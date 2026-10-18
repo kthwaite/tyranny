@@ -482,6 +482,7 @@ mod tests {
         let mut info = b"INFO".to_vec();
         chunk(&mut info, b"INAM", "夜の曲\0".as_bytes());
         chunk(&mut info, b"IART", "Björk\0".as_bytes());
+        chunk(&mut info, b"IGNR", "Jazz\0".as_bytes());
         chunk(&mut body, b"LIST", &info);
         chunk(&mut body, b"data", &[0; 1_920]);
         let mut wave = b"RIFF".to_vec();
@@ -513,6 +514,9 @@ mod tests {
         assert_eq!(metadata.sample_rate, 48_000);
         assert_eq!(metadata.channels, 2);
         assert_eq!(metadata.duration_ms, Some(10));
+        assert_eq!(metadata.codec.as_deref(), Some("WAV"));
+        assert_eq!(metadata.bit_depth, Some(16));
+        assert_eq!(metadata.genres, ["Jazz"]);
         scanner.shutdown().unwrap();
     }
 

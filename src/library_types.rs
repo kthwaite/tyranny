@@ -27,6 +27,50 @@ pub struct TrackMetadata {
     pub musicbrainz_track_id: Option<String>,
     pub musicbrainz_artist_id: Option<String>,
     pub musicbrainz_album_artist_id: Option<String>,
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub codec: Option<String>,
+    #[serde(default)]
+    pub bit_depth: Option<u16>,
+    #[serde(default)]
+    pub bitrate_kbps: Option<u32>,
+}
+
+/// Whether a codec label (from `metadata::codec_label`) names a lossless format.
+pub(crate) fn is_lossless(codec: &str) -> bool {
+    matches!(
+        codec,
+        "FLAC" | "ALAC" | "WAV" | "AIFF" | "PCM" | "WavPack" | "APE"
+    )
+}
+
+/// Short format description: `FLAC 24/96`, `WAV 16/44.1`, `MP3 320`, or the codec alone.
+pub fn format_label(
+    codec: Option<&str>,
+    bit_depth: Option<u16>,
+    sample_rate: u32,
+    bitrate_kbps: Option<u32>,
+) -> String {
+    let Some(codec) = codec else {
+        return String::new();
+    };
+    if is_lossless(codec) {
+        if let Some(depth) = bit_depth.filter(|_| sample_rate != 0) {
+            let tenths = (sample_rate + 50) / 100;
+            let khz = if tenths.is_multiple_of(10) {
+                (tenths / 10).to_string()
+            } else {
+                format!("{}.{}", tenths / 10, tenths % 10)
+            };
+            return format!("{codec} {depth}/{khz}");
+        }
+    } else if let Some(kbps) = bitrate_kbps {
+        return format!("{codec} {kbps}");
+    }
+    codec.to_owned()
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -172,3 +216,36 @@ impl fmt::Display for StaleLibraryRevision {
     }
 }
 impl std::error::Error for StaleLibraryRevision {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_labels_follow_codec_class() {
+        assert_eq!(
+            format_label(Some("FLAC"), Some(24), 96_000, None),
+            "FLAC 24/96"
+        );
+        assert_eq!(
+            format_label(Some("WAV"), Some(16), 44_100, None),
+            "WAV 16/44.1"
+        );
+        assert_eq!(
+            format_label(Some("MP3"), None, 44_100, Some(320)),
+            "MP3 320"
+        );
+        assert_eq!(format_label(None, None, 0, None), "");
+    }
+
+    #[test]
+    fn legacy_metadata_json_without_new_fields_deserializes() {
+        let mut value = serde_json::to_value(TrackMetadata::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for key in ["year", "genres", "codec", "bit_depth", "bitrate_kbps"] {
+            object.remove(key);
+        }
+        let metadata: TrackMetadata = serde_json::from_value(value).unwrap();
+        assert_eq!(metadata, TrackMetadata::default());
+    }
+}

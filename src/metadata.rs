@@ -21,7 +21,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::{
     decoder::{GainMetadata, initialize_ffmpeg},
-    library_types::TrackMetadata,
+    library_types::{TrackMetadata, is_lossless},
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -107,6 +107,24 @@ pub(crate) fn probe_before(
     let duration_ms = duration_ms(stream.duration(), time_base.0, time_base.1)
         .or_else(|| duration_ms(input.duration(), 1, ffmpeg::ffi::AV_TIME_BASE));
     let mut metadata = tags.finish(path)?;
+    let codec = codec_label(
+        ffmpeg::codec::Id::from(parameters.codec_id),
+        input.format().name(),
+    );
+    metadata.codec = Some(codec.to_owned());
+    if is_lossless(codec) {
+        metadata.bit_depth = [
+            parameters.bits_per_raw_sample,
+            parameters.bits_per_coded_sample,
+        ]
+        .into_iter()
+        .find_map(|bits| u16::try_from(bits).ok().filter(|bits| *bits != 0));
+    }
+    metadata.bitrate_kbps = [parameters.bit_rate, input.bit_rate()]
+        .into_iter()
+        .find(|rate| *rate > 0)
+        .and_then(|rate| u32::try_from((rate + 500) / 1_000).ok())
+        .filter(|kbps| *kbps != 0);
     metadata.duration_ms = duration_ms;
     metadata.sample_rate = sample_rate;
     metadata.channels = channels;
@@ -230,6 +248,68 @@ fn visit_tags(
 struct Tags {
     metadata: TrackMetadata,
     gain: GainMetadata,
+    /// Index into `YEAR_KEYS` of the tag that supplied `metadata.year`.
+    year_rank: Option<usize>,
+}
+
+const YEAR_KEYS: [&str; 4] = ["date", "year", "originaldate", "originalyear"];
+
+/// First run of exactly four ASCII digits in 1000..=2999.
+pub(crate) fn year_from(value: &str) -> Option<i32> {
+    let bytes = value.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !bytes[start].is_ascii_digit() {
+            start += 1;
+            continue;
+        }
+        let end = bytes[start..]
+            .iter()
+            .position(|byte| !byte.is_ascii_digit())
+            .map_or(bytes.len(), |length| start + length);
+        if end - start == 4 {
+            let year: i32 = value[start..end].parse().ok()?;
+            if (1000..=2999).contains(&year) {
+                return Some(year);
+            }
+        }
+        start = end;
+    }
+    None
+}
+
+/// Splits a genre value on `;` and NUL, trimming and dropping empty parts.
+pub(crate) fn split_genres(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split([';', '\0'])
+        .map(str::trim)
+        .filter(|genre| !genre.is_empty())
+}
+
+pub(crate) fn codec_label(codec: ffmpeg::codec::Id, container: &str) -> &'static str {
+    use ffmpeg::codec::Id;
+    match codec {
+        Id::FLAC => "FLAC",
+        Id::MP3 => "MP3",
+        Id::AAC => "AAC",
+        Id::ALAC => "ALAC",
+        Id::OPUS => "Opus",
+        Id::VORBIS => "Vorbis",
+        Id::WAVPACK => "WavPack",
+        Id::APE => "APE",
+        Id::MUSEPACK7 | Id::MUSEPACK8 => "Musepack",
+        other if other.name().starts_with("pcm_") => {
+            let mut formats = container.split(',');
+            if formats.clone().any(|format| format == "wav") {
+                "WAV"
+            } else if formats.any(|format| format == "aiff") {
+                "AIFF"
+            } else {
+                "PCM"
+            }
+        }
+        _ => "Other",
+    }
 }
 
 impl Tags {
@@ -299,7 +379,24 @@ impl Tags {
             text.push_str(value);
             return;
         }
-        if key_is(key, "track") || key_is(key, "tracknumber") {
+        if let Some(rank) = YEAR_KEYS.iter().position(|name| key_is(key, name)) {
+            if self.year_rank.is_none_or(|current| rank <= current)
+                && let Some(year) = year_from(value)
+            {
+                metadata.year = Some(year);
+                self.year_rank = Some(rank);
+            }
+        } else if key_is(key, "genre") {
+            for genre in split_genres(value) {
+                if !metadata
+                    .genres
+                    .iter()
+                    .any(|known| known.to_lowercase() == genre.to_lowercase())
+                {
+                    metadata.genres.push(genre.to_owned());
+                }
+            }
+        } else if key_is(key, "track") || key_is(key, "tracknumber") {
             let (number, total) = number_pair(value);
             if number.is_some() {
                 metadata.track_number = number;
@@ -561,5 +658,40 @@ mod tests {
         assert_eq!(metadata.album_gain_db, Some(-4.5));
         assert_eq!(metadata.track_peak, Some(0.5));
         assert_eq!(metadata.album_peak, Some(1.0));
+    }
+
+    #[test]
+    fn year_tags_parse_dates_and_reject_garbage() {
+        assert_eq!(year_from("1959-08-17"), Some(1959));
+        assert_eq!(year_from("1971"), Some(1971));
+        assert_eq!(year_from("c. 1985?"), Some(1985));
+        assert_eq!(year_from("85"), None);
+        assert_eq!(year_from("0000"), None);
+        let mut tags = Tags::default();
+        tags.tag("originaldate", "1950");
+        tags.tag("date", "garbage");
+        assert_eq!(tags.metadata.year, Some(1950));
+        tags.tag("year", "1960");
+        assert_eq!(tags.metadata.year, Some(1960));
+    }
+
+    #[test]
+    fn genre_values_split_dedupe_and_keep_first_spelling() {
+        let mut tags = Tags::default();
+        tags.tag("genre", "Jazz; Modal");
+        tags.tag("GENRE", "jazz");
+        tags.tag("genre", "Bop\0 ");
+        assert_eq!(tags.metadata.genres, ["Jazz", "Modal", "Bop"]);
+    }
+
+    #[test]
+    fn codec_labels_follow_codec_and_container() {
+        use ffmpeg::codec::Id;
+        assert_eq!(codec_label(Id::FLAC, "flac"), "FLAC");
+        assert_eq!(codec_label(Id::PCM_S16LE, "wav"), "WAV");
+        assert_eq!(codec_label(Id::PCM_S24BE, "aiff"), "AIFF");
+        assert_eq!(codec_label(Id::PCM_S16LE, "mov"), "PCM");
+        assert_eq!(codec_label(Id::MP3, "mp3"), "MP3");
+        assert_eq!(codec_label(Id::H264, "mp4"), "Other");
     }
 }
