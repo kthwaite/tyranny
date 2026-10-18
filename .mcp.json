@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "clepsydra": {
+      "command": "clep",
+      "args": ["mcp"]
+    }
+  }
+}
