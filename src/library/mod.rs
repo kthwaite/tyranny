@@ -2,13 +2,16 @@
 //! coordinator owns SQL and bounded worklists; one scanner owns filesystem and
 //! native metadata IO. Root completion watermarks make reconciliation atomic.
 mod db;
+mod lists;
 mod query;
 #[cfg(test)]
 mod tests;
 
 use crate::{
     library_types::*,
+    protocol::ErrorCode,
     scanner::{ScanEvent, Scanner},
+    store::PlaylistFailure,
 };
 use anyhow::{Context, Result, anyhow, ensure};
 pub(crate) use db::{migrate, migrate_v5, resolve_track};
@@ -22,7 +25,7 @@ use std::{
         mpsc as startup,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -53,6 +56,13 @@ fn error(kind: LibraryErrorKind, message: impl Into<String>) -> LibraryError {
 fn classify(failure: anyhow::Error) -> LibraryError {
     if failure.downcast_ref::<StaleLibraryRevision>().is_some() {
         error(LibraryErrorKind::StaleRevision, failure.to_string())
+    } else if let Some(playlist) = failure.downcast_ref::<PlaylistFailure>() {
+        let kind = match playlist.code {
+            ErrorCode::StalePlaylistRevision => LibraryErrorKind::StalePlaylistRevision,
+            ErrorCode::InvalidFilter => LibraryErrorKind::InvalidFilter,
+            _ => LibraryErrorKind::Invalid,
+        };
+        error(kind, failure.to_string())
     } else if failure.is::<crate::filter::InvalidFilter>() {
         error(LibraryErrorKind::InvalidFilter, failure.to_string())
     } else if let Some(failure) = failure.downcast_ref::<LibraryError>() {
@@ -71,6 +81,8 @@ impl Library {
             revision: 1,
             roots: 0,
             tracks: 0,
+            duration_ms: 0,
+            size_bytes: 0,
             scan: ScanStatus::default(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -300,7 +312,12 @@ impl Coordinator {
     }
     fn publish(&mut self, force: bool) -> Result<()> {
         if self.dirty && (force || self.published.elapsed() >= PUBLISH_INTERVAL) {
-            publish(&self.shared, db::state(&self.connection)?);
+            let previous = self
+                .shared
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone();
+            publish(&self.shared, db::state(&self.connection, Some(&previous))?);
             self.published = Instant::now();
             self.dirty = false;
         }
@@ -319,6 +336,17 @@ impl Coordinator {
         match command {
             LibraryCommand::AddRoot { path } => self.add_root(path),
             LibraryCommand::Rescan { root_id } => self.rescan(root_id),
+            command @ (LibraryCommand::ListTracks { .. }
+            | LibraryCommand::ListAlbums { .. }
+            | LibraryCommand::ListArtists(_)
+            | LibraryCommand::ListGenres(_)
+            | LibraryCommand::AlbumSummaries { .. }
+            | LibraryCommand::ListGroups { .. }) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs() as i64);
+                lists::execute(&mut self.connection, command, now)
+            }
             command => query::execute(&mut self.connection, command),
         }
     }

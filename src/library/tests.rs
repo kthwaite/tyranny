@@ -1322,3 +1322,911 @@ async fn upgraded_tracks_without_date_added_are_not_recent() {
     assert_eq!((count(&library_list), count(&recent)), (1, 0));
     library.shutdown().unwrap();
 }
+
+mod lists_fixture {
+    use super::*;
+    pub(super) use crate::listing::{
+        Browser, Grouping, ListDescription, ListSource, SortField, SortKey, compile,
+    };
+
+    pub(super) const NOW: i64 = 10_000_000;
+
+    pub(super) fn list(source: ListSource) -> ListDescription {
+        ListDescription {
+            source,
+            browser: Browser::default(),
+            query: String::new(),
+            sort: Vec::new(),
+            group: Grouping::None,
+        }
+    }
+
+    /// Row IDs in `compile` order: the order every list command must follow.
+    pub(super) fn compiled_rows(connection: &Connection, list: &ListDescription) -> Vec<u64> {
+        let compiled = compile(connection, list, 0, 1).unwrap();
+        let mut statement = connection
+            .prepare(&format!("SELECT row_id FROM ({})", compiled.sql))
+            .unwrap();
+        statement
+            .query_map(rusqlite::params_from_iter(compiled.values), |row| {
+                row.get(0)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<u64>>>()
+            .unwrap()
+    }
+
+    pub(super) fn execute(connection: &mut Connection, command: LibraryCommand) -> LibraryReply {
+        lists::execute(connection, command, NOW).unwrap()
+    }
+    pub(super) fn rejected(
+        connection: &mut Connection,
+        command: LibraryCommand,
+    ) -> LibraryErrorKind {
+        classify(lists::execute(connection, command, NOW).unwrap_err()).kind
+    }
+
+    pub(super) struct Fixture {
+        pub(super) id: u64,
+        pub(super) album: u64,
+        pub(super) artist: u64,
+        pub(super) title: &'static str,
+        pub(super) disc: u32,
+        pub(super) track: u32,
+        pub(super) year: Option<i32>,
+        pub(super) codec: &'static str,
+        pub(super) depth: Option<u16>,
+        pub(super) rate: u32,
+        pub(super) bitrate: Option<u32>,
+        pub(super) added: i64,
+        pub(super) duration: Option<u64>,
+        pub(super) gain: Option<f64>,
+        pub(super) visible: bool,
+    }
+
+    /// Album artists Alpha (1) and Beta (2); Various Artists (3) owns the
+    /// compilation; Gamma (4) is only a compilation track artist.
+    /// Albums: 1 First and 2 Second (Alpha), 3 Third (Beta), 4 Hits
+    /// (compilation), 5 Ghost (Beta, only an unavailable track).
+    /// Genres: Orphan (4) has no tracks; Hidden (5) only the unavailable track.
+    pub(super) fn connection(tracks: &[Fixture]) -> Connection {
+        let mut connection = Connection::open_in_memory().unwrap();
+        crate::store::migrate(&mut connection, 5).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/m','/m',2);
+                 INSERT INTO library_artists(id,identity,name,search) VALUES
+                   (1,'alpha','Alpha','alpha'),(2,'beta','Beta','beta'),
+                   (3,'various','Various Artists','various artists'),(4,'gamma','Gamma','gamma');
+                 INSERT INTO library_albums(id,identity,artist_id,title,album_artist,search,title_sort,
+                   musicbrainz_release_id,compilation) VALUES
+                   (1,'first',1,'First','Alpha','first','first','mb-1',0),
+                   (2,'second',1,'Second','Alpha','second','second',NULL,0),
+                   (3,'third',2,'Third','Beta','third','third',NULL,0),
+                   (4,'hits',3,'Hits','Various Artists','hits','hits',NULL,1),
+                   (5,'ghost',2,'Ghost','Beta','ghost','ghost',NULL,0);
+                 INSERT INTO library_genres(id,name,search) VALUES
+                   (1,'Rock','rock'),(2,'Pop','pop'),(3,'Jazz','jazz'),(4,'Orphan','orphan'),
+                   (5,'Hidden','hidden');
+                 UPDATE library_state SET revision=11;",
+            )
+            .unwrap();
+        for track in tracks {
+            let metadata = TrackMetadata {
+                title: track.title.into(),
+                artist: ["Alpha", "Beta", "Various Artists", "Gamma"][track.artist as usize - 1]
+                    .into(),
+                duration_ms: track.duration,
+                sample_rate: track.rate,
+                album_gain_db: track.gain,
+                ..TrackMetadata::default()
+            };
+            connection
+                .execute(
+                    "INSERT INTO library_assets(id,root_id,path,indexed,last_seen_scan)
+                     VALUES(?1,1,?2,1,?3)",
+                    params![
+                        track.id,
+                        format!("/m/{:04}.flac", track.id),
+                        if track.visible { 2 } else { 1 }
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO library_tracks(id,asset_id,artist_id,album_id,metadata,search,
+                     title_sort,disc_number,disc_total,track_number,year,codec,bit_depth,
+                     bitrate_kbps,file_size,date_added)
+                     VALUES(?1,?1,?2,?3,?4,?5,?5,?6,2,?7,?8,?9,?10,?11,?12,?13)",
+                    params![
+                        track.id,
+                        track.artist,
+                        track.album,
+                        serde_json::to_string(&metadata).unwrap(),
+                        track.title.to_lowercase(),
+                        track.disc,
+                        track.track,
+                        track.year,
+                        track.codec,
+                        track.depth,
+                        track.bitrate,
+                        track.id * 1000,
+                        track.added
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "one fixture row per call")]
+    fn track(
+        id: u64,
+        album: u64,
+        artist: u64,
+        title: &'static str,
+        (disc, number): (u32, u32),
+        year: Option<i32>,
+        (codec, depth, rate, bitrate): (&'static str, Option<u16>, u32, Option<u32>),
+        (added, duration, gain): (i64, Option<u64>, Option<f64>),
+    ) -> Fixture {
+        Fixture {
+            id,
+            album,
+            artist,
+            title,
+            disc,
+            track: number,
+            year,
+            codec,
+            depth,
+            rate,
+            bitrate,
+            added,
+            duration,
+            gain,
+            visible: true,
+        }
+    }
+
+    pub(super) fn library() -> Connection {
+        let flac = ("FLAC", Some(16), 44_100, Some(900));
+        let mp3 = ("MP3", None, 44_100, Some(320));
+        let mut ghost = track(9, 5, 2, "Nine", (1, 1), None, mp3, (900, Some(9000), None));
+        ghost.visible = false;
+        let connection = connection(&[
+            track(
+                1,
+                1,
+                1,
+                "One",
+                (1, 1),
+                Some(1970),
+                flac,
+                (100, Some(1000), Some(-6.5)),
+            ),
+            track(
+                2,
+                1,
+                1,
+                "Two",
+                (1, 2),
+                Some(1970),
+                flac,
+                (300, Some(2000), Some(-6.5)),
+            ),
+            track(
+                3,
+                1,
+                1,
+                "Three",
+                (2, 1),
+                Some(1971),
+                mp3,
+                (200, Some(3000), Some(-6.5)),
+            ),
+            track(
+                4,
+                2,
+                1,
+                "Four",
+                (1, 1),
+                None,
+                ("FLAC", Some(24), 96_000, Some(2500)),
+                (0, Some(4000), None),
+            ),
+            track(5, 2, 1, "Five", (1, 2), None, mp3, (0, None, None)),
+            track(
+                6,
+                3,
+                2,
+                "Six",
+                (1, 1),
+                Some(1980),
+                ("AAC", None, 44_100, Some(256)),
+                (500, Some(6000), None),
+            ),
+            track(
+                7,
+                4,
+                4,
+                "Seven",
+                (1, 1),
+                Some(1990),
+                mp3,
+                (400, Some(7000), None),
+            ),
+            track(
+                8,
+                4,
+                1,
+                "Eight",
+                (1, 2),
+                Some(1991),
+                mp3,
+                (450, Some(8000), None),
+            ),
+            ghost,
+        ]);
+        connection
+            .execute_batch(
+                "INSERT INTO library_track_genres(track_id,genre_id,position) VALUES
+                   (1,1,0),(2,1,0),(2,2,1),(3,2,0),(4,3,0),(5,2,0),(6,1,0),(7,3,0),
+                   (9,5,0),(9,1,1);
+                 INSERT INTO track_stats(track_id,play_count,last_played) VALUES(2,4,1234);",
+            )
+            .unwrap();
+        connection
+    }
+}
+use lists_fixture::*;
+
+fn tracks_page(
+    connection: &mut Connection,
+    list: &ListDescription,
+    offset: usize,
+    limit: usize,
+) -> (Page<ListRow>, Option<ListTotals>) {
+    match execute(
+        connection,
+        LibraryCommand::ListTracks {
+            list: list.clone(),
+            revision: Some(11),
+            offset,
+            limit,
+        },
+    ) {
+        LibraryReply::ListTracks { page, totals } => (page, totals),
+        other => panic!("unexpected list reply: {other:?}"),
+    }
+}
+
+#[test]
+fn list_tracks_pages_are_contiguous_and_totals_only_on_first_page() {
+    let rows: Vec<Fixture> = (1..=600)
+        .map(|id| Fixture {
+            id,
+            album: 1 + id % 2,
+            artist: 1,
+            title: ["Delta", "alpha", "Charlie", "bravo", "Echo"][id as usize % 5],
+            disc: 1,
+            track: (id % 7) as u32,
+            year: (id % 3 != 0).then_some(1960 + (id % 11) as i32),
+            codec: "FLAC",
+            depth: Some(16),
+            rate: 44_100,
+            bitrate: None,
+            added: id as i64,
+            duration: (id % 10 != 0).then_some(id * 10),
+            gain: None,
+            visible: true,
+        })
+        .collect();
+    let mut connection = connection(&rows);
+    let list = ListDescription {
+        sort: vec![
+            SortKey {
+                field: SortField::Year,
+                descending: true,
+            },
+            SortKey {
+                field: SortField::Title,
+                descending: false,
+            },
+        ],
+        group: Grouping::Album,
+        ..list(ListSource::Library)
+    };
+    let expected = compiled_rows(&connection, &list);
+    assert_eq!(expected.len(), 600);
+    let (first, totals) = tracks_page(&mut connection, &list, 0, 500);
+    let (second, none) = tracks_page(&mut connection, &list, 500, 100);
+    let (past, _) = tracks_page(&mut connection, &list, 600, 100);
+    assert_eq!(
+        (
+            first.revision,
+            first.total,
+            first.offset,
+            first.entries.len()
+        ),
+        (11, 600, 0, 500)
+    );
+    assert_eq!(
+        (second.total, second.offset, second.entries.len()),
+        (600, 500, 100)
+    );
+    assert!(past.entries.is_empty());
+    let concatenated: Vec<u64> = first
+        .entries
+        .iter()
+        .chain(&second.entries)
+        .map(|row| row.row_id)
+        .collect();
+    assert_eq!(concatenated, expected);
+    assert!(
+        first
+            .entries
+            .iter()
+            .chain(&second.entries)
+            .all(|row| row.track.id == row.row_id
+                && row.album_key == row.track.album_id
+                && row.artist_key == 1
+                && row.available)
+    );
+    let duration: u64 = (1..=600).filter(|id| id % 10 != 0).map(|id| id * 10).sum();
+    let size: u64 = (1..=600).map(|id| id * 1000).sum();
+    assert_eq!(
+        totals,
+        Some(ListTotals {
+            tracks: 600,
+            duration_ms: duration,
+            size_bytes: size
+        })
+    );
+    assert_eq!(none, None);
+}
+
+#[test]
+fn list_rows_summarize_tracks_and_library_state_totals_visible_tracks() {
+    let mut connection = library();
+    let (page, totals) = tracks_page(&mut connection, &list(ListSource::Album { id: 1 }), 1, 1);
+    assert_eq!(totals, None);
+    assert_eq!(
+        page.entries,
+        [ListRow {
+            row_id: 2,
+            artist_key: 1,
+            album_key: 1,
+            available: true,
+            track: TrackSummary {
+                id: 2,
+                album_id: 1,
+                artist_id: 1,
+                album_artist_id: 1,
+                title: "Two".into(),
+                artist: "Alpha".into(),
+                album: "First".into(),
+                album_artist: "Alpha".into(),
+                compilation: false,
+                disc_number: 1,
+                track_number: 2,
+                duration_ms: Some(2000),
+                year: Some(1970),
+                genre: "Rock, Pop".into(),
+                format: "FLAC 16/44.1".into(),
+                sample_rate: 44_100,
+                bitrate_kbps: Some(900),
+                play_count: 4,
+                last_played: Some(1234),
+                date_added: 300,
+                path: "/m/0002.flac".into(),
+            },
+        }]
+    );
+    let (page, totals) = tracks_page(&mut connection, &list(ListSource::Compilations), 0, 10);
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|row| (row.row_id, row.artist_key, row.track.compilation))
+            .collect::<Vec<_>>(),
+        [(7, 0, true), (8, 0, true)]
+    );
+    assert_eq!(page.entries[0].track.play_count, 0);
+    assert_eq!(
+        totals,
+        Some(ListTotals {
+            tracks: 2,
+            duration_ms: 15_000,
+            size_bytes: 15_000
+        })
+    );
+    // The unavailable track 9 counts in neither list totals nor library state.
+    let state = db::state(&connection, None).unwrap();
+    assert_eq!((state.duration_ms, state.size_bytes), (31_000, 36_000));
+}
+
+fn album_summaries(connection: &mut Connection, album_ids: Vec<u64>) -> Vec<AlbumSummary> {
+    match execute(
+        connection,
+        LibraryCommand::AlbumSummaries {
+            album_ids,
+            revision: Some(11),
+        },
+    ) {
+        LibraryReply::AlbumSummaries { revision, entries } => {
+            assert_eq!(revision, 11);
+            entries
+        }
+        other => panic!("unexpected summaries reply: {other:?}"),
+    }
+}
+
+#[test]
+fn album_summaries_aggregate_format_genre_and_newest_date() {
+    let mut connection = library();
+    // Request order; unknown album 99 and Ghost (no visible track) are skipped.
+    let summaries = album_summaries(&mut connection, vec![4, 99, 1, 5, 2]);
+    assert_eq!(
+        summaries,
+        [
+            AlbumSummary {
+                id: 4,
+                title: "Hits".into(),
+                album_artist: "Various Artists".into(),
+                album_artist_id: 3,
+                compilation: true,
+                year: Some(1990),
+                // Track 8 has no genre and does not vote.
+                genre: "Jazz".into(),
+                track_count: 2,
+                disc_count: 2,
+                duration_ms: 15_000,
+                format: "MP3 320".into(),
+                album_gain_db: None,
+                date_added: 450,
+                musicbrainz_release_id: None,
+            },
+            AlbumSummary {
+                id: 1,
+                title: "First".into(),
+                album_artist: "Alpha".into(),
+                album_artist_id: 1,
+                compilation: false,
+                year: Some(1970),
+                // Rock is the first genre of two tracks; Pop only of one.
+                genre: "Rock".into(),
+                track_count: 3,
+                disc_count: 2,
+                duration_ms: 6000,
+                // Two FLAC tracks outvote one MP3.
+                format: "FLAC 16/44.1".into(),
+                album_gain_db: Some(-6.5),
+                date_added: 300,
+                musicbrainz_release_id: Some("mb-1".into()),
+            },
+            AlbumSummary {
+                id: 2,
+                title: "Second".into(),
+                album_artist: "Alpha".into(),
+                album_artist_id: 1,
+                compilation: false,
+                year: None,
+                // Jazz and Pop tie; the tie goes to the first by name.
+                genre: "Jazz".into(),
+                track_count: 2,
+                disc_count: 2,
+                duration_ms: 4000,
+                // One FLAC 24/96 and one MP3 320 tie.
+                format: "Mixed".into(),
+                album_gain_db: None,
+                date_added: 0,
+                musicbrainz_release_id: None,
+            },
+        ]
+    );
+    for album_ids in [vec![], (1..=501).collect(), vec![0]] {
+        assert_eq!(
+            rejected(
+                &mut connection,
+                LibraryCommand::AlbumSummaries {
+                    album_ids,
+                    revision: None
+                }
+            ),
+            LibraryErrorKind::Invalid
+        );
+    }
+    assert_eq!(
+        rejected(
+            &mut connection,
+            LibraryCommand::AlbumSummaries {
+                album_ids: vec![1],
+                revision: Some(10)
+            }
+        ),
+        LibraryErrorKind::StaleRevision
+    );
+}
+
+#[test]
+fn list_albums_cover_listed_albums_in_album_sort() {
+    let mut connection = library();
+    let mut albums = |list: ListDescription, sort, descending, offset, limit| match execute(
+        &mut connection,
+        LibraryCommand::ListAlbums {
+            list,
+            sort,
+            descending,
+            revision: Some(11),
+            offset,
+            limit,
+        },
+    ) {
+        LibraryReply::ListAlbums(page) => (
+            page.total,
+            page.entries
+                .iter()
+                .map(|album| album.id)
+                .collect::<Vec<_>>(),
+        ),
+        other => panic!("unexpected albums reply: {other:?}"),
+    };
+    let library = list(ListSource::Library);
+    for (sort, descending, expected) in [
+        (AlbumSort::AlbumArtist, false, vec![1, 2, 3, 4]),
+        (AlbumSort::AlbumArtist, true, vec![4, 3, 1, 2]),
+        // Unknown years and dates sort last both ways.
+        (AlbumSort::Year, false, vec![1, 3, 4, 2]),
+        (AlbumSort::Year, true, vec![4, 3, 1, 2]),
+        (AlbumSort::DateAdded, false, vec![1, 4, 3, 2]),
+        (AlbumSort::DateAdded, true, vec![3, 4, 1, 2]),
+    ] {
+        assert_eq!(
+            albums(library.clone(), sort, descending, 0, 10),
+            (4, expected),
+            "{sort:?} descending={descending}"
+        );
+    }
+    assert_eq!(
+        albums(library.clone(), AlbumSort::AlbumArtist, false, 1, 2),
+        (4, vec![2, 3])
+    );
+    // Albums with at least one row in the list; the list's sort and group are ignored.
+    let narrowed = ListDescription {
+        query: "title:e".into(),
+        sort: vec![SortKey {
+            field: SortField::Title,
+            descending: true,
+        }],
+        group: Grouping::ArtistAlbum,
+        ..list(ListSource::Library)
+    };
+    assert_eq!(
+        albums(narrowed, AlbumSort::AlbumArtist, false, 0, 10),
+        (3, vec![1, 2, 4])
+    );
+    assert_eq!(
+        albums(
+            list(ListSource::Genre { id: 3 }),
+            AlbumSort::Year,
+            true,
+            0,
+            10
+        ),
+        (2, vec![4, 2])
+    );
+}
+
+fn named(id: u64, name: &str, album_count: u64, track_count: u64) -> NamedCount {
+    NamedCount {
+        id,
+        name: name.into(),
+        album_count,
+        track_count,
+    }
+}
+
+#[test]
+fn artists_exclude_compilations_and_report_compilations_row() {
+    let mut connection = library();
+    let mut artists = |offset, limit, query: &str| match execute(
+        &mut connection,
+        LibraryCommand::ListArtists(page_request(Some(11), offset, limit, query)),
+    ) {
+        LibraryReply::ListArtists { page, compilations } => {
+            (page.total, page.entries, compilations)
+        }
+        other => panic!("unexpected artists reply: {other:?}"),
+    };
+    // Various Artists owns only the compilation; Gamma is only a track artist.
+    // Beta's Ghost album has no visible track, so it does not count.
+    assert_eq!(
+        artists(0, 10, ""),
+        (
+            2,
+            vec![named(1, "Alpha", 2, 5), named(2, "Beta", 1, 1)],
+            Some(named(0, "Compilations", 1, 2))
+        )
+    );
+    assert_eq!(artists(1, 1, ""), (2, vec![named(2, "Beta", 1, 1)], None));
+    assert_eq!(
+        artists(0, 10, "title:seven"),
+        (0, vec![], Some(named(0, "Compilations", 1, 1)))
+    );
+    assert_eq!(
+        artists(0, 10, "title:six"),
+        (1, vec![named(2, "Beta", 1, 1)], None)
+    );
+}
+
+#[test]
+fn genres_count_albums_and_tracks() {
+    let mut connection = library();
+    let mut genres = |offset, limit, query: &str| match execute(
+        &mut connection,
+        LibraryCommand::ListGenres(page_request(Some(11), offset, limit, query)),
+    ) {
+        LibraryReply::ListGenres(page) => (page.total, page.entries),
+        other => panic!("unexpected genres reply: {other:?}"),
+    };
+    // Every genre position counts. Orphan has no track and Hidden only an
+    // unavailable one, so neither appears.
+    assert_eq!(
+        genres(0, 10, ""),
+        (
+            3,
+            vec![
+                named(3, "Jazz", 2, 2),
+                named(2, "Pop", 2, 3),
+                named(1, "Rock", 2, 3)
+            ]
+        )
+    );
+    assert_eq!(genres(2, 5, ""), (3, vec![named(1, "Rock", 2, 3)]));
+    assert_eq!(
+        genres(0, 10, "title:t"),
+        (2, vec![named(2, "Pop", 1, 2), named(1, "Rock", 1, 1)])
+    );
+}
+
+#[test]
+fn group_spans_cover_the_list_contiguously_in_order() {
+    let mut connection = library();
+    let spans = |connection: &mut Connection, list: &ListDescription| match execute(
+        connection,
+        LibraryCommand::ListGroups {
+            list: list.clone(),
+            revision: Some(11),
+        },
+    ) {
+        LibraryReply::ListGroups {
+            revision,
+            total,
+            groups,
+        } => {
+            assert_eq!(revision, 11);
+            (total, groups)
+        }
+        other => panic!("unexpected groups reply: {other:?}"),
+    };
+    let span = |artist_key, album_key, start, count| GroupSpan {
+        artist_key,
+        album_key,
+        start,
+        count,
+    };
+    assert_eq!(
+        spans(
+            &mut connection,
+            &ListDescription {
+                group: Grouping::ArtistAlbum,
+                ..list(ListSource::Library)
+            }
+        ),
+        (
+            8,
+            vec![
+                span(1, Some(1), 0, 3),
+                span(1, Some(2), 3, 2),
+                span(2, Some(3), 5, 1),
+                span(0, Some(4), 6, 2)
+            ]
+        )
+    );
+    assert_eq!(
+        spans(
+            &mut connection,
+            &ListDescription {
+                group: Grouping::Artist,
+                ..list(ListSource::Library)
+            }
+        ),
+        (
+            8,
+            vec![
+                span(1, None, 0, 5),
+                span(2, None, 5, 1),
+                span(0, None, 6, 2)
+            ]
+        )
+    );
+    let check =
+        |connection: &mut Connection, list: ListDescription, total, groups: Vec<GroupSpan>| {
+            let (page, _) = tracks_page(connection, &list, 0, 500);
+            assert_eq!(page.total, total);
+            assert_eq!(groups.iter().map(|group| group.count).sum::<u64>(), total);
+            let mut next = 0;
+            for group in &groups {
+                assert_eq!(group.start, next);
+                assert!(group.count > 0);
+                next = group.start + group.count;
+                for row in &page.entries[group.start as usize..next as usize] {
+                    assert_eq!(row.artist_key, group.artist_key);
+                    match list.group {
+                        Grouping::Artist => assert_eq!(group.album_key, None),
+                        _ => assert_eq!(group.album_key, Some(row.album_key)),
+                    }
+                }
+            }
+        };
+    for group in [Grouping::Artist, Grouping::Album, Grouping::ArtistAlbum] {
+        for field in [SortField::Title, SortField::DateAdded, SortField::Plays] {
+            for descending in [false, true] {
+                let list = ListDescription {
+                    sort: vec![SortKey { field, descending }],
+                    group,
+                    ..list(ListSource::Library)
+                };
+                let (total, groups) = spans(&mut connection, &list);
+                check(&mut connection, list, total, groups);
+            }
+        }
+    }
+    assert_eq!(
+        rejected(
+            &mut connection,
+            LibraryCommand::ListGroups {
+                list: list(ListSource::Library),
+                revision: None
+            }
+        ),
+        LibraryErrorKind::Invalid
+    );
+}
+
+#[test]
+fn list_commands_check_page_bounds_browser_caps_and_revisions() {
+    let mut connection = library();
+    let tracks = |list: ListDescription, revision, offset, limit| LibraryCommand::ListTracks {
+        list,
+        revision,
+        offset,
+        limit,
+    };
+    let library = list(ListSource::Library);
+    for (offset, limit) in [(0, 0), (0, 501), (i64::MAX as usize + 1, 1)] {
+        assert_eq!(
+            rejected(
+                &mut connection,
+                tracks(library.clone(), None, offset, limit)
+            ),
+            LibraryErrorKind::Invalid
+        );
+        assert_eq!(
+            rejected(
+                &mut connection,
+                LibraryCommand::ListGenres(page_request(None, offset, limit, ""))
+            ),
+            LibraryErrorKind::Invalid
+        );
+    }
+    let ids: Vec<u64> = (1..=501).collect();
+    for browser in [
+        Browser {
+            genre_ids: ids.clone(),
+            ..Browser::default()
+        },
+        Browser {
+            artist_ids: ids.clone(),
+            ..Browser::default()
+        },
+        Browser {
+            album_ids: ids.clone(),
+            ..Browser::default()
+        },
+    ] {
+        let capped = ListDescription {
+            browser,
+            ..library.clone()
+        };
+        assert_eq!(
+            rejected(&mut connection, tracks(capped.clone(), None, 0, 1)),
+            LibraryErrorKind::Invalid
+        );
+        assert_eq!(
+            rejected(
+                &mut connection,
+                LibraryCommand::ListGroups {
+                    list: ListDescription {
+                        group: Grouping::Album,
+                        ..capped
+                    },
+                    revision: None
+                }
+            ),
+            LibraryErrorKind::Invalid
+        );
+    }
+    // 500 IDs per dimension is allowed.
+    let allowed = ListDescription {
+        browser: Browser {
+            album_ids: (1..=500).collect(),
+            ..Browser::default()
+        },
+        ..library.clone()
+    };
+    let (page, _) = tracks_page(&mut connection, &allowed, 0, 1);
+    assert_eq!(page.total, 8);
+    assert_eq!(
+        rejected(&mut connection, tracks(library.clone(), Some(10), 0, 1)),
+        LibraryErrorKind::StaleRevision
+    );
+    assert_eq!(
+        rejected(
+            &mut connection,
+            tracks(
+                ListDescription {
+                    query: "title:(".into(),
+                    ..library.clone()
+                },
+                None,
+                0,
+                1
+            )
+        ),
+        LibraryErrorKind::InvalidFilter
+    );
+    // Playlist failures keep their meaning.
+    connection
+        .execute_batch(
+            "INSERT INTO playlists(id,name,search,revision,query) VALUES(1,'Mix','mix',3,NULL);
+             INSERT INTO playlist_entries(id,playlist_id,track_id,ordinal) VALUES(1,1,9,0);",
+        )
+        .unwrap();
+    let playlist = |revision| list(ListSource::Playlist { id: 1, revision });
+    assert_eq!(
+        rejected(&mut connection, tracks(playlist(2), None, 0, 1)),
+        LibraryErrorKind::StalePlaylistRevision
+    );
+    assert_eq!(
+        rejected(
+            &mut connection,
+            tracks(list(ListSource::Smart { id: 1, revision: 3 }), None, 0, 1)
+        ),
+        LibraryErrorKind::Invalid
+    );
+    // An unavailable playlist row lists, but its album has no visible track.
+    let (page, totals) = tracks_page(&mut connection, &playlist(3), 0, 10);
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|row| (row.row_id, row.track.id, row.available))
+            .collect::<Vec<_>>(),
+        [(1, 9, false)]
+    );
+    assert_eq!(totals.map(|totals| totals.tracks), Some(1));
+    match execute(
+        &mut connection,
+        LibraryCommand::ListAlbums {
+            list: playlist(3),
+            sort: AlbumSort::AlbumArtist,
+            descending: false,
+            revision: None,
+            offset: 0,
+            limit: 10,
+        },
+    ) {
+        LibraryReply::ListAlbums(page) => assert_eq!((page.total, page.entries.len()), (0, 0)),
+        other => panic!("unexpected albums reply: {other:?}"),
+    }
+}

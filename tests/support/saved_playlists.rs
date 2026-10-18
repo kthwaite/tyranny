@@ -7,7 +7,7 @@ use tyranny::{
     protocol::{Playlist, PlaylistEntry, QueueItem},
 };
 
-async fn ok(client: &mut PlaybackClient, command: Value) -> Response {
+pub(super) async fn ok(client: &mut PlaybackClient, command: Value) -> Response {
     match client.request(command).await {
         Reply::Ok { result } => {
             match &result {
@@ -30,7 +30,7 @@ async fn change(client: &mut PlaybackClient, command: Value) -> Option<Playlist>
         response => panic!("expected playlist change: {response:?}"),
     }
 }
-async fn create(client: &mut PlaybackClient, name: &str) -> Playlist {
+pub(super) async fn create(client: &mut PlaybackClient, name: &str) -> Playlist {
     let revision = client.state.playlists_revision;
     change(
         client,
@@ -39,7 +39,7 @@ async fn create(client: &mut PlaybackClient, name: &str) -> Playlist {
     .await
     .unwrap()
 }
-async fn add(
+pub(super) async fn add(
     client: &mut PlaybackClient,
     playlist: &Playlist,
     library: u64,
@@ -78,7 +78,7 @@ async fn queue(client: &mut PlaybackClient) -> Vec<QueueItem> {
         response => panic!("expected queue: {response:?}"),
     }
 }
-async fn index(
+pub(super) async fn index(
     scratch: &Scratch,
     client: &mut PlaybackClient,
     names: &[&str],

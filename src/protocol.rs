@@ -1,13 +1,15 @@
-//! Version 8 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 9 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::decoder::GainMode;
 use crate::library_types::{
-    Album, AlbumArtist, LibraryReply, LibraryState, Page, Root, Track, TrackMetadata,
+    Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
+    ListTotals, NamedCount, Page, Root, Track, TrackMetadata,
 };
-use serde::{Deserialize, Serialize};
+use crate::listing::ListDescription;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 pub const MAX_PAGE_SIZE: usize = 500;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -15,6 +17,14 @@ pub struct Request {
     pub id: u64,
     #[serde(flatten)]
     pub command: Command,
+}
+
+/// Serde treats a missing `Option` field as `None`; v9 list commands require
+/// every field, so their optional fields decode through this.
+fn required<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Option::deserialize(deserializer)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -97,6 +107,46 @@ pub enum Command {
         limit: usize,
         query: String,
         album_id: Option<u64>,
+    },
+    ListTracks {
+        list: ListDescription,
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
+        offset: usize,
+        limit: usize,
+    },
+    ListAlbums {
+        list: ListDescription,
+        sort: AlbumSort,
+        descending: bool,
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
+        offset: usize,
+        limit: usize,
+    },
+    ListArtists {
+        query: String,
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
+        offset: usize,
+        limit: usize,
+    },
+    ListGenres {
+        query: String,
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
+        offset: usize,
+        limit: usize,
+    },
+    AlbumSummaries {
+        album_ids: Vec<u64>,
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
+    },
+    ListGroups {
+        list: ListDescription,
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
     },
     AppendTrack {
         expected_revision: u64,
@@ -345,6 +395,33 @@ pub enum Response {
         #[serde(flatten)]
         page: Page<Track>,
     },
+    ListTracks {
+        #[serde(flatten)]
+        page: Page<ListRow>,
+        totals: Option<ListTotals>,
+    },
+    ListAlbums {
+        #[serde(flatten)]
+        page: Page<AlbumSummary>,
+    },
+    ListArtists {
+        #[serde(flatten)]
+        page: Page<NamedCount>,
+        compilations: Option<NamedCount>,
+    },
+    ListGenres {
+        #[serde(flatten)]
+        page: Page<NamedCount>,
+    },
+    AlbumSummaries {
+        revision: u64,
+        entries: Vec<AlbumSummary>,
+    },
+    ListGroups {
+        revision: u64,
+        total: u64,
+        groups: Vec<GroupSpan>,
+    },
     SavedPlaylists {
         #[serde(flatten)]
         page: Page<Playlist>,
@@ -370,6 +447,24 @@ impl From<LibraryReply> for Response {
             LibraryReply::Artists(page) => Self::LibraryArtists { page },
             LibraryReply::Albums(page) => Self::LibraryAlbums { page },
             LibraryReply::Tracks(page) => Self::LibraryTracks { page },
+            LibraryReply::ListTracks { page, totals } => Self::ListTracks { page, totals },
+            LibraryReply::ListAlbums(page) => Self::ListAlbums { page },
+            LibraryReply::ListArtists { page, compilations } => {
+                Self::ListArtists { page, compilations }
+            }
+            LibraryReply::ListGenres(page) => Self::ListGenres { page },
+            LibraryReply::AlbumSummaries { revision, entries } => {
+                Self::AlbumSummaries { revision, entries }
+            }
+            LibraryReply::ListGroups {
+                revision,
+                total,
+                groups,
+            } => Self::ListGroups {
+                revision,
+                total,
+                groups,
+            },
         }
     }
 }
@@ -451,6 +546,115 @@ mod tests {
         let mut invalid = command;
         invalid["size"] = serde_json::json!("original");
         assert!(serde_json::from_value::<Request>(invalid).is_err());
+    }
+
+    #[test]
+    fn v9_list_commands_require_every_field() {
+        assert_eq!(VERSION, 9);
+        let list = serde_json::json!({
+            "source": {"kind": "playlist", "id": 4, "revision": 9},
+            "query": "genre:Jazz",
+            "sort": [{"field": "year", "descending": true}],
+            "group": "artist_album"
+        });
+        let commands = [
+            serde_json::json!({"id":1,"command":"list_tracks","list":list,
+                "revision":null,"offset":0,"limit":10}),
+            serde_json::json!({"id":1,"command":"list_albums","list":list,"sort":"date_added",
+                "descending":true,"revision":3,"offset":0,"limit":10}),
+            serde_json::json!({"id":1,"command":"list_artists","query":"",
+                "revision":null,"offset":0,"limit":10}),
+            serde_json::json!({"id":1,"command":"list_genres","query":"",
+                "revision":null,"offset":0,"limit":10}),
+            serde_json::json!({"id":1,"command":"album_summaries","album_ids":[3,1],
+                "revision":null}),
+            serde_json::json!({"id":1,"command":"list_groups","list":list,"revision":null}),
+        ];
+        for command in commands {
+            let request = serde_json::from_value::<Request>(command.clone())
+                .unwrap_or_else(|error| panic!("rejected {command}: {error}"));
+            match request.command {
+                Command::ListTracks {
+                    list,
+                    revision: None,
+                    offset: 0,
+                    limit: 10,
+                }
+                | Command::ListGroups {
+                    list,
+                    revision: None,
+                } => assert_eq!(list.group, crate::listing::Grouping::ArtistAlbum),
+                Command::ListAlbums {
+                    sort: AlbumSort::DateAdded,
+                    descending: true,
+                    revision: Some(3),
+                    ..
+                } => {}
+                Command::ListArtists { query, .. } | Command::ListGenres { query, .. } => {
+                    assert!(query.is_empty())
+                }
+                Command::AlbumSummaries {
+                    album_ids,
+                    revision: None,
+                } => assert_eq!(album_ids, [3, 1]),
+                other => panic!("decoded {command} as {other:?}"),
+            }
+            for field in command.as_object().unwrap().keys() {
+                if field == "id" || field == "command" {
+                    continue;
+                }
+                let mut missing = command.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(
+                    serde_json::from_value::<Request>(missing).is_err(),
+                    "accepted {command} without {field}"
+                );
+            }
+            let mut extra = command.clone();
+            extra["path"] = serde_json::json!("/private/source");
+            assert!(serde_json::from_value::<Request>(extra).is_err());
+        }
+        for sort in ["album_artist", "year", "date_added"] {
+            let parsed: AlbumSort = serde_json::from_value(serde_json::json!(sort)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), sort);
+        }
+    }
+
+    #[test]
+    fn list_responses_keep_their_wire_shapes() {
+        let response = Response::from(LibraryReply::ListTracks {
+            page: Page {
+                revision: 2,
+                total: 0,
+                offset: 0,
+                entries: Vec::new(),
+            },
+            totals: Some(ListTotals {
+                tracks: 0,
+                duration_ms: 0,
+                size_bytes: 0,
+            }),
+        });
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::json!({"kind":"list_tracks","revision":2,"total":0,"offset":0,"entries":[],
+                "totals":{"tracks":0,"duration_ms":0,"size_bytes":0}})
+        );
+        let groups = Response::from(LibraryReply::ListGroups {
+            revision: 2,
+            total: 3,
+            groups: vec![GroupSpan {
+                artist_key: 1,
+                album_key: None,
+                start: 0,
+                count: 3,
+            }],
+        });
+        assert_eq!(
+            serde_json::to_value(&groups).unwrap(),
+            serde_json::json!({"kind":"list_groups","revision":2,"total":3,
+                "groups":[{"artist_key":1,"album_key":null,"start":0,"count":3}]})
+        );
     }
 
     #[test]

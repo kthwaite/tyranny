@@ -2,13 +2,6 @@
 //! The compiled `SELECT` yields `position, row_id, track_id, artist_key,
 //! album_key, available`, ordered by `position` (1-based). Callers wrap it as a
 //! subquery for pages, counts, totals, group spans and run selections.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "list queries (Task 7) are the first caller of compile"
-    )
-)]
 use crate::{
     filter::Filter,
     library_types::{LibraryError, LibraryErrorKind},
@@ -118,6 +111,11 @@ pub struct ListDescription {
     pub group: Grouping,
 }
 
+/// The Recent source covers tracks added within this many seconds.
+pub const RECENT_WINDOW_SECS: i64 = 2_592_000;
+/// The most IDs one browser dimension may name.
+pub const MAX_BROWSER_IDS: usize = 500;
+
 pub(crate) struct CompiledList {
     pub sql: String,
     pub values: Vec<Value>,
@@ -163,7 +161,8 @@ fn sort_columns(field: SortField) -> &'static [&'static str] {
             "t.bitrate_kbps",
         ],
         SortField::Plays => &["COALESCE(s.play_count,0)"],
-        SortField::DateAdded => &["t.date_added"],
+        // Date added 0 is unknown and sorts with NULL, last in both directions.
+        SortField::DateAdded => &["NULLIF(t.date_added,0)"],
         SortField::LastPlayed => &["s.last_played"],
         // The tiebreak's album prefix: album artist, album, album ID, disc, track.
         SortField::AlbumOrder => &TIEBREAK[..5],
@@ -220,6 +219,15 @@ pub(crate) fn compile(
     recent_cutoff: i64,
     first_parameter: usize,
 ) -> Result<CompiledList> {
+    let browser = &list.browser;
+    if [&browser.genre_ids, &browser.artist_ids, &browser.album_ids]
+        .iter()
+        .any(|ids| ids.len() > MAX_BROWSER_IDS)
+    {
+        return Err(invalid(&format!(
+            "a browser dimension names more than {MAX_BROWSER_IDS} IDs"
+        )));
+    }
     let mut parameters = Parameters {
         next: first_parameter,
         values: Vec::new(),
@@ -256,7 +264,6 @@ pub(crate) fn compile(
             conditions.push(format!("({})", parameters.filter(&rule)?));
         }
     }
-    let browser = &list.browser;
     if !browser.genre_ids.is_empty() {
         conditions.push(format!(
             "t.id IN (SELECT track_id FROM library_track_genres WHERE genre_id IN ({}))",
@@ -577,9 +584,10 @@ mod tests {
                 [2, 5, 8, 4, 3, 7, 9, 1, 6],
                 [6, 1, 9, 7, 3, 4, 2, 5, 8],
             ),
+            // Date added 0 is unknown and sorts last both ways.
             (
                 DateAdded,
-                [7, 1, 6, 2, 3, 5, 4, 8, 9],
+                [1, 6, 2, 3, 5, 4, 8, 9, 7],
                 [8, 9, 4, 3, 5, 2, 6, 1, 7],
             ),
             (
@@ -632,11 +640,12 @@ mod tests {
         list.group = Grouping::Album;
         // Arrival's newest track (2500) beats Help (2000), so track 1 moves up with its album.
         assert_eq!(row_ids(&connection, &list), [8, 9, 4, 3, 5, 2, 1, 6, 7]);
-        // Ascending: each album takes its oldest track's value.
+        // Ascending: each album takes its oldest known track's value. Giant
+        // Steps has only an unknown date (0), so it comes last.
         let mut list = sorted(ListSource::Library, SortField::DateAdded, false);
-        assert_eq!(row_ids(&connection, &list), [7, 1, 6, 2, 3, 5, 4, 8, 9]);
+        assert_eq!(row_ids(&connection, &list), [1, 6, 2, 3, 5, 4, 8, 9, 7]);
         list.group = Grouping::Album;
-        assert_eq!(row_ids(&connection, &list), [7, 1, 2, 6, 3, 5, 4, 8, 9]);
+        assert_eq!(row_ids(&connection, &list), [1, 2, 6, 3, 5, 4, 8, 9, 7]);
         // Recent defaults to date added descending.
         let recent = |group| {
             run(&connection, &list_of(ListSource::Recent, group), 1000, 1)
@@ -813,6 +822,27 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(failure_code(error), ErrorCode::InvalidCommand);
+    }
+
+    #[test]
+    fn source_browser_and_query_combine_after_leading_parameters() {
+        let connection = fixture();
+        let list = ListDescription {
+            browser: Browser {
+                artist_ids: vec![2, 3],
+                ..Browser::default()
+            },
+            query: "title:the".into(),
+            ..list(ListSource::Genre { id: 2 })
+        };
+        // Rock tracks by Beatles or Coltrane albums whose title contains "the".
+        assert_eq!(
+            run(&connection, &list, 0, 4).unwrap(),
+            [(3, 3, 2, 3, true), (4, 4, 2, 3, true)]
+        );
+        let compiled = compile(&connection, &list, 0, 4).unwrap();
+        assert_eq!(compiled.values.len(), 4);
+        assert!(compiled.sql.contains("?7") && !compiled.sql.contains("?3"));
     }
 
     #[test]

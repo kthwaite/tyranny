@@ -185,16 +185,36 @@ pub(super) fn bounded_error(error: impl AsRef<str>) -> String {
     error[..end].to_owned()
 }
 
-pub(super) fn state(connection: &Connection) -> Result<LibraryState> {
+/// Duration and size are totals over visible tracks. They change only with
+/// visible rows, so `previous` lends its totals while the revision holds:
+/// summing them reads every track.
+pub(super) fn state(
+    connection: &Connection,
+    previous: Option<&LibraryState>,
+) -> Result<LibraryState> {
     let (revision, roots, tracks, scan): (u64, u64, u64, String) = connection.query_row(
         "SELECT revision,root_count,track_count,scan FROM library_state WHERE singleton=1",
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
+    let (duration_ms, size_bytes) = match previous.filter(|state| state.revision == revision) {
+        Some(state) => (state.duration_ms, state.size_bytes),
+        None => connection.query_row(
+            "SELECT COALESCE(SUM(json_extract(t.metadata,'$.duration_ms')),0),
+             COALESCE(SUM(t.file_size),0)
+             FROM library_tracks t JOIN library_assets a ON a.id=t.asset_id
+             JOIN library_roots r ON r.id=a.root_id
+             WHERE a.indexed=1 AND a.last_seen_scan>=r.completed_scan",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?,
+    };
     Ok(LibraryState {
         revision,
         roots,
         tracks,
+        duration_ms,
+        size_bytes,
         scan: serde_json::from_str(&scan)?,
     })
 }
@@ -227,7 +247,7 @@ pub(super) fn save_status(transaction: &Transaction<'_>, status: &ScanStatus) ->
 }
 
 pub(super) fn recover(connection: &mut Connection) -> Result<LibraryState> {
-    let mut current = state(connection)?;
+    let mut current = state(connection, None)?;
     if matches!(
         current.scan.phase,
         ScanPhase::Discovering | ScanPhase::Indexing
@@ -238,7 +258,7 @@ pub(super) fn recover(connection: &mut Connection) -> Result<LibraryState> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         save_status(&transaction, &current.scan)?;
         transaction.commit()?;
-        current = state(connection)?;
+        current = state(connection, Some(&current))?;
     }
     Ok(current)
 }

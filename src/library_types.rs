@@ -1,5 +1,6 @@
 //! Durable library identities and bounded query/scan results. Paths identify
 //! assets; track IDs identify playable items; queue occurrences remain separate.
+use crate::listing::ListDescription;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -104,6 +105,9 @@ pub struct LibraryState {
     pub revision: u64,
     pub roots: u64,
     pub tracks: u64,
+    /// Totals over visible tracks.
+    pub duration_ms: u64,
+    pub size_bytes: u64,
     pub scan: ScanStatus,
 }
 
@@ -146,6 +150,92 @@ pub struct Page<T> {
     pub offset: usize,
     pub entries: Vec<T>,
 }
+/// One track as list rows show it. `genre` joins the track's genres with ", "
+/// in tag order; `format` is `format_label`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TrackSummary {
+    pub id: u64,
+    pub album_id: u64,
+    pub artist_id: u64,
+    pub album_artist_id: u64,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub compilation: bool,
+    pub disc_number: u32,
+    pub track_number: u32,
+    pub duration_ms: Option<u64>,
+    pub year: Option<i32>,
+    pub genre: String,
+    pub format: String,
+    pub sample_rate: u32,
+    pub bitrate_kbps: Option<u32>,
+    pub play_count: u64,
+    pub last_played: Option<i64>,
+    pub date_added: i64,
+    pub path: String,
+}
+/// One row of a list. `row_id` is the playlist occurrence for playlist
+/// sources and the track ID otherwise.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ListRow {
+    pub row_id: u64,
+    pub artist_key: u64,
+    pub album_key: u64,
+    pub available: bool,
+    pub track: TrackSummary,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ListTotals {
+    pub tracks: u64,
+    pub duration_ms: u64,
+    pub size_bytes: u64,
+}
+/// Album facts over its visible tracks. `format` is the most common track
+/// format, or "Mixed" on a tie; `genre` is the most common first genre;
+/// `date_added` is the newest track's.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AlbumSummary {
+    pub id: u64,
+    pub title: String,
+    pub album_artist: String,
+    pub album_artist_id: u64,
+    pub compilation: bool,
+    pub year: Option<i32>,
+    pub genre: String,
+    pub track_count: u64,
+    pub disc_count: u64,
+    pub duration_ms: u64,
+    pub format: String,
+    pub album_gain_db: Option<f64>,
+    pub date_added: i64,
+    pub musicbrainz_release_id: Option<String>,
+}
+/// An artist or genre with its visible album and track counts.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NamedCount {
+    pub id: u64,
+    pub name: String,
+    pub album_count: u64,
+    pub track_count: u64,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumSort {
+    AlbumArtist,
+    Year,
+    DateAdded,
+}
+/// One group of a grouped list: `count` rows from 0-based position `start`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GroupSpan {
+    pub artist_key: u64,
+    pub album_key: Option<u64>,
+    pub start: u64,
+    pub count: u64,
+}
+
 #[derive(Debug)]
 pub struct PageRequest {
     pub revision: Option<u64>,
@@ -172,15 +262,60 @@ pub enum LibraryCommand {
         album_id: Option<u64>,
         page: PageRequest,
     },
+    ListTracks {
+        list: ListDescription,
+        revision: Option<u64>,
+        offset: usize,
+        limit: usize,
+    },
+    ListAlbums {
+        list: ListDescription,
+        sort: AlbumSort,
+        descending: bool,
+        revision: Option<u64>,
+        offset: usize,
+        limit: usize,
+    },
+    ListArtists(PageRequest),
+    ListGenres(PageRequest),
+    AlbumSummaries {
+        album_ids: Vec<u64>,
+        revision: Option<u64>,
+    },
+    ListGroups {
+        list: ListDescription,
+        revision: Option<u64>,
+    },
 }
 #[derive(Debug)]
 pub enum LibraryReply {
     RootAdded(Root),
-    ScanAccepted { root_id: u64 },
+    ScanAccepted {
+        root_id: u64,
+    },
     Roots(Page<Root>),
     Artists(Page<AlbumArtist>),
     Albums(Page<Album>),
     Tracks(Page<Track>),
+    ListTracks {
+        page: Page<ListRow>,
+        totals: Option<ListTotals>,
+    },
+    ListAlbums(Page<AlbumSummary>),
+    ListArtists {
+        page: Page<NamedCount>,
+        compilations: Option<NamedCount>,
+    },
+    ListGenres(Page<NamedCount>),
+    AlbumSummaries {
+        revision: u64,
+        entries: Vec<AlbumSummary>,
+    },
+    ListGroups {
+        revision: u64,
+        total: u64,
+        groups: Vec<GroupSpan>,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibraryErrorKind {
@@ -188,6 +323,7 @@ pub enum LibraryErrorKind {
     InvalidFilter,
     Busy,
     StaleRevision,
+    StalePlaylistRevision,
     Storage,
 }
 #[derive(Debug)]

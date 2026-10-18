@@ -24,6 +24,8 @@ use uuid::Uuid;
 
 const DEADLINE: Duration = Duration::from_secs(5);
 
+#[path = "support/library_lists.rs"]
+mod library_lists;
 #[path = "support/saved_playlists.rs"]
 mod saved_playlists;
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;

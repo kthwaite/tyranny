@@ -50,7 +50,7 @@ pub struct Subscription {
 }
 enum Work {
     Subscribe(oneshot::Sender<Subscription>),
-    Request(Request, oneshot::Sender<Message>),
+    Request(Box<Request>, oneshot::Sender<Message>),
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
@@ -214,6 +214,62 @@ impl Controller {
                     query,
                 },
             },
+            Command::ListTracks {
+                list,
+                revision,
+                offset,
+                limit,
+            } => LibraryCommand::ListTracks {
+                list,
+                revision,
+                offset,
+                limit,
+            },
+            Command::ListAlbums {
+                list,
+                sort,
+                descending,
+                revision,
+                offset,
+                limit,
+            } => LibraryCommand::ListAlbums {
+                list,
+                sort,
+                descending,
+                revision,
+                offset,
+                limit,
+            },
+            Command::ListArtists {
+                query,
+                revision,
+                offset,
+                limit,
+            } => LibraryCommand::ListArtists(PageRequest {
+                revision,
+                offset,
+                limit,
+                query,
+            }),
+            Command::ListGenres {
+                query,
+                revision,
+                offset,
+                limit,
+            } => LibraryCommand::ListGenres(PageRequest {
+                revision,
+                offset,
+                limit,
+                query,
+            }),
+            Command::AlbumSummaries {
+                album_ids,
+                revision,
+            } => LibraryCommand::AlbumSummaries {
+                album_ids,
+                revision,
+            },
+            Command::ListGroups { list, revision } => LibraryCommand::ListGroups { list, revision },
             command => return self.playback_request(Request { id, command }).await,
         };
         let reply = match self.library.request(command).await {
@@ -241,6 +297,7 @@ impl Controller {
                     LibraryErrorKind::Invalid | LibraryErrorKind::Busy => ErrorCode::InvalidCommand,
                     LibraryErrorKind::InvalidFilter => ErrorCode::InvalidFilter,
                     LibraryErrorKind::StaleRevision => ErrorCode::StaleLibraryRevision,
+                    LibraryErrorKind::StalePlaylistRevision => ErrorCode::StalePlaylistRevision,
                     LibraryErrorKind::Storage => ErrorCode::Persistence,
                 };
                 Reply::Error {
@@ -256,7 +313,7 @@ impl Controller {
     async fn playback_request(&self, request: Request) -> Result<Message> {
         let (reply, receiver) = oneshot::channel();
         self.sender
-            .try_send(Work::Request(request, reply))
+            .try_send(Work::Request(Box::new(request), reply))
             .context("playback owner busy or unavailable")?;
         receiver
             .await
@@ -1005,7 +1062,13 @@ impl Actor {
             | Command::LibraryRoots { .. }
             | Command::LibraryArtists { .. }
             | Command::LibraryAlbums { .. }
-            | Command::LibraryTracks { .. } => {
+            | Command::LibraryTracks { .. }
+            | Command::ListTracks { .. }
+            | Command::ListAlbums { .. }
+            | Command::ListArtists { .. }
+            | Command::ListGenres { .. }
+            | Command::AlbumSummaries { .. }
+            | Command::ListGroups { .. } => {
                 unreachable!("library and artwork commands are routed to their own workers")
             }
             Command::Remove {
@@ -1211,6 +1274,7 @@ impl Actor {
                         let _ = reply.send(subscription);
                     }
                     Ok(Work::Request(request, reply)) => {
+                        let request = *request;
                         let result = self.command(request.command);
                         match result {
                             Ok(result) => {

@@ -96,13 +96,6 @@ fn header(connection: &Connection, id: u64, expected: Option<u64>) -> Result<Pla
 }
 /// A list source names playlist `id` at `revision`, smart exactly when `smart`.
 /// Returns the smart rule. Unknown, stale and wrong-kind playlists are rejected.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "list queries (Task 7) are the first caller of compile"
-    )
-)]
 pub(crate) fn list_source_rule(
     connection: &Connection,
     id: u64,
