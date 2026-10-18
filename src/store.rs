@@ -4,7 +4,9 @@ use crate::{
     library,
     library_types::format_label,
     play_order::RunInfo,
-    protocol::{QueueItem, QueueSource, Settings, SourceKind},
+    protocol::{
+        ErrorCode, MAX_RUN_ENTRIES, QueueItem, QueueSource, Settings, SourceKind, TrackSelection,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -17,6 +19,7 @@ use std::{
 };
 
 mod playlists;
+mod selection;
 pub(crate) use playlists::{PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule};
 #[cfg(test)]
 mod playlists_tests;
@@ -111,7 +114,6 @@ pub(crate) struct LoadedEntry {
     pub path: PathBuf,
     pub run: Option<RunInfo>,
     /// Set once the entry has played. Task 12 writes it.
-    #[allow(dead_code)]
     pub played_seq: Option<u64>,
 }
 /// What the library knows about a queue entry's indexed track.
@@ -141,6 +143,16 @@ pub(crate) enum Edit<'a> {
         id: u64,
     },
     Clear,
+}
+/// One enqueue's queue edit, as the player prepared it.
+pub(crate) struct UpcomingEdit<'a> {
+    /// Entries removed before the new ones are inserted.
+    pub removed: &'a [u64],
+    /// The kept entry the new entries go before; `None` puts them last.
+    pub before: Option<u64>,
+    pub source: &'a QueueSource,
+    /// Selects the first new entry in the same commit.
+    pub checkpoint: Option<Checkpoint>,
 }
 /// File name without extension, for entries the library cannot describe.
 fn file_stem(path: &str) -> String {
@@ -307,6 +319,92 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// Rechecks the queue revision and every revision `selection` was resolved
+    /// under, then removes, inserts and checkpoints in one commit. The new
+    /// entries share one run, whose ID is the first new entry's.
+    pub fn replace_upcoming<'a>(
+        &mut self,
+        expected_queue: u64,
+        selection: &TrackSelection,
+        edit: UpcomingEdit<'_>,
+        entries: impl ExactSizeIterator<Item = (u64, u64, &'a Path)>,
+    ) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        selection::check_revisions(&transaction, selection)?;
+        let (revision, next_id): (u64, u64) = transaction.query_row(
+            "SELECT revision,next_id FROM control WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        playlists::check_revision(
+            Some(expected_queue),
+            revision,
+            ErrorCode::StaleRevision,
+            "queue",
+        )?;
+        let count = entries.len();
+        if count == 0 || count > MAX_RUN_ENTRIES {
+            return Err(playlists::invalid(format!(
+                "enqueue requires 1..={MAX_RUN_ENTRIES} tracks"
+            )));
+        }
+        let following_id = next_id
+            .checked_add(count as u64)
+            .filter(|id| *id <= i64::MAX as u64)
+            .ok_or_else(|| playlists::invalid("queue ID exhausted"))?;
+        let revision = playlists::next_revision(revision)?;
+        {
+            let mut delete = transaction.prepare("DELETE FROM queue WHERE id=?1")?;
+            for &id in edit.removed {
+                ensure!(
+                    delete.execute([id])? == 1,
+                    "persisted queue occurrence not found"
+                );
+            }
+        }
+        let ordinal = playlists::insertion_ordinal(&transaction, None, edit.before, count)?;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO queue(id,ordinal,path,track_id,source_kind,source_name,run_id)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            )?;
+            for (index, (id, track, path)) in entries.enumerate() {
+                ensure!(
+                    id == next_id + index as u64,
+                    "prepared queue identity changed"
+                );
+                insert.execute(params![
+                    id,
+                    ordinal + index as i64,
+                    path.to_str()
+                        .ok_or_else(|| playlists::invalid("source path must be UTF-8"))?,
+                    track,
+                    edit.source.kind.as_str(),
+                    &edit.source.name,
+                    next_id
+                ])?;
+            }
+        }
+        transaction.execute(
+            "UPDATE control SET revision=?1,next_id=?2 WHERE singleton=1",
+            params![revision, following_id],
+        )?;
+        if let Some(checkpoint) = edit.checkpoint {
+            transaction.execute(
+                "UPDATE control SET current_id=?1,position_frames=?2,playing=?3 WHERE singleton=1",
+                params![
+                    checkpoint.current_id,
+                    checkpoint.position_frames,
+                    checkpoint.playing
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn edit(&mut self, edit: Edit<'_>, revision: u64, next_id: u64) -> Result<()> {

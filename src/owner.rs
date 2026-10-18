@@ -7,15 +7,17 @@ use crate::{
     library_types::{
         LibraryCommand, LibraryError, LibraryErrorKind, PageRequest, StaleLibraryRevision,
     },
+    listing::{recent_cutoff, unix_now},
     output::OutputConfig,
     playback::Player,
     protocol::{
-        Command, ControlState, ErrorCode, MAX_PAGE_SIZE, Message, NowPlaying, QueueSource, Reply,
-        Request, Response, Settings, SourceKind, Transport,
+        Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
+        NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
+        TrackSelection, Transport,
     },
     store::{
         Checkpoint, Edit, EntryTrack, LoadedEntry, PlaylistChange, PlaylistEdit, PlaylistFailure,
-        Store,
+        Store, UpcomingEdit,
     },
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -363,23 +365,21 @@ impl Failure {
         Self::library(error)
     }
     fn library(error: anyhow::Error) -> Self {
+        let kind = error.downcast_ref::<LibraryError>().map(|error| error.kind);
         let code = if error.is::<StaleLibraryRevision>() {
             ErrorCode::StaleLibraryRevision
-        } else if error.is::<crate::filter::InvalidFilter>()
-            || error
-                .downcast_ref::<LibraryError>()
-                .is_some_and(|error| error.kind == LibraryErrorKind::InvalidFilter)
-        {
+        } else if error.is::<crate::filter::InvalidFilter>() {
             ErrorCode::InvalidFilter
-        } else if error.downcast_ref::<LibraryError>().is_some_and(|error| {
-            matches!(
-                error.kind,
-                LibraryErrorKind::Invalid | LibraryErrorKind::Busy
-            )
-        }) {
-            ErrorCode::InvalidCommand
         } else {
-            ErrorCode::Persistence
+            match kind {
+                Some(LibraryErrorKind::StaleRevision) => ErrorCode::StaleLibraryRevision,
+                Some(LibraryErrorKind::StalePlaylistRevision) => ErrorCode::StalePlaylistRevision,
+                Some(LibraryErrorKind::InvalidFilter) => ErrorCode::InvalidFilter,
+                Some(LibraryErrorKind::Invalid | LibraryErrorKind::Busy) => {
+                    ErrorCode::InvalidCommand
+                }
+                Some(LibraryErrorKind::Storage) | None => ErrorCode::Persistence,
+            }
         };
         Self {
             code,
@@ -863,6 +863,79 @@ impl Actor {
         self.published(Some(first_id))
     }
 
+    /// Resolves the selection, then edits the queue in one store transaction
+    /// and one infallible player commit. With `play` the first new entry is
+    /// selected as `Play` would, and the checkpoint commits with the rows.
+    fn enqueue_tracks(
+        &mut self,
+        selection: TrackSelection,
+        expected_revision: u64,
+        placement: Placement,
+        play: bool,
+        source: QueueSource,
+    ) -> CommandResult<Response> {
+        self.check_revision(expected_revision)?;
+        self.next_revision()?;
+        if source.name.len() > MAX_SOURCE_NAME_BYTES {
+            return Err(Failure::invalid(format!(
+                "source name exceeds {MAX_SOURCE_NAME_BYTES} UTF-8 bytes"
+            )));
+        }
+        let mut sources = self
+            .store
+            .resolve_selection(&selection, recent_cutoff(unix_now()))
+            .map_err(Failure::playlist)?;
+        for (_, path) in &mut sources {
+            *path = self.source_path(std::mem::take(path))?;
+        }
+        let mut track_ids = Vec::new();
+        track_ids
+            .try_reserve_exact(sources.len())
+            .map_err(|error| Failure::playback(error.into()))?;
+        let paths = sources.into_iter().map(|(track_id, path)| {
+            track_ids.push(track_id);
+            path
+        });
+        let prepared = self
+            .player
+            .prepare_replace_upcoming(
+                paths,
+                placement,
+                expected_revision,
+                play,
+                source.kind.repeat_scope(),
+            )
+            .map_err(Failure::playback)?;
+        let first_id = prepared.first_id();
+        self.store
+            .replace_upcoming(
+                expected_revision,
+                &selection,
+                UpcomingEdit {
+                    removed: prepared.removed(),
+                    before: prepared.before(),
+                    source: &source,
+                    checkpoint: play.then_some(Checkpoint {
+                        current_id: Some(first_id),
+                        position_frames: 0,
+                        playing: true,
+                    }),
+                },
+                prepared
+                    .entries()
+                    .zip(track_ids)
+                    .map(|((id, path), track_id)| (id, track_id, path)),
+            )
+            .map_err(Failure::playlist)?;
+        self.player.commit_replace_upcoming(prepared);
+        if play {
+            self.fault = None;
+        }
+        // Queue rows and any new selection were committed together; no second
+        // fallible checkpoint may reject an already audible run.
+        self.published(Some(first_id))
+    }
+
     fn append(
         &mut self,
         expected_revision: u64,
@@ -1108,6 +1181,13 @@ impl Actor {
                 track_ids,
                 before,
             } => self.insert_tracks(expected_revision, library_revision, track_ids, before),
+            Command::EnqueueTracks {
+                selection,
+                expected_revision,
+                placement,
+                play,
+                source,
+            } => self.enqueue_tracks(selection, expected_revision, placement, play, source),
             Command::Artwork { .. }
             | Command::AddRoot { .. }
             | Command::Rescan { .. }

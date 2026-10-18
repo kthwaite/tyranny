@@ -28,14 +28,19 @@ impl fmt::Display for PlaylistFailure {
     }
 }
 impl std::error::Error for PlaylistFailure {}
-fn invalid(message: impl Into<String>) -> anyhow::Error {
+pub(super) fn invalid(message: impl Into<String>) -> anyhow::Error {
     PlaylistFailure {
         code: ErrorCode::InvalidCommand,
         message: message.into(),
     }
     .into()
 }
-fn check_revision(expected: Option<u64>, current: u64, code: ErrorCode, kind: &str) -> Result<()> {
+pub(super) fn check_revision(
+    expected: Option<u64>,
+    current: u64,
+    code: ErrorCode,
+    kind: &str,
+) -> Result<()> {
     if let Some(expected) = expected.filter(|expected| *expected != current) {
         return Err(PlaylistFailure {
             code,
@@ -51,7 +56,7 @@ fn check_id(id: u64) -> Result<()> {
     }
     Ok(())
 }
-fn next_revision(revision: u64) -> Result<u64> {
+pub(super) fn next_revision(revision: u64) -> Result<u64> {
     if revision >= i64::MAX as u64 {
         return Err(invalid("playlist revision exhausted"));
     }
@@ -65,7 +70,7 @@ fn page_bounds(offset: usize, limit: usize) -> Result<()> {
     }
     Ok(())
 }
-fn library_revision(connection: &Connection, expected: Option<u64>) -> Result<u64> {
+pub(super) fn library_revision(connection: &Connection, expected: Option<u64>) -> Result<u64> {
     let revision = connection.query_row(
         "SELECT revision FROM library_state WHERE singleton=1",
         [],
@@ -322,7 +327,7 @@ fn move_occurrences(
     Ok(changed)
 }
 
-fn insertion_ordinal(
+pub(super) fn insertion_ordinal(
     transaction: &Transaction<'_>,
     playlist: Option<u64>,
     before: Option<u64>,

@@ -5,7 +5,7 @@ use crate::{
     decoder::{Decoder, GainMode},
     output::{Output, OutputConfig, OutputSnapshot, TrackToken},
     play_order::{RepeatScope, RunInfo},
-    protocol::NowPlaying,
+    protocol::{NowPlaying, Placement},
     store::LoadedEntry,
 };
 use anyhow::{Context, Result, ensure};
@@ -26,6 +26,8 @@ struct Entry {
     /// Read by Repeat All to find the run an entry repeats within.
     #[allow(dead_code)]
     run: Option<RunInfo>,
+    /// The entry has played. Replacing upcoming entries with nothing current keeps it.
+    played: bool,
 }
 
 /// A validated decoder replacement. Commit on the same player without an
@@ -72,6 +74,40 @@ pub(crate) struct PreparedInsert {
     destination: usize,
     tokens: Vec<Arc<TrackToken>>,
 }
+/// An enqueue prepared without touching audible state: the entries it removes,
+/// the new entries and where they go, and with `play` the first one opened.
+pub(crate) struct PreparedReplace {
+    append: PreparedAppend,
+    /// The entry current at preparation. The edit is relative to it, even if
+    /// output moves on before the commit.
+    anchor: Option<u64>,
+    /// Per queue index: whether this edit removes the entry.
+    removed: Vec<bool>,
+    removed_ids: Vec<u64>,
+    /// Index of the first new entry once the removed entries are gone.
+    destination: usize,
+    before: Option<u64>,
+    /// Fresh tokens for the kept entries, in order. Empty when the edit only
+    /// appends after everything, which leaves all prepared PCM valid.
+    tokens: Vec<Arc<TrackToken>>,
+}
+impl PreparedReplace {
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = (u64, &Path)> {
+        self.append.entries()
+    }
+    pub fn first_id(&self) -> u64 {
+        self.append.first_id()
+    }
+    /// Entries removed before the new ones are inserted, in queue order.
+    pub fn removed(&self) -> &[u64] {
+        &self.removed_ids
+    }
+    /// The kept entry the new entries go before; `None` puts them last.
+    pub fn before(&self) -> Option<u64> {
+        self.before
+    }
+}
+
 impl PreparedInsert {
     pub fn entries(&self) -> impl ExactSizeIterator<Item = (u64, &Path)> {
         self.append.entries()
@@ -135,6 +171,7 @@ impl Player {
                     prefilled_frames: 0,
                     metadata: None,
                     run: None,
+                    played: false,
                 }
             })
             .collect();
@@ -183,6 +220,7 @@ impl Player {
                 prefilled_frames: 0,
                 metadata: None,
                 run: entry.run,
+                played: entry.played_seq.is_some(),
             })
             .collect();
         Self::open(queue, revision, next_id, output, mode)
@@ -457,6 +495,7 @@ impl Player {
                 run_id: id,
                 scope: RepeatScope::Queue,
             }),
+            played: false,
         });
         self.next_id = next_id;
         self.revision = revision;
@@ -501,29 +540,15 @@ impl Player {
                     run_id: self.next_id,
                     scope,
                 }),
+                played: false,
             });
         }
         let (selection, replacement_tokens) = if play {
-            let first = &entries[0];
-            let mut decoder = Decoder::open(&first.path, self.mode).with_context(|| {
-                format!("opening queue entry {}: {}", first.id, first.path.display())
-            })?;
-            let metadata = Self::source_metadata(&mut decoder, first.id, self.mode);
+            let selection = self.prepare_first(&entries[0], revision, self.queue.len())?;
             let mut tokens = Vec::new();
             tokens.try_reserve_exact(self.queue.len())?;
             tokens.extend(self.queue.iter().map(|entry| TrackToken::new(entry.id)));
-            (
-                Some(PreparedSelection {
-                    revision,
-                    index: self.queue.len(),
-                    id: first.id,
-                    frame: 0,
-                    mode: self.mode,
-                    decoder,
-                    metadata,
-                }),
-                tokens,
-            )
+            (Some(selection), tokens)
         } else {
             (None, Vec::new())
         };
@@ -534,6 +559,46 @@ impl Player {
             selection,
             replacement_tokens,
         })
+    }
+
+    /// Opens a new entry from frame 0, to be selected at `index` once committed.
+    fn prepare_first(
+        &self,
+        first: &Entry,
+        revision: u64,
+        index: usize,
+    ) -> Result<PreparedSelection> {
+        let mut decoder = Decoder::open(&first.path, self.mode).with_context(|| {
+            format!("opening queue entry {}: {}", first.id, first.path.display())
+        })?;
+        let metadata = Self::source_metadata(&mut decoder, first.id, self.mode);
+        Ok(PreparedSelection {
+            revision,
+            index,
+            id: first.id,
+            frame: 0,
+            mode: self.mode,
+            decoder,
+            metadata,
+        })
+    }
+
+    /// Plays a selection prepared by `prepare_first`. Every token was already
+    /// replaced, so no old PCM can play.
+    fn adopt_first(&mut self, selection: PreparedSelection) {
+        self.started = false;
+        self.prefilled_frames = 0;
+        self.queue[selection.index].metadata = Some(selection.metadata);
+        self.decoder = Some(selection.decoder);
+        self.cursor = selection.index;
+        self.pending = 0;
+        self.decoded_position = 0;
+        self.finished = false;
+        self.failure = None;
+        self.stopped = false;
+        self.playing = true;
+        self.selection = Some((selection.id, 0));
+        self.output.mark_end(false);
     }
 
     /// No allocation, reopening, or fallible work after the durable transaction.
@@ -554,19 +619,7 @@ impl Player {
         self.next_id = prepared.next_id;
         self.revision = prepared.revision;
         if let Some(selection) = prepared.selection {
-            self.started = false;
-            self.prefilled_frames = 0;
-            self.queue[selection.index].metadata = Some(selection.metadata);
-            self.decoder = Some(selection.decoder);
-            self.cursor = selection.index;
-            self.pending = 0;
-            self.decoded_position = 0;
-            self.finished = false;
-            self.failure = None;
-            self.stopped = false;
-            self.playing = true;
-            self.selection = Some((selection.id, 0));
-            self.output.mark_end(false);
+            self.adopt_first(selection);
         } else if self.failure.is_none() {
             self.finished = false;
             self.output.mark_end(false);
@@ -748,6 +801,141 @@ impl Player {
         self.commit_append(prepared.append);
         self.queue[prepared.destination..].rotate_right(count);
         self.relocate_decoder(current, decoding);
+    }
+
+    /// Prepares one enqueue: `placement` decides what is removed and where the
+    /// new entries go, relative to the current entry. With `play` the first new
+    /// entry is opened, as selecting it would.
+    pub(crate) fn prepare_replace_upcoming(
+        &mut self,
+        paths: impl ExactSizeIterator<Item = PathBuf>,
+        placement: Placement,
+        expected_revision: u64,
+        play: bool,
+        scope: RepeatScope,
+    ) -> Result<PreparedReplace> {
+        self.check_revision(expected_revision)?;
+        let anchor = self.snapshot().current_id;
+        let current = anchor.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
+        let mut removed = Vec::new();
+        removed.try_reserve_exact(self.queue.len())?;
+        removed.extend(self.queue.iter().enumerate().map(|(index, entry)| {
+            placement == Placement::ReplaceUpcoming
+                && current.map_or(!entry.played, |current| index > current)
+        }));
+        let mut removed_ids = Vec::new();
+        removed_ids.try_reserve_exact(removed.iter().filter(|gone| **gone).count())?;
+        removed_ids.extend(
+            self.queue
+                .iter()
+                .zip(&removed)
+                .filter(|(_, gone)| **gone)
+                .map(|(entry, _)| entry.id),
+        );
+        let kept = self.queue.len() - removed_ids.len();
+        let destination = match (placement, current) {
+            (Placement::Next, Some(current)) => current + 1,
+            _ => kept,
+        };
+        let before = self
+            .queue
+            .iter()
+            .zip(&removed)
+            .filter(|(_, gone)| !**gone)
+            .nth(destination)
+            .map(|(entry, _)| entry.id);
+        let mut append = self.prepare_append(paths, expected_revision, false, scope)?;
+        let mut tokens = Vec::new();
+        if play || destination < kept || !removed_ids.is_empty() {
+            tokens.try_reserve_exact(kept)?;
+            tokens.extend(
+                self.queue
+                    .iter()
+                    .zip(&removed)
+                    .filter(|(_, gone)| !**gone)
+                    .map(|(entry, _)| TrackToken::new(entry.id)),
+            );
+        }
+        if play {
+            append.selection =
+                Some(self.prepare_first(&append.entries[0], append.revision, destination)?);
+        }
+        Ok(PreparedReplace {
+            append,
+            anchor,
+            removed,
+            removed_ids,
+            destination,
+            before,
+            tokens,
+        })
+    }
+
+    /// Infallible after preparation with no intervening queue mutation. The
+    /// anchor entry keeps its PCM unless the first new entry is selected.
+    pub(crate) fn commit_replace_upcoming(&mut self, prepared: PreparedReplace) {
+        let PreparedReplace {
+            append,
+            anchor,
+            removed,
+            destination,
+            tokens,
+            ..
+        } = prepared;
+        let PreparedAppend {
+            revision,
+            next_id,
+            entries,
+            selection,
+            ..
+        } = append;
+        assert_eq!(self.revision + 1, revision);
+        assert_eq!(self.next_id, entries[0].id);
+        assert_eq!(self.queue.len(), removed.len());
+        let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
+        if selection.is_some() {
+            self.output.set_paused(true);
+        }
+        for (entry, gone) in self.queue.iter().zip(&removed) {
+            if *gone {
+                entry.token.invalidate();
+                self.prefilled_frames -= entry.prefilled_frames;
+            }
+        }
+        let mut index = 0;
+        self.queue.retain(|_| {
+            index += 1;
+            !removed[index - 1]
+        });
+        if let Some((selected, _)) = self.selection
+            && !self.queue.iter().any(|entry| entry.id == selected)
+        {
+            self.selection = None;
+        }
+        let rewrites = !tokens.is_empty();
+        if selection.is_some() {
+            for (entry, token) in self.queue.iter_mut().zip(tokens) {
+                entry.token.invalidate();
+                entry.token = token;
+                entry.prefilled_frames = 0;
+                entry.metadata = None;
+            }
+        } else {
+            self.replace_future_tokens(anchor, tokens);
+        }
+        let count = entries.len();
+        self.queue.extend(entries);
+        self.queue[destination..].rotate_right(count);
+        self.next_id = next_id;
+        self.revision = revision;
+        if let Some(selection) = selection {
+            self.adopt_first(selection);
+        } else if rewrites {
+            self.relocate_decoder(anchor, decoding);
+        } else if self.failure.is_none() {
+            self.finished = false;
+            self.output.mark_end(false);
+        }
     }
 
     pub fn clear(&mut self, expected_revision: u64) -> Result<()> {
@@ -992,15 +1180,25 @@ mod batch_tests {
         assert_eq!(player.started_entries(), &[1, 5, 6, 4, 2, 3]);
         drop(player);
         let pcm = fs::read(capture)?;
-        assert_eq!(pcm.len(), (48_000 + 223 * 2 + 199 + 311 + 137) * 8);
+        assert_pcm(
+            &pcm,
+            &[
+                (48_000, 1000),
+                (446, 5000),
+                (199, 4000),
+                (311, 2000),
+                (137, 3000),
+            ],
+        );
+        Ok(())
+    }
+
+    /// The capture holds exactly these `(frames, sample)` runs, in order.
+    fn assert_pcm(pcm: &[u8], runs: &[(usize, i16)]) {
+        let total: usize = runs.iter().map(|run| run.0).sum();
+        assert_eq!(pcm.len(), total * 8);
         let mut frames = pcm.as_chunks::<8>().0.iter();
-        for (count, sample) in [
-            (48_000, 1000),
-            (446, 5000),
-            (199, 4000),
-            (311, 2000),
-            (137, 3000),
-        ] {
+        for &(count, sample) in runs {
             for _ in 0..count {
                 let frame = frames.next().unwrap();
                 assert_eq!(
@@ -1013,6 +1211,187 @@ mod batch_tests {
                 );
             }
         }
+    }
+
+    fn finish(player: &mut Player, deadline: Instant) -> Result<()> {
+        while !player.completed() {
+            assert!(Instant::now() < deadline, "playback did not finish");
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        player.pump()
+    }
+
+    #[test]
+    fn replace_upcoming_keeps_current_pcm_and_played_entries() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let played = source(&scratch.0, "played.wav", 97, 500);
+        let current = source(&scratch.0, "current.wav", 48_000, 1000);
+        let second = source(&scratch.0, "second.wav", 311, 2000);
+        let third = source(&scratch.0, "third.wav", 137, 3000);
+        let run_a = source(&scratch.0, "run-a.wav", 223, 5000);
+        let run_b = source(&scratch.0, "run-b.wav", 101, 6000);
+        let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
+            id,
+            path: path.clone(),
+            run: None,
+            played_seq: played.then_some(id),
+        };
+        let output = |name: &str| OutputConfig::Capture {
+            path: scratch.0.join(name),
+            clocked: true,
+        };
+
+        // Entry 2 is current; entry 3 is already decoding into the output.
+        let mut player = Player::from_loaded(
+            vec![
+                loaded(1, &played, true),
+                loaded(2, &current, false),
+                loaded(3, &second, false),
+                loaded(4, &third, false),
+            ],
+            1,
+            5,
+            output("current.f32"),
+            GainMode::Off,
+        )?;
+        let selection = player.prepare_selection(2, 0, GainMode::Off)?;
+        player.commit_selection(selection);
+        player.play();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while player.snapshot().current_id != Some(2) || player.snapshot().prepared_id != Some(3) {
+            assert!(
+                Instant::now() < deadline,
+                "next occurrence was not prepared"
+            );
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        player.pause();
+        let before = player.snapshot();
+        let abandoned = player.prepare_replace_upcoming(
+            vec![run_a.clone()].into_iter(),
+            Placement::ReplaceUpcoming,
+            1,
+            false,
+            RepeatScope::Queue,
+        )?;
+        drop(abandoned);
+        assert_eq!(player.queue_ids(), [1, 2, 3, 4]);
+        assert_eq!(player.snapshot().prepared_id, Some(3));
+        assert_eq!(player.snapshot().position_frames, before.position_frames);
+        let prepared = player.prepare_replace_upcoming(
+            vec![run_a, run_b.clone()].into_iter(),
+            Placement::ReplaceUpcoming,
+            1,
+            false,
+            RepeatScope::Queue,
+        )?;
+        assert_eq!(prepared.first_id(), 5);
+        assert_eq!(prepared.removed(), [3, 4]);
+        assert_eq!(prepared.before(), None);
+        player.commit_replace_upcoming(prepared);
+        assert_eq!(player.queue_ids(), [1, 2, 5, 6]);
+        let after = player.snapshot();
+        assert_eq!(after.current_id, Some(2));
+        assert_eq!(after.position_frames, before.position_frames);
+        assert_eq!(after.queue_revision, 2);
+        assert!(!after.playing);
+        player.play();
+        finish(&mut player, deadline)?;
+        // The current entry's PCM plays out whole; the removed entries' prefetched
+        // PCM never does.
+        assert_eq!(player.started_entries(), &[2, 5, 6]);
+        drop(player);
+        assert_pcm(
+            &fs::read(scratch.0.join("current.f32"))?,
+            &[(48_000, 1000), (223, 5000), (101, 6000)],
+        );
+
+        // With nothing current, every unplayed entry goes and played ones stay.
+        let mut player = Player::from_loaded(
+            vec![
+                loaded(1, &second, false),
+                loaded(2, &played, true),
+                loaded(3, &third, false),
+            ],
+            1,
+            4,
+            output("idle.f32"),
+            GainMode::Off,
+        )?;
+        assert_eq!(player.snapshot().current_id, None);
+        let prepared = player.prepare_replace_upcoming(
+            vec![run_b].into_iter(),
+            Placement::ReplaceUpcoming,
+            1,
+            true,
+            RepeatScope::Queue,
+        )?;
+        assert_eq!(prepared.removed(), [1, 3]);
+        player.commit_replace_upcoming(prepared);
+        assert_eq!(player.queue_ids(), [2, 4]);
+        assert_eq!(player.snapshot().current_id, Some(4));
+        assert!(player.snapshot().playing);
+        finish(&mut player, deadline)?;
+        assert_eq!(player.started_entries(), &[4]);
+        drop(player);
+        assert_pcm(&fs::read(scratch.0.join("idle.f32"))?, &[(101, 6000)]);
+        Ok(())
+    }
+    #[test]
+    fn replace_upcoming_stays_anchored_when_output_reaches_a_removed_entry() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let current = source(&scratch.0, "current.wav", 4_800, 1000);
+        let second = source(&scratch.0, "second.wav", 48_000, 2000);
+        let third = source(&scratch.0, "third.wav", 137, 3000);
+        let run = source(&scratch.0, "run.wav", 223, 5000);
+        let capture = scratch.0.join("capture.f32");
+        let mut player = Player::new(
+            vec![current, second, third],
+            OutputConfig::Capture {
+                path: capture.clone(),
+                clocked: true,
+            },
+            GainMode::Off,
+        )?;
+        player.play();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // The prebuffer holds all of entry 1 and the start of entry 2.
+        while player.snapshot().current_id != Some(1) {
+            assert!(Instant::now() < deadline, "playback did not start");
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(player.snapshot().prepared_id, Some(2));
+        let prepared = player.prepare_replace_upcoming(
+            vec![run].into_iter(),
+            Placement::ReplaceUpcoming,
+            1,
+            false,
+            RepeatScope::Queue,
+        )?;
+        assert_eq!(prepared.removed(), [2, 3]);
+        // The store commit takes time; output moves on into a removed entry.
+        while player.snapshot().current_id != Some(2) {
+            assert!(Instant::now() < deadline, "output did not reach entry 2");
+            thread::sleep(Duration::from_millis(1));
+        }
+        player.commit_replace_upcoming(prepared);
+        assert_eq!(player.queue_ids(), [1, 4]);
+        finish(&mut player, deadline)?;
+        // The removed entry is cut off and the run follows the anchor entry; the
+        // queue does not restart from its first entry.
+        assert_eq!(player.started_entries(), &[1, 2, 4]);
+        drop(player);
+        let pcm = fs::read(capture)?;
+        let cut = pcm.len() / 8 - 4_800 - 223;
+        assert!(cut > 0 && cut < 48_000, "{cut} frames of entry 2 played");
+        assert_pcm(&pcm, &[(4_800, 1000), (cut, 2000), (223, 5000)]);
         Ok(())
     }
 }

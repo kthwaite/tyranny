@@ -5,7 +5,7 @@
 use crate::{
     filter::Filter,
     library_types::*,
-    listing::{CompiledList, Grouping, ListDescription, RECENT_WINDOW_SECS, compile},
+    listing::{CompiledList, Grouping, ListDescription, compile, recent_cutoff},
     protocol::MAX_PAGE_SIZE,
 };
 use anyhow::{Result, anyhow};
@@ -100,7 +100,7 @@ pub(super) fn execute(
     if expected.is_some_and(|expected| expected != revision) {
         return Err(StaleLibraryRevision { current: revision }.into());
     }
-    let cutoff = now.saturating_sub(RECENT_WINDOW_SECS);
+    let cutoff = recent_cutoff(now);
     let reply = match command {
         LibraryCommand::ListTracks {
             list,

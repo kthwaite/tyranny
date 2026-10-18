@@ -11,6 +11,10 @@ use std::sync::Arc;
 
 pub const VERSION: u32 = 9;
 pub const MAX_PAGE_SIZE: usize = 500;
+/// The most tracks one enqueue or playlist add may resolve to.
+pub const MAX_RUN_ENTRIES: usize = 100_000;
+/// The most ranges one list selection may name.
+pub const MAX_SELECTION_RANGES: usize = 64;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Request {
@@ -229,6 +233,49 @@ pub enum Command {
         expected_revision: u64,
         play: bool,
     },
+    EnqueueTracks {
+        selection: TrackSelection,
+        expected_revision: u64,
+        placement: Placement,
+        play: bool,
+        source: QueueSource,
+    },
+}
+
+/// Tracks named by a client, either directly or as rows of a list.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TrackSelection {
+    /// 1..=500 track IDs, in order.
+    Ids {
+        library_revision: u64,
+        track_ids: Vec<u64>,
+    },
+    /// Rows of `list`. `ranges` are half-open 0-based row positions, sorted and
+    /// disjoint, 1..=64 of them; an end of `u64::MAX` means the end of the list.
+    /// `excluded` names at most 500 row IDs. `first_row_id`, when set, must be
+    /// the row at `ranges[0][0]`.
+    List {
+        list: ListDescription,
+        library_revision: u64,
+        ranges: Vec<[u64; 2]>,
+        excluded: Vec<u64>,
+        #[serde(deserialize_with = "required")]
+        first_row_id: Option<u64>,
+    },
+}
+
+/// Where an enqueue puts its new entries.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// After the last entry.
+    Append,
+    /// Straight after the current entry, or last when nothing is current.
+    Next,
+    /// After removing every entry after the current one. With nothing current,
+    /// every unplayed entry is removed.
+    ReplaceUpcoming,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -749,6 +796,80 @@ mod tests {
             serde_json::json!({"kind":"list_groups","revision":2,"total":3,
                 "groups":[{"artist_key":1,"album_key":null,"start":0,"count":3}]})
         );
+    }
+
+    #[test]
+    fn enqueue_tracks_wire_shape_round_trips() {
+        let list = serde_json::json!({"source":{"kind":"library"},"browser":{"genre_ids":[],
+            "artist_ids":[],"compilations":false,"album_ids":[]},"query":"",
+            "sort":[],"group":"none"});
+        let command = serde_json::json!({"id":1,"command":"enqueue_tracks",
+            "selection":{"kind":"list","list":list,"library_revision":3,
+                "ranges":[[0,2],[120,u64::MAX]],"excluded":[7],"first_row_id":11},
+            "expected_revision":4,"placement":"replace_upcoming","play":true,
+            "source":{"kind":"songs","name":"Songs"}});
+        let request = serde_json::from_value::<Request>(command.clone()).unwrap();
+        let Command::EnqueueTracks {
+            selection,
+            expected_revision: 4,
+            placement: Placement::ReplaceUpcoming,
+            play: true,
+            source,
+        } = &request.command
+        else {
+            panic!("decoded {:?}", request.command);
+        };
+        assert_eq!(source, &QueueSource::stamped(SourceKind::Songs, "Songs"));
+        let TrackSelection::List {
+            ranges,
+            excluded,
+            first_row_id,
+            library_revision: 3,
+            ..
+        } = selection
+        else {
+            panic!("decoded {selection:?}");
+        };
+        assert_eq!(ranges, &[[0, 2], [120, u64::MAX]]);
+        assert_eq!((excluded.as_slice(), *first_row_id), (&[7][..], Some(11)));
+        assert_eq!(serde_json::to_value(&request).unwrap(), command);
+        for field in [
+            "selection",
+            "expected_revision",
+            "placement",
+            "play",
+            "source",
+        ] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
+        }
+        for field in ["ranges", "excluded", "first_row_id", "library_revision"] {
+            let mut missing = command.clone();
+            missing["selection"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Request>(missing).is_err(),
+                "accepted a list selection without {field}"
+            );
+        }
+        let ids = serde_json::json!({"kind":"ids","library_revision":3,"track_ids":[5,6]});
+        assert_eq!(
+            serde_json::from_value::<TrackSelection>(ids.clone()).unwrap(),
+            TrackSelection::Ids {
+                library_revision: 3,
+                track_ids: vec![5, 6]
+            }
+        );
+        let mut extra = ids;
+        extra["path"] = serde_json::json!("/private/source");
+        assert!(serde_json::from_value::<TrackSelection>(extra).is_err());
+        for (placement, name) in [
+            (Placement::Append, "append"),
+            (Placement::Next, "next"),
+            (Placement::ReplaceUpcoming, "replace_upcoming"),
+        ] {
+            assert_eq!(serde_json::to_value(placement).unwrap(), name);
+        }
     }
 
     #[test]

@@ -25,7 +25,7 @@ use std::{
         mpsc as startup,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -342,10 +342,7 @@ impl Coordinator {
             | LibraryCommand::ListGenres(_)
             | LibraryCommand::AlbumSummaries { .. }
             | LibraryCommand::ListGroups { .. }) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |elapsed| elapsed.as_secs() as i64);
-                lists::execute(&mut self.connection, command, now)
+                lists::execute(&mut self.connection, command, crate::listing::unix_now())
             }
             command => query::execute(&mut self.connection, command),
         }

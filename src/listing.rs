@@ -10,6 +10,7 @@ use crate::{
 use anyhow::Result;
 use rusqlite::{Connection, types::Value};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", from = "WireSource")]
@@ -113,6 +114,16 @@ pub struct ListDescription {
 
 /// The Recent source covers tracks added within this many seconds.
 pub const RECENT_WINDOW_SECS: i64 = 2_592_000;
+/// Request time in UTC seconds, the `now` that `recent_cutoff` counts back from.
+pub(crate) fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+/// The oldest `date_added` the Recent source shows at `now`.
+pub(crate) fn recent_cutoff(now: i64) -> i64 {
+    now.saturating_sub(RECENT_WINDOW_SECS)
+}
 /// The most IDs one browser dimension may name.
 pub const MAX_BROWSER_IDS: usize = 500;
 

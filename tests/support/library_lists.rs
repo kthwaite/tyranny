@@ -433,3 +433,261 @@ async fn now_playing_reports_format_and_applied_gain() {
     );
     running.stop().await;
 }
+
+fn songs() -> Value {
+    json!({"source":{"kind":"library"},"query":"","sort":[{"field":"title","descending":false}],
+        "group":"none"})
+}
+fn enqueue(
+    client: &PlaybackClient,
+    selection: Value,
+    placement: &str,
+    play: bool,
+    name: &str,
+) -> Value {
+    json!({"command":"enqueue_tracks","selection":selection,
+        "expected_revision":client.state.queue_revision,"placement":placement,"play":play,
+        "source":{"kind":"songs","name":name}})
+}
+/// Every row of `list` as `(revision, track IDs)`, read in pages.
+async fn list_track_ids(client: &mut PlaybackClient, list: Value) -> (u64, Vec<u64>) {
+    let mut revision = None;
+    let mut ids = Vec::new();
+    loop {
+        let Response::ListTracks { page, .. } =
+            ok(client, list_tracks(list.clone(), revision, ids.len(), 500)).await
+        else {
+            panic!("expected a list page");
+        };
+        revision = Some(page.revision);
+        ids.extend(page.entries.iter().map(|row| row.track.id));
+        if ids.len() as u64 == page.total {
+            return (page.revision, ids);
+        }
+    }
+}
+/// The whole queue, read in pages.
+async fn whole_queue(client: &mut PlaybackClient) -> Vec<tyranny::protocol::QueueItem> {
+    let mut items = Vec::new();
+    loop {
+        let Response::QueuePage { total, entries, .. } = ok(
+            client,
+            json!({"command":"queue_page","revision":null,"offset":items.len(),"limit":500}),
+        )
+        .await
+        else {
+            panic!("expected a queue page");
+        };
+        items.extend(entries);
+        if items.len() == total {
+            return items;
+        }
+    }
+}
+fn applied_entry(response: Response) -> u64 {
+    match response {
+        Response::Applied {
+            entry_id: Some(id), ..
+        } => id,
+        response => panic!("expected an applied enqueue: {response:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_enqueue_of_600_rows_plays_from_clicked_row() {
+    let scratch = Scratch::new();
+    let music = scratch.path("music");
+    fs::create_dir(&music).unwrap();
+    for index in 0..600 {
+        tagged_wav(
+            &music.join(format!("{index:04}.wav")),
+            480,
+            format!("Song {index:04}").as_bytes(),
+        );
+    }
+    // Long entries outside the library: history, current and upcoming.
+    let outside: Vec<_> = ["History", "Current", "Upcoming"]
+        .iter()
+        .map(|name| {
+            let path = scratch.path(&format!("{name}.wav"));
+            tagged_wav(&path, 240_000, name.as_bytes());
+            path
+        })
+        .collect();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    ok(&mut client, json!({"command":"add_root","path":music})).await;
+    client
+        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .await;
+    for path in &outside {
+        client.append(path).await;
+    }
+    ok(&mut client, json!({"command":"play","entry_id":2})).await;
+    let (revision, rows) = list_track_ids(&mut client, songs()).await;
+    assert_eq!(rows.len(), 600);
+
+    let selection = |first_row_id: u64, library_revision: u64| {
+        json!({"kind":"list","list":songs(),"library_revision":library_revision,
+            "ranges":[[120, u64::MAX]],"excluded":[],"first_row_id":first_row_id})
+    };
+    // Stale or malformed requests change nothing.
+    let before = whole_queue(&mut client).await;
+    let command = enqueue(
+        &client,
+        selection(rows[120], revision - 1),
+        "replace_upcoming",
+        true,
+        "Songs",
+    );
+    client
+        .reject(command, ErrorCode::StaleLibraryRevision)
+        .await;
+    let command = enqueue(
+        &client,
+        selection(rows[121], revision),
+        "replace_upcoming",
+        true,
+        "Songs",
+    );
+    client
+        .reject(command, ErrorCode::StaleLibraryRevision)
+        .await;
+    let command = enqueue(
+        &client,
+        selection(rows[120], revision),
+        "replace_upcoming",
+        true,
+        &"n".repeat(257),
+    );
+    client.reject(command, ErrorCode::InvalidCommand).await;
+    let mut command = enqueue(
+        &client,
+        selection(rows[120], revision),
+        "replace_upcoming",
+        true,
+        "Songs",
+    );
+    command["expected_revision"] = json!(client.state.queue_revision - 1);
+    client.reject(command, ErrorCode::StaleRevision).await;
+    assert_eq!(whole_queue(&mut client).await, before);
+    assert_eq!(client.state.current_id, Some(2));
+
+    let expected = client.state.queue_revision;
+    let command = enqueue(
+        &client,
+        selection(rows[120], revision),
+        "replace_upcoming",
+        true,
+        "Songs",
+    );
+    let first = applied_entry(ok(&mut client, command).await);
+    assert_eq!(client.state.current_id, Some(first));
+    assert_eq!(client.state.queue_revision, expected + 1);
+    assert_eq!(client.state.queue_length, 482);
+    let items = whole_queue(&mut client).await;
+    // History and the old current entry stay; the old upcoming entry is gone.
+    assert_eq!(
+        items[..2]
+            .iter()
+            .map(|item| (item.id, item.title.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "History"), (2, "Current")]
+    );
+    let run = &items[2..];
+    assert_eq!(
+        run.iter().map(|item| item.track_id).collect::<Vec<_>>(),
+        rows[120..].iter().map(|id| Some(*id)).collect::<Vec<_>>()
+    );
+    for (index, item) in run.iter().enumerate() {
+        assert_eq!(item.id, first + index as u64);
+        assert_eq!(item.source, stamp(SourceKind::Songs, "Songs"));
+        assert_eq!((item.run_id, item.played), (Some(first), false));
+    }
+    assert_eq!(run[0].title, "Song 0120");
+    running.stop().await;
+
+    // The run survives a restart in order.
+    let running = Running::start(&scratch).await;
+    let mut restored = PlaybackClient::connect(&running).await;
+    assert_eq!(whole_queue(&mut restored).await, items);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keep_mode_inserts_run_before_existing_upcoming() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (_, tracks) = index(&scratch, &mut client, &["Alpha", "Beta", "Gamma"]).await;
+    let id = |title: &str| {
+        tracks
+            .entries
+            .iter()
+            .find(|track| track.metadata.title == title)
+            .unwrap()
+            .id
+    };
+    for name in ["Current", "Later 1", "Later 2"] {
+        let path = scratch.path(&format!("{name}.wav"));
+        tagged_wav(&path, 240_000, name.as_bytes());
+        client.append(&path).await;
+    }
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    let (revision, rows) = list_track_ids(&mut client, songs()).await;
+    assert_eq!(rows, [id("Alpha"), id("Beta"), id("Gamma")]);
+
+    // Keep: the run plays now and the old upcoming entries follow it.
+    let selection = json!({"kind":"list","list":songs(),"library_revision":revision,
+        "ranges":[[1, u64::MAX]],"excluded":[],"first_row_id":id("Beta")});
+    let command = enqueue(&client, selection, "next", true, "Songs");
+    let first = applied_entry(ok(&mut client, command).await);
+    assert_eq!(first, 4);
+    assert_eq!(client.state.current_id, Some(4));
+    let order = |items: &[tyranny::protocol::QueueItem]| {
+        items
+            .iter()
+            .map(|item| (item.id, item.title.clone()))
+            .collect::<Vec<_>>()
+    };
+    let named = |entries: &[(u64, &str)]| {
+        entries
+            .iter()
+            .map(|(id, title)| (*id, title.to_string()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        order(&whole_queue(&mut client).await),
+        named(&[
+            (1, "Current"),
+            (4, "Beta"),
+            (5, "Gamma"),
+            (2, "Later 1"),
+            (3, "Later 2")
+        ])
+    );
+
+    // Next without play goes straight after the current entry; Append goes last.
+    let alpha = json!({"kind":"ids","library_revision":revision,"track_ids":[id("Alpha")]});
+    let command = enqueue(&client, alpha.clone(), "next", false, "");
+    assert_eq!(applied_entry(ok(&mut client, command).await), 6);
+    let command = enqueue(&client, alpha, "append", false, "");
+    assert_eq!(applied_entry(ok(&mut client, command).await), 7);
+    assert_eq!(client.state.current_id, Some(4));
+    let items = whole_queue(&mut client).await;
+    assert_eq!(
+        order(&items),
+        named(&[
+            (1, "Current"),
+            (4, "Beta"),
+            (6, "Alpha"),
+            (5, "Gamma"),
+            (2, "Later 1"),
+            (3, "Later 2"),
+            (7, "Alpha")
+        ])
+    );
+    assert_eq!(items[2].run_id, Some(6));
+    assert_eq!(items[3].run_id, Some(4));
+    running.stop().await;
+}
