@@ -166,6 +166,31 @@ struct BlockConsumer {
 }
 
 impl BlockConsumer {
+    fn new(
+        shared: Arc<Shared>,
+        ready: Consumer<Box<Block>>,
+        recycle: Producer<Box<Block>>,
+        starts: Producer<u64>,
+    ) -> Self {
+        Self {
+            ready,
+            recycle,
+            starts,
+            pending: std::array::from_fn(|_| None),
+            head: 0,
+            len: 0,
+            entry_id: 0,
+            position: 0,
+            rendered: 0,
+            underruns: 0,
+            starving: false,
+            // The volume set before open; until PCM renders, `apply_volume`
+            // adopts later changes outright.
+            amplitude: f32::from_bits(shared.volume_bits.load(Ordering::Relaxed)),
+            shared,
+        }
+    }
+
     fn pop_front(&mut self) -> Option<Box<Block>> {
         if self.len == 0 {
             return None;
@@ -237,6 +262,8 @@ impl BlockConsumer {
             return 0;
         }
         let requested = destination.len() / 2;
+        // Nothing heard yet: the first PCM starts at the target volume.
+        let fresh = self.rendered == 0;
         let mut written = 0;
         while written < requested && self.len != 0 {
             let Some(block) = self.pending[self.head].as_mut() else {
@@ -294,7 +321,7 @@ impl BlockConsumer {
                 self.recycle_block(block);
             }
         }
-        self.apply_volume(&mut destination[..written * 2]);
+        self.apply_volume(&mut destination[..written * 2], fresh);
         if written < requested
             && clocked
             && self.rendered != 0
@@ -309,9 +336,14 @@ impl BlockConsumer {
     }
 
     /// Scales real PCM only. Ramps linearly from the previous amplitude to the
-    /// target across these frames, then holds it. Atomics and arithmetic only.
-    fn apply_volume(&mut self, pcm: &mut [f32]) {
+    /// target across these frames, then holds it. Before any PCM has rendered
+    /// (`fresh`) there is nothing to ramp from: the target applies at once.
+    /// Atomics and arithmetic only.
+    fn apply_volume(&mut self, pcm: &mut [f32], fresh: bool) {
         let target = f32::from_bits(self.shared.volume_bits.load(Ordering::Relaxed));
+        if fresh {
+            self.amplitude = target;
+        }
         let previous = self.amplitude;
         let frames = pcm.len() / 2;
         if frames == 0 {
@@ -399,21 +431,7 @@ impl Output {
                 })
             })
             .collect();
-        let consumer = BlockConsumer {
-            ready: ready_rx,
-            recycle: recycle_tx,
-            starts: starts_tx,
-            shared: Arc::clone(&shared),
-            pending: std::array::from_fn(|_| None),
-            head: 0,
-            len: 0,
-            entry_id: 0,
-            position: 0,
-            rendered: 0,
-            underruns: 0,
-            starving: false,
-            amplitude: 1.0,
-        };
+        let consumer = BlockConsumer::new(Arc::clone(&shared), ready_rx, recycle_tx, starts_tx);
         let backend = match config {
             OutputConfig::CoreAudio => open_coreaudio(consumer)?,
             OutputConfig::Capture { path, clocked } => {
@@ -785,7 +803,6 @@ mod tests {
 
     #[test]
     fn volume_scales_captured_pcm_by_square_law() {
-        let settled = BLOCK_FRAMES * 2; // After the first block's ramp.
         let unscaled = capture(None, 4, ramp_wave);
         assert_eq!(unscaled.len(), 4 * BLOCK_FRAMES * 2);
 
@@ -806,24 +823,113 @@ mod tests {
             "explicit 100% altered the PCM"
         );
 
-        // 50% is 0.25x amplitude once the ramp is over.
+        // 50% is 0.25x amplitude, from the first frame.
         let half = capture(Some(50), 4, ramp_wave);
         assert_eq!(half.len(), source.len());
-        for (index, (got, want)) in half.iter().zip(&source).enumerate().skip(settled) {
+        for (index, (got, want)) in half.iter().zip(&source).enumerate() {
             assert_eq!(got.to_bits(), (want * 0.25).to_bits(), "sample {index}");
         }
 
-        // 0% is silence once the ramp is over.
+        // 0% is silence.
         let mute = capture(Some(0), 4, ramp_wave);
-        assert!(mute[settled..].iter().all(|sample| *sample == 0.0));
+        assert!(mute.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn startup_volume_applies_from_the_first_frame() {
+        // The volume set before anything renders (the persisted setting at
+        // open) applies to the first frame, with no ramp down from full scale.
+        let source: Vec<f32> = (0..2 * BLOCK_FRAMES).flat_map(ramp_wave).collect();
+        let half = capture(Some(50), 2, ramp_wave);
+        assert_eq!(half.len(), source.len());
+        for (index, (got, want)) in half.iter().zip(&source).enumerate() {
+            assert_eq!(got.to_bits(), (want * 0.25).to_bits(), "sample {index}");
+        }
+        let mute = capture(Some(0), 2, ramp_wave);
+        assert!(mute.iter().all(|sample| *sample == 0.0));
+    }
+
+    /// A consumer driven directly, one `consume` call at a time.
+    struct Harness {
+        consumer: BlockConsumer,
+        ready: Producer<Box<Block>>,
+        recycle: Consumer<Box<Block>>,
+        _starts: Consumer<u64>,
+        token: Arc<TrackToken>,
+        submitted: u64,
+    }
+    impl Harness {
+        fn new() -> Self {
+            let shared = Arc::new(Shared::new());
+            let (ready_tx, ready_rx) = RingBuffer::new(POOL_BLOCKS);
+            let (recycle_tx, recycle_rx) = RingBuffer::new(POOL_BLOCKS);
+            let (starts_tx, starts_rx) = RingBuffer::new(START_EVENTS);
+            let consumer = BlockConsumer::new(Arc::clone(&shared), ready_rx, recycle_tx, starts_tx);
+            shared.paused.store(false, Ordering::Release);
+            Self {
+                consumer,
+                ready: ready_tx,
+                recycle: recycle_rx,
+                _starts: starts_rx,
+                token: TrackToken::new(1),
+                submitted: 0,
+            }
+        }
+        /// Queues `blocks` full blocks of constant full-scale PCM.
+        fn submit(&mut self, blocks: usize) {
+            for _ in 0..blocks {
+                let block = Box::new(Block {
+                    samples: [[1.0; 2]; BLOCK_FRAMES],
+                    token: Some(Arc::clone(&self.token)),
+                    start_frame: self.submitted,
+                    len: BLOCK_FRAMES,
+                    offset: 0,
+                });
+                self.consumer
+                    .shared
+                    .buffered
+                    .fetch_add(BLOCK_FRAMES, Ordering::AcqRel);
+                assert!(self.ready.push(block).is_ok());
+                self.submitted += BLOCK_FRAMES as u64;
+            }
+        }
+        fn set_volume(&self, percent: u8) {
+            let linear = f32::from(percent) / 100.0;
+            self.consumer
+                .shared
+                .volume_bits
+                .store((linear * linear).to_bits(), Ordering::Relaxed);
+        }
+        /// The left channel of `frames` frames, rendered `per_call` at a time.
+        fn render(&mut self, frames: usize, per_call: usize) -> Vec<f32> {
+            let mut left = Vec::new();
+            let mut destination = vec![0.0; per_call * 2];
+            while left.len() < frames {
+                let written = self.consumer.consume(&mut destination, false);
+                assert_eq!(written, per_call, "the harness ran out of PCM");
+                for frame in destination.chunks(2) {
+                    assert_eq!(frame[0], frame[1], "channels diverged");
+                    left.push(frame[0]);
+                }
+                while self.recycle.pop().is_ok() {}
+            }
+            left
+        }
     }
 
     #[test]
     fn volume_change_ramps_without_a_step() {
-        let constant = |_: usize| [1.0_f32, 1.0];
-        let half = capture(Some(50), 3, constant);
-        let first_block = &half[..BLOCK_FRAMES * 2];
-        let left: Vec<f32> = first_block.iter().step_by(2).copied().collect();
+        let mut harness = Harness::new();
+        harness.submit(3);
+        // Full scale first, then a change mid-stream.
+        assert!(
+            harness
+                .render(BLOCK_FRAMES, BLOCK_FRAMES)
+                .iter()
+                .all(|s| *s == 1.0)
+        );
+        harness.set_volume(50);
+        let left = harness.render(BLOCK_FRAMES, BLOCK_FRAMES);
         // From the previous amplitude (1.0) down to the target (0.25), linearly.
         let slope = (1.0 - 0.25) / BLOCK_FRAMES as f32;
         assert!(left[0] < 1.0 && left[0] > 1.0 - 2.0 * slope, "{}", left[0]);
@@ -834,11 +940,10 @@ mod tests {
         }
         // Then it holds the target.
         assert!(
-            half[BLOCK_FRAMES * 2..]
+            harness
+                .render(BLOCK_FRAMES, BLOCK_FRAMES)
                 .iter()
-                .all(|sample| *sample == 0.25)
+                .all(|s| *s == 0.25)
         );
-        // Both channels follow the same ramp.
-        assert!(first_block.chunks(2).all(|frame| frame[0] == frame[1]));
     }
 }
