@@ -730,6 +730,39 @@ impl Actor {
         self.playlist_applied(change)
     }
 
+    /// Resolves the selection and validates each source once, then adds every
+    /// track in one playlist edit that rechecks the selection's revisions.
+    fn playlist_add_selection(
+        &mut self,
+        playlist_id: u64,
+        expected_revision: u64,
+        selection: TrackSelection,
+        before: Option<u64>,
+    ) -> CommandResult<Response> {
+        let sources = self
+            .store
+            .resolve_selection(&selection, recent_cutoff(unix_now()))
+            .map_err(Failure::playlist)?;
+        let mut track_ids = Vec::with_capacity(sources.len());
+        for (track, path) in sources {
+            self.source_path(path)?;
+            track_ids.push(track);
+        }
+        let change = self
+            .store
+            .edit_playlist(
+                Some(playlist_id),
+                expected_revision,
+                PlaylistEdit::AddSelection {
+                    selection: Box::new(selection),
+                    track_ids,
+                    before,
+                },
+            )
+            .map_err(Failure::playlist)?;
+        self.playlist_applied(change)
+    }
+
     fn source_path(&self, source: PathBuf) -> CommandResult<PathBuf> {
         if source.as_os_str().len() > 4096 || !source.is_absolute() {
             return Err(Failure::invalid(
@@ -1143,6 +1176,12 @@ impl Actor {
                     before,
                 },
             ),
+            Command::PlaylistAddSelection {
+                playlist_id,
+                expected_revision,
+                selection,
+                before,
+            } => self.playlist_add_selection(playlist_id, expected_revision, selection, before),
             Command::PlaylistRemove {
                 playlist_id,
                 expected_revision,

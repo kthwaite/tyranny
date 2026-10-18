@@ -215,6 +215,13 @@ pub enum Command {
         track_ids: Vec<u64>,
         before: Option<u64>,
     },
+    /// Adds every row of `selection` (up to `MAX_RUN_ENTRIES`) in one edit.
+    PlaylistAddSelection {
+        playlist_id: u64,
+        expected_revision: u64,
+        selection: TrackSelection,
+        before: Option<u64>,
+    },
     PlaylistRemove {
         playlist_id: u64,
         expected_revision: u64,

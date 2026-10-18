@@ -6,7 +6,7 @@ use super::{
 use serde_json::{Value, json};
 use tyranny::{
     listing::Grouping,
-    protocol::{QueueSource, SourceKind},
+    protocol::{Playlist, QueueSource, SourceKind},
 };
 
 fn list(source: Value) -> Value {
@@ -692,5 +692,158 @@ async fn keep_mode_inserts_run_before_existing_upcoming() {
     );
     assert_eq!(items[2].run_id, Some(6));
     assert_eq!(items[3].run_id, Some(4));
+    running.stop().await;
+}
+
+fn add_selection(playlist: &Playlist, selection: Value, before: Option<u64>) -> Value {
+    json!({"command":"playlist_add_selection","playlist_id":playlist.id,
+        "expected_revision":playlist.revision,"selection":selection,"before":before})
+}
+/// Every entry of a playlist as `(entry ID, track ID)`, read in pages.
+async fn playlist_rows(client: &mut PlaybackClient, id: u64) -> Vec<(u64, u64)> {
+    let mut rows = Vec::new();
+    let mut revisions = (None, None);
+    loop {
+        let Response::PlaylistEntries {
+            library_revision,
+            page,
+            ..
+        } = ok(
+            client,
+            json!({"command":"playlist_entries","playlist_id":id,"revision":revisions.0,
+                "library_revision":revisions.1,"offset":rows.len(),"limit":500,"query":""}),
+        )
+        .await
+        else {
+            panic!("expected playlist entries");
+        };
+        revisions = (Some(page.revision), Some(library_revision));
+        rows.extend(page.entries.iter().map(|entry| (entry.id, entry.track_id)));
+        if rows.len() as u64 == page.total {
+            return rows;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn playlist_add_selection_adds_all_matching_rows_atomically() {
+    let scratch = Scratch::new();
+    let music = scratch.path("music");
+    fs::create_dir(&music).unwrap();
+    for index in 0..700 {
+        tagged_wav(
+            &music.join(format!("{index:04}.wav")),
+            480,
+            format!("Song {index:04}").as_bytes(),
+        );
+    }
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    ok(&mut client, json!({"command":"add_root","path":music})).await;
+    client
+        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .await;
+    let (revision, rows) = list_track_ids(&mut client, songs()).await;
+    assert_eq!(rows.len(), 700);
+    let playlist = create(&mut client, "Everything").await;
+    let selection = |first_row_id: u64, library_revision: u64| {
+        json!({"kind":"list","list":songs(),"library_revision":library_revision,
+            "ranges":[[0, u64::MAX]],"excluded":[rows[5]],"first_row_id":first_row_id})
+    };
+
+    // Stale or malformed requests change nothing.
+    client
+        .reject(
+            add_selection(&playlist, selection(rows[0], revision - 1), None),
+            ErrorCode::StaleLibraryRevision,
+        )
+        .await;
+    client
+        .reject(
+            add_selection(&playlist, selection(rows[1], revision), None),
+            ErrorCode::StaleLibraryRevision,
+        )
+        .await;
+    let mut stale = playlist.clone();
+    stale.revision -= 1;
+    client
+        .reject(
+            add_selection(&stale, selection(rows[0], revision), None),
+            ErrorCode::StalePlaylistRevision,
+        )
+        .await;
+    client
+        .reject(
+            add_selection(&playlist, selection(rows[0], revision), Some(999)),
+            ErrorCode::InvalidCommand,
+        )
+        .await;
+    assert!(playlist_rows(&mut client, playlist.id).await.is_empty());
+
+    let Response::PlaylistApplied {
+        playlist: Some(added),
+        ..
+    } = ok(
+        &mut client,
+        add_selection(&playlist, selection(rows[0], revision), None),
+    )
+    .await
+    else {
+        panic!("expected playlist change");
+    };
+    assert_eq!(added.revision, playlist.revision + 1);
+    assert_eq!(added.entry_count, Some(699));
+    let entries = playlist_rows(&mut client, playlist.id).await;
+    let mut expected = rows.clone();
+    expected.remove(5);
+    assert_eq!(
+        entries.iter().map(|(_, track)| *track).collect::<Vec<_>>(),
+        expected
+    );
+
+    // A second selection lands before an existing occurrence.
+    let tail = json!({"kind":"list","list":songs(),"library_revision":revision,
+        "ranges":[[698, u64::MAX]],"excluded":[],"first_row_id":rows[698]});
+    let before = entries[1].0;
+    ok(&mut client, add_selection(&added, tail, Some(before))).await;
+    let entries = playlist_rows(&mut client, playlist.id).await;
+    assert_eq!(
+        entries[..4]
+            .iter()
+            .map(|(_, track)| *track)
+            .collect::<Vec<_>>(),
+        [rows[0], rows[698], rows[699], rows[1]]
+    );
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn playlist_add_selection_rejects_smart_destinations() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    index(&scratch, &mut client, &["Alpha", "Beta"]).await;
+    let (revision, rows) = list_track_ids(&mut client, songs()).await;
+    let catalog = client.state.playlists_revision;
+    let Response::PlaylistApplied {
+        playlist: Some(smart),
+        ..
+    } = ok(
+        &mut client,
+        json!({"command":"create_smart_playlist","expected_revision":catalog,
+            "name":"Live","query":"title:Alpha"}),
+    )
+    .await
+    else {
+        panic!("expected smart playlist");
+    };
+    let selection = json!({"kind":"list","list":songs(),"library_revision":revision,
+        "ranges":[[0, u64::MAX]],"excluded":[],"first_row_id":rows[0]});
+    client
+        .reject(
+            add_selection(&smart, selection, None),
+            ErrorCode::InvalidCommand,
+        )
+        .await;
     running.stop().await;
 }

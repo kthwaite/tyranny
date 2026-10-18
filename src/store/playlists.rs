@@ -3,7 +3,8 @@ use crate::{
     filter::{Filter, InvalidFilter},
     library_types::{Page, PageRequest, StaleLibraryRevision},
     protocol::{
-        ErrorCode, MAX_PAGE_SIZE, Playlist, PlaylistEntry, PlaylistKind, QueueSource, SourceKind,
+        ErrorCode, MAX_PAGE_SIZE, MAX_RUN_ENTRIES, Playlist, PlaylistEntry, PlaylistKind,
+        QueueSource, SourceKind, TrackSelection,
     },
 };
 use anyhow::{Result, ensure};
@@ -395,6 +396,32 @@ pub(super) fn migrate(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Appends `track_ids` to playlist `id` (before occurrence `before`), after
+/// checking each is indexed and available.
+fn add_tracks(
+    transaction: &Transaction<'_>,
+    id: u64,
+    track_ids: Vec<u64>,
+    before: Option<u64>,
+) -> Result<()> {
+    let mut available = transaction.prepare(
+        "SELECT EXISTS(SELECT 1 FROM library_tracks t JOIN library_assets a ON a.id=t.asset_id
+         JOIN library_roots r ON r.id=a.root_id WHERE t.id=?1 AND a.indexed=1 AND a.last_seen_scan>=r.completed_scan)"
+    )?;
+    for &track in &track_ids {
+        if !available.query_row([track], |row| row.get::<_, bool>(0))? {
+            return Err(invalid("library track is unknown or unavailable"));
+        }
+    }
+    let ordinal = insertion_ordinal(transaction, Some(id), before, track_ids.len())?;
+    let mut insert = transaction
+        .prepare("INSERT INTO playlist_entries(playlist_id,track_id,ordinal) VALUES(?1,?2,?3)")?;
+    for (index, track) in track_ids.into_iter().enumerate() {
+        insert.execute(params![id, track, ordinal + index as i64])?;
+    }
+    Ok(())
+}
+
 pub(crate) enum PlaylistEdit {
     Create {
         name: String,
@@ -412,6 +439,13 @@ pub(crate) enum PlaylistEdit {
     Delete,
     Add {
         library_revision: u64,
+        track_ids: Vec<u64>,
+        before: Option<u64>,
+    },
+    /// `track_ids` are `selection` resolved by `Store::resolve_selection`; the
+    /// edit rechecks the selection's revisions in its own transaction.
+    AddSelection {
+        selection: Box<TrackSelection>,
         track_ids: Vec<u64>,
         before: Option<u64>,
     },
@@ -724,6 +758,7 @@ impl Store {
                     && matches!(
                         &edit,
                         PlaylistEdit::Add { .. }
+                            | PlaylistEdit::AddSelection { .. }
                             | PlaylistEdit::Remove { .. }
                             | PlaylistEdit::Move { .. }
                     )
@@ -758,21 +793,20 @@ impl Store {
                     } => {
                         batch(&track_ids, false)?;
                         library_revision(&transaction, Some(expected_library))?;
-                        let mut available = transaction.prepare(
-                            "SELECT EXISTS(SELECT 1 FROM library_tracks t JOIN library_assets a ON a.id=t.asset_id
-                             JOIN library_roots r ON r.id=a.root_id WHERE t.id=?1 AND a.indexed=1 AND a.last_seen_scan>=r.completed_scan)"
-                        )?;
-                        for &track in &track_ids {
-                            if !available.query_row([track], |row| row.get::<_, bool>(0))? {
-                                return Err(invalid("library track is unknown or unavailable"));
-                            }
+                        add_tracks(&transaction, id, track_ids, before)?;
+                    }
+                    PlaylistEdit::AddSelection {
+                        selection,
+                        track_ids,
+                        before,
+                    } => {
+                        if track_ids.is_empty() || track_ids.len() > MAX_RUN_ENTRIES {
+                            return Err(invalid(format!(
+                                "adding a selection requires 1..={MAX_RUN_ENTRIES} tracks"
+                            )));
                         }
-                        let ordinal =
-                            insertion_ordinal(&transaction, Some(id), before, track_ids.len())?;
-                        let mut insert = transaction.prepare("INSERT INTO playlist_entries(playlist_id,track_id,ordinal) VALUES(?1,?2,?3)")?;
-                        for (index, track) in track_ids.into_iter().enumerate() {
-                            insert.execute(params![id, track, ordinal + index as i64])?;
-                        }
+                        super::selection::check_revisions(&transaction, &selection)?;
+                        add_tracks(&transaction, id, track_ids, before)?;
                     }
                     PlaylistEdit::Remove { entry_ids } => {
                         batch(&entry_ids, true)?;
