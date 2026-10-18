@@ -500,6 +500,7 @@ impl Actor {
             config.output,
             loaded.settings.gain_mode,
         )?;
+        player.set_volume(loaded.settings.volume);
         player.set_repeat(loaded.settings.repeat);
         if loaded.settings.shuffle {
             player.set_shuffle(Some(shuffle_strategy()));
@@ -1608,6 +1609,19 @@ impl Actor {
                 if changed {
                     self.player.set_shuffle(enabled.then(shuffle_strategy));
                 }
+                self.published(None)
+            }
+            Command::SetVolume { percent } => {
+                if percent > 100 {
+                    return Err(Failure::invalid("volume must be 0..=100"));
+                }
+                let mut settings = self.settings.clone();
+                settings.volume = percent;
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.player.set_volume(percent);
                 self.published(None)
             }
             Command::SetGain { mode } => {

@@ -1147,6 +1147,36 @@ async fn repeat_and_shuffle_settings_survive_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn volume_setting_persists_and_rejects_over_100() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    assert_eq!(client.state.settings.volume, 100);
+    ok(&mut client, json!({"command":"set_volume","percent":35})).await;
+    assert_eq!(client.state.settings.volume, 35);
+    client
+        .reject(
+            json!({"command":"set_volume","percent":101}),
+            ErrorCode::InvalidCommand,
+        )
+        .await;
+    assert_eq!(client.state.settings.volume, 35);
+    running.stop().await;
+
+    let running = Running::start(&scratch).await;
+    let mut restored = PlaybackClient::connect(&running).await;
+    assert_eq!(restored.state.settings.volume, 35);
+    ok(&mut restored, json!({"command":"set_volume","percent":0})).await;
+    ok(&mut restored, json!({"command":"set_volume","percent":100})).await;
+    running.stop().await;
+
+    let running = Running::start(&scratch).await;
+    let restored = PlaybackClient::connect(&running).await;
+    assert_eq!(restored.state.settings.volume, 100);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeat_all_wrap_starts_a_fresh_pass_over_the_run() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;

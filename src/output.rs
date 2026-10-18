@@ -18,7 +18,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -116,6 +116,8 @@ struct Shared {
     underruns: AtomicU64,
     drained: AtomicBool,
     drained_generation: AtomicU64,
+    /// Target amplitude `(percent / 100)^2` as `f32` bits.
+    volume_bits: AtomicU32,
 }
 
 impl Shared {
@@ -135,6 +137,7 @@ impl Shared {
             underruns: AtomicU64::new(0),
             drained: AtomicBool::new(false),
             drained_generation: AtomicU64::new(0),
+            volume_bits: AtomicU32::new(1.0_f32.to_bits()),
         }
     }
 
@@ -158,6 +161,8 @@ struct BlockConsumer {
     rendered: u64,
     underruns: u64,
     starving: bool,
+    /// Amplitude the last call ended on; the next call ramps from it.
+    amplitude: f32,
 }
 
 impl BlockConsumer {
@@ -289,6 +294,7 @@ impl BlockConsumer {
                 self.recycle_block(block);
             }
         }
+        self.apply_volume(&mut destination[..written * 2]);
         if written < requested
             && clocked
             && self.rendered != 0
@@ -300,6 +306,38 @@ impl BlockConsumer {
             self.starving = true;
         }
         written
+    }
+
+    /// Scales real PCM only. Ramps linearly from the previous amplitude to the
+    /// target across these frames, then holds it. Atomics and arithmetic only.
+    fn apply_volume(&mut self, pcm: &mut [f32]) {
+        let target = f32::from_bits(self.shared.volume_bits.load(Ordering::Relaxed));
+        let previous = self.amplitude;
+        let frames = pcm.len() / 2;
+        if frames == 0 {
+            return;
+        }
+        self.amplitude = target;
+        if previous == 1.0 && target == 1.0 {
+            return;
+        }
+        if previous == target {
+            for sample in pcm {
+                *sample *= target;
+            }
+            return;
+        }
+        let step = (target - previous) / frames as f32;
+        for (index, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            // The last frame lands exactly on the target.
+            let amplitude = if index + 1 == frames {
+                target
+            } else {
+                previous + step * (index + 1) as f32
+            };
+            frame[0] *= amplitude;
+            frame[1] *= amplitude;
+        }
     }
 
     fn at_end(&self) -> bool {
@@ -374,6 +412,7 @@ impl Output {
             rendered: 0,
             underruns: 0,
             starving: false,
+            amplitude: 1.0,
         };
         let backend = match config {
             OutputConfig::CoreAudio => open_coreaudio(consumer)?,
@@ -463,6 +502,15 @@ impl Output {
     pub fn set_paused(&self, paused: bool) {
         self.shared.paused.store(paused, Ordering::Release);
         self.wake_capture();
+    }
+
+    /// Output amplitude is `(percent / 100)^2`, applied after buffering. The
+    /// consumer ramps to it across the frames of its next call.
+    pub fn set_volume(&self, percent: u8) {
+        let linear = f32::from(percent.min(100)) / 100.0;
+        self.shared
+            .volume_bits
+            .store((linear * linear).to_bits(), Ordering::Relaxed);
     }
 
     pub fn mark_end(&self, end: bool) {
@@ -674,5 +722,123 @@ fn capture_worker(
         } else if frames == 0 {
             thread::park_timeout(Duration::from_millis(1));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+
+    fn ramp_wave(frame: usize) -> Frame {
+        let value = ((frame % 977) as f32 - 488.0) / 500.0;
+        [value, -value * 0.75]
+    }
+
+    /// Renders `blocks` full blocks through an unclocked capture at `percent`
+    /// (None leaves the default) and returns the captured samples.
+    fn capture(percent: Option<u8>, blocks: usize, source: impl Fn(usize) -> Frame) -> Vec<f32> {
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-volume-{}-{}.f32",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut output = Output::open(OutputConfig::Capture {
+            path: path.clone(),
+            clocked: false,
+        })
+        .unwrap();
+        if let Some(percent) = percent {
+            output.set_volume(percent);
+        }
+        let token = TrackToken::new(1);
+        for block in 0..blocks {
+            let frames: Vec<Frame> = (0..BLOCK_FRAMES)
+                .map(|frame| source(block * BLOCK_FRAMES + frame))
+                .collect();
+            assert!(
+                output
+                    .try_submit(&token, (block * BLOCK_FRAMES) as u64, &frames)
+                    .unwrap()
+            );
+        }
+        output.mark_end(true);
+        output.set_paused(false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !output.snapshot().drained {
+            assert!(Instant::now() < deadline, "capture did not drain");
+            output.check_error().unwrap();
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(output);
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
+            .collect()
+    }
+
+    #[test]
+    fn volume_scales_captured_pcm_by_square_law() {
+        let settled = BLOCK_FRAMES * 2; // After the first block's ramp.
+        let unscaled = capture(None, 4, ramp_wave);
+        assert_eq!(unscaled.len(), 4 * BLOCK_FRAMES * 2);
+
+        // 100% is bit-identical to the source, set explicitly or by default.
+        let full = capture(Some(100), 4, ramp_wave);
+        let source: Vec<f32> = (0..4 * BLOCK_FRAMES).flat_map(ramp_wave).collect();
+        assert!(
+            unscaled
+                .iter()
+                .zip(&source)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "default volume altered the PCM"
+        );
+        assert!(
+            full.iter()
+                .zip(&source)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "explicit 100% altered the PCM"
+        );
+
+        // 50% is 0.25x amplitude once the ramp is over.
+        let half = capture(Some(50), 4, ramp_wave);
+        assert_eq!(half.len(), source.len());
+        for (index, (got, want)) in half.iter().zip(&source).enumerate().skip(settled) {
+            assert_eq!(got.to_bits(), (want * 0.25).to_bits(), "sample {index}");
+        }
+
+        // 0% is silence once the ramp is over.
+        let mute = capture(Some(0), 4, ramp_wave);
+        assert!(mute[settled..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn volume_change_ramps_without_a_step() {
+        let constant = |_: usize| [1.0_f32, 1.0];
+        let half = capture(Some(50), 3, constant);
+        let first_block = &half[..BLOCK_FRAMES * 2];
+        let left: Vec<f32> = first_block.iter().step_by(2).copied().collect();
+        // From the previous amplitude (1.0) down to the target (0.25), linearly.
+        let slope = (1.0 - 0.25) / BLOCK_FRAMES as f32;
+        assert!(left[0] < 1.0 && left[0] > 1.0 - 2.0 * slope, "{}", left[0]);
+        assert_eq!(*left.last().unwrap(), 0.25);
+        for pair in left.windows(2) {
+            let step = pair[0] - pair[1];
+            assert!(step > 0.0 && step <= slope * 1.01, "step {step} vs {slope}");
+        }
+        // Then it holds the target.
+        assert!(
+            half[BLOCK_FRAMES * 2..]
+                .iter()
+                .all(|sample| *sample == 0.25)
+        );
+        // Both channels follow the same ramp.
+        assert!(first_block.chunks(2).all(|frame| frame[0] == frame[1]));
     }
 }

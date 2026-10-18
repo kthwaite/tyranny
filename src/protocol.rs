@@ -107,6 +107,9 @@ pub enum Command {
     SetShuffle {
         enabled: bool,
     },
+    SetVolume {
+        percent: u8,
+    },
     AddRoot {
         path: String,
     },
@@ -355,6 +358,12 @@ pub struct Settings {
     pub repeat: RepeatMode,
     #[serde(default)]
     pub shuffle: bool,
+    #[serde(default = "full")]
+    pub volume: u8,
+}
+
+fn full() -> u8 {
+    100
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -363,6 +372,7 @@ impl Default for Settings {
             resume_on_start: false,
             repeat: RepeatMode::Off,
             shuffle: false,
+            volume: full(),
         }
     }
 }

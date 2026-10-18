@@ -352,6 +352,11 @@ impl Player {
         self.output.set_paused(true);
     }
 
+    /// Output volume, `0..=100` percent.
+    pub fn set_volume(&mut self, percent: u8) {
+        self.output.set_volume(percent);
+    }
+
     pub fn stop(&mut self) {
         self.playing = false;
         self.stopped = true;
