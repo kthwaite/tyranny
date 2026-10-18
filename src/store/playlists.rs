@@ -966,37 +966,15 @@ impl Store {
         Ok(playlist_stamp(&header(&self.connection, id, None)?))
     }
 
-    /// A narrow source snapshot, never metadata hydration or a UI-sized page.
+    /// A narrow source snapshot (`playlist_sources`) on the store's connection.
+    #[cfg(test)]
     pub fn playlist_sources(
         &mut self,
         id: u64,
         revision: u64,
         expected_library: u64,
     ) -> Result<Vec<(u64, PathBuf)>> {
-        let transaction = self.connection.transaction()?;
-        let playlist = header(&transaction, id, Some(revision))?;
-        library_revision(&transaction, Some(expected_library))?;
-        let sources = {
-            let (sql, values) = source_query(&playlist)?;
-            let mut query = transaction.prepare(&sql)?;
-            let mut rows = query.query(params_from_iter(values.iter()))?;
-            let mut sources = Vec::new();
-            if let Some(count) = playlist.entry_count {
-                sources.try_reserve(usize::try_from(count)?)?;
-            }
-            while let Some(row) = rows.next()? {
-                if !row.get::<_, bool>(2)? {
-                    return Err(invalid("playlist contains an unavailable library track"));
-                }
-                sources.push((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?)));
-            }
-            sources
-        };
-        if sources.is_empty() {
-            return Err(invalid("cannot enqueue an empty playlist"));
-        }
-        transaction.commit()?;
-        Ok(sources)
+        playlist_sources(&mut self.connection, id, revision, expected_library)
     }
 
     /// Rechecks every authority under the write lock, then appends and checkpoints
@@ -1104,4 +1082,40 @@ impl Store {
         transaction.commit()?;
         Ok(())
     }
+}
+
+/// Playlist `id`'s tracks and source paths, in order, under its `revision` and
+/// library revision `expected_library`. A narrow source snapshot, never
+/// metadata hydration or a UI-sized page. Reads only, so the run resolver
+/// calls it on its own connection.
+pub(crate) fn playlist_sources(
+    connection: &mut Connection,
+    id: u64,
+    revision: u64,
+    expected_library: u64,
+) -> Result<Vec<(u64, PathBuf)>> {
+    let transaction = connection.transaction()?;
+    let playlist = header(&transaction, id, Some(revision))?;
+    library_revision(&transaction, Some(expected_library))?;
+    let sources = {
+        let (sql, values) = source_query(&playlist)?;
+        let mut query = transaction.prepare(&sql)?;
+        let mut rows = query.query(params_from_iter(values.iter()))?;
+        let mut sources = Vec::new();
+        if let Some(count) = playlist.entry_count {
+            sources.try_reserve(usize::try_from(count)?)?;
+        }
+        while let Some(row) = rows.next()? {
+            if !row.get::<_, bool>(2)? {
+                return Err(invalid("playlist contains an unavailable library track"));
+            }
+            sources.push((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?)));
+        }
+        sources
+    };
+    if sources.is_empty() {
+        return Err(invalid("cannot enqueue an empty playlist"));
+    }
+    transaction.commit()?;
+    Ok(sources)
 }

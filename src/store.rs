@@ -23,7 +23,9 @@ mod history;
 mod playlists;
 mod selection;
 pub(crate) use history::{PendingPlays, PlayRecord, count_threshold_frames};
-pub(crate) use playlists::{PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule};
+pub(crate) use playlists::{
+    PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule, playlist_sources,
+};
 pub(crate) use selection::resolve_selection;
 #[cfg(test)]
 mod playlists_tests;

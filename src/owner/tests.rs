@@ -284,3 +284,81 @@ async fn a_library_change_after_resolution_is_stale_at_commit() {
     };
     assert_eq!(snapshot.queue_length, tracks as usize);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enqueue_playlist_resolves_off_the_owner_and_rechecks_at_commit() {
+    let fixture = Fixture::new();
+    let root = fixture.index(&["a", "b", "c"]).await;
+    let control = fixture.control();
+    let state = snapshot(&control).await;
+    let Response::PlaylistApplied {
+        playlist: Some(playlist),
+        ..
+    } = ok(
+        &control,
+        Command::CreatePlaylist {
+            expected_revision: state.playlists_revision,
+            name: "Mix".into(),
+        },
+    )
+    .await
+    else {
+        panic!("expected a new playlist");
+    };
+    let Response::PlaylistApplied {
+        playlist: Some(playlist),
+        ..
+    } = ok(&control, add_selection(&state, &playlist)).await
+    else {
+        panic!("expected the filled playlist");
+    };
+    let enqueue_playlist = |state: &ControlState| Command::EnqueuePlaylist {
+        playlist_id: playlist.id,
+        playlist_revision: playlist.revision,
+        library_revision: state.library.revision,
+        expected_revision: state.queue_revision,
+        play: false,
+    };
+    // The owner answers while the playlist's sources resolve.
+    let before = snapshot(&control).await;
+    let (held, mut gate) = gated(&control);
+    let command = enqueue_playlist(&before);
+    let pending = tokio::spawn(async move { ask(&held, command).await });
+    gate.wait().await;
+    let paused = timeout(Duration::from_millis(500), ask(&control, Command::Pause))
+        .await
+        .expect("pause must not wait for playlist resolution");
+    assert!(matches!(paused, Reply::Ok { .. }), "{paused:?}");
+    assert!(!pending.is_finished());
+    gate.release.send(()).unwrap();
+    let Reply::Ok {
+        result: Response::Applied {
+            snapshot: applied,
+            entry_id,
+        },
+    } = pending.await.unwrap()
+    else {
+        panic!("the playlist was not enqueued");
+    };
+    assert_eq!(applied.queue_length, 3);
+    assert!(entry_id.is_some());
+    // A library change after resolution is stale at commit.
+    let before = snapshot(&control).await;
+    let (held, mut gate) = gated(&control);
+    let command = enqueue_playlist(&before);
+    let pending = tokio::spawn(async move { ask(&held, command).await });
+    gate.wait().await;
+    wav(&fixture.music("new.wav"));
+    ok(&control, Command::Rescan { root_id: root }).await;
+    fixture.scanned(4).await;
+    gate.release.send(()).unwrap();
+    match pending.await.unwrap() {
+        Reply::Error { code, .. } => assert_eq!(code, ErrorCode::StaleLibraryRevision),
+        reply => panic!("a stale playlist was enqueued: {reply:?}"),
+    }
+    let after = snapshot(&control).await;
+    assert_eq!(
+        (after.queue_revision, after.queue_length),
+        (before.queue_revision, before.queue_length)
+    );
+}

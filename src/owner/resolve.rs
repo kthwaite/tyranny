@@ -1,18 +1,19 @@
-//! Resolves run selections on a blocking worker with its own read-only
-//! connection, so a large selection never holds up the playback owner. The
-//! owner then only rechecks revisions and commits (`Actor::resolved`).
+//! Resolves run selections and enqueued playlists on a blocking worker with
+//! its own read-only connection, so a large selection never holds up the
+//! playback owner. The owner then only rechecks revisions and commits
+//! (`Actor::resolved`).
 use super::{CommandResult, Failure, source_name, source_path};
 use crate::{
     listing::{recent_cutoff, unix_now},
     protocol::Command,
-    store::resolve_selection,
+    store::{playlist_sources, resolve_selection},
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-/// A selection's tracks with their canonical source paths, in selection
-/// order, or why the selection cannot be enqueued.
+/// A selection's (or playlist's) tracks with their canonical source paths, in
+/// order, or why they cannot be enqueued.
 pub(super) type Resolution = CommandResult<Vec<(u64, PathBuf)>>;
 
 #[derive(Clone)]
@@ -35,9 +36,9 @@ impl Resolver {
         }
     }
 
-    /// Resolves the selection of `command` (`EnqueueTracks` or
-    /// `PlaylistAddSelection`) on a blocking worker. Returns the command with
-    /// its resolution.
+    /// Resolves the tracks `command` (`EnqueueTracks`, `PlaylistAddSelection`
+    /// or `EnqueuePlaylist`) names on a blocking worker. Returns the command
+    /// with its resolution.
     pub(super) async fn resolve(
         self: Arc<Self>,
         command: Command,
@@ -55,20 +56,30 @@ impl Resolver {
     }
 
     fn sources(&self, command: &Command) -> Resolution {
-        let selection = match command {
-            Command::EnqueueTracks {
-                selection, source, ..
-            } => {
-                // Needs no SQL, so a bad name skips the resolution.
-                source_name(source)?;
-                selection
-            }
-            Command::PlaylistAddSelection { selection, .. } => selection,
-            _ => unreachable!("only run selections are resolved before the owner"),
-        };
+        if let Command::EnqueueTracks { source, .. } = command {
+            // Needs no SQL, so a bad name skips the resolution.
+            source_name(source)?;
+        }
         let mut connection = self.connection().map_err(Failure::persistence)?;
-        let mut sources = resolve_selection(&mut connection, selection, recent_cutoff(unix_now()))
-            .map_err(Failure::playlist)?;
+        let mut sources = match command {
+            Command::EnqueueTracks { selection, .. }
+            | Command::PlaylistAddSelection { selection, .. } => {
+                resolve_selection(&mut connection, selection, recent_cutoff(unix_now()))
+            }
+            Command::EnqueuePlaylist {
+                playlist_id,
+                playlist_revision,
+                library_revision,
+                ..
+            } => playlist_sources(
+                &mut connection,
+                *playlist_id,
+                *playlist_revision,
+                *library_revision,
+            ),
+            _ => unreachable!("only run selections are resolved before the owner"),
+        }
+        .map_err(Failure::playlist)?;
         for (_, path) in &mut sources {
             *path = source_path(std::mem::take(path), self.capture.as_deref())?;
         }

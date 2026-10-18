@@ -288,7 +288,9 @@ impl Controller {
                 revision,
             },
             Command::ListGroups { list, revision } => LibraryCommand::ListGroups { list, revision },
-            command @ (Command::EnqueueTracks { .. } | Command::PlaylistAddSelection { .. }) => {
+            command @ (Command::EnqueueTracks { .. }
+            | Command::PlaylistAddSelection { .. }
+            | Command::EnqueuePlaylist { .. }) => {
                 return self.run_request(id, command).await;
             }
             command => return self.playback_request(Request { id, command }).await,
@@ -1036,6 +1038,9 @@ impl Actor {
         self.published(Some(first_id))
     }
 
+    /// Appends the playlist's resolved sources in one store transaction, which
+    /// rechecks the playlist and library revisions and every source, and one
+    /// infallible player commit.
     fn enqueue_playlist(
         &mut self,
         playlist_id: u64,
@@ -1043,16 +1048,11 @@ impl Actor {
         library_revision: u64,
         expected_revision: u64,
         play: bool,
+        sources: Resolution,
     ) -> CommandResult<Response> {
         self.check_revision(expected_revision)?;
         self.next_revision()?;
-        let mut sources = self
-            .store
-            .playlist_sources(playlist_id, playlist_revision, library_revision)
-            .map_err(Failure::playlist)?;
-        for (_, source) in &mut sources {
-            *source = self.source_path(std::mem::take(source))?;
-        }
+        let sources = sources?;
         let mut track_ids = Vec::new();
         track_ids
             .try_reserve_exact(sources.len())
@@ -1437,26 +1437,15 @@ impl Actor {
                 expected_revision,
                 PlaylistEdit::Move { entry_ids, before },
             ),
-            Command::EnqueuePlaylist {
-                playlist_id,
-                playlist_revision,
-                library_revision,
-                expected_revision,
-                play,
-            } => self.enqueue_playlist(
-                playlist_id,
-                playlist_revision,
-                library_revision,
-                expected_revision,
-                play,
-            ),
             Command::InsertTracks {
                 expected_revision,
                 library_revision,
                 track_ids,
                 before,
             } => self.insert_tracks(expected_revision, library_revision, track_ids, before),
-            Command::EnqueueTracks { .. } | Command::PlaylistAddSelection { .. } => {
+            Command::EnqueueTracks { .. }
+            | Command::PlaylistAddSelection { .. }
+            | Command::EnqueuePlaylist { .. } => {
                 unreachable!("run selections are resolved before the owner (`Work::Resolved`)")
             }
             Command::Artwork { .. }
@@ -1769,6 +1758,20 @@ impl Actor {
                 expected_revision,
                 selection,
                 before,
+                sources,
+            ),
+            Command::EnqueuePlaylist {
+                playlist_id,
+                playlist_revision,
+                library_revision,
+                expected_revision,
+                play,
+            } => self.enqueue_playlist(
+                playlist_id,
+                playlist_revision,
+                library_revision,
+                expected_revision,
+                play,
                 sources,
             ),
             _ => unreachable!("only run selections are resolved before the owner"),
