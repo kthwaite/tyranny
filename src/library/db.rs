@@ -490,9 +490,12 @@ fn install(
         "DELETE FROM library_track_genres WHERE track_id=?1",
         [track_id],
     )?;
+    // One genre per lowercased name, spelt as the track indexed last spells it,
+    // so a retag that changes only case shows.
     for (position, genre) in metadata.genres.iter().enumerate() {
         transaction.execute(
-            "INSERT INTO library_genres(name,search) VALUES(?1,?2) ON CONFLICT(search) DO NOTHING",
+            "INSERT INTO library_genres(name,search) VALUES(?1,?2)
+            ON CONFLICT(search) DO UPDATE SET name=excluded.name",
             params![genre, genre.to_lowercase()],
         )?;
         transaction.execute(

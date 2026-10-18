@@ -1144,9 +1144,13 @@ async fn genres_are_normalized_rows_in_tag_order() {
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     };
-    assert_eq!(genres("a"), ["Soul", "Jazz"]);
-    // One row per lowercased name; the first spelling stored wins.
-    assert_eq!(genres("b"), ["Jazz"]);
+    // Within one file the first spelling wins ("soul" dedupes into "Soul").
+    // Across files the tracks share one row per lowercased name, spelt as the
+    // track indexed last spells it.
+    let (a, b) = (genres("a"), genres("b"));
+    assert_eq!(a[0], "Soul");
+    assert_eq!((a.len(), &a[1], b.len()), (2, &b[0], 1));
+    assert_eq!(b[0].to_lowercase(), "jazz");
     let rows: i64 = connection
         .query_row("SELECT COUNT(*) FROM library_genres", [], |row| row.get(0))
         .unwrap();
@@ -1167,6 +1171,34 @@ async fn genres_are_normalized_rows_in_tag_order() {
     let scan = rescan(&library, root).await;
     assert_eq!(scan.updated, 1);
     assert_eq!(genres("a"), ["Blues"]);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn a_retag_that_changes_only_genre_case_shows_the_new_spelling() {
+    let scratch = Scratch::new();
+    let source = scratch.path("music/a.flac");
+    flac(&source, &[("title", "A"), ("genre", "jazz")]);
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let connection = database(&scratch);
+    let names = || -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT name FROM library_genres ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(names(), ["jazz"]);
+    flac(&source, &[("title", "A"), ("genre", "Jazz")]);
+    let scan = rescan(&library, root).await;
+    assert_eq!(scan.updated, 1);
+    // Still one genre, now spelt as the newest tag spells it.
+    assert_eq!(names(), ["Jazz"]);
     library.shutdown().unwrap();
 }
 
