@@ -10,17 +10,21 @@ use crate::{
     output::OutputConfig,
     playback::Player,
     protocol::{
-        Command, ControlState, ErrorCode, MAX_PAGE_SIZE, Message, Reply, Request, Response,
-        Settings, Transport,
+        Command, ControlState, ErrorCode, MAX_PAGE_SIZE, Message, NowPlaying, QueueSource, Reply,
+        Request, Response, Settings, SourceKind, Transport,
     },
-    store::{Checkpoint, Edit, PlaylistChange, PlaylistEdit, PlaylistFailure, Store},
+    store::{
+        Checkpoint, Edit, EntryTrack, LoadedEntry, PlaylistChange, PlaylistEdit, PlaylistFailure,
+        Store,
+    },
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
+    cell::RefCell,
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::mpsc as startup,
+    sync::{Arc, mpsc as startup},
     thread,
     time::{Duration, Instant},
 };
@@ -404,10 +408,7 @@ fn same_file(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn capture_destination(
-    config: &OwnerConfig,
-    entries: &[(u64, PathBuf)],
-) -> Result<Option<PathBuf>> {
+fn capture_destination(config: &OwnerConfig, entries: &[LoadedEntry]) -> Result<Option<PathBuf>> {
     let OutputConfig::Capture { path, .. } = &config.output else {
         return Ok(None);
     };
@@ -443,11 +444,14 @@ fn capture_destination(
         "capture destination overlaps private server state"
     );
     ensure!(
-        !entries.iter().any(|(_, path)| same_file(&capture, path)),
+        !entries.iter().any(|entry| same_file(&capture, &entry.path)),
         "capture destination overlaps a queued source"
     );
     Ok(Some(capture))
 }
+
+/// `(entry id, library revision)` and what the library said about that entry.
+type NowTrack = ((u64, u64), Option<EntryTrack>);
 
 struct Actor {
     player: Player,
@@ -459,13 +463,15 @@ struct Actor {
     events: broadcast::Sender<ControlState>,
     capture_path: Option<PathBuf>,
     library: Library,
+    /// Last library lookup for the playing entry, keyed by entry and library revision.
+    now_track: RefCell<Option<NowTrack>>,
 }
 impl Actor {
     fn open(config: OwnerConfig) -> Result<Self> {
         let store = Store::open(&config.database_path)?;
         let loaded = store.load()?;
         let capture_path = capture_destination(&config, &loaded.entries)?;
-        let mut player = Player::from_queue(
+        let mut player = Player::from_loaded(
             loaded.entries,
             loaded.revision,
             loaded.next_id,
@@ -519,6 +525,7 @@ impl Actor {
             events,
             capture_path,
             library,
+            now_track: RefCell::new(None),
         };
         actor.publish();
         Ok(actor)
@@ -546,6 +553,10 @@ impl Actor {
         } else {
             Transport::Stopped
         };
+        let library = self.library.state();
+        let now_playing = state
+            .now_playing
+            .map(|now| self.describe(now, library.revision));
         ControlState {
             sequence: self.last.sequence,
             queue_revision: state.queue_revision,
@@ -554,15 +565,33 @@ impl Actor {
             current_id: state.current_id,
             can_next: state.next_id.is_some(),
             can_previous: state.previous_id.is_some(),
-            now_playing: state.now_playing,
+            now_playing,
             position_frames: state.position_frames,
             sample_rate: SAMPLE_RATE,
             transport,
             settings: self.settings.clone(),
             error,
             underruns: state.output.underruns,
-            library: self.library.state(),
+            library,
         }
+    }
+    /// Adds the indexed track, album and format to the player's metadata. The
+    /// lookup is display-only, so a failed one leaves those fields blank.
+    fn describe(&self, now: Arc<NowPlaying>, library_revision: u64) -> Arc<NowPlaying> {
+        let key = (now.entry_id, library_revision);
+        let mut cache = self.now_track.borrow_mut();
+        if cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
+            *cache = Some((key, self.store.entry_track(now.entry_id).ok().flatten()));
+        }
+        let Some((_, Some(track))) = cache.as_ref() else {
+            return now;
+        };
+        Arc::new(NowPlaying {
+            track_id: Some(track.track_id),
+            album_id: Some(track.album_id),
+            format: track.format.clone(),
+            ..(*now).clone()
+        })
     }
     fn publish(&mut self) {
         let mut state = self.state();
@@ -797,9 +826,15 @@ impl Actor {
             track_ids.push(track_id);
             path
         });
+        let scope = self
+            .store
+            .playlist_source(playlist_id)
+            .map_err(Failure::playlist)?
+            .kind
+            .repeat_scope();
         let prepared = self
             .player
-            .prepare_append(paths, expected_revision, play)
+            .prepare_append(paths, expected_revision, play, scope)
             .map_err(Failure::playback)?;
         let first_id = prepared.first_id();
         self.store
@@ -833,6 +868,7 @@ impl Actor {
         expected_revision: u64,
         path: String,
         track: Option<(u64, u64)>,
+        kind: SourceKind,
     ) -> CommandResult<Response> {
         self.check_revision(expected_revision)?;
         let revision = self.next_revision()?;
@@ -842,8 +878,19 @@ impl Actor {
         }
         let source = self.source_path(PathBuf::from(path))?;
         let path = source.to_str().expect("validated UTF-8 source");
+        let stamp = QueueSource::stamped(kind, "");
         self.store
-            .edit(Edit::Append { id, path, track }, revision, id + 1)
+            .edit(
+                Edit::Append {
+                    id,
+                    path,
+                    track,
+                    source: Some(&stamp),
+                    run_id: Some(id),
+                },
+                revision,
+                id + 1,
+            )
             .map_err(Failure::library)?;
         let actual = self
             .player
@@ -890,7 +937,7 @@ impl Actor {
             Command::Append {
                 expected_revision,
                 path,
-            } => self.append(expected_revision, path, None),
+            } => self.append(expected_revision, path, None, SourceKind::Direct),
             Command::AppendTrack {
                 expected_revision,
                 library_revision,
@@ -901,7 +948,12 @@ impl Actor {
                     .store
                     .track_source(track_id, library_revision)
                     .map_err(Failure::library)?;
-                self.append(expected_revision, path, Some((track_id, library_revision)))
+                self.append(
+                    expected_revision,
+                    path,
+                    Some((track_id, library_revision)),
+                    SourceKind::Drag,
+                )
             }
             Command::SavedPlaylists {
                 revision,

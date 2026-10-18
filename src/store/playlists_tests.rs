@@ -94,7 +94,11 @@ fn schema_one_and_two_migrations_preserve_queue_checkpoint_settings_and_library(
         let mut store = Store::open(&path)?;
         let loaded = store.load()?;
         assert_eq!(
-            loaded.entries,
+            loaded
+                .entries
+                .iter()
+                .map(|entry| (entry.id, entry.path.clone()))
+                .collect::<Vec<_>>(),
             vec![
                 (3, PathBuf::from("/music/retained.wav")),
                 (9, PathBuf::from("/music/retained.wav"))
@@ -1116,7 +1120,7 @@ fn schema_three_migration_preserves_regular_identities_order_revisions_and_queue
         loaded
             .entries
             .iter()
-            .map(|entry| entry.0)
+            .map(|entry| entry.id)
             .collect::<Vec<_>>(),
         [3, 9]
     );

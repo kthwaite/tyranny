@@ -2,10 +2,12 @@
 //! commit before the matching infallible engine change; checkpoints are separate.
 use crate::{
     library,
-    protocol::{QueueItem, Settings},
+    library_types::format_label,
+    play_order::RunInfo,
+    protocol::{QueueItem, QueueSource, Settings, SourceKind},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -103,8 +105,24 @@ pub(crate) struct Checkpoint {
     pub position_frames: u64,
     pub playing: bool,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LoadedEntry {
+    pub id: u64,
+    pub path: PathBuf,
+    pub run: Option<RunInfo>,
+    /// Set once the entry has played. Task 12 writes it.
+    #[allow(dead_code)]
+    pub played_seq: Option<u64>,
+}
+/// What the library knows about a queue entry's indexed track.
+#[derive(Clone)]
+pub(crate) struct EntryTrack {
+    pub track_id: u64,
+    pub album_id: u64,
+    pub format: String,
+}
 pub(crate) struct Loaded {
-    pub entries: Vec<(u64, PathBuf)>,
+    pub entries: Vec<LoadedEntry>,
     pub revision: u64,
     pub next_id: u64,
     pub playlists_revision: u64,
@@ -116,11 +134,20 @@ pub(crate) enum Edit<'a> {
         id: u64,
         path: &'a str,
         track: Option<(u64, u64)>,
+        source: Option<&'a QueueSource>,
+        run_id: Option<u64>,
     },
     Remove {
         id: u64,
     },
     Clear,
+}
+/// File name without extension, for entries the library cannot describe.
+fn file_stem(path: &str) -> String {
+    Path::new(path).file_stem().map_or_else(
+        || path.to_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    )
 }
 pub(crate) struct Store {
     connection: Connection,
@@ -149,29 +176,45 @@ impl Store {
         let (revision, next_id, current_id, position_frames, playing, settings): (u64,u64,Option<u64>,u64,bool,String) = self.connection.query_row(
             "SELECT revision,next_id,current_id,position_frames,playing,settings FROM control WHERE singleton=1", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?;
-        let mut query = self
-            .connection
-            .prepare("SELECT id,path,ordinal FROM queue ORDER BY ordinal")?;
+        let mut query = self.connection.prepare(
+            "SELECT id,path,ordinal,source_kind,run_id,played_seq FROM queue ORDER BY ordinal",
+        )?;
         let rows = query.query_map([], |row| {
             Ok((
                 row.get::<_, u64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<u64>>(4)?,
+                row.get::<_, Option<u64>>(5)?,
             ))
         })?;
         let mut entries = Vec::new();
         for row in rows {
-            let (id, path, ordinal) = row?;
+            let (id, path, ordinal, kind, run_id, played_seq) = row?;
             ensure!(
                 id > 0 && id < next_id && ordinal >= 0,
                 "invalid persisted queue identity/order"
             );
             let path = PathBuf::from(path);
             ensure!(path.is_absolute(), "persisted source path is not absolute");
-            entries.push((id, path));
+            let run =
+                kind.as_deref()
+                    .and_then(SourceKind::parse)
+                    .zip(run_id)
+                    .map(|(kind, run_id)| RunInfo {
+                        run_id,
+                        scope: kind.repeat_scope(),
+                    });
+            entries.push(LoadedEntry {
+                id,
+                path,
+                run,
+                played_seq,
+            });
         }
         ensure!(
-            current_id.is_none_or(|id| entries.iter().any(|entry| entry.0 == id)),
+            current_id.is_none_or(|id| entries.iter().any(|entry| entry.id == id)),
             "checkpoint refers to a missing queue occurrence"
         );
         Ok(Loaded {
@@ -199,18 +242,71 @@ impl Store {
     }
 
     pub fn queue_page(&self, offset: usize, limit: usize) -> Result<Vec<QueueItem>> {
-        let mut query = self
-            .connection
-            .prepare("SELECT id,path,track_id FROM queue ORDER BY ordinal LIMIT ?1 OFFSET ?2")?;
+        let mut query = self.connection.prepare(
+            "SELECT q.id,q.path,q.track_id,q.source_kind,q.source_name,q.run_id,q.played_seq,
+                    json_extract(t.metadata,'$.title'),json_extract(t.metadata,'$.artist'),
+                    al.title,t.album_id,json_extract(t.metadata,'$.duration_ms')
+             FROM queue q
+             LEFT JOIN library_tracks t ON t.id=q.track_id
+             LEFT JOIN library_albums al ON al.id=t.album_id
+             ORDER BY q.ordinal LIMIT ?1 OFFSET ?2",
+        )?;
         Ok(query
             .query_map(params![limit, offset], |row| {
+                let path: String = row.get(1)?;
+                let kind: Option<String> = row.get(3)?;
+                let name: Option<String> = row.get(4)?;
+                let title: Option<String> = row.get(7)?;
                 Ok(QueueItem {
                     id: row.get(0)?,
-                    path: row.get(1)?,
                     track_id: row.get(2)?,
+                    source: kind
+                        .as_deref()
+                        .and_then(SourceKind::parse)
+                        .map(|kind| QueueSource {
+                            kind,
+                            name: name.unwrap_or_default(),
+                        }),
+                    run_id: row.get(5)?,
+                    played: row.get::<_, Option<u64>>(6)?.is_some(),
+                    title: title
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| file_stem(&path)),
+                    artist: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    album: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                    album_id: row.get(10)?,
+                    duration_ms: row.get(11)?,
+                    path,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The indexed track behind queue entry `entry_id`, or `None` when it has
+    /// no track or the track is gone.
+    pub fn entry_track(&self, entry_id: u64) -> Result<Option<EntryTrack>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT t.id,t.album_id,t.codec,t.bit_depth,
+                        COALESCE(json_extract(t.metadata,'$.sample_rate'),0),t.bitrate_kbps
+                 FROM queue q JOIN library_tracks t ON t.id=q.track_id WHERE q.id=?1",
+                [entry_id],
+                |row| {
+                    let codec: Option<String> = row.get(2)?;
+                    Ok(EntryTrack {
+                        track_id: row.get(0)?,
+                        album_id: row.get(1)?,
+                        format: format_label(
+                            codec.as_deref(),
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ),
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn edit(&mut self, edit: Edit<'_>, revision: u64, next_id: u64) -> Result<()> {
@@ -218,12 +314,29 @@ impl Store {
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         match edit {
-            Edit::Append { id, path, track } => {
+            Edit::Append {
+                id,
+                path,
+                track,
+                source,
+                run_id,
+            } => {
                 if let Some((track_id, library_revision)) = track {
                     let indexed = library::resolve_track(&transaction, track_id, library_revision)?;
                     ensure!(indexed == path, "indexed source changed before enqueue");
                 }
-                transaction.execute("INSERT INTO queue(id,ordinal,path,track_id) SELECT ?1,COALESCE(MAX(ordinal),-1)+1,?2,?3 FROM queue", params![id,path,track.map(|track| track.0)])?;
+                transaction.execute(
+                    "INSERT INTO queue(id,ordinal,path,track_id,source_kind,source_name,run_id)
+                     SELECT ?1,COALESCE(MAX(ordinal),-1)+1,?2,?3,?4,?5,?6 FROM queue",
+                    params![
+                        id,
+                        path,
+                        track.map(|track| track.0),
+                        source.map(|source| source.kind.as_str()),
+                        source.map(|source| source.name.as_str()),
+                        run_id
+                    ],
+                )?;
             }
             Edit::Remove { id } => {
                 transaction.execute("UPDATE control SET current_id=NULL,position_frames=0,playing=0 WHERE current_id=?1", [id])?;
@@ -249,6 +362,10 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        play_order::{RepeatScope, RunInfo},
+        protocol::{QueueSource, SourceKind},
+    };
     #[test]
     fn failed_edit_rolls_back_queue_and_revision() -> Result<()> {
         let path =
@@ -260,6 +377,8 @@ mod tests {
                     id: 1,
                     path: "/music/a.flac",
                     track: None,
+                    source: None,
+                    run_id: None,
                 },
                 2,
                 2,
@@ -271,6 +390,8 @@ mod tests {
                             id: 1,
                             path: "/music/b.flac",
                             track: None,
+                            source: None,
+                            run_id: None,
                         },
                         3,
                         3
@@ -278,7 +399,14 @@ mod tests {
                     .is_err()
             );
             let loaded = store.load()?;
-            assert_eq!(loaded.entries, vec![(1, PathBuf::from("/music/a.flac"))]);
+            assert_eq!(
+                loaded
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.id, entry.path.clone()))
+                    .collect::<Vec<_>>(),
+                vec![(1, PathBuf::from("/music/a.flac"))]
+            );
             assert_eq!((loaded.revision, loaded.next_id), (2, 2));
             Ok(())
         })();
@@ -351,6 +479,124 @@ mod tests {
                 .unwrap();
         }
         path
+    }
+    fn source(kind: SourceKind, name: &str) -> QueueSource {
+        QueueSource {
+            kind,
+            name: name.to_owned(),
+        }
+    }
+    #[test]
+    fn queue_rows_persist_source_run_and_played_through_restart() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let mut store = Store::open(&path)?;
+            let album = source(SourceKind::Album, "Kind of Blue");
+            let songs = source(SourceKind::Songs, "");
+            for (id, name, source, run) in [
+                (1, "a", Some(&album), Some(1)),
+                (2, "b", Some(&album), Some(1)),
+                (3, "c", Some(&songs), Some(3)),
+                (4, "d", None, None),
+            ] {
+                store.edit(
+                    Edit::Append {
+                        id,
+                        path: &format!("/music/{name}.flac"),
+                        track: None,
+                        source,
+                        run_id: run,
+                    },
+                    id + 1,
+                    id + 1,
+                )?;
+            }
+            Connection::open(&path)?.execute("UPDATE queue SET played_seq=7 WHERE id=2", [])?;
+            drop(store);
+            let loaded = Store::open(&path)?.load()?;
+            let album_run = Some(RunInfo {
+                run_id: 1,
+                scope: RepeatScope::Run,
+            });
+            let songs_run = Some(RunInfo {
+                run_id: 3,
+                scope: RepeatScope::Queue,
+            });
+            assert_eq!(
+                loaded
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.id, entry.run, entry.played_seq))
+                    .collect::<Vec<_>>(),
+                [
+                    (1, album_run, None),
+                    (2, album_run, Some(7)),
+                    (3, songs_run, None),
+                    (4, None, None)
+                ]
+            );
+            let page = Store::open(&path)?.queue_page(0, 10)?;
+            assert_eq!(
+                page.iter()
+                    .map(|item| (item.source.clone(), item.run_id, item.played))
+                    .collect::<Vec<_>>(),
+                [
+                    (Some(album.clone()), Some(1), false),
+                    (Some(album), Some(1), true),
+                    (Some(songs), Some(3), false),
+                    (None, None, false)
+                ]
+            );
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+    #[test]
+    fn queue_page_returns_track_display_fields_and_stem_fallback() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let store = Store::open(&path)?;
+            let connection = Connection::open(&path)?;
+            // Foreign keys off lets row 3 point at a track that no longer exists.
+            connection.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                INSERT INTO library_roots(id,path,search) VALUES(1,'/music','/music');
+                INSERT INTO library_assets(id,root_id,path,indexed,last_seen_scan)
+                    VALUES(1,1,'/music/a.flac',1,1);
+                INSERT INTO library_artists(id,identity,name,search) VALUES(1,'a','A','a');
+                INSERT INTO library_albums(id,identity,artist_id,title,album_artist,search,title_sort,compilation)
+                    VALUES(7,'b',1,'Album B','A','b','b',0);
+                INSERT INTO library_tracks(id,asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number)
+                    VALUES(3,1,1,7,'{\"title\":\"Title A\",\"artist\":\"Artist A\",\"duration_ms\":1234}','t','t',1,1,1);
+                INSERT INTO queue(id,ordinal,path,track_id) VALUES(1,0,'/music/a.flac',3);
+                INSERT INTO queue(id,ordinal,path,track_id) VALUES(2,1,'/elsewhere/Loose Song.flac',NULL);
+                INSERT INTO queue(id,ordinal,path,track_id) VALUES(3,2,'/music/gone.flac',99);
+                UPDATE control SET next_id=4;",
+            )?;
+            let page = store.queue_page(0, 10)?;
+            let shown = |index: usize| {
+                let item = &page[index];
+                (
+                    item.title.as_str(),
+                    item.artist.as_str(),
+                    item.album.as_str(),
+                    item.album_id,
+                    item.duration_ms,
+                )
+            };
+            assert_eq!(page[0].track_id, Some(3));
+            assert_eq!(
+                shown(0),
+                ("Title A", "Artist A", "Album B", Some(7), Some(1234))
+            );
+            assert_eq!(shown(1), ("Loose Song", "", "", None, None));
+            assert_eq!(page[2].track_id, Some(99));
+            assert_eq!(shown(2), ("gone", "", "", None, None));
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
     }
     #[test]
     fn schema_4_database_migrates_to_5_preserving_state() -> Result<()> {

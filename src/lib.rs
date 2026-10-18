@@ -11,6 +11,7 @@ pub mod listing;
 mod metadata;
 pub mod output;
 pub mod owner;
+pub mod play_order;
 pub mod playback;
 pub mod protocol;
 mod scanner;

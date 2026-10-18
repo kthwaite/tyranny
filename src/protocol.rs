@@ -1,11 +1,11 @@
 //! Version 9 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
-use crate::decoder::GainMode;
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
     ListTotals, NamedCount, Page, Root, Track, TrackMetadata,
 };
 use crate::listing::ListDescription;
+use crate::{decoder::GainMode, play_order::RepeatScope};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
@@ -291,7 +291,7 @@ pub enum Transport {
     Error,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct NowPlaying {
     pub entry_id: u64,
     pub title: String,
@@ -299,6 +299,13 @@ pub struct NowPlaying {
     pub album: String,
     pub duration_frames: Option<u64>,
     pub metadata_error: Option<String>,
+    /// Indexed track behind the entry, if any. The owner fills this and
+    /// `album_id`/`format` from the library; the player leaves them blank.
+    pub track_id: Option<u64>,
+    pub album_id: Option<u64>,
+    pub format: String,
+    /// Gain the decoder applied; `None` when gain mode is off.
+    pub gain_db: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -325,6 +332,93 @@ pub struct QueueItem {
     pub id: u64,
     pub path: String,
     pub track_id: Option<u64>,
+    pub source: Option<QueueSource>,
+    pub run_id: Option<u64>,
+    pub played: bool,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_id: Option<u64>,
+    pub duration_ms: Option<u64>,
+}
+
+/// Longest `QueueSource::name`, in UTF-8 bytes.
+pub const MAX_SOURCE_NAME_BYTES: usize = 256;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Album,
+    Playlist,
+    Smart,
+    Songs,
+    Genre,
+    Artist,
+    Recent,
+    Compilations,
+    Drag,
+    Direct,
+}
+impl SourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Album => "album",
+            Self::Playlist => "playlist",
+            Self::Smart => "smart",
+            Self::Songs => "songs",
+            Self::Genre => "genre",
+            Self::Artist => "artist",
+            Self::Recent => "recent",
+            Self::Compilations => "compilations",
+            Self::Drag => "drag",
+            Self::Direct => "direct",
+        }
+    }
+    /// `None` for a name this server does not know.
+    pub fn parse(name: &str) -> Option<Self> {
+        [
+            Self::Album,
+            Self::Playlist,
+            Self::Smart,
+            Self::Songs,
+            Self::Genre,
+            Self::Artist,
+            Self::Recent,
+            Self::Compilations,
+            Self::Drag,
+            Self::Direct,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == name)
+    }
+    /// Albums and playlists repeat as a run. Every other source repeats the queue.
+    pub fn repeat_scope(self) -> RepeatScope {
+        match self {
+            Self::Album | Self::Playlist | Self::Smart => RepeatScope::Run,
+            _ => RepeatScope::Queue,
+        }
+    }
+}
+
+/// Where a queue entry came from, as the Up Next view shows it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct QueueSource {
+    pub kind: SourceKind,
+    /// At most `MAX_SOURCE_NAME_BYTES` bytes.
+    pub name: String,
+}
+impl QueueSource {
+    /// Server-side stamp. A long name is cut on a character boundary.
+    pub fn stamped(kind: SourceKind, name: &str) -> Self {
+        let mut end = name.len().min(MAX_SOURCE_NAME_BYTES);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            kind,
+            name: name[..end].to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -668,6 +762,36 @@ mod tests {
         let request = serde_json::from_value::<Request>(command).unwrap();
         assert!(
             matches!(request.command, Command::PlaylistEntries { query, .. } if query.is_empty())
+        );
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn stamped_names_are_cut_on_a_character_boundary() {
+        let short = QueueSource::stamped(SourceKind::Album, "Kind of Blue");
+        assert_eq!(short.name, "Kind of Blue");
+        // 255 ASCII bytes then a 2-byte character straddles the 256-byte limit.
+        let name = format!("{}é", "a".repeat(255));
+        let cut = QueueSource::stamped(SourceKind::Playlist, &name);
+        assert_eq!(cut.name, "a".repeat(255));
+        let exact = QueueSource::stamped(SourceKind::Playlist, &"é".repeat(128));
+        assert_eq!(exact.name.len(), MAX_SOURCE_NAME_BYTES);
+    }
+    #[test]
+    fn repeat_scope_follows_source_kind() {
+        assert_eq!(SourceKind::Smart.repeat_scope(), RepeatScope::Run);
+        assert_eq!(SourceKind::Drag.repeat_scope(), RepeatScope::Queue);
+        assert_eq!(
+            SourceKind::parse("compilations"),
+            Some(SourceKind::Compilations)
+        );
+        assert_eq!(
+            serde_json::to_string(&SourceKind::Compilations).unwrap(),
+            "\"compilations\""
         );
     }
 }

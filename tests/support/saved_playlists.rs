@@ -67,7 +67,7 @@ async fn catalog(client: &mut PlaybackClient, query: &str) -> Page<Playlist> {
         response => panic!("expected saved playlists: {response:?}"),
     }
 }
-async fn queue(client: &mut PlaybackClient) -> Vec<QueueItem> {
+pub(super) async fn queue(client: &mut PlaybackClient) -> Vec<QueueItem> {
     match ok(
         client,
         json!({"command":"queue_page","revision":null,"offset":0,"limit":500}),

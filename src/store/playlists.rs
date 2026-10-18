@@ -2,7 +2,9 @@ use super::{Checkpoint, Store};
 use crate::{
     filter::{Filter, InvalidFilter},
     library_types::{Page, PageRequest, StaleLibraryRevision},
-    protocol::{ErrorCode, MAX_PAGE_SIZE, Playlist, PlaylistEntry, PlaylistKind},
+    protocol::{
+        ErrorCode, MAX_PAGE_SIZE, Playlist, PlaylistEntry, PlaylistKind, QueueSource, SourceKind,
+    },
 };
 use anyhow::{Result, ensure};
 use rusqlite::{
@@ -171,6 +173,14 @@ fn source_query(playlist: &Playlist) -> Result<(String, Vec<Value>)> {
             vec![Value::Integer(playlist.id as i64)],
         ))
     }
+}
+
+fn playlist_stamp(playlist: &Playlist) -> QueueSource {
+    let kind = match playlist.kind {
+        PlaylistKind::Regular => SourceKind::Playlist,
+        PlaylistKind::Smart => SourceKind::Smart,
+    };
+    QueueSource::stamped(kind, &playlist.name)
 }
 
 fn entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistEntry> {
@@ -467,8 +477,10 @@ impl Store {
         let revision = next_revision(revision)?;
         let ordinal = insertion_ordinal(&transaction, None, before, count)?;
         {
-            let mut insert = transaction
-                .prepare("INSERT INTO queue(id,ordinal,path,track_id) VALUES(?1,?2,?3,?4)")?;
+            let mut insert = transaction.prepare(
+                "INSERT INTO queue(id,ordinal,path,track_id,source_kind,source_name,run_id)
+                 VALUES(?1,?2,?3,?4,'drag','',?5)",
+            )?;
             for (index, (id, track, path)) in entries.enumerate() {
                 ensure!(
                     id == next_id + index as u64,
@@ -483,7 +495,8 @@ impl Store {
                     ordinal + index as i64,
                     path.to_str()
                         .ok_or_else(|| invalid("source path must be UTF-8"))?,
-                    track
+                    track,
+                    next_id
                 ])?;
             }
         }
@@ -856,6 +869,11 @@ impl Store {
         Ok(PlaylistChange { revision, playlist })
     }
 
+    /// The stamp `enqueue_playlist` writes on every entry it adds.
+    pub fn playlist_source(&self, id: u64) -> Result<QueueSource> {
+        Ok(playlist_stamp(&header(&self.connection, id, None)?))
+    }
+
     /// A narrow source snapshot, never metadata hydration or a UI-sized page.
     pub fn playlist_sources(
         &mut self,
@@ -943,8 +961,11 @@ impl Store {
             let (sql, values) = source_query(&playlist)?;
             let mut query = transaction.prepare(&sql)?;
             let mut rows = query.query(params_from_iter(values.iter()))?;
-            let mut insert = transaction
-                .prepare("INSERT INTO queue(id,ordinal,path,track_id) VALUES(?1,?2,?3,?4)")?;
+            let stamp = playlist_stamp(&playlist);
+            let mut insert = transaction.prepare(
+                "INSERT INTO queue(id,ordinal,path,track_id,source_kind,source_name,run_id)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            )?;
             for (index, (id, track_id, path)) in entries.enumerate() {
                 let row = rows
                     .next()?
@@ -964,7 +985,10 @@ impl Store {
                     ordinal + index as i64 + 1,
                     path.to_str()
                         .ok_or_else(|| invalid("source path must be UTF-8"))?,
-                    track_id
+                    track_id,
+                    stamp.kind.as_str(),
+                    &stamp.name,
+                    next_id
                 ])?;
             }
             if rows.next()?.is_some() {

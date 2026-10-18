@@ -4,7 +4,9 @@ use crate::{
     BLOCK_FRAMES, Frame, SAMPLE_RATE,
     decoder::{Decoder, GainMode},
     output::{Output, OutputConfig, OutputSnapshot, TrackToken},
+    play_order::{RepeatScope, RunInfo},
     protocol::NowPlaying,
+    store::LoadedEntry,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -21,6 +23,9 @@ struct Entry {
     token: Arc<TrackToken>,
     prefilled_frames: usize,
     metadata: Option<Arc<NowPlaying>>,
+    /// Read by Repeat All to find the run an entry repeats within.
+    #[allow(dead_code)]
+    run: Option<RunInfo>,
 }
 
 /// A validated decoder replacement. Commit on the same player without an
@@ -129,6 +134,7 @@ impl Player {
                     token: TrackToken::new(id),
                     prefilled_frames: 0,
                     metadata: None,
+                    run: None,
                 }
             })
             .collect();
@@ -143,20 +149,40 @@ impl Player {
         output: OutputConfig,
         mode: GainMode,
     ) -> Result<Self> {
+        let entries = entries
+            .into_iter()
+            .map(|(id, path)| LoadedEntry {
+                id,
+                path,
+                run: None,
+                played_seq: None,
+            })
+            .collect();
+        Self::from_loaded(entries, revision, next_id, output, mode)
+    }
+
+    pub(crate) fn from_loaded(
+        entries: Vec<LoadedEntry>,
+        revision: u64,
+        next_id: u64,
+        output: OutputConfig,
+        mode: GainMode,
+    ) -> Result<Self> {
         ensure!(next_id != 0, "next queue ID must be nonzero");
         let mut ids = HashSet::with_capacity(entries.len());
-        for (id, _) in &entries {
+        for LoadedEntry { id, .. } in &entries {
             ensure!(*id != 0 && *id < next_id, "invalid restored queue ID {id}");
             ensure!(ids.insert(*id), "duplicate restored queue ID {id}");
         }
         let queue = entries
             .into_iter()
-            .map(|(id, path)| Entry {
-                id,
-                path,
-                token: TrackToken::new(id),
+            .map(|entry| Entry {
+                id: entry.id,
+                path: entry.path,
+                token: TrackToken::new(entry.id),
                 prefilled_frames: 0,
                 metadata: None,
+                run: entry.run,
             })
             .collect();
         Self::open(queue, revision, next_id, output, mode)
@@ -267,7 +293,7 @@ impl Player {
             let mut decoder = Decoder::open(&entry.path, self.mode).with_context(|| {
                 format!("opening queue entry {}: {}", entry.id, entry.path.display())
             })?;
-            entry.metadata = Some(Self::source_metadata(&mut decoder, entry.id));
+            entry.metadata = Some(Self::source_metadata(&mut decoder, entry.id, self.mode));
             self.gains.push(decoder.gain_db());
             self.decoder = Some(decoder);
             self.decoded_position = 0;
@@ -427,6 +453,10 @@ impl Player {
             token: TrackToken::new(id),
             prefilled_frames: 0,
             metadata: None,
+            run: Some(RunInfo {
+                run_id: id,
+                scope: RepeatScope::Queue,
+            }),
         });
         self.next_id = next_id;
         self.revision = revision;
@@ -442,6 +472,7 @@ impl Player {
         paths: impl ExactSizeIterator<Item = PathBuf>,
         expected_revision: u64,
         play: bool,
+        scope: RepeatScope,
     ) -> Result<PreparedAppend> {
         self.check_revision(expected_revision)?;
         ensure!(paths.len() > 0, "cannot append an empty playlist");
@@ -466,6 +497,10 @@ impl Player {
                 token: TrackToken::new(id),
                 prefilled_frames: 0,
                 metadata: None,
+                run: Some(RunInfo {
+                    run_id: self.next_id,
+                    scope,
+                }),
             });
         }
         let (selection, replacement_tokens) = if play {
@@ -473,7 +508,7 @@ impl Player {
             let mut decoder = Decoder::open(&first.path, self.mode).with_context(|| {
                 format!("opening queue entry {}: {}", first.id, first.path.display())
             })?;
-            let metadata = Self::source_metadata(&mut decoder, first.id);
+            let metadata = Self::source_metadata(&mut decoder, first.id, self.mode);
             let mut tokens = Vec::new();
             tokens.try_reserve_exact(self.queue.len())?;
             tokens.extend(self.queue.iter().map(|entry| TrackToken::new(entry.id)));
@@ -692,7 +727,7 @@ impl Player {
                 .context("destination entry not found")?,
             None => self.queue.len(),
         };
-        let append = self.prepare_append(paths, expected_revision, false)?;
+        let append = self.prepare_append(paths, expected_revision, false, RepeatScope::Queue)?;
         let tokens = self
             .queue
             .iter()
@@ -771,7 +806,7 @@ impl Player {
         self.output.mark_end(false);
     }
 
-    fn source_metadata(decoder: &mut Decoder, entry_id: u64) -> Arc<NowPlaying> {
+    fn source_metadata(decoder: &mut Decoder, entry_id: u64, mode: GainMode) -> Arc<NowPlaying> {
         let metadata = decoder.take_metadata();
         Arc::new(NowPlaying {
             entry_id,
@@ -780,6 +815,10 @@ impl Player {
             album: metadata.album,
             duration_frames: decoder.duration_frames(),
             metadata_error: metadata.metadata_error,
+            track_id: None,
+            album_id: None,
+            format: String::new(),
+            gain_db: (mode != GainMode::Off).then(|| decoder.gain_db()),
         })
     }
 
@@ -805,7 +844,7 @@ impl Player {
             }
             decoder.seek(frame)?;
         }
-        let metadata = Self::source_metadata(&mut decoder, entry_id);
+        let metadata = Self::source_metadata(&mut decoder, entry_id, mode);
         Ok(PreparedSelection {
             revision: self.revision,
             index,

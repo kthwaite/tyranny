@@ -1,10 +1,13 @@
 //! v9 list queries through a real authenticated client and native indexing.
 use super::{
-    saved_playlists::{add, create, index, ok},
+    saved_playlists::{add, create, index, ok, queue},
     *,
 };
 use serde_json::{Value, json};
-use tyranny::listing::Grouping;
+use tyranny::{
+    listing::Grouping,
+    protocol::{QueueSource, SourceKind},
+};
 
 fn list(source: Value) -> Value {
     json!({"source":source,"query":"","sort":[{"field":"title","descending":true}],"group":"none"})
@@ -209,5 +212,224 @@ async fn list_tracks_round_trips_over_the_socket_and_rejects_stale_revision() {
             ErrorCode::InvalidCommand,
         )
         .await;
+    running.stop().await;
+}
+
+fn stamp(kind: SourceKind, name: &str) -> Option<QueueSource> {
+    Some(QueueSource {
+        kind,
+        name: name.to_owned(),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enqueue_playlist_stamps_source_and_one_run_id() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (_, tracks) = index(&scratch, &mut client, &["Alpha", "Beta", "Gamma", "Delta"]).await;
+    let library = tracks.revision;
+    let id = |title: &str| {
+        tracks
+            .entries
+            .iter()
+            .find(|track| track.metadata.title == title)
+            .unwrap()
+            .id
+    };
+    let mix = create(&mut client, "Mix").await;
+    let mix = add(&mut client, &mix, library, vec![id("Beta"), id("Alpha")]).await;
+    let expected = client.state.queue_revision;
+    ok(
+        &mut client,
+        json!({"command":"enqueue_playlist","playlist_id":mix.id,"playlist_revision":mix.revision,
+            "library_revision":library,"expected_revision":expected,"play":false}),
+    )
+    .await;
+    let items = queue(&mut client).await;
+    assert_eq!(items.len(), 2);
+    let first = items[0].id;
+    for (item, title) in items.iter().zip(["Beta", "Alpha"]) {
+        assert_eq!(item.source, stamp(SourceKind::Playlist, "Mix"));
+        assert_eq!((item.run_id, item.played), (Some(first), false));
+        assert_eq!(
+            (item.title.as_str(), item.artist.as_str()),
+            (title, "Fixture Artist")
+        );
+        assert_eq!(item.album, "Fixture Album");
+        assert_eq!(item.track_id, Some(id(title)));
+        assert!(item.album_id.is_some());
+        assert_eq!(item.duration_ms, Some(5000));
+    }
+
+    let catalog = client.state.playlists_revision;
+    let smart = ok(
+        &mut client,
+        json!({"command":"create_smart_playlist","expected_revision":catalog,
+            "name":"Live","query":"title:Gamma"}),
+    )
+    .await;
+    let Response::PlaylistApplied {
+        playlist: Some(smart),
+        ..
+    } = smart
+    else {
+        panic!("expected smart playlist");
+    };
+    let expected = client.state.queue_revision;
+    ok(
+        &mut client,
+        json!({"command":"enqueue_playlist","playlist_id":smart.id,"playlist_revision":smart.revision,
+            "library_revision":library,"expected_revision":expected,"play":false}),
+    )
+    .await;
+    let items = queue(&mut client).await;
+    assert_eq!(items.len(), 3);
+    let smart_id = items[2].id;
+    assert_eq!(items[2].source, stamp(SourceKind::Smart, "Live"));
+    assert_eq!(items[2].run_id, Some(smart_id));
+    assert_eq!(items[0].run_id, Some(first));
+
+    let expected = client.state.queue_revision;
+    ok(
+        &mut client,
+        json!({"command":"append_track","expected_revision":expected,
+            "library_revision":library,"track_id":id("Delta")}),
+    )
+    .await;
+    let path = scratch.path("direct.wav");
+    tagged_wav(&path, 480, b"Direct");
+    client.append(&path).await;
+    let expected = client.state.queue_revision;
+    ok(
+        &mut client,
+        json!({"command":"insert_tracks","expected_revision":expected,
+            "library_revision":library,"track_ids":[id("Alpha"), id("Beta")],"before":null}),
+    )
+    .await;
+    let items = queue(&mut client).await;
+    assert_eq!(items.len(), 7);
+    let summary = |index: usize| {
+        (
+            items[index].source.clone(),
+            items[index].run_id == Some(items[index].id),
+        )
+    };
+    assert_eq!(summary(3), (stamp(SourceKind::Drag, ""), true));
+    assert_eq!(summary(4), (stamp(SourceKind::Direct, ""), true));
+    let inserted = items[5].id;
+    for index in [5, 6] {
+        assert_eq!(items[index].source, stamp(SourceKind::Drag, ""));
+        assert_eq!(items[index].run_id, Some(inserted));
+    }
+    assert_eq!(items[4].title, "direct");
+    assert_eq!(items[4].track_id, None);
+    running.stop().await;
+
+    // Source, run and title survive a restart.
+    let running = Running::start(&scratch).await;
+    let mut restored = PlaybackClient::connect(&running).await;
+    assert_eq!(queue(&mut restored).await, items);
+    running.stop().await;
+}
+
+/// `tagged_wav` plus an ID3 chunk carrying an album ReplayGain tag.
+fn album_gain_wav(path: &Path, title: &[u8], gain: &str) {
+    tagged_wav(path, 240_000, title);
+    let mut frame = Vec::new();
+    let mut body = vec![0];
+    body.extend_from_slice(b"REPLAYGAIN_ALBUM_GAIN\0");
+    body.extend_from_slice(gain.as_bytes());
+    frame.extend_from_slice(b"TXXX");
+    frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(&body);
+    let mut tag = b"ID3\x03\x00\x00".to_vec();
+    let size = frame.len() as u32;
+    tag.extend_from_slice(&[
+        (size >> 21) as u8 & 0x7f,
+        (size >> 14) as u8 & 0x7f,
+        (size >> 7) as u8 & 0x7f,
+        size as u8 & 0x7f,
+    ]);
+    tag.extend_from_slice(&frame);
+    if tag.len() % 2 == 1 {
+        tag.push(0);
+    }
+    let mut file = fs::read(path).unwrap();
+    file.extend_from_slice(b"id3 ");
+    file.extend_from_slice(&(tag.len() as u32).to_le_bytes());
+    file.extend_from_slice(&tag);
+    let riff = (file.len() - 8) as u32;
+    file[4..8].copy_from_slice(&riff.to_le_bytes());
+    fs::write(path, file).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn now_playing_reports_format_and_applied_gain() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let music = scratch.path("music");
+    fs::create_dir(&music).unwrap();
+    album_gain_wav(&music.join("Gained.wav"), b"Gained", "-6.00 dB");
+    let root = ok(&mut client, json!({"command":"add_root","path":music})).await;
+    assert!(matches!(root, Response::RootAdded { .. }));
+    client
+        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .await;
+    let Response::LibraryTracks { page } = ok(
+        &mut client,
+        json!({"command":"library_tracks","revision":null,"offset":0,"limit":10,"query":"","album_id":null}),
+    )
+    .await
+    else {
+        panic!("expected tracks");
+    };
+    assert_eq!(page.entries[0].metadata.album_gain_db, Some(-6.0));
+    let track = &page.entries[0];
+    let play = |client: &PlaybackClient| {
+        json!({"command":"append_track","expected_revision":client.state.queue_revision,
+            "library_revision":page.revision,"track_id":track.id})
+    };
+
+    // Gain mode off: the format is known, no gain was applied.
+    let command = play(&client);
+    ok(&mut client, command).await;
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    client.until(|state| state.now_playing.is_some()).await;
+    let now = client.state.now_playing.clone().unwrap();
+    assert_eq!(now.track_id, Some(track.id));
+    assert_eq!(now.album_id, Some(track.album_id));
+    assert_eq!(now.format, "WAV 16/48");
+    assert_eq!(now.gain_db, None);
+
+    ok(&mut client, json!({"command":"set_gain","mode":"album"})).await;
+    client
+        .until(|state| {
+            state
+                .now_playing
+                .as_ref()
+                .is_some_and(|now| now.gain_db.is_some())
+        })
+        .await;
+    let now = client.state.now_playing.clone().unwrap();
+    assert!((now.gain_db.unwrap() + 6.0).abs() < 1e-9);
+    assert_eq!(
+        (now.format.as_str(), now.track_id),
+        ("WAV 16/48", Some(track.id))
+    );
+
+    // A path-appended entry has no indexed track.
+    let loose = scratch.path("loose.wav");
+    tagged_wav(&loose, 480, b"Loose");
+    client.append(&loose).await;
+    ok(&mut client, json!({"command":"play","entry_id":2})).await;
+    client.until(|state| state.current_id == Some(2)).await;
+    let now = client.state.now_playing.clone().unwrap();
+    assert_eq!(
+        (now.track_id, now.album_id, now.format.as_str()),
+        (None, None, "")
+    );
     running.stop().await;
 }
