@@ -1835,12 +1835,13 @@ impl Actor {
                 }
                 let recorded = write && self.write_plays();
                 // Natural advance: each pass output starts marks its entry played.
+                // The mark is bookkeeping: a failed one leaves the player and
+                // the store as they were, and playback goes on.
                 for (id, fresh) in self.player.take_advances() {
                     if let Err(error) = self.advance(id, &fresh) {
-                        self.player.pause();
-                        self.fault = Some(format!(
-                            "recording a played entry failed; playback paused: {error:#}"
-                        ));
+                        eprintln!(
+                            "tyranny: recording entry {id} as played failed; still playing: {error:#}"
+                        );
                     }
                 }
                 self.player.clear_diagnostics();

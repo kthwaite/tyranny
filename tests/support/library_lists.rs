@@ -1452,6 +1452,46 @@ async fn a_failed_history_write_keeps_playing_and_is_retried() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_played_mark_on_natural_advance_keeps_playing() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (library, tracks) = index_frames(&scratch, &mut client, &["Alpha", "Beta"], 24_000).await;
+    let command = play_ids(&client, library, &tracks);
+    let first = applied_entry(ok(&mut client, command).await);
+    // Every played mark fails from here on.
+    let database = rusqlite::Connection::open(scratch.path("state").join("state.sqlite3")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER injected BEFORE UPDATE OF played_seq ON queue
+             BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+        )
+        .unwrap();
+    client
+        .until(|state| state.current_id == Some(first + 1))
+        .await;
+    // The advance is not recorded, but playback goes on to the queue's end.
+    client
+        .until(|state| matches!(state.transport, Transport::Ended | Transport::Error))
+        .await;
+    assert_eq!(
+        client.state.transport,
+        Transport::Ended,
+        "{:?}",
+        client.state
+    );
+    assert_eq!(client.state.error, None);
+    let played: Vec<(u64, bool)> = whole_queue(&mut client)
+        .await
+        .iter()
+        .map(|item| (item.id, item.played))
+        .collect();
+    assert_eq!(played, [(first, true), (first + 1, false)]);
+    database.execute_batch("DROP TRIGGER injected;").unwrap();
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pass_restored_past_its_threshold_does_not_count_again() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
