@@ -106,7 +106,7 @@ final class WireClient {
                 helloDeadline = Task { @MainActor [weak self] in
                     do { try await Task.sleep(for: .seconds(10)) } catch { return }
                     self?.endConnection(
-                        ServerFailure(code: "hello_timeout", message: "The server did not send a protocol v8 hello within 10 seconds."),
+                        ServerFailure(code: "hello_timeout", message: "The server did not send a protocol v9 hello within 10 seconds."),
                         generation: connectionID
                     )
                 }
@@ -233,7 +233,7 @@ final class WireClient {
             }
             data = Data(text.utf8)
         case .data:
-            throw protocolFailure("The server sent a binary message; protocol v8 requires JSON text.")
+            throw protocolFailure("The server sent a binary message; protocol v9 requires JSON text.")
         @unknown default:
             throw protocolFailure("The server sent an unsupported WebSocket message.")
         }
@@ -241,15 +241,15 @@ final class WireClient {
         do {
             incoming = try decoder.decode(IncomingMessage.self, from: data)
         } catch {
-            throw protocolFailure("The server sent malformed or incompatible protocol v8 JSON. Upgrade the client and server together.")
+            throw protocolFailure("The server sent malformed or incompatible protocol v9 JSON. Upgrade the client and server together.")
         }
 
         if case .hello(let version, let instance, let snapshot) = incoming {
             guard !ready, let waiter = helloWaiter else {
                 throw protocolFailure("The server sent more than one hello.")
             }
-            guard version == 8 else {
-                throw protocolFailure("The server protocol is incompatible; this client requires version 8.")
+            guard version == 9 else {
+                throw protocolFailure("The server protocol is incompatible; this client requires version 9.")
             }
             guard !instance.isEmpty else {
                 throw protocolFailure("The server hello did not identify its instance.")
@@ -269,7 +269,7 @@ final class WireClient {
             return
         }
         guard ready else {
-            throw protocolFailure("The server sent a message before its protocol v8 hello.")
+            throw protocolFailure("The server sent a message before its protocol v9 hello.")
         }
         switch incoming {
         case .hello:
@@ -487,7 +487,7 @@ private struct ResultHeader: Decodable {
         case "queue_page", "root_added", "scan_accepted", "library_roots", "library_artists", "library_albums", "library_tracks", "saved_playlists", "playlist_entries", "artwork":
             snapshot = nil
         default:
-            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown protocol v8 result kind")
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown protocol v9 result kind")
         }
     }
 }
@@ -528,7 +528,7 @@ private enum IncomingMessage: Decodable {
                 throw DecodingError.dataCorruptedError(forKey: .status, in: container, debugDescription: "Unknown reply status")
             }
         default:
-            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown protocol v8 message type")
+            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown protocol v9 message type")
         }
     }
 }

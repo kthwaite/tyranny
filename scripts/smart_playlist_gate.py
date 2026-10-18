@@ -60,7 +60,7 @@ def main():
         report['cases'].append({'name': name, 'passed': True})
         print('Passed ' + name, flush=True)
 
-    def start(binary, version=8):
+    def start(binary, version=9):
         nonlocal process, client, ready
         index = len(report['launches'])
         command = [str(Path(binary).resolve()), '--state-dir', str(run / 'state'),
@@ -138,7 +138,7 @@ def main():
         assert payload['passed'], payload.get('error')
 
     try:
-        start(args.legacy_server or args.server, 6 if args.legacy_server else 8)
+        start(args.legacy_server or args.server, 6 if args.legacy_server else 9)
         root = client.request('add_root', path=str(music))['root']
         client.wait(lambda s: s['library']['scan']['phase'] == 'complete' and s['library']['tracks'] == 508, seconds=30)
         first = client.request('library_tracks', revision=None, offset=0, limit=500, query='', album_id=None)

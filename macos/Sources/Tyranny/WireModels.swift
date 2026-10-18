@@ -3,6 +3,9 @@ import Foundation
 struct PlayerSettings: Codable, Sendable, Equatable {
     let gain_mode: String
     let resume_on_start: Bool
+    let volume: UInt8
+    let `repeat`: String
+    let shuffle: Bool
 }
 
 struct NowPlaying: Codable, Sendable, Equatable {
@@ -12,6 +15,10 @@ struct NowPlaying: Codable, Sendable, Equatable {
     let album: String
     let duration_frames: UInt64?
     let metadata_error: String?
+    let track_id: UInt64?
+    let album_id: UInt64?
+    let format: String
+    let gain_db: Double?
 }
 
 struct ControlState: Codable, Sendable, Equatable {
@@ -30,11 +37,13 @@ struct ControlState: Codable, Sendable, Equatable {
     let error: String?
     let underruns: UInt64
     let library: LibraryState
+    let history_revision: UInt64
 
     private enum CodingKeys: String, CodingKey {
         case sequence, queue_revision, queue_length, current_id, can_next, can_previous, now_playing
         case playlists_revision
         case position_frames, sample_rate, transport, settings, error, underruns, library
+        case history_revision
     }
 
     init(from decoder: any Decoder) throws {
@@ -54,6 +63,7 @@ struct ControlState: Codable, Sendable, Equatable {
         error = try values.decode(String?.self, forKey: .error)
         underruns = try values.decode(UInt64.self, forKey: .underruns)
         library = try values.decode(LibraryState.self, forKey: .library)
+        history_revision = try values.decode(UInt64.self, forKey: .history_revision)
         guard now_playing?.entry_id == current_id else {
             throw DecodingError.dataCorruptedError(
                 forKey: .now_playing, in: values,
@@ -66,6 +76,8 @@ struct LibraryState: Codable, Sendable, Equatable {
     let revision: UInt64
     let roots: Int
     let tracks: Int
+    let duration_ms: UInt64
+    let size_bytes: UInt64
     let scan: ScanStatus
 }
 
@@ -133,6 +145,19 @@ struct QueueItem: Codable, Sendable, Equatable, Identifiable {
     let id: UInt64
     let path: String
     let track_id: UInt64?
+    let source: QueueSource?
+    let run_id: UInt64?
+    let played: Bool
+    let title: String
+    let artist: String
+    let album: String
+    let album_id: UInt64?
+    let duration_ms: UInt64?
+}
+
+struct QueueSource: Codable, Sendable, Equatable {
+    let kind: String
+    let name: String
 }
 
 struct Page<T: Codable & Sendable & Equatable>: Codable, Sendable, Equatable {

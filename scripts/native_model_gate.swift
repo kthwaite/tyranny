@@ -77,7 +77,7 @@ struct NativeModelGate {
                     throw Failure(message: "Protocol v5 accepted missing \(required)")
                 } catch is DecodingError { }
             }
-            cases.append("protocol-v8-requires-authoritative-metadata-capabilities-and-playlists-revision")
+            cases.append("protocol-v9-requires-authoritative-metadata-capabilities-and-playlists-revision")
             model.pause()
             try await wait("idempotent pause") { !model.busy && model.snapshot?.transport == "paused" }
             model.seek(seconds: .nan, entryID: firstEntry)
