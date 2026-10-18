@@ -1,6 +1,6 @@
 //! v9 list queries through a real authenticated client and native indexing.
 use super::{
-    saved_playlists::{add, create, index, ok, queue},
+    saved_playlists::{add, create, index, ok, queue, rescan},
     *,
 };
 use serde_json::{Value, json};
@@ -872,11 +872,13 @@ async fn shuffle_upcoming_permutes_only_entries_after_current() {
     let mut names = vec!["History", "Current"];
     names.extend(upcoming.iter().map(String::as_str));
     append_long(&scratch, &mut client, &names).await;
-    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    // Play, Previous and Next each make an entry current, and so played.
+    ok(&mut client, json!({"command":"play","entry_id":2})).await;
+    ok(&mut client, json!({"command":"previous"})).await;
+    assert_eq!(client.state.current_id, Some(1));
     ok(&mut client, json!({"command":"next"})).await;
     assert_eq!(client.state.current_id, Some(2));
     let before = whole_queue(&mut client).await;
-    // Entries become played when they become current.
     assert_eq!(
         ids_and_played(&before[..3]),
         [(1, true), (2, true), (3, false)]
@@ -920,16 +922,16 @@ async fn save_upcoming_creates_regular_playlist() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
     let mut client = PlaybackClient::connect(&running).await;
-    let (_, tracks) = index(&scratch, &mut client, &["Alpha", "Beta", "Gamma"]).await;
+    let (root, tracks) = index(&scratch, &mut client, &["Alpha", "Beta", "Gamma"]).await;
     let library = tracks.revision;
-    let id = |title: &str| {
+    let track = |title: &str| {
         tracks
             .entries
             .iter()
             .find(|track| track.metadata.title == title)
             .unwrap()
-            .id
     };
+    let id = |title: &str| track(title).id;
     let append_track = |client: &PlaybackClient, track: u64| {
         json!({"command":"append_track","expected_revision":client.state.queue_revision,
             "library_revision":library,"track_id":track})
@@ -981,6 +983,34 @@ async fn save_upcoming_creates_regular_playlist() {
     // Playlist names stay unique, ignoring case.
     let command = save(&client, "up next");
     client.reject(command, ErrorCode::InvalidCommand).await;
+
+    // An unavailable track is skipped and does not block the save.
+    fs::remove_file(&track("Beta").path).unwrap();
+    rescan(&mut client, root).await;
+    let command = save(&client, "Partial");
+    let Response::PlaylistApplied {
+        playlist: Some(partial),
+        ..
+    } = ok(&mut client, command).await
+    else {
+        panic!("expected a saved playlist");
+    };
+    assert_eq!(partial.entry_count, Some(1));
+    assert_eq!(
+        playlist_rows(&mut client, partial.id)
+            .await
+            .iter()
+            .map(|(_, track)| *track)
+            .collect::<Vec<_>>(),
+        [id("Alpha")]
+    );
+    // With no available track left there is nothing to save.
+    fs::remove_file(&track("Alpha").path).unwrap();
+    rescan(&mut client, root).await;
+    let catalog = client.state.playlists_revision;
+    let command = save(&client, "Nothing");
+    client.reject(command, ErrorCode::InvalidCommand).await;
+    assert_eq!(client.state.playlists_revision, catalog);
 
     // Clear Upcoming keeps the current entry playing.
     let expected = client.state.queue_revision;
@@ -1038,5 +1068,45 @@ async fn played_prefix_is_trimmed_to_100() {
     let mut expected: Vec<(u64, bool)> = (6..=106).map(|id| (id, true)).collect();
     expected.push((107, false));
     assert_eq!(ids_and_played(&items), expected);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn play_on_an_early_entry_trims_played_entries_after_it() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    // An unplayed entry of 0.5 s, then 101 entries of 0.025 s, then a long one.
+    let early = scratch.path("early.wav");
+    tagged_wav(&early, 24_000, b"Early");
+    client.append(&early).await;
+    for index in 0..101 {
+        let path = scratch.path(&format!("{index:03}.wav"));
+        tagged_wav(&path, 1_200, format!("Short {index:03}").as_bytes());
+        client.append(&path).await;
+    }
+    append_long(&scratch, &mut client, &["Tail"]).await;
+    ok(&mut client, json!({"command":"play","entry_id":2})).await;
+    client
+        .until(|state| state.current_id.is_some_and(|id| id >= 50))
+        .await;
+    // Entry 2 is trimmed when the tail (103) becomes current.
+    client
+        .until(|state| state.current_id == Some(103) && state.queue_length == 102)
+        .await;
+
+    // Playing the early entry trims entry 3, which is after it in the queue.
+    let revision = client.state.queue_revision;
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    assert_eq!(client.state.current_id, Some(1));
+    assert_eq!(client.state.queue_revision, revision + 1);
+    let items = whole_queue(&mut client).await;
+    let mut expected = vec![(1, true)];
+    expected.extend((4..=103).map(|id| (id, true)));
+    assert_eq!(ids_and_played(&items), expected);
+    // Playback continues through the kept entries after the early one to the
+    // tail. Each is played again; none is trimmed, as 100 others stay played.
+    client.until(|state| state.current_id == Some(103)).await;
+    assert_eq!(client.state.queue_length, 101);
     running.stop().await;
 }

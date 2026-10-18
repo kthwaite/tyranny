@@ -4,7 +4,7 @@ use crate::{
     BLOCK_FRAMES, Frame, SAMPLE_RATE,
     decoder::{Decoder, GainMode},
     output::{Output, OutputConfig, OutputSnapshot, TrackToken},
-    play_order::{RepeatScope, RunInfo},
+    play_order::{RepeatScope, RunInfo, ShuffleStrategy},
     protocol::{NowPlaying, Placement},
     store::LoadedEntry,
 };
@@ -68,6 +68,21 @@ pub(crate) struct PreparedMove {
     revision: u64,
     destinations: Vec<usize>,
     tokens: Vec<Arc<TrackToken>>,
+}
+
+/// A reorder of the upcoming entries, relative to the entry current at preparation.
+pub(crate) struct PreparedReorder {
+    change: PreparedMove,
+    /// The entry current at preparation. It keeps its PCM, even if output moves
+    /// on into a reordered entry before the commit.
+    anchor: Option<u64>,
+    order: Vec<u64>,
+}
+impl PreparedReorder {
+    /// The reordered entries in their new order.
+    pub fn order(&self) -> &[u64] {
+        &self.order
+    }
 }
 
 pub(crate) struct PreparedInsert {
@@ -753,9 +768,15 @@ impl Player {
         }))
     }
 
-    pub(crate) fn commit_move(&mut self, mut prepared: PreparedMove) {
-        assert_eq!(self.revision + 1, prepared.revision);
+    pub(crate) fn commit_move(&mut self, prepared: PreparedMove) {
         let current = self.snapshot().current_id;
+        self.apply_move(prepared, current);
+    }
+
+    /// Permutes the queue. `current` keeps its PCM; every other entry gets a
+    /// fresh token, and decoding resumes after `current`.
+    fn apply_move(&mut self, mut prepared: PreparedMove, current: Option<u64>) {
+        assert_eq!(self.revision + 1, prepared.revision);
         let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
         self.replace_future_tokens(current, prepared.tokens);
         for index in 0..prepared.destinations.len() {
@@ -1028,6 +1049,10 @@ impl Player {
             !ids.is_empty() && selected.len() == ids.len(),
             "removed occurrences must be distinct and non-empty"
         );
+        ensure!(
+            anchor.is_none_or(|anchor| !selected.contains(&anchor)),
+            "a batch removal cannot remove its anchor"
+        );
         let mut removed = Vec::new();
         removed.try_reserve_exact(self.queue.len())?;
         removed.extend(self.queue.iter().map(|entry| selected.contains(&entry.id)));
@@ -1121,14 +1146,37 @@ impl Player {
         }
     }
 
+    /// Prepares a uniform permutation of the upcoming entries (see `upcoming`),
+    /// drawn by Fisher–Yates with `strategy`. `None` when the order does not change.
+    pub(crate) fn prepare_shuffle_upcoming(
+        &self,
+        strategy: &mut dyn ShuffleStrategy,
+        expected_revision: u64,
+    ) -> Result<Option<PreparedReorder>> {
+        self.check_revision(expected_revision)?;
+        let (anchor, _, upcoming) = self.upcoming()?;
+        let mut order: Vec<u64> = self
+            .queue
+            .iter()
+            .zip(&upcoming)
+            .filter(|(_, next)| **next)
+            .map(|(entry, _)| entry.id)
+            .collect();
+        // Each place from the end takes a uniform pick of those left.
+        for end in (1..order.len()).rev() {
+            let pick = strategy.choose(&order[..=end]);
+            order.swap(pick, end);
+        }
+        Ok(self.prepare_reorder(&order)?.map(|change| PreparedReorder {
+            change,
+            anchor,
+            order,
+        }))
+    }
+
     /// Prepares putting the entries `ids` names in that order, in the queue
     /// positions they already occupy. `None` when the order does not change.
-    pub(crate) fn prepare_reorder(
-        &self,
-        ids: &[u64],
-        expected_revision: u64,
-    ) -> Result<Option<PreparedMove>> {
-        self.check_revision(expected_revision)?;
+    fn prepare_reorder(&self, ids: &[u64]) -> Result<Option<PreparedMove>> {
         let rank: HashMap<u64, usize> = ids
             .iter()
             .enumerate()
@@ -1172,6 +1220,13 @@ impl Player {
             destinations,
             tokens,
         }))
+    }
+
+    /// Infallible after preparation with no intervening queue mutation.
+    /// The prepare-time anchor keeps its PCM. An entry output reached in the
+    /// meantime is cut off, and playback resumes after the anchor.
+    pub(crate) fn commit_reorder(&mut self, prepared: PreparedReorder) {
+        self.apply_move(prepared.change, prepared.anchor);
     }
 
     /// Records that entry `id` became current, as the store's `played_seq` does.
@@ -1650,6 +1705,7 @@ mod batch_tests {
         // Trimming a played entry before the current one leaves its PCM alone.
         assert!(player.prepare_remove_batch(&[1, 1], Some(2), 2).is_err());
         assert!(player.prepare_remove_batch(&[9], Some(2), 2).is_err());
+        assert!(player.prepare_remove_batch(&[1, 2], Some(2), 2).is_err());
         let prepared = player.prepare_remove_batch(&[1], Some(2), 2)?;
         player.commit_remove_batch(prepared);
         assert_eq!(player.queue_ids(), [2]);
@@ -1678,6 +1734,157 @@ mod batch_tests {
         assert_eq!(prepared.removed(), [1, 3]);
         player.commit_remove_batch(prepared);
         assert_eq!(player.queue_ids(), [2]);
+        Ok(())
+    }
+    #[test]
+    fn played_run_with_trim_goes_straight_after_the_current_entry() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let played = source(&scratch.0, "played.wav", 97, 500);
+        let current = source(&scratch.0, "current.wav", 48_000, 1000);
+        let second = source(&scratch.0, "second.wav", 311, 2000);
+        let third = source(&scratch.0, "third.wav", 137, 3000);
+        let run = source(&scratch.0, "run.wav", 223, 5000);
+        let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
+            id,
+            path: path.clone(),
+            run: None,
+            played_seq: played.then_some(id),
+        };
+        let capture = scratch.0.join("capture.f32");
+        // Entry 2 is current and paused; entry 1 is played and is trimmed.
+        let mut player = Player::from_loaded(
+            vec![
+                loaded(1, &played, true),
+                loaded(2, &current, true),
+                loaded(3, &second, false),
+                loaded(4, &third, false),
+            ],
+            1,
+            5,
+            OutputConfig::Capture {
+                path: capture.clone(),
+                clocked: true,
+            },
+            GainMode::Off,
+        )?;
+        let selection = player.prepare_selection(2, 0, GainMode::Off)?;
+        player.commit_selection(selection);
+        assert!(
+            player
+                .prepare_replace_upcoming(
+                    vec![run.clone()].into_iter(),
+                    Placement::Next,
+                    1,
+                    true,
+                    RepeatScope::Queue,
+                    &[9],
+                )
+                .is_err()
+        );
+        let prepared = player.prepare_replace_upcoming(
+            vec![run].into_iter(),
+            Placement::Next,
+            1,
+            true,
+            RepeatScope::Queue,
+            &[1],
+        )?;
+        assert_eq!(prepared.removed(), [1]);
+        // Straight after the current entry, counted among the kept entries.
+        assert_eq!(prepared.before(), Some(3));
+        player.commit_replace_upcoming(prepared);
+        assert_eq!(player.queue_ids(), [2, 5, 3, 4]);
+        assert_eq!(player.snapshot().current_id, Some(5));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        finish(&mut player, deadline)?;
+        // The paused entry's prefetched PCM never plays; the run plays now and
+        // the old upcoming entries follow it.
+        assert_eq!(player.started_entries(), &[5, 3, 4]);
+        // The new current entry is played: with nothing current, only the
+        // entries the owner never marked count as upcoming.
+        player.stop();
+        assert_eq!(player.upcoming_ids()?, [3, 4]);
+        drop(player);
+        assert_pcm(
+            &fs::read(capture)?,
+            &[(223, 5000), (311, 2000), (137, 3000)],
+        );
+        Ok(())
+    }
+    /// Always picks the first candidate, so Fisher–Yates gives a fixed order.
+    struct First;
+    impl crate::play_order::ShuffleStrategy for First {
+        fn choose(&mut self, _candidates: &[u64]) -> usize {
+            0
+        }
+    }
+    #[test]
+    fn shuffle_upcoming_stays_anchored_when_output_reaches_a_shuffled_entry() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let runs = [
+            (4_800, 1000),
+            (48_000, 2000),
+            (137, 3000),
+            (199, 4000),
+            (223, 5000),
+        ];
+        let paths = runs
+            .iter()
+            .enumerate()
+            .map(|(index, (frames, sample))| {
+                source(&scratch.0, &format!("{index}.wav"), *frames, *sample)
+            })
+            .collect();
+        let capture = scratch.0.join("capture.f32");
+        let mut player = Player::new(
+            paths,
+            OutputConfig::Capture {
+                path: capture.clone(),
+                clocked: true,
+            },
+            GainMode::Off,
+        )?;
+        player.play();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while player.snapshot().current_id != Some(1) {
+            assert!(Instant::now() < deadline, "playback did not start");
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(player.snapshot().prepared_id, Some(2));
+        let prepared = player.prepare_shuffle_upcoming(&mut First, 1)?.unwrap();
+        let order = prepared.order().to_vec();
+        assert_eq!(order, [3, 4, 5, 2]);
+        // The store commit takes time; output moves on into a shuffled entry.
+        while player.snapshot().current_id != Some(2) {
+            assert!(Instant::now() < deadline, "output did not reach entry 2");
+            thread::sleep(Duration::from_millis(1));
+        }
+        player.commit_reorder(prepared);
+        assert_eq!(player.queue_ids(), [1, 3, 4, 5, 2]);
+        finish(&mut player, deadline)?;
+        // Entry 2 is cut off and playback resumes at the new first upcoming
+        // entry after entry 1; entry 2 then plays whole in its new place.
+        assert_eq!(player.started_entries(), &[1, 2, 3, 4, 5, 2]);
+        drop(player);
+        let pcm = fs::read(capture)?;
+        let cut = pcm.len() / 8 - 4_800 - 137 - 199 - 223 - 48_000;
+        assert!(cut > 0 && cut < 48_000, "{cut} frames of entry 2 played");
+        assert_pcm(
+            &pcm,
+            &[
+                (4_800, 1000),
+                (cut, 2000),
+                (137, 3000),
+                (199, 4000),
+                (223, 5000),
+                (48_000, 2000),
+            ],
+        );
         Ok(())
     }
     #[test]

@@ -9,7 +9,7 @@ use crate::{
     },
     listing::{recent_cutoff, unix_now},
     output::OutputConfig,
-    play_order::{ShuffleStrategy, UniformShuffle},
+    play_order::UniformShuffle,
     playback::{Player, PreparedRemove},
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
@@ -1394,22 +1394,18 @@ impl Actor {
             }
             Command::ShuffleUpcoming { expected_revision } => {
                 self.check_revision(expected_revision)?;
-                let mut ids = self.player.upcoming_ids().map_err(Failure::playback)?;
-                // Fisher-Yates: each place takes a uniform pick of those left.
-                let mut strategy = UniformShuffle::from_entropy();
-                for end in (1..ids.len()).rev() {
-                    let pick = strategy.choose(&ids[..=end]);
-                    ids.swap(pick, end);
-                }
                 let prepared = self
                     .player
-                    .prepare_reorder(&ids, expected_revision)
+                    .prepare_shuffle_upcoming(
+                        &mut UniformShuffle::from_entropy(),
+                        expected_revision,
+                    )
                     .map_err(Failure::playback)?;
                 if let Some(prepared) = prepared {
                     self.store
-                        .reorder_queue(expected_revision, &ids)
+                        .reorder_queue(expected_revision, prepared.order())
                         .map_err(Failure::playlist)?;
-                    self.player.commit_move(prepared);
+                    self.player.commit_reorder(prepared);
                 }
                 self.published(None)
             }

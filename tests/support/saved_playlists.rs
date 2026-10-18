@@ -103,7 +103,7 @@ pub(super) async fn index(
         response => panic!("expected indexed tracks: {response:?}"),
     }
 }
-async fn rescan(client: &mut PlaybackClient, root: u64) {
+pub(super) async fn rescan(client: &mut PlaybackClient, root: u64) {
     let previous = client.state.library.revision;
     ok(client, json!({"command":"rescan","root_id":root})).await;
     client

@@ -908,7 +908,8 @@ impl Store {
     }
 
     /// Creates regular playlist `name` from the queue entries `entry_ids` that
-    /// have a library track, in that order, with one catalog revision bump.
+    /// have an available library track, in that order, with one catalog
+    /// revision bump. Other entries are skipped.
     pub fn save_upcoming(
         &mut self,
         expected_queue: u64,
@@ -929,7 +930,12 @@ impl Store {
         )?;
         let mut track_ids = Vec::new();
         {
-            let mut track = transaction.prepare("SELECT track_id FROM queue WHERE id=?1")?;
+            let mut track = transaction.prepare(
+                "SELECT t.id FROM queue q LEFT JOIN library_tracks t ON t.id=q.track_id
+                 AND EXISTS(SELECT 1 FROM library_assets a JOIN library_roots r ON r.id=a.root_id
+                    WHERE a.id=t.asset_id AND a.indexed=1 AND a.last_seen_scan>=r.completed_scan)
+                 WHERE q.id=?1",
+            )?;
             for &id in entry_ids {
                 let track_id: Option<u64> = track
                     .query_row([id], |row| row.get(0))
@@ -940,7 +946,7 @@ impl Store {
         }
         if track_ids.is_empty() || track_ids.len() > MAX_RUN_ENTRIES {
             return Err(invalid(format!(
-                "saving requires 1..={MAX_RUN_ENTRIES} upcoming entries with library tracks"
+                "saving requires 1..={MAX_RUN_ENTRIES} upcoming entries with available library tracks"
             )));
         }
         let id = create_regular(&transaction, name)?;
