@@ -12,7 +12,10 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 /// A 48-frame silent stereo WAV.
 fn wav(path: &Path) {
-    let frames = 48u32;
+    wav_frames(path, 48);
+}
+/// A silent stereo WAV `frames` long.
+fn wav_frames(path: &Path, frames: u32) {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(36 + frames * 4).to_le_bytes());
@@ -361,4 +364,80 @@ async fn enqueue_playlist_resolves_off_the_owner_and_rechecks_at_commit() {
         (after.queue_revision, after.queue_length),
         (before.queue_revision, before.queue_length)
     );
+}
+
+fn applied(actor: &mut Actor, command: Command) -> Response {
+    match actor.command(command) {
+        Ok(response) => response,
+        Err(failure) => panic!("command failed: {:#}", failure.error),
+    }
+}
+/// Remove or Clear of the current entry just after output reached its
+/// threshold, before the owner's next pump saw it, still records the play.
+#[test]
+fn a_play_counted_just_before_its_entry_is_deleted_is_recorded() {
+    for clear in [false, true] {
+        let root = std::env::temp_dir().join(format!("tyranny-count-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        // Two seconds: the play counts at one.
+        let source = root.join("song.wav");
+        wav_frames(&source, 96_000);
+        let mut actor = Actor::open(OwnerConfig {
+            database_path: root.join("state.sqlite"),
+            output: OutputConfig::Capture {
+                path: root.join("capture.f32"),
+                clocked: true,
+            },
+        })
+        .unwrap();
+        let expected_revision = actor.revision();
+        applied(
+            &mut actor,
+            Command::Append {
+                expected_revision,
+                path: source.to_str().unwrap().to_owned(),
+            },
+        );
+        applied(&mut actor, Command::Play { entry_id: None });
+        // Decode past the threshold, then stop pumping: no pump sees output
+        // reach it.
+        let deadline = Instant::now() + DEADLINE;
+        while actor.player.snapshot().output.buffered_frames < 60_000 {
+            assert!(
+                Instant::now() < deadline,
+                "decoding did not fill the buffer"
+            );
+            actor.player.pump().unwrap();
+        }
+        while actor.player.snapshot().output.position_frames < 50_000 {
+            assert!(
+                Instant::now() < deadline,
+                "output did not reach the threshold"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        let entry_id = actor.player.snapshot().current_id.unwrap();
+        let expected_revision = actor.revision();
+        applied(
+            &mut actor,
+            if clear {
+                Command::Clear { expected_revision }
+            } else {
+                Command::Remove {
+                    expected_revision,
+                    entry_id,
+                }
+            },
+        );
+        actor.player.pump().unwrap();
+        for play in actor.player.take_counted_plays() {
+            actor.count_play(play);
+        }
+        assert!(actor.write_plays(), "clear {clear}: the play was dropped");
+        let page = actor.store.history_page(0, 10).unwrap();
+        assert_eq!(page.total, 1, "clear {clear}");
+        assert_eq!(page.entries[0].title, "song");
+        actor.library.shutdown().unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
 }

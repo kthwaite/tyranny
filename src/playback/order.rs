@@ -284,7 +284,7 @@ impl Player {
     /// Counts what output played since the last `hear`. Passes are about to
     /// be dropped, and a pass that reached its threshold or ended in the
     /// meantime must not be lost.
-    pub(super) fn count_heard(&mut self) {
+    pub(crate) fn count_heard(&mut self) {
         let output = self.output.snapshot();
         if let Some(latest) = self
             .passes

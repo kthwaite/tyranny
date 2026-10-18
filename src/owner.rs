@@ -556,6 +556,8 @@ struct Actor {
     history_revision: u64,
     /// Counted plays whose history write has not succeeded yet.
     pending_plays: PendingPlays,
+    /// The last history write failed: pending plays wait for the retry.
+    retrying_plays: bool,
 }
 impl Actor {
     fn open(config: OwnerConfig) -> Result<Self> {
@@ -628,6 +630,7 @@ impl Actor {
             marked: loaded.checkpoint.current_id,
             history_revision,
             pending_plays: PendingPlays::default(),
+            retrying_plays: false,
         };
         actor.publish();
         Ok(actor)
@@ -789,6 +792,8 @@ impl Actor {
         let mut marked = None;
         let renews = fresh.iter().any(|entry| *entry != entry_id);
         if !seek && (self.marked != Some(entry_id) || renews) {
+            // The trim can delete the entry that was current.
+            self.collect_plays();
             let (trimmed, removal) = self
                 .prepare_trim(entry_id, Some(entry_id))
                 .map_err(Failure::persistence)?;
@@ -903,6 +908,17 @@ impl Actor {
         }
     }
 
+    /// Describes the passes that counted since the last pump, while their
+    /// entries are still in the store. Call before a store edit that can
+    /// delete the current entry: output may have reached its threshold since
+    /// the pump, and a deleted entry has nothing to describe its play.
+    fn collect_plays(&mut self) {
+        self.player.count_heard();
+        for play in self.player.take_counted_plays() {
+            self.count_play(play);
+        }
+    }
+
     /// Writes the pending plays oldest first, one small commit each. The first
     /// failure stops this attempt; it and the later plays wait for the retry.
     /// Playback never pauses for history. Returns whether any play was written.
@@ -919,6 +935,7 @@ impl Actor {
             self.pending_plays.pop_front();
             written = true;
         }
+        self.retrying_plays = !self.pending_plays.is_empty();
         if written {
             match self.store.history_revision() {
                 Ok(revision) => self.history_revision = revision,
@@ -1470,6 +1487,7 @@ impl Actor {
                 self.check_revision(expected_revision)?;
                 self.contains(entry_id)?;
                 let revision = self.next_revision()?;
+                self.collect_plays();
                 self.store
                     .edit(
                         Edit::Remove { id: entry_id },
@@ -1503,6 +1521,7 @@ impl Actor {
             Command::Clear { expected_revision } => {
                 self.check_revision(expected_revision)?;
                 let revision = self.next_revision()?;
+                self.collect_plays();
                 self.store
                     .edit(Edit::Clear, revision, self.player.next_id())
                     .map_err(Failure::persistence)?;
@@ -1828,12 +1847,11 @@ impl Actor {
                 }
                 // Before the advances, whose trims may remove a counted entry.
                 // While earlier writes fail, new plays wait for the retry.
-                let counted = self.player.take_counted_plays();
-                let write = !counted.is_empty() && self.pending_plays.is_empty();
-                for play in counted {
+                for play in self.player.take_counted_plays() {
                     self.count_play(play);
                 }
-                let recorded = write && self.write_plays();
+                let recorded =
+                    !self.retrying_plays && !self.pending_plays.is_empty() && self.write_plays();
                 // Natural advance: each pass output starts marks its entry played.
                 // The mark is bookkeeping: a failed one leaves the player and
                 // the store as they were, and playback goes on.
