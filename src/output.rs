@@ -35,6 +35,8 @@ const TIMESTAMP_OVERFLOW: u64 = 8;
 const INVALID_DEVICE_BUFFER: u64 = 16;
 #[cfg(target_os = "macos")]
 const BACKEND_FAILURE: u64 = 32;
+/// A volume change ramps linearly over this many frames: 10 ms at 48 kHz.
+const RAMP_FRAMES: usize = SAMPLE_RATE as usize / 100;
 
 pub enum OutputConfig {
     CoreAudio,
@@ -161,8 +163,14 @@ struct BlockConsumer {
     rendered: u64,
     underruns: u64,
     starving: bool,
-    /// Amplitude the last call ended on; the next call ramps from it.
+    /// Amplitude of the last scaled frame.
     amplitude: f32,
+    /// The ramp in progress, carried across calls: from `ramp_from` to
+    /// `ramp_to` over `RAMP_FRAMES`, of which `ramp_done` have rendered.
+    /// `ramp_done == RAMP_FRAMES` holds `ramp_to`.
+    ramp_from: f32,
+    ramp_to: f32,
+    ramp_done: usize,
 }
 
 impl BlockConsumer {
@@ -172,6 +180,7 @@ impl BlockConsumer {
         recycle: Producer<Box<Block>>,
         starts: Producer<u64>,
     ) -> Self {
+        let initial = f32::from_bits(shared.volume_bits.load(Ordering::Relaxed));
         Self {
             ready,
             recycle,
@@ -186,7 +195,10 @@ impl BlockConsumer {
             starving: false,
             // The volume set before open; until PCM renders, `apply_volume`
             // adopts later changes outright.
-            amplitude: f32::from_bits(shared.volume_bits.load(Ordering::Relaxed)),
+            amplitude: initial,
+            ramp_from: initial,
+            ramp_to: initial,
+            ramp_done: RAMP_FRAMES,
             shared,
         }
     }
@@ -335,40 +347,40 @@ impl BlockConsumer {
         written
     }
 
-    /// Scales real PCM only. Ramps linearly from the previous amplitude to the
-    /// target across these frames, then holds it. Before any PCM has rendered
-    /// (`fresh`) there is nothing to ramp from: the target applies at once.
-    /// Atomics and arithmetic only.
+    /// Scales real PCM only. A changed target starts a linear ramp of
+    /// `RAMP_FRAMES` from the amplitude reached, carried across calls, then
+    /// holds the target. Full scale is left bit-identical. Before any PCM has
+    /// rendered (`fresh`) there is nothing to ramp from: the target applies at
+    /// once. Atomics and arithmetic only.
     fn apply_volume(&mut self, pcm: &mut [f32], fresh: bool) {
         let target = f32::from_bits(self.shared.volume_bits.load(Ordering::Relaxed));
         if fresh {
-            self.amplitude = target;
+            (self.amplitude, self.ramp_to, self.ramp_done) = (target, target, RAMP_FRAMES);
+        } else if target != self.ramp_to {
+            (self.ramp_from, self.ramp_to, self.ramp_done) = (self.amplitude, target, 0);
         }
-        let previous = self.amplitude;
-        let frames = pcm.len() / 2;
-        if frames == 0 {
-            return;
-        }
-        self.amplitude = target;
-        if previous == 1.0 && target == 1.0 {
-            return;
-        }
-        if previous == target {
-            for sample in pcm {
-                *sample *= target;
-            }
-            return;
-        }
-        let step = (target - previous) / frames as f32;
-        for (index, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-            // The last frame lands exactly on the target.
-            let amplitude = if index + 1 == frames {
-                target
-            } else {
-                previous + step * (index + 1) as f32
+        let mut frames = pcm.as_chunks_mut::<2>().0.iter_mut();
+        while self.ramp_done < RAMP_FRAMES {
+            let Some(frame) = frames.next() else {
+                return;
             };
-            frame[0] *= amplitude;
-            frame[1] *= amplitude;
+            self.ramp_done += 1;
+            // The last frame lands exactly on the target.
+            self.amplitude = if self.ramp_done == RAMP_FRAMES {
+                self.ramp_to
+            } else {
+                let progress = self.ramp_done as f32 / RAMP_FRAMES as f32;
+                self.ramp_from + (self.ramp_to - self.ramp_from) * progress
+            };
+            frame[0] *= self.amplitude;
+            frame[1] *= self.amplitude;
+        }
+        if self.amplitude == 1.0 {
+            return;
+        }
+        for frame in frames {
+            frame[0] *= self.amplitude;
+            frame[1] *= self.amplitude;
         }
     }
 
@@ -523,7 +535,7 @@ impl Output {
     }
 
     /// Output amplitude is `(percent / 100)^2`, applied after buffering. The
-    /// consumer ramps to it across the frames of its next call.
+    /// consumer ramps to it over the next 10 ms of PCM (`RAMP_FRAMES`).
     pub fn set_volume(&self, percent: u8) {
         let linear = f32::from(percent.min(100)) / 100.0;
         self.shared
@@ -917,33 +929,58 @@ mod tests {
         }
     }
 
+    /// Checks a ramp of `RAMP_FRAMES` frames from `from` to `to`, then the hold.
+    fn assert_ramp(left: &[f32], from: f32, to: f32) {
+        let slope = (to - from) / RAMP_FRAMES as f32;
+        for (index, sample) in left[..RAMP_FRAMES].iter().enumerate() {
+            let want = from + slope * (index + 1) as f32;
+            assert!(
+                (sample - want).abs() <= slope.abs() * 0.01,
+                "frame {index}: {sample} vs {want}"
+            );
+        }
+        assert_eq!(left[RAMP_FRAMES - 1], to, "the ramp ends on the target");
+        assert!(left[RAMP_FRAMES..].iter().all(|sample| *sample == to));
+    }
+
     #[test]
-    fn volume_change_ramps_without_a_step() {
+    fn volume_change_ramps_over_ten_milliseconds_across_calls() {
+        assert_eq!(RAMP_FRAMES, 480, "10 ms at 48 kHz");
+        // Small device callbacks, and one larger than the ramp: the ramp is
+        // the same continuous line however output is cut into calls.
+        for per_call in [32, 100, BLOCK_FRAMES] {
+            let mut harness = Harness::new();
+            harness.submit(4);
+            let steady = harness.render(BLOCK_FRAMES, per_call);
+            assert!(
+                steady
+                    .iter()
+                    .all(|sample| sample.to_bits() == 1.0_f32.to_bits())
+            );
+            harness.set_volume(50);
+            assert_ramp(&harness.render(BLOCK_FRAMES, per_call), 1.0, 0.25);
+            // A change back ramps up from where the last one ended.
+            harness.set_volume(100);
+            assert_ramp(&harness.render(BLOCK_FRAMES, per_call), 0.25, 1.0);
+        }
+    }
+
+    #[test]
+    fn a_change_mid_ramp_ramps_on_from_the_reached_amplitude() {
         let mut harness = Harness::new();
         harness.submit(3);
-        // Full scale first, then a change mid-stream.
+        harness.render(32, 32);
+        harness.set_volume(0);
+        let first = harness.render(96, 32);
+        let reached = *first.last().unwrap();
+        assert!(reached < 1.0 && reached > 0.0, "{reached}");
+        harness.set_volume(100);
+        let left = harness.render(BLOCK_FRAMES, 32);
         assert!(
-            harness
-                .render(BLOCK_FRAMES, BLOCK_FRAMES)
-                .iter()
-                .all(|s| *s == 1.0)
+            left[0] > reached,
+            "no step back down: {} after {reached}",
+            left[0]
         );
-        harness.set_volume(50);
-        let left = harness.render(BLOCK_FRAMES, BLOCK_FRAMES);
-        // From the previous amplitude (1.0) down to the target (0.25), linearly.
-        let slope = (1.0 - 0.25) / BLOCK_FRAMES as f32;
-        assert!(left[0] < 1.0 && left[0] > 1.0 - 2.0 * slope, "{}", left[0]);
-        assert_eq!(*left.last().unwrap(), 0.25);
-        for pair in left.windows(2) {
-            let step = pair[0] - pair[1];
-            assert!(step > 0.0 && step <= slope * 1.01, "step {step} vs {slope}");
-        }
-        // Then it holds the target.
-        assert!(
-            harness
-                .render(BLOCK_FRAMES, BLOCK_FRAMES)
-                .iter()
-                .all(|s| *s == 0.25)
-        );
+        assert_ramp(&left, reached, 1.0);
     }
 }
