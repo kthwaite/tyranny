@@ -1321,6 +1321,12 @@ async fn index_frames(
         .await;
     list_track_ids(client, songs()).await
 }
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
 async fn history(client: &mut PlaybackClient) -> Page<HistoryEntry> {
     match ok(
         client,
@@ -1363,11 +1369,19 @@ async fn a_pass_counts_once_at_half_duration_despite_seeks() {
     client.until(|state| state.position_frames >= 12_000).await;
     client.seek(entry, 0).await;
     client.until(|state| state.position_frames >= 12_000).await;
+    // A pause of two seconds separates the pass's start from its count.
+    ok(&mut client, json!({"command":"pause"})).await;
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    let before_threshold = unix_seconds();
     client.seek(entry, 24_000).await;
+    ok(&mut client, json!({"command":"play","entry_id":null})).await;
     assert_eq!(client.state.history_revision, 0);
     client.until(|state| state.history_revision > 0).await;
     assert_eq!(client.state.current_id, Some(entry));
-    assert!(client.state.position_frames >= 48_000, "{:?}", client.state);
+    // The threshold fires mid-track, while playing, not at the natural end.
+    let position = client.state.position_frames;
+    assert!((48_000..96_000).contains(&position), "{:?}", client.state);
+    assert_eq!(client.state.transport, Transport::Playing);
     // A seek after counting, and the natural end, do not count it again.
     client.seek(entry, 0).await;
     client
@@ -1397,11 +1411,43 @@ async fn a_pass_counts_once_at_half_duration_despite_seeks() {
             stamp(SourceKind::Album, "Fixture Album")
         )
     );
+    // Stamped when the pass started, before the pause.
     assert!(played.played_at > 1_600_000_000);
+    assert!(played.played_at < before_threshold, "{played:?}");
     assert_eq!(by_plays(&mut client).await, [(tracks[0], 1, true)]);
     // Recording a play edits neither the library nor the queue.
     assert_eq!(client.state.library.revision, library);
     assert_eq!(client.state.queue_revision, queue_revision);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_history_write_keeps_playing_and_is_retried() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (library, tracks) = index_frames(&scratch, &mut client, &["Retried"], 144_000).await;
+    // Every history insert fails until the trigger is dropped.
+    let database = rusqlite::Connection::open(scratch.path("state").join("state.sqlite3")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER injected BEFORE INSERT ON play_history
+             BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+        )
+        .unwrap();
+    let command = play_ids(&client, library, &tracks);
+    ok(&mut client, command).await;
+    // Past the 1.5 s threshold, after at least one retry.
+    client.until(|state| state.position_frames >= 120_000).await;
+    assert_eq!(client.state.history_revision, 0);
+    assert_eq!(client.state.transport, Transport::Playing);
+    assert_eq!(client.state.error, None);
+    database.execute_batch("DROP TRIGGER injected;").unwrap();
+    client.until(|state| state.history_revision == 1).await;
+    let page = history(&mut client).await;
+    assert_eq!(page.total, 1);
+    assert_eq!(page.entries[0].track_id, Some(tracks[0]));
+    assert_eq!(by_plays(&mut client).await, [(tracks[0], 1, true)]);
     running.stop().await;
 }
 

@@ -726,7 +726,48 @@ fn repeat_one_counts_each_pass() {
     let heard = pcm(&capture);
     assert_eq!(heard.len() % 4_800, 0);
     // Every pass counts, each once.
-    assert_eq!(counted, vec![1; heard.len() / 4_800]);
+    let entries: Vec<u64> = counted.iter().map(|play| play.entry_id).collect();
+    assert_eq!(entries, vec![1; heard.len() / 4_800]);
+}
+
+#[test]
+fn a_selection_counts_a_pass_that_crossed_its_threshold_since_the_last_pump() {
+    let scratch = Scratch::new();
+    let (short, long) = (scratch.path("short.wav"), scratch.path("long.wav"));
+    // The prebuffer holds all of the short entry: it plays on without pumps.
+    wav(&short, 9_600);
+    wav(&long, 96_000);
+    let mut player = Player::new(
+        vec![short, long],
+        OutputConfig::Capture {
+            path: scratch.path("capture.f32"),
+            clocked: true,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while player.snapshot().output.rendered_frames == 0 {
+        assert!(Instant::now() < deadline, "playback did not start");
+        player.pump().unwrap();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(player.snapshot().position_frames < 4_800);
+    assert!(player.take_counted_plays().is_empty());
+    // No pump while output passes the threshold at 4_800 frames.
+    while player.snapshot().position_frames < 4_800 {
+        assert!(Instant::now() < deadline, "{:?}", player.snapshot());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(player.snapshot().current_id, Some(1));
+    let prepared = player.prepare_selection(2, 0, GainMode::Off).unwrap();
+    player.commit_selection(prepared);
+    let counted = player.take_counted_plays();
+    assert_eq!(
+        counted.iter().map(|play| play.entry_id).collect::<Vec<_>>(),
+        [1]
+    );
 }
 
 #[cfg(target_os = "macos")]

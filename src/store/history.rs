@@ -10,9 +10,12 @@ use crate::{
 };
 use anyhow::Result;
 use rusqlite::{TransactionBehavior, params};
+use std::collections::VecDeque;
 
 /// A play counts after at most this long, however long the track is.
 const MAX_THRESHOLD_SECS: u64 = 240;
+/// The most counted plays kept while their history writes fail.
+pub(crate) const MAX_PENDING_PLAYS: usize = 1_000;
 
 /// The position at which a pass over a track `duration_frames` long counts as
 /// a play: half the duration or 4 minutes, whichever comes first. `None` for
@@ -50,6 +53,35 @@ impl PlayRecord {
             source: item.source,
             played_at,
         }
+    }
+}
+
+/// Counted plays not yet written, oldest first: the newest
+/// `MAX_PENDING_PLAYS` of them.
+#[derive(Default)]
+pub(crate) struct PendingPlays(VecDeque<PlayRecord>);
+impl PendingPlays {
+    /// Adds `play` last. Returns the oldest play, dropped to make room.
+    pub fn push(&mut self, play: PlayRecord) -> Option<PlayRecord> {
+        let dropped = if self.0.len() >= MAX_PENDING_PLAYS {
+            self.0.pop_front()
+        } else {
+            None
+        };
+        self.0.push_back(play);
+        dropped
+    }
+    pub fn front(&self) -> Option<&PlayRecord> {
+        self.0.front()
+    }
+    pub fn pop_front(&mut self) -> Option<PlayRecord> {
+        self.0.pop_front()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -218,6 +250,20 @@ mod tests {
             .iter()
             .map(|entry| entry.title.as_str())
             .collect()
+    }
+
+    #[test]
+    fn pending_plays_keep_the_newest_1000_in_order() {
+        let mut pending = PendingPlays::default();
+        for id in 1..=1_000 {
+            assert_eq!(pending.push(play(id, None, "Waiting", id as i64)), None);
+        }
+        let dropped = pending.push(play(1_001, None, "Waiting", 1_001));
+        assert_eq!(dropped.map(|play| play.entry_id), Some(1));
+        assert_eq!(pending.len(), 1_000);
+        assert_eq!(pending.front().map(|play| play.entry_id), Some(2));
+        pending.pop_front();
+        assert_eq!(pending.front().map(|play| play.entry_id), Some(3));
     }
 
     #[test]

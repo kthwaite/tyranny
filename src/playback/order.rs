@@ -3,6 +3,7 @@
 
 use super::Player;
 use crate::{
+    listing::unix_now,
     output::{OutputSnapshot, TrackToken},
     play_order::{self, RepeatMode, ShuffleStrategy, Slot},
     store::{count_threshold_frames, played_overflow},
@@ -29,6 +30,16 @@ pub(super) struct Pass {
     pub threshold: Option<u64>,
     /// This pass, or the pass a seek or gain change continued, counted as a play.
     pub counted: bool,
+    /// When output started this pass, or the pass it continues: UTC seconds.
+    pub started_at: Option<i64>,
+}
+
+/// A pass that counted as a play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CountedPlay {
+    pub entry_id: u64,
+    /// When output started the pass: UTC seconds.
+    pub started_at: i64,
 }
 
 /// What the player decodes after a pass.
@@ -86,7 +97,7 @@ impl Player {
     /// position, or when it ends naturally. Re-selecting the current entry (a
     /// seek or gain change) continues its pass; any other selection, and each
     /// replay (Repeat One, a Repeat All wrap), is a new pass.
-    pub fn take_counted_plays(&mut self) -> Vec<u64> {
+    pub fn take_counted_plays(&mut self) -> Vec<CountedPlay> {
         std::mem::take(&mut self.counted_plays)
     }
 
@@ -103,14 +114,18 @@ impl Player {
         }
     }
 
-    /// Whether `id`'s current pass has counted, for a selection that
-    /// re-selects it. Completed playback has no current pass to continue.
-    pub(super) fn counted_pass_of(&self, id: u64) -> bool {
-        !self.completed()
-            && self
-                .current_pass(&self.output.snapshot())
-                .and_then(|(_, pass, _)| pass)
-                .is_some_and(|pass| self.passes[pass].id == id && self.passes[pass].counted)
+    /// Whether `id`'s current pass has counted, and when it started, for a
+    /// selection that re-selects it and so continues it. Completed playback
+    /// has no current pass to continue.
+    pub(super) fn continued_pass(&self, id: u64) -> (bool, Option<i64>) {
+        if self.completed() {
+            return (false, None);
+        }
+        self.current_pass(&self.output.snapshot())
+            .and_then(|(_, pass, _)| pass)
+            .map(|pass| &self.passes[pass])
+            .filter(|pass| pass.id == id)
+            .map_or((false, None), |pass| (pass.counted, pass.started_at))
     }
 
     /// Clears the played state of `ids`, as the store does for a fresh pass.
@@ -213,6 +228,7 @@ impl Player {
             fresh: self.opening.take(),
             threshold: count_threshold_frames(duration),
             counted: false,
+            started_at: None,
         });
         self.plan = self.decide(self.cursor);
     }
@@ -257,25 +273,46 @@ impl Player {
                 continue;
             }
             pass.heard = true;
+            pass.started_at.get_or_insert_with(unix_now);
             let (id, fresh) = (pass.id, pass.fresh.take());
             self.heard(id, fresh);
         }
-        for pass in self.passes.drain(..latest) {
-            if !pass.counted {
-                self.counted_plays.push(pass.id);
-            }
+        self.count(&output, latest);
+        self.passes.drain(..latest);
+    }
+
+    /// Counts what output played since the last `hear`. Passes are about to
+    /// be dropped, and a pass that reached its threshold or ended in the
+    /// meantime must not be lost.
+    pub(super) fn count_heard(&mut self) {
+        let output = self.output.snapshot();
+        if let Some(latest) = self
+            .passes
+            .iter()
+            .rposition(|pass| pass.token.consumed_by(output.rendered_frames))
+        {
+            self.count(&output, latest);
         }
-        // The latest pass counts at its threshold, or once output drains
-        // after it with no failure: the queue ended there.
+    }
+
+    /// Passes before `latest`, the latest pass output started, ended
+    /// naturally: each counts. The latest counts at its threshold, or once
+    /// output drains after it with no failure: the queue ended there.
+    fn count(&mut self, output: &OutputSnapshot, latest: usize) {
         let ended = self.finished && output.drained && self.failure.is_none();
-        let pass = &mut self.passes[0];
-        let reached = output.entry_id == pass.id
-            && pass
-                .threshold
-                .is_some_and(|threshold| output.position_frames >= threshold);
-        if !pass.counted && pass.token.is_valid() && (reached || ended) {
-            pass.counted = true;
-            self.counted_plays.push(pass.id);
+        for (index, pass) in self.passes.range_mut(..=latest).enumerate() {
+            let reached = output.entry_id == pass.id
+                && pass
+                    .threshold
+                    .is_some_and(|threshold| output.position_frames >= threshold);
+            let counts = index < latest || reached || ended;
+            if !pass.counted && pass.token.is_valid() && counts {
+                pass.counted = true;
+                self.counted_plays.push(CountedPlay {
+                    entry_id: pass.id,
+                    started_at: *pass.started_at.get_or_insert_with(unix_now),
+                });
+            }
         }
     }
 
@@ -443,6 +480,7 @@ impl Player {
     /// and drops every pass after it; with no `current`, every pass. A decoder
     /// on a dropped pass closes.
     pub(super) fn cut_after(&mut self, current: Option<u64>) {
+        self.count_heard();
         let rendered = self.output.snapshot().rendered_frames;
         let keep = current.and_then(|id| {
             let ours = |pass: &Pass| pass.id == id && pass.token.is_valid();
@@ -469,6 +507,7 @@ impl Player {
 
     /// Drops the passes of removed entries. A decoder on one closes.
     pub(super) fn forget_passes(&mut self, removed: &[u64]) {
+        self.count_heard();
         if self
             .passes
             .back()
@@ -491,6 +530,7 @@ impl Player {
 
     /// Drops every pass and what was planned after them.
     pub(super) fn drop_passes(&mut self) {
+        self.count_heard();
         for pass in self.passes.drain(..) {
             pass.token.invalidate();
             self.prefilled_frames -= pass.prefilled;

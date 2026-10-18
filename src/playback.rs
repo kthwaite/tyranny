@@ -17,6 +17,7 @@ use std::{
 };
 
 mod order;
+pub use order::CountedPlay;
 
 const PREBUFFER_FRAMES: usize = SAMPLE_RATE as usize / 2;
 
@@ -226,7 +227,7 @@ pub struct Player {
     /// The entry last recorded in the play order's history.
     last_heard: Option<u64>,
     /// The entry of each pass that counted as a play, not yet taken.
-    counted_plays: Vec<u64>,
+    counted_plays: Vec<CountedPlay>,
 }
 
 impl Player {
@@ -1431,9 +1432,10 @@ impl Player {
         );
         assert_eq!(self.queue[prepared.index].id, prepared.id);
         // A seek or gain change keeps what was planned after the entry, and
-        // continues its pass.
+        // continues its pass, counted as output last played it.
+        self.count_heard();
         let kept = self.current_plan().filter(|(id, _)| *id == prepared.id);
-        let counted = self.counted_pass_of(prepared.id);
+        let (counted, started_at) = self.continued_pass(prepared.id);
         self.output.set_paused(true);
         self.invalidate_buffer();
         self.queue[prepared.index].metadata = Some(prepared.metadata);
@@ -1448,7 +1450,8 @@ impl Player {
         self.selection = Some((prepared.id, prepared.frame));
         self.output.mark_end(false);
         self.begin_pass();
-        self.passes.back_mut().expect("a pass just began").counted = counted;
+        let pass = self.passes.back_mut().expect("a pass just began");
+        (pass.counted, pass.started_at) = (counted, started_at);
         if let Some((_, plan)) = kept {
             self.plan = plan;
         }

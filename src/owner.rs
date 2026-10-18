@@ -10,15 +10,15 @@ use crate::{
     listing::{recent_cutoff, unix_now},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, ShuffleStrategy, UniformShuffle},
-    playback::{Player, PreparedRemove, Start},
+    playback::{CountedPlay, Player, PreparedRemove, Start},
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
         NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
         TrackSelection, Transport,
     },
     store::{
-        Checkpoint, Edit, EntryTrack, LoadedEntry, PlayRecord, PlaylistChange, PlaylistEdit,
-        PlaylistFailure, Store, UpcomingEdit, played_overflow,
+        Checkpoint, Edit, EntryTrack, LoadedEntry, PendingPlays, PlayRecord, PlaylistChange,
+        PlaylistEdit, PlaylistFailure, Store, UpcomingEdit, played_overflow,
     },
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -489,6 +489,8 @@ struct Actor {
     marked: Option<u64>,
     /// The newest play history ID, or 0.
     history_revision: u64,
+    /// Counted plays whose history write has not succeeded yet.
+    pending_plays: PendingPlays,
 }
 impl Actor {
     fn open(config: OwnerConfig) -> Result<Self> {
@@ -560,6 +562,7 @@ impl Actor {
             now_track: RefCell::new(None),
             marked: loaded.checkpoint.current_id,
             history_revision,
+            pending_plays: PendingPlays::default(),
         };
         actor.publish();
         Ok(actor)
@@ -811,16 +814,53 @@ impl Actor {
         Ok(())
     }
 
-    /// A pass over queue entry `id` counted as a play: one small commit adds
-    /// it to the history and its track's statistics. An entry already gone
-    /// from the queue has nothing to describe it, and is not recorded.
-    fn record_play(&mut self, id: u64) -> Result<()> {
-        let Some(item) = self.store.queue_entry(id)? else {
-            return Ok(());
-        };
-        self.store.record_play(&PlayRecord::of(item, unix_now()))?;
-        self.history_revision = self.store.history_revision()?;
-        Ok(())
+    /// A pass counted as a play. It waits in `pending_plays` with what queue
+    /// pages show for its entry. An entry already gone from the queue has
+    /// nothing to describe it, and is not recorded.
+    fn count_play(&mut self, play: CountedPlay) {
+        match self.store.queue_entry(play.entry_id) {
+            Ok(Some(item)) => {
+                if let Some(dropped) = self
+                    .pending_plays
+                    .push(PlayRecord::of(item, play.started_at))
+                {
+                    eprintln!(
+                        "tyranny: play history writes keep failing; dropped the play of entry {} at {}",
+                        dropped.entry_id, dropped.played_at
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "tyranny: describing the play of entry {} failed; not recorded: {error:#}",
+                play.entry_id
+            ),
+        }
+    }
+
+    /// Writes the pending plays oldest first, one small commit each. The first
+    /// failure stops this attempt; it and the later plays wait for the retry.
+    /// Playback never pauses for history. Returns whether any play was written.
+    fn write_plays(&mut self) -> bool {
+        let mut written = false;
+        while let Some(play) = self.pending_plays.front() {
+            if let Err(error) = self.store.record_play(play) {
+                eprintln!(
+                    "tyranny: recording a play failed; {} waiting to retry: {error:#}",
+                    self.pending_plays.len()
+                );
+                break;
+            }
+            self.pending_plays.pop_front();
+            written = true;
+        }
+        if written {
+            match self.store.history_revision() {
+                Ok(revision) => self.history_revision = revision,
+                Err(error) => eprintln!("tyranny: reading the history revision failed: {error:#}"),
+            }
+        }
+        written
     }
 
     fn playlist_applied(&mut self, change: PlaylistChange) -> CommandResult<Response> {
@@ -1700,15 +1740,13 @@ impl Actor {
                     self.fault = Some(format!("audio output: {error:#}"));
                 }
                 // Before the advances, whose trims may remove a counted entry.
+                // While earlier writes fail, new plays wait for the retry.
                 let counted = self.player.take_counted_plays();
-                for id in &counted {
-                    if let Err(error) = self.record_play(*id) {
-                        self.player.pause();
-                        self.fault = Some(format!(
-                            "recording a play failed; playback paused: {error:#}"
-                        ));
-                    }
+                let write = !counted.is_empty() && self.pending_plays.is_empty();
+                for play in counted {
+                    self.count_play(play);
                 }
+                let recorded = write && self.write_plays();
                 // Natural advance: each pass output starts marks its entry played.
                 for (id, fresh) in self.player.take_advances() {
                     if let Err(error) = self.advance(id, &fresh) {
@@ -1719,7 +1757,7 @@ impl Actor {
                     }
                 }
                 self.player.clear_diagnostics();
-                if !counted.is_empty() {
+                if recorded {
                     self.publish();
                 }
                 match receiver.try_recv() {
@@ -1764,6 +1802,7 @@ impl Actor {
                     Ok(Work::Shutdown(reply)) => {
                         let checkpoint = self.checkpoint();
                         self.player.pause();
+                        self.write_plays();
                         let library = self.library.shutdown();
                         let saved = self.store.checkpoint(checkpoint, &self.settings);
                         let result = library.and(saved);
@@ -1789,6 +1828,9 @@ impl Actor {
                 event_time = Instant::now();
             }
             if checkpoint_time.elapsed() >= CHECKPOINT_INTERVAL {
+                if !self.pending_plays.is_empty() && self.write_plays() {
+                    self.publish();
+                }
                 if let Err(error) = self.save() {
                     self.player.pause();
                     self.fault = Some(format!("checkpoint failed; playback paused: {error:#}"));

@@ -22,7 +22,7 @@ use std::{
 mod history;
 mod playlists;
 mod selection;
-pub(crate) use history::{PlayRecord, count_threshold_frames};
+pub(crate) use history::{PendingPlays, PlayRecord, count_threshold_frames};
 pub(crate) use playlists::{PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule};
 #[cfg(test)]
 mod playlists_tests;
