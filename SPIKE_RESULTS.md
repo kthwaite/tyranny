@@ -657,3 +657,67 @@ The owner now tracks valid pre-start submissions separately, including per-entry
 - Queue state, settings, checkpoints, roots, library metadata and saved playlists are durable. Local protocol/reconnect, library import, SwiftUI, and the independent managed-process lifecycle are implemented as described above.
 
 Continue real-collection listening and longer-duration operation alongside playback controls, regular playlists and smart rules. Treat dynamic queue autofill and relocatable distribution as separate gates; do not mistake the development LaunchAgent for a finished installer.
+
+## Library redesign — server
+
+The server half of the library-window redesign is implemented on `feature/library-redesign`: **protocol v9, SQLite schema 5**. The existing SwiftUI client was only moved to v9 on the wire so its gates still run. **The new client UI is not built here**; it is a separate plan.
+
+### Added
+
+- **List descriptions and queries.** Tracks, albums, artists, genres, playlists, smart playlists and Recent are described by one list description with source, filter, sort and grouping. Pages, totals, album/artist/genre browsers and the artist→album grouping come from one SQL compiler. Windows are revision-bound (`stale_library_revision`).
+- **Content revision.** The library revision changes only when rows visible to list queries change. Scan progress, and cover-file-only rescans, do not move it, so clients may cache windows by revision.
+- **Run enqueue.** An enqueue carries a selection (ids, or a list description plus optional first row) and a placement. The selection is resolved and paths are canonicalized **off the playback owner**; the owner only rechecks revisions and commits.
+- **Queue sources, played flag, trim.** Each queue entry records its source and run, and a `played` flag. After 100 played entries the played prefix is trimmed (one queue-revision bump per trim; skipped inside a Repeat context).
+- **Shuffle, repeat, volume.** Uniform shuffle per run, Repeat Off/All/One with Previous that walks history, and a ramped volume setting. All persist across restart.
+- **History and counts.** A play is counted once per pass at the start-time stamp and threshold. Failed history writes are kept pending, retried, and never pause playback (bounded to 1000, oldest dropped and logged).
+- **Filter fields.** `year` (single year or ascending `a..b` range) joins title, artist, album, albumartist and genre. Genre extraction is capped at 32 genres per track.
+- **Metadata.** `now_playing` gains `track_id`, `album_id`, `format` and `gain_db` (present when a gain mode is active).
+
+### Verification
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --check` | pass |
+| `cargo clippy --locked --all-targets -- -D warnings` | pass |
+| `cargo test --locked --all-targets` | **210 passed**, 1 ignored (the pre-existing CoreAudio hardware test): lib 155, `playback` 15 (+1 ignored), `server_transport` 40 |
+| `server_gate.py` (capture) | pass, 12 cases |
+| `library_gate.py` | pass, 13 cases |
+| `playlist_gate.py` | pass |
+| `smart_playlist_gate.py` | pass |
+| `filter_gate.py` | pass |
+| `artwork_gate.py` | pass, including the live Cover Art Archive fetch |
+| `client_gate.py --model-only` (builds `scripts/native_model_gate.swift`) | pass; headless real server and `PlayerModel`, no UI permissions |
+| Scale gate | recorded in `spike-results/scale-gate.json` (see below) |
+| `lifecycle_gate.py`, `--app` modes, `client_gate.py --coreaudio`, `server_gate.py --coreaudio` | **not run**: need an unlocked GUI session with Accessibility/Screen Recording, or the real audio device |
+
+Gate scripts were changed only for documented v9 drift:
+
+- `library_gate.py`: expected `user_version` 4 → 5 (schema 5).
+- `filter_gate.py`: `year:1959` is now a valid filter; the unknown-field probe uses `rating:5`.
+- `artwork_gate.py`: a cover-file-only rescan no longer moves the content revision; the helper waits for scan `complete` plus a 2 s settle instead of a revision bump when the track count is unchanged. The refresh assertions are unchanged.
+- `native_model_gate.swift`: `now_playing.gain_db` is `nil` until a gain mode is set, so the post-gain metadata checks compare every other field and ignore `gain_db`. This case had not been run since Task 16.
+
+Product code was not changed.
+
+### Scale (50,000 tracks, release server, 30 samples per list family)
+
+| Family | p50 ms | p95 ms | 100 ms target |
+| --- | --- | --- | --- |
+| `list_tracks_first_window` | 93.1 | 98.1 | met |
+| `list_tracks_deep_window` | 71.0 | 74.4 | met |
+| `list_albums_by_year` | 70.8 | 77.2 | met |
+| `list_tracks_filtered_genre` | 17.3 | 18.7 | met |
+| `list_tracks_filtered_genre_query` | 50.1 | 51.2 | met |
+| `list_tracks_sorted_year_desc` | 99.0 | 105.6 | **unmet** |
+| `list_tracks_grouped_artist_album` | 138.1 | 141.5 | **unmet** |
+
+Unmet targets are accepted and recorded: **`sorted_year_desc` (about 105 ms) and `grouped_artist_album` (about 140 ms; 145.1 ms in an earlier run)**. Each new window still needs one 50k-row sort; no index serves a multi-table total order. Fixing it needs a stored or cached order, which is a plan change. A client window cache masks it. Tuning cut the first window from 162 to 98 ms p95 and grouped from 279 to 141 ms.
+
+`enqueue_run_50k` (50,001-entry queue, three enqueues while playing): **996.6, 1094.0 and 1214.0 ms, with 0 underruns** across all three (underrun delta 0, playback advanced). Before the off-owner resolution (Task 17b) the same gate gave 983 / 1077 / 1073 ms and **2 underruns**. Total time is similar; the owner thread is now blocked only 53–116 ms.
+
+### Limitations
+
+- The native SwiftUI UI gates were **not run** (no GUI session). Only the model-level gate ran.
+- The client UI is not rebuilt for the new library window; that is a separate plan. The existing client only speaks v9 and passes its model gate.
+- A run enqueue is checked for a stale queue revision after off-thread resolution (about 0.9 s at 50k), and a trim bumps the queue revision. Clients must retry a run enqueue once on `stale_revision`.
+- CoreAudio-output gate variants were not re-run for this slice.

@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 
 sys.dont_write_bytecode = True
@@ -128,9 +129,14 @@ def main():
         return image['cache_key']
 
     def rescan(total):
-        revision = client.state()['library']['revision']
+        before = client.state()['library']
         client.request('rescan', root_id=root['id'])
-        client.wait(lambda state: state['library']['revision'] > revision and state['library']['scan']['phase'] == 'complete' and state['library']['tracks'] == total, seconds=30)
+        if before['tracks'] == total:
+            # v9: the revision is the content revision and does not move when only cover files change.
+            client.wait(lambda state: state['library']['scan']['phase'] == 'complete' and state['library']['tracks'] == total, seconds=30)
+            time.sleep(2)
+            return
+        client.wait(lambda state: state['library']['revision'] > before['revision'] and state['library']['scan']['phase'] == 'complete' and state['library']['tracks'] == total, seconds=30)
 
     def native(mode):
         folder = run / ('native-' + mode)

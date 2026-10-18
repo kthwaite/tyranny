@@ -15,6 +15,13 @@ struct NativeModelGate {
             guard let index = args.firstIndex(of: name), index + 1 < args.count else { fatalError("Missing \(name)") }
             return args[index + 1]
         }
+        // v9: now_playing.gain_db appears once a gain mode is active; every other field must stay identical.
+        func sameTrack(_ lhs: NowPlaying?, _ rhs: NowPlaying) -> Bool {
+            guard let lhs else { return false }
+            return lhs.entry_id == rhs.entry_id && lhs.title == rhs.title && lhs.artist == rhs.artist && lhs.album == rhs.album
+                && lhs.duration_frames == rhs.duration_frames && lhs.metadata_error == rhs.metadata_error
+                && lhs.track_id == rhs.track_id && lhs.album_id == rhs.album_id && lhs.format == rhs.format
+        }
         let output = URL(fileURLWithPath: argument("--output"))
         let folder = argument("--folder")
         let model = PlayerModel()
@@ -132,7 +139,7 @@ struct NativeModelGate {
             try check(!model.busy && model.snapshot?.queue_revision == queueBeforeFilter, "Stale library selection started a mutation while filtering")
             cases.append("source-filter-change-immediately-invalidates-drag-and-play-selection")
             try await wait("empty filter") { model.tracks?.total == 0 }
-            try check(model.snapshot?.now_playing == metadata && model.durationSeconds == duration, "Filter lost current metadata")
+            try check(sameTrack(model.snapshot?.now_playing, metadata) && model.durationSeconds == duration, "Filter lost current metadata")
             model.filter = "Track 104"; model.filterChanged()
             model.filter = "Track 103"; model.filterChanged()
             try await wait("latest filter wins") { model.tracks?.entries.first?.metadata.title == "Track 103" && model.tracks?.total == 1 }
@@ -140,7 +147,7 @@ struct NativeModelGate {
             try await wait("reset filter") { model.tracks?.total == 105 }
             model.pageTracks(1)
             try await wait("playing metadata off page") { model.tracks?.offset == 100 }
-            try check(model.snapshot?.now_playing == metadata && model.currentName.contains(metadata.title), "Paging lost current metadata")
+            try check(sameTrack(model.snapshot?.now_playing, metadata) && model.currentName.contains(metadata.title), "Paging lost current metadata")
             model.pageTracks(-1)
             try await wait("restore library page") { model.tracks?.offset == 0 }
             cases.append("authoritative-now-playing-survives-library-filter-and-page-replacement")
@@ -152,7 +159,7 @@ struct NativeModelGate {
             model.reconnect()
             try await wait("authoritative reconnect") { model.connected && model.snapshot?.queue_length == 1 && (model.snapshot?.position_frames ?? 0) > before }
             try check(model.snapshot?.transport == "playing", "Reconnect interrupted playback")
-            try check(model.snapshot?.now_playing == metadata, "Reconnect lost current metadata")
+            try check(sameTrack(model.snapshot?.now_playing, metadata), "Reconnect lost current metadata")
             try await wait("queue refreshed after reconnect") { model.queue?.entries.count == 1 }
             let reconnectedQueue = model.queue!
             try check(!model.dropTracks(token: reconnectDrag, destination: .queue, row: 0), "Previous-connection drag was accepted")
@@ -188,7 +195,7 @@ struct NativeModelGate {
             try await wait("bounded large queue") { !model.busy && model.queue?.total == 101 && model.queue?.entries.count == 100 }
             model.pageQueue(1)
             try await wait("queue second page") { model.queue?.offset == 100 && model.queue?.entries.count == 1 }
-            try check(model.snapshot?.now_playing == metadata && model.snapshot?.can_next == true,
+            try check(sameTrack(model.snapshot?.now_playing, metadata) && model.snapshot?.can_next == true,
                       "Off-page current metadata/capabilities depend on loaded queue page")
             let boundaryID = model.queue!.entries[0].id
             model.selectedQueue = [boundaryID]

@@ -131,7 +131,7 @@ def main():
         record('bounded-filtered-library-pages-and-revision-rejection')
         before = client.state()
         for invalid in ['artist:[]', 'artist:["Miles Davis",]', 'artist:["Miles Davis"',
-                        '(artist:Miles | album:Sessions', 'artist:Miles &', 'year:1959',
+                        '(artist:Miles | album:Sessions', 'artist:Miles &', 'rating:5',
                         '!' * 80 + 'title:Freedom', 'x' * 1025]:
             for command in ['library_tracks', 'library_artists', 'library_albums']:
                 library(invalid, command, expect_error='invalid_filter')
