@@ -381,3 +381,16 @@ Decided by the user. All three are server state, persisted with settings, report
 ## 10. Deferred, recorded for later
 
 Folders view, Radio, the bottom-bar transport option, user-chosen columns, saved sort orders for regular playlists, ratings, artwork-derived colours and themes, keybinding configuration, vi modes, dynamic autofill.
+
+## Amendments during planning
+
+These were settled while writing the implementation plans. They refine the design without changing what the user approved.
+
+- **Library revision.** It changes only when rows visible to list queries change. Scan-progress saves no longer bump it, so list windows and enqueue checks are not invalidated by progress alone.
+- **Play statistics.** Play count and last played live in a separate `track_stats` table, written by the playback owner. This keeps the library coordinator the only writer of library rows, and stops play counts from changing the library revision.
+- **Up Next sections.** HISTORY / NOW PLAYING / UP NEXT come from each entry's played state, not its queue position, so they stay correct under shuffle. The 100-entry trim keeps the 100 most recently played entries, by play order.
+- **Grouped tables.** The server returns the group spans (`ListGroups`) for a whole list. The client can then size a grouped table without loading every row.
+- **Album block height.** An album block takes at least 7 rows (cover plus facts). Shorter albums are padded.
+- **Display fields.** Queue pages carry title, artist, album and duration. Now Playing carries format and the applied gain, for the toolbar display.
+- **Selection limits.** One enqueue or playlist add resolves at most 100,000 tracks. A selection sent as a list uses at most 64 ranges, or one bounding range with at most 500 exclusions. Otherwise the client says "Selection is too scattered; select fewer separate ranges."
+
