@@ -238,7 +238,8 @@ mod tests {
             .execute_batch(
                 "INSERT INTO playlists(id,name,search,revision) VALUES(1,'Mix','mix',3);
                 INSERT INTO playlist_entries(id,playlist_id,track_id,ordinal) VALUES
-                    (10,1,2,0),(11,1,5,1),(12,1,2,2),(13,1,1,3);",
+                    (10,1,2,0),(11,1,5,1),(12,1,2,2),(13,1,1,3);
+                INSERT INTO playlists(id,name,search,revision,query) VALUES(2,'Every','every',1,'title:t');",
             )
             .unwrap();
         Store { connection }
@@ -459,5 +460,173 @@ mod tests {
         );
         // Track 5 is unavailable, so the whole list is one row over the limit.
         invalid(&mut large, rows(songs(false), &[[0, u64::MAX]], &[], None));
+    }
+
+    /// The fixture plus queue entries 1..=3 (revision 5, next ID 4) with entry 2
+    /// current at frame 900, paused.
+    fn queued() -> Store {
+        let store = fixture(10);
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO queue(id,ordinal,path,track_id) VALUES
+                    (1,0,'/m/000001.flac',1),(2,1,'/m/000002.flac',2),(3,2,'/m/000003.flac',3);
+                UPDATE control SET revision=5,next_id=4,current_id=2,position_frames=900,playing=0;",
+            )
+            .unwrap();
+        store
+    }
+    type Persisted = (Vec<LoadedEntry>, u64, u64, (Option<u64>, u64, bool));
+    fn persisted(store: &Store) -> Persisted {
+        let loaded = store.load().unwrap();
+        let checkpoint = loaded.checkpoint;
+        (
+            loaded.entries,
+            loaded.revision,
+            loaded.next_id,
+            (
+                checkpoint.current_id,
+                checkpoint.position_frames,
+                checkpoint.playing,
+            ),
+        )
+    }
+    /// `(removed, before)` as the player prepares them for each placement, with
+    /// entry 2 current.
+    const PLACEMENTS: [(&[u64], Option<u64>); 3] = [
+        // Replace upcoming: entry 3 goes, the run goes last.
+        (&[3], None),
+        // Next: straight after entry 2.
+        (&[], Some(3)),
+        // Append.
+        (&[], None),
+    ];
+    fn write(
+        store: &mut Store,
+        expected_queue: u64,
+        selection: &TrackSelection,
+        (removed, before): (&[u64], Option<u64>),
+        play: bool,
+    ) -> Result<()> {
+        let source = QueueSource::stamped(SourceKind::Songs, "Songs");
+        let paths = [
+            PathBuf::from("/m/000006.flac"),
+            PathBuf::from("/m/000004.flac"),
+        ];
+        store.replace_upcoming(
+            expected_queue,
+            selection,
+            UpcomingEdit {
+                removed,
+                before,
+                source: &source,
+                checkpoint: play.then_some(Checkpoint {
+                    current_id: Some(4),
+                    position_frames: 0,
+                    playing: true,
+                }),
+            },
+            [(4, 6, paths[0].as_path()), (5, 4, paths[1].as_path())].into_iter(),
+        )
+    }
+
+    #[test]
+    fn stale_state_at_write_time_leaves_the_queue_and_checkpoint_unchanged() {
+        let smart = |revision| ListDescription {
+            source: ListSource::Smart { id: 2, revision },
+            sort: Vec::new(),
+            ..songs(false)
+        };
+        let library = rows(songs(false), &[[0, 2]], &[], None);
+        let cases: [(&str, TrackSelection, u64, ErrorCode); 5] = [
+            (
+                "UPDATE library_state SET revision=8",
+                library.clone(),
+                5,
+                ErrorCode::StaleLibraryRevision,
+            ),
+            (
+                "UPDATE library_state SET revision=8",
+                ids(&[6, 4]),
+                5,
+                ErrorCode::StaleLibraryRevision,
+            ),
+            (
+                "UPDATE playlists SET revision=4 WHERE id=1",
+                rows(playlist(3), &[[0, 1]], &[], None),
+                5,
+                ErrorCode::StalePlaylistRevision,
+            ),
+            (
+                "UPDATE playlists SET revision=2 WHERE id=2",
+                rows(smart(1), &[[0, 1]], &[], None),
+                5,
+                ErrorCode::StalePlaylistRevision,
+            ),
+            (
+                "UPDATE control SET revision=6",
+                library,
+                5,
+                ErrorCode::StaleRevision,
+            ),
+        ];
+        for (change, selection, expected_queue, expected) in cases {
+            for placement in PLACEMENTS {
+                for play in [false, true] {
+                    let mut store = queued();
+                    // The selection resolved before the change.
+                    store.resolve_selection(&selection, 0).unwrap();
+                    store.connection.execute_batch(change).unwrap();
+                    let before = persisted(&store);
+                    let error = write(&mut store, expected_queue, &selection, placement, play)
+                        .expect_err(change);
+                    assert_eq!(code(error).0, expected, "{change}");
+                    assert_eq!(persisted(&store), before, "{change}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_with_play_commits_rows_and_checkpoint_together() {
+        let selection = ids(&[6, 4]);
+        let run = Some(RunInfo {
+            run_id: 4,
+            scope: crate::play_order::RepeatScope::Queue,
+        });
+        for ((removed, before), order) in
+            PLACEMENTS
+                .into_iter()
+                .zip([&[1, 2, 4, 5][..], &[1, 2, 4, 5, 3], &[1, 2, 3, 4, 5]])
+        {
+            let mut store = queued();
+            write(&mut store, 5, &selection, (removed, before), true).unwrap();
+            let (entries, revision, next_id, checkpoint) = persisted(&store);
+            assert_eq!(
+                entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+                order
+            );
+            assert!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.id >= 4)
+                    .all(|entry| entry.run == run)
+            );
+            assert_eq!((revision, next_id), (6, 6));
+            assert_eq!(checkpoint, (Some(4), 0, true));
+            let page = store.queue_page(0, 10).unwrap();
+            let new = page.iter().find(|item| item.id == 5).unwrap();
+            assert_eq!(
+                (new.track_id, new.source.clone()),
+                (
+                    Some(4),
+                    Some(QueueSource::stamped(SourceKind::Songs, "Songs"))
+                )
+            );
+        }
+        // Without play the checkpoint stays as it was.
+        let mut store = queued();
+        write(&mut store, 5, &selection, PLACEMENTS[0], false).unwrap();
+        assert_eq!(persisted(&store).3, (Some(2), 900, false));
     }
 }

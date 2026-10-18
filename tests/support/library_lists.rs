@@ -499,9 +499,11 @@ async fn run_enqueue_of_600_rows_plays_from_clicked_row() {
     let music = scratch.path("music");
     fs::create_dir(&music).unwrap();
     for index in 0..600 {
+        // The clicked row plays long enough to stay current through the restart.
+        let frames = if index == 120 { 240_000 } else { 480 };
         tagged_wav(
             &music.join(format!("{index:04}.wav")),
-            480,
+            frames,
             format!("Song {index:04}").as_bytes(),
         );
     }
@@ -610,6 +612,7 @@ async fn run_enqueue_of_600_rows_plays_from_clicked_row() {
     // The run survives a restart in order.
     let running = Running::start(&scratch).await;
     let mut restored = PlaybackClient::connect(&running).await;
+    assert_eq!(restored.state.current_id, Some(first));
     assert_eq!(whole_queue(&mut restored).await, items);
     running.stop().await;
 }
