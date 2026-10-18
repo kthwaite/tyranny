@@ -408,7 +408,8 @@ fn build(
     };
     let sql = if groups.is_empty() {
         format!(
-            "{ALBUM_RANK} SELECT row_order AS position,row_id,track_id,artist_key,album_key,available
+            "{ALBUM_RANK} SELECT row_order AS position,row_id AS row_id,track_id AS track_id,
+             artist_key AS artist_key,album_key AS album_key,available AS available
              FROM ({rows}) ORDER BY position"
         )
     } else {
@@ -418,7 +419,7 @@ fn build(
             .iter()
             .map(|key| {
                 format!(
-                    ",{key}_first AS MATERIALIZED (SELECT {key},MIN(row_order) AS first_row
+                    ",{key}_first AS MATERIALIZED (SELECT {key} AS {key},MIN(row_order) AS first_row
                      FROM listed GROUP BY {key})"
                 )
             })
@@ -434,7 +435,8 @@ fn build(
         format!(
             "{ALBUM_RANK},listed AS MATERIALIZED ({rows}){firsts}
              SELECT ROW_NUMBER() OVER (ORDER BY {order}listed.row_order) AS position,
-             listed.row_id,listed.track_id,listed.artist_key,listed.album_key,listed.available
+             listed.row_id AS row_id,listed.track_id AS track_id,listed.artist_key AS artist_key,
+             listed.album_key AS album_key,listed.available AS available
              FROM listed{joins} ORDER BY position"
         )
     };

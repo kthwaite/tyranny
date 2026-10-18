@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Measure the real daemon/native client with a declared offline 50k/10k fixture.
 
-Library rows are metadata-only, NOT imported media. Queue occurrences point at a
-real generated WAV; a separate root scans real WAV hard links during native use.
+Library rows are seeded metadata, NOT scanned media; their asset paths are hard
+links to one short generated WAV, so run enqueue can canonicalize every source.
+Queue occurrences point at a real generated WAV; a separate root scans real WAV
+hard links during native use.
 No builds, cache-purge claims, default user state, or fabricated timing results.
 """
 import argparse
@@ -182,7 +184,7 @@ def main():
     report = dict(run_directory=str(run), passed=False, targets_met=None,
                   fixture=dict(library_tracks=TRACKS, queue_entries=QUEUE,
                                kind="Explicit offline metadata-only library and persistent queue fixture",
-                               media="Queue entries all reference one real generated 120-second WAV; metadata-only library paths do not exist",
+                               media="Queue entries all reference one real generated 120-second WAV; seeded library asset paths are hard links to one generated 0.1-second WAV (metadata seeded, not scanned)",
                                scan_files=args.scan_files),
                   environment=dict(platform=platform.platform(), python=sys.version, server=str(server), app=str(app)),
                   output="coreaudio" if args.coreaudio else "clocked_pcm",
@@ -465,17 +467,22 @@ def main():
         report["v9_underrun_counters"] = underruns
         report["v9_list_targets_met"] = all(family["target_met"] for family in families.values())
 
+        # Longer than the output prebuffer, so a stall the enqueues caused is counted.
+        time.sleep(1)
         final = control.state()
         report["final_snapshot"] = final
         report["playback_observation"] = dict(before=before_queries, after=final,
             advanced=final["current_id"] != before_queries["current_id"] or final["position_frames"] > before_queries["position_frames"],
             underrun_delta=final["underruns"] - before_queries["underruns"])
         assert final["transport"] == "playing" and report["playback_observation"]["advanced"]
-        # Queries must not disturb playback. The 50k enqueue's own effect is a finding: reported, not asserted.
+        # Neither queries nor 50k run enqueues may disturb playback: run
+        # selections resolve off the playback owner.
         query_underruns = underruns["after_list_families"] - before_queries["underruns"]
+        enqueue_underruns = final["underruns"] - underruns["after_list_families"]
         report["playback_observation"]["query_phase_underrun_delta"] = query_underruns
-        report["playback_observation"]["enqueue_phase_underrun_delta"] = final["underruns"] - underruns["after_list_families"]
+        report["playback_observation"]["enqueue_phase_underrun_delta"] = enqueue_underruns
         assert query_underruns == 0, "playback underruns during query measurements"
+        assert enqueue_underruns == 0, f"{enqueue_underruns} playback underruns during 50k run enqueues"
         if not args.queries_only:
             for index in range(1, args.native_runs):
                 native_run(index, ready, scan=index == args.native_runs - 1)

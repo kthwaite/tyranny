@@ -7,7 +7,6 @@ use crate::{
     library_types::{
         LibraryCommand, LibraryError, LibraryErrorKind, PageRequest, StaleLibraryRevision,
     },
-    listing::{recent_cutoff, unix_now},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, ShuffleStrategy, UniformShuffle},
     playback::{CountedPlay, Player, PreparedRemove, Start},
@@ -34,6 +33,11 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+mod resolve;
+#[cfg(test)]
+mod tests;
+use resolve::{Resolution, Resolver};
+
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 const EVENT_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -51,6 +55,7 @@ pub struct Controller {
     sender: mpsc::Sender<Work>,
     library: LibraryHandle,
     artwork: ArtworkHandle,
+    resolver: Arc<Resolver>,
 }
 pub struct Subscription {
     pub snapshot: ControlState,
@@ -59,12 +64,14 @@ pub struct Subscription {
 enum Work {
     Subscribe(oneshot::Sender<Subscription>),
     Request(Box<Request>, oneshot::Sender<Message>),
+    /// A run selection command with its selection already resolved.
+    Resolved(Box<Request>, Resolution, oneshot::Sender<Message>),
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
 impl Owner {
     pub fn start(config: OwnerConfig) -> Result<Self> {
-        let artwork_database = config.database_path.clone();
+        let database = config.database_path.clone();
         let (sender, receiver) = mpsc::channel(64);
         let (ready_tx, ready_rx) = startup::sync_channel(1);
         let thread = thread::Builder::new()
@@ -73,7 +80,8 @@ impl Owner {
                 let actor = Actor::open(config);
                 match actor {
                     Ok(actor) => {
-                        if ready_tx.send(Ok(actor.library.handle())).is_err() {
+                        let ready = (actor.library.handle(), actor.capture_path.clone());
+                        if ready_tx.send(Ok(ready)).is_err() {
                             return Ok(());
                         }
                         actor.run(receiver)
@@ -90,13 +98,15 @@ impl Owner {
             Err(error) => Err(error.into()),
         };
         match initialized {
-            Ok(library) => {
-                let artwork = ArtworkWorkers::start(artwork_database);
+            Ok((library, capture)) => {
+                let resolver = Arc::new(Resolver::new(database.clone(), capture));
+                let artwork = ArtworkWorkers::start(database);
                 Ok(Self {
                     controller: Controller {
                         sender,
                         library,
                         artwork: artwork.handle(),
+                        resolver,
                     },
                     artwork,
                     thread,
@@ -278,6 +288,9 @@ impl Controller {
                 revision,
             },
             Command::ListGroups { list, revision } => LibraryCommand::ListGroups { list, revision },
+            command @ (Command::EnqueueTracks { .. } | Command::PlaylistAddSelection { .. }) => {
+                return self.run_request(id, command).await;
+            }
             command => return self.playback_request(Request { id, command }).await,
         };
         let reply = match self.library.request(command).await {
@@ -319,9 +332,22 @@ impl Controller {
     }
 
     async fn playback_request(&self, request: Request) -> Result<Message> {
+        self.submit(|reply| Work::Request(Box::new(request), reply))
+            .await
+    }
+
+    /// Resolves the run selection off the playback owner. The owner only
+    /// rechecks revisions and commits.
+    async fn run_request(&self, id: u64, command: Command) -> Result<Message> {
+        let (command, resolution) = Arc::clone(&self.resolver).resolve(command).await?;
+        self.submit(|reply| Work::Resolved(Box::new(Request { id, command }), resolution, reply))
+            .await
+    }
+
+    async fn submit(&self, work: impl FnOnce(oneshot::Sender<Message>) -> Work) -> Result<Message> {
         let (reply, receiver) = oneshot::channel();
         self.sender
-            .try_send(Work::Request(Box::new(request), reply))
+            .try_send(work(reply))
             .context("playback owner busy or unavailable")?;
         receiver
             .await
@@ -450,6 +476,43 @@ fn capture_destination(config: &OwnerConfig, entries: &[LoadedEntry]) -> Result<
         "capture destination overlaps a queued source"
     );
     Ok(Some(capture))
+}
+
+/// The canonical form of a queued source. `capture` is the capture output,
+/// which cannot also be a source.
+fn source_path(source: PathBuf, capture: Option<&Path>) -> CommandResult<PathBuf> {
+    if source.as_os_str().len() > 4096 || !source.is_absolute() {
+        return Err(Failure::invalid(
+            "source must be an absolute local path of at most 4096 bytes",
+        ));
+    }
+    let source = source
+        .canonicalize()
+        .map_err(|error| Failure::invalid(format!("opening source: {error}")))?;
+    if !source.is_file() {
+        return Err(Failure::invalid("source is not a regular file"));
+    }
+    if capture.is_some_and(|capture| same_file(&source, capture)) {
+        return Err(Failure::invalid(
+            "capture output cannot also be a queued source",
+        ));
+    }
+    let path = source
+        .to_str()
+        .ok_or_else(|| Failure::invalid("source path must be UTF-8"))?;
+    if path.len() > 4096 {
+        return Err(Failure::invalid("resolved source path exceeds 4096 bytes"));
+    }
+    Ok(source)
+}
+
+fn source_name(source: &QueueSource) -> CommandResult<()> {
+    if source.name.len() > MAX_SOURCE_NAME_BYTES {
+        return Err(Failure::invalid(format!(
+            "source name exceeds {MAX_SOURCE_NAME_BYTES} UTF-8 bytes"
+        )));
+    }
+    Ok(())
 }
 
 /// `(entry id, library revision)` and what the library said about that entry.
@@ -902,24 +965,17 @@ impl Actor {
         self.playlist_applied(change)
     }
 
-    /// Resolves the selection and validates each source once, then adds every
-    /// track in one playlist edit that rechecks the selection's revisions.
+    /// Adds every track of the resolved selection in one playlist edit that
+    /// rechecks the selection's revisions.
     fn playlist_add_selection(
         &mut self,
         playlist_id: u64,
         expected_revision: u64,
         selection: TrackSelection,
         before: Option<u64>,
+        sources: Resolution,
     ) -> CommandResult<Response> {
-        let sources = self
-            .store
-            .resolve_selection(&selection, recent_cutoff(unix_now()))
-            .map_err(Failure::playlist)?;
-        let mut track_ids = Vec::with_capacity(sources.len());
-        for (track, path) in sources {
-            self.source_path(path)?;
-            track_ids.push(track);
-        }
+        let track_ids = sources?.into_iter().map(|(track, _)| track).collect();
         let change = self
             .store
             .edit_playlist(
@@ -936,33 +992,7 @@ impl Actor {
     }
 
     fn source_path(&self, source: PathBuf) -> CommandResult<PathBuf> {
-        if source.as_os_str().len() > 4096 || !source.is_absolute() {
-            return Err(Failure::invalid(
-                "source must be an absolute local path of at most 4096 bytes",
-            ));
-        }
-        let source = source
-            .canonicalize()
-            .map_err(|error| Failure::invalid(format!("opening source: {error}")))?;
-        if !source.is_file() {
-            return Err(Failure::invalid("source is not a regular file"));
-        }
-        if self
-            .capture_path
-            .as_ref()
-            .is_some_and(|capture| same_file(&source, capture))
-        {
-            return Err(Failure::invalid(
-                "capture output cannot also be a queued source",
-            ));
-        }
-        let path = source
-            .to_str()
-            .ok_or_else(|| Failure::invalid("source path must be UTF-8"))?;
-        if path.len() > 4096 {
-            return Err(Failure::invalid("resolved source path exceeds 4096 bytes"));
-        }
-        Ok(source)
+        source_path(source, self.capture_path.as_deref())
     }
     fn insert_tracks(
         &mut self,
@@ -1068,9 +1098,10 @@ impl Actor {
         self.published(Some(first_id))
     }
 
-    /// Resolves the selection, then edits the queue in one store transaction
-    /// and one infallible player commit. With `play` the first new entry is
-    /// selected as `Play` would, and the checkpoint commits with the rows.
+    /// Edits the queue with the resolved selection in one store transaction,
+    /// which rechecks the selection's revisions, and one infallible player
+    /// commit. With `play` the first new entry is selected as `Play` would,
+    /// and the checkpoint commits with the rows.
     fn enqueue_tracks(
         &mut self,
         selection: TrackSelection,
@@ -1078,21 +1109,12 @@ impl Actor {
         placement: Placement,
         play: bool,
         source: QueueSource,
+        sources: Resolution,
     ) -> CommandResult<Response> {
         self.check_revision(expected_revision)?;
         self.next_revision()?;
-        if source.name.len() > MAX_SOURCE_NAME_BYTES {
-            return Err(Failure::invalid(format!(
-                "source name exceeds {MAX_SOURCE_NAME_BYTES} UTF-8 bytes"
-            )));
-        }
-        let mut sources = self
-            .store
-            .resolve_selection(&selection, recent_cutoff(unix_now()))
-            .map_err(Failure::playlist)?;
-        for (_, path) in &mut sources {
-            *path = self.source_path(std::mem::take(path))?;
-        }
+        source_name(&source)?;
+        let sources = sources?;
         let mut track_ids = Vec::new();
         track_ids
             .try_reserve_exact(sources.len())
@@ -1396,12 +1418,6 @@ impl Actor {
                     before,
                 },
             ),
-            Command::PlaylistAddSelection {
-                playlist_id,
-                expected_revision,
-                selection,
-                before,
-            } => self.playlist_add_selection(playlist_id, expected_revision, selection, before),
             Command::PlaylistRemove {
                 playlist_id,
                 expected_revision,
@@ -1440,13 +1456,9 @@ impl Actor {
                 track_ids,
                 before,
             } => self.insert_tracks(expected_revision, library_revision, track_ids, before),
-            Command::EnqueueTracks {
-                selection,
-                expected_revision,
-                placement,
-                play,
-                source,
-            } => self.enqueue_tracks(selection, expected_revision, placement, play, source),
+            Command::EnqueueTracks { .. } | Command::PlaylistAddSelection { .. } => {
+                unreachable!("run selections are resolved before the owner (`Work::Resolved`)")
+            }
             Command::Artwork { .. }
             | Command::AddRoot { .. }
             | Command::Rescan { .. }
@@ -1730,6 +1742,78 @@ impl Actor {
         }
     }
 
+    /// A run selection command whose selection resolved off the owner.
+    fn resolved(&mut self, command: Command, sources: Resolution) -> CommandResult<Response> {
+        match command {
+            Command::EnqueueTracks {
+                selection,
+                expected_revision,
+                placement,
+                play,
+                source,
+            } => self.enqueue_tracks(
+                selection,
+                expected_revision,
+                placement,
+                play,
+                source,
+                sources,
+            ),
+            Command::PlaylistAddSelection {
+                playlist_id,
+                expected_revision,
+                selection,
+                before,
+            } => self.playlist_add_selection(
+                playlist_id,
+                expected_revision,
+                selection,
+                before,
+                sources,
+            ),
+            _ => unreachable!("only run selections are resolved before the owner"),
+        }
+    }
+
+    /// Sends the command's reply. Returns the error of a fatal failure, after
+    /// which the owner stops.
+    fn reply(
+        &mut self,
+        id: u64,
+        result: CommandResult<Response>,
+        reply: oneshot::Sender<Message>,
+    ) -> Option<anyhow::Error> {
+        match result {
+            Ok(result) => {
+                let _ = reply.send(Message::Reply {
+                    id,
+                    reply: Reply::Ok { result },
+                });
+                None
+            }
+            Err(failure) => {
+                self.publish();
+                let message = format!("{:#}", failure.error);
+                let _ = reply.send(Message::Reply {
+                    id,
+                    reply: Reply::Error {
+                        code: failure.code,
+                        message,
+                        queue_revision: self.revision(),
+                    },
+                });
+                failure.fatal.then_some(failure.error)
+            }
+        }
+    }
+
+    /// Stops the owner after a fatal failure.
+    fn stop(mut self, error: anyhow::Error) -> Result<()> {
+        self.player.pause();
+        let _ = self.library.shutdown();
+        Err(error)
+    }
+
     fn run(mut self, mut receiver: mpsc::Receiver<Work>) -> Result<()> {
         let mut event_time = Instant::now();
         let mut checkpoint_time = Instant::now();
@@ -1771,32 +1855,15 @@ impl Actor {
                         let _ = reply.send(subscription);
                     }
                     Ok(Work::Request(request, reply)) => {
-                        let request = *request;
                         let result = self.command(request.command);
-                        match result {
-                            Ok(result) => {
-                                let _ = reply.send(Message::Reply {
-                                    id: request.id,
-                                    reply: Reply::Ok { result },
-                                });
-                            }
-                            Err(failure) => {
-                                self.publish();
-                                let message = format!("{:#}", failure.error);
-                                let _ = reply.send(Message::Reply {
-                                    id: request.id,
-                                    reply: Reply::Error {
-                                        code: failure.code,
-                                        message,
-                                        queue_revision: self.revision(),
-                                    },
-                                });
-                                if failure.fatal {
-                                    self.player.pause();
-                                    let _ = self.library.shutdown();
-                                    return Err(failure.error);
-                                }
-                            }
+                        if let Some(error) = self.reply(request.id, result, reply) {
+                            return self.stop(error);
+                        }
+                    }
+                    Ok(Work::Resolved(request, sources, reply)) => {
+                        let result = self.resolved(request.command, sources);
+                        if let Some(error) = self.reply(request.id, result, reply) {
+                            return self.stop(error);
                         }
                     }
                     Ok(Work::Shutdown(reply)) => {

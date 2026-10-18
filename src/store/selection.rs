@@ -1,7 +1,9 @@
 //! Resolves a `TrackSelection` to `(track_id, path)` pairs. Resolution runs in
 //! one read transaction under the library revision the client saw; list rows
 //! come from `listing::compile`, which also checks a playlist source's revision.
-use super::{Store, list_source_rule, playlists::library_revision};
+//! The owner resolves on its own read-only connection, off the playback owner;
+//! the write that commits the rows rechecks every revision (`check_revisions`).
+use super::{list_source_rule, playlists::library_revision};
 use crate::{
     library::resolve_track,
     library_types::{LibraryError, LibraryErrorKind},
@@ -148,47 +150,58 @@ fn list_rows(
     Ok(sources)
 }
 
-impl Store {
-    /// The selected tracks and their indexed paths, in selection order.
+/// The selected tracks and their indexed paths, in selection order. Any
+/// connection to the library database works, including a read-only one.
+pub(crate) fn resolve_selection(
+    connection: &mut Connection,
+    selection: &TrackSelection,
+    recent_cutoff: i64,
+) -> Result<Vec<(u64, PathBuf)>> {
+    validate(selection)?;
+    let transaction = connection.transaction()?;
+    library_revision(&transaction, Some(selection_revision(selection)))?;
+    let sources = match selection {
+        TrackSelection::Ids {
+            library_revision,
+            track_ids,
+        } => track_ids
+            .iter()
+            .map(|&id| {
+                let path = resolve_track(&transaction, id, *library_revision)?;
+                Ok((id, PathBuf::from(path)))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        TrackSelection::List {
+            list,
+            ranges,
+            excluded,
+            first_row_id,
+            ..
+        } => list_rows(
+            &transaction,
+            list,
+            ranges,
+            excluded,
+            *first_row_id,
+            recent_cutoff,
+        )?,
+    };
+    if sources.is_empty() {
+        return Err(invalid("selection resolves to no tracks"));
+    }
+    transaction.commit()?;
+    Ok(sources)
+}
+
+#[cfg(test)]
+impl super::Store {
+    /// `resolve_selection` on the store's own connection.
     pub fn resolve_selection(
         &mut self,
         selection: &TrackSelection,
         recent_cutoff: i64,
     ) -> Result<Vec<(u64, PathBuf)>> {
-        validate(selection)?;
-        let transaction = self.connection.transaction()?;
-        library_revision(&transaction, Some(selection_revision(selection)))?;
-        let sources = match selection {
-            TrackSelection::Ids {
-                library_revision,
-                track_ids,
-            } => track_ids
-                .iter()
-                .map(|&id| {
-                    let path = resolve_track(&transaction, id, *library_revision)?;
-                    Ok((id, PathBuf::from(path)))
-                })
-                .collect::<Result<Vec<_>>>()?,
-            TrackSelection::List {
-                list,
-                ranges,
-                excluded,
-                first_row_id,
-                ..
-            } => list_rows(
-                &transaction,
-                list,
-                ranges,
-                excluded,
-                *first_row_id,
-                recent_cutoff,
-            )?,
-        };
-        if sources.is_empty() {
-            return Err(invalid("selection resolves to no tracks"));
-        }
-        transaction.commit()?;
-        Ok(sources)
+        resolve_selection(&mut self.connection, selection, recent_cutoff)
     }
 }
 
