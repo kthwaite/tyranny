@@ -1234,9 +1234,10 @@ impl Player {
             .filter(|(_, next)| **next)
             .map(|(entry, _)| entry.id)
             .collect();
-        // Each place from the end takes a uniform pick of those left.
+        // Each place from the end takes a uniform pick of those left. A pick
+        // out of range clamps to the last candidate, as `PlayOrder::pick` does.
         for end in (1..order.len()).rev() {
-            let pick = strategy.choose(&order[..=end]);
+            let pick = strategy.choose(&order[..=end]).min(end);
             order.swap(pick, end);
         }
         Ok(self.prepare_reorder(&order)?.map(|change| PreparedReorder {
@@ -1911,6 +1912,34 @@ mod batch_tests {
         fn choose(&mut self, _candidates: &[u64]) -> usize {
             0
         }
+    }
+    /// Answers out of range, as a misbehaving strategy might.
+    struct Beyond;
+    impl crate::play_order::ShuffleStrategy for Beyond {
+        fn choose(&mut self, _candidates: &[u64]) -> usize {
+            usize::MAX
+        }
+    }
+    #[test]
+    fn shuffle_upcoming_clamps_an_out_of_range_pick() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let paths = (0..4)
+            .map(|index| source(&scratch.0, &format!("{index}.wav"), 137, 1000))
+            .collect();
+        let player = Player::new(
+            paths,
+            OutputConfig::Capture {
+                path: scratch.0.join("capture.f32"),
+                clocked: false,
+            },
+            GainMode::Off,
+        )?;
+        // Each pick clamps to the last candidate, as `PlayOrder::pick` does:
+        // every place keeps its entry, so the order does not change.
+        assert!(player.prepare_shuffle_upcoming(&mut Beyond, 1)?.is_none());
+        Ok(())
     }
     #[test]
     fn shuffle_upcoming_stays_anchored_when_output_reaches_a_shuffled_entry() -> Result<()> {
