@@ -39,6 +39,9 @@ pub(crate) struct Candidate {
     pub path: PathBuf,
     pub size: u64,
     pub modified_ns: i64,
+    /// Birth time, falling back to `modified_ns`. `None` until the file is
+    /// fingerprinted again (the worklist does not store it).
+    pub created_ns: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -147,11 +150,11 @@ fn run(
             Err(RecvTimeoutError::Disconnected) => return,
         };
         let mut results = Vec::with_capacity(batch.len());
-        for candidate in batch {
+        for mut candidate in batch {
             if cancelled.load(Ordering::Acquire) {
                 return;
             }
-            let result = probe_candidate(&candidate, &cancelled)
+            let result = probe_candidate(&mut candidate, &cancelled)
                 .map_err(|error| bounded_error(format!("{}: {error:#}", candidate.path.display())));
             results.push(ProbeResult { candidate, result });
         }
@@ -161,10 +164,13 @@ fn run(
     }
 }
 
-fn probe_candidate(candidate: &Candidate, cancelled: &Arc<AtomicBool>) -> Result<TrackMetadata> {
+fn probe_candidate(
+    candidate: &mut Candidate,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<TrackMetadata> {
     let before = fingerprint(&candidate.path)?;
     ensure!(
-        before == (candidate.size, candidate.modified_ns),
+        (before.0, before.1) == (candidate.size, candidate.modified_ns),
         "file changed since enumeration; retry on next scan"
     );
     let metadata = metadata::probe(&candidate.path, cancelled)?;
@@ -173,6 +179,7 @@ fn probe_candidate(candidate: &Candidate, cancelled: &Arc<AtomicBool>) -> Result
         after == before,
         "file changed during metadata probe; retry on next scan"
     );
+    candidate.created_ns = Some(before.2);
     Ok(metadata)
 }
 
@@ -281,11 +288,12 @@ fn enumerate(
             result.skipped += 1;
         } else {
             match fingerprint(&path) {
-                Ok((size, modified_ns)) => {
+                Ok((size, modified_ns, created_ns)) => {
                     batch.push(Candidate {
                         path,
                         size,
                         modified_ns,
+                        created_ns: Some(created_ns),
                     });
                     result.total += 1;
                     if batch.len() == ENUMERATION_BATCH {
@@ -331,7 +339,7 @@ fn bounded_error(mut error: String) -> String {
     error
 }
 
-fn fingerprint(path: &Path) -> Result<(u64, i64)> {
+fn fingerprint(path: &Path) -> Result<(u64, i64, i64)> {
     let attributes = fs::symlink_metadata(path)
         .with_context(|| format!("reading file attributes {}", path.display()))?;
     ensure!(
@@ -344,7 +352,13 @@ fn fingerprint(path: &Path) -> Result<(u64, i64)> {
         .with_context(|| format!("reading modification time {}", path.display()))?;
     let modified_ns = timestamp_ns(modified)
         .with_context(|| format!("representing modification time {}", path.display()))?;
-    Ok((attributes.len(), modified_ns))
+    // Birth time is unavailable on some filesystems; fall back to modification.
+    let created_ns = attributes
+        .created()
+        .ok()
+        .and_then(|created| timestamp_ns(created).ok())
+        .unwrap_or(modified_ns);
+    Ok((attributes.len(), modified_ns, created_ns))
 }
 
 fn timestamp_ns(time: SystemTime) -> Result<i64> {
@@ -442,14 +456,15 @@ mod tests {
         let directory = TemporaryDirectory::new();
         let path = directory.0.join("track.flac");
         fs::write(&path, b"old").unwrap();
-        let (size, modified_ns) = fingerprint(&path).unwrap();
-        let candidate = Candidate {
+        let (size, modified_ns, created_ns) = fingerprint(&path).unwrap();
+        let mut candidate = Candidate {
             path: path.clone(),
             size,
             modified_ns,
+            created_ns: Some(created_ns),
         };
         fs::write(&path, b"new data").unwrap();
-        let result = probe_candidate(&candidate, &Arc::new(AtomicBool::new(false)));
+        let result = probe_candidate(&mut candidate, &Arc::new(AtomicBool::new(false)));
         assert!(
             result
                 .unwrap_err()

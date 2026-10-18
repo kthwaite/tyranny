@@ -4,8 +4,11 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const BATCH: usize = 64;
+/// Bump when extraction learns new fields so unchanged files are re-read once.
+pub(super) const METADATA_VERSION: i64 = 2;
 pub(super) const ERROR_LIMIT: usize = 1024;
 
 /// The completed-scan watermark is an atomic tombstone set: discovery may mark
@@ -313,16 +316,18 @@ pub(super) fn next_batch(
         let mut statement = transaction.prepare(
             "SELECT w.path,w.size,w.modified_ns,
             a.indexed=1 AND a.error IS NULL AND a.size=w.size AND a.modified_ns=w.modified_ns
+            AND a.metadata_version=?3
             FROM library_worklist w JOIN library_assets a ON a.path=w.path
             WHERE w.scan_id=?1 ORDER BY w.path LIMIT ?2",
         )?;
         statement
-            .query_map(params![serial, BATCH as u64], |row| {
+            .query_map(params![serial, BATCH as u64, METADATA_VERSION], |row| {
                 Ok((
                     Candidate {
                         path: row.get::<_, String>(0)?.into(),
                         size: row.get(1)?,
                         modified_ns: row.get(2)?,
+                        created_ns: None,
                     },
                     row.get::<_, bool>(3)?,
                 ))
@@ -425,16 +430,45 @@ fn install(
         [path],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    transaction.execute("INSERT INTO library_tracks(asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(asset_id) DO UPDATE SET
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let added = (candidate.created_ns.unwrap_or(candidate.modified_ns) / 1_000_000_000).min(now);
+    let genres = metadata.genres.join("\n");
+    transaction.execute("INSERT INTO library_tracks(asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number,
+        year,codec,bit_depth,bitrate_kbps,file_size,date_added)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(asset_id) DO UPDATE SET
         artist_id=excluded.artist_id,album_id=excluded.album_id,metadata=excluded.metadata,search=excluded.search,
-        title_sort=excluded.title_sort,disc_number=excluded.disc_number,disc_total=excluded.disc_total,track_number=excluded.track_number",
+        title_sort=excluded.title_sort,disc_number=excluded.disc_number,disc_total=excluded.disc_total,track_number=excluded.track_number,
+        year=excluded.year,codec=excluded.codec,bit_depth=excluded.bit_depth,bitrate_kbps=excluded.bitrate_kbps,file_size=excluded.file_size,
+        date_added=CASE WHEN library_tracks.date_added=0 THEN excluded.date_added ELSE library_tracks.date_added END",
         params![asset_id,artist_id,album_id,serde_json::to_string(&metadata)?,
-            format!("{}\n{}\n{}\n{}\n{path}",metadata.title,metadata.artist,metadata.album,metadata.album_artist).to_lowercase(),
-            metadata.title.to_lowercase(),metadata.disc_number.unwrap_or(1),metadata.disc_total.unwrap_or(1),metadata.track_number.unwrap_or(0)])?;
+            format!("{}\n{}\n{}\n{}\n{genres}\n{path}",metadata.title,metadata.artist,metadata.album,metadata.album_artist).to_lowercase(),
+            metadata.title.to_lowercase(),metadata.disc_number.unwrap_or(1),metadata.disc_total.unwrap_or(1),metadata.track_number.unwrap_or(0),
+            metadata.year,metadata.codec,metadata.bit_depth,metadata.bitrate_kbps,candidate.size,added])?;
+    let track_id: u64 = transaction.query_row(
+        "SELECT id FROM library_tracks WHERE asset_id=?1",
+        [asset_id],
+        |row| row.get(0),
+    )?;
     transaction.execute(
-        "UPDATE library_assets SET size=?1,modified_ns=?2,indexed=1,error=NULL WHERE id=?3",
-        params![candidate.size, candidate.modified_ns, asset_id],
+        "DELETE FROM library_track_genres WHERE track_id=?1",
+        [track_id],
+    )?;
+    for (position, genre) in metadata.genres.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO library_genres(name,search) VALUES(?1,?2) ON CONFLICT(search) DO NOTHING",
+            params![genre, genre.to_lowercase()],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO library_track_genres(track_id,genre_id,position)
+            SELECT ?1,id,?3 FROM library_genres WHERE search=?2",
+            params![track_id, genre.to_lowercase(), position as u64],
+        )?;
+    }
+    transaction.execute(
+        "UPDATE library_assets SET size=?1,modified_ns=?2,created_ns=?3,metadata_version=?4,indexed=1,error=NULL WHERE id=?5",
+        params![candidate.size, candidate.modified_ns, candidate.created_ns, METADATA_VERSION, asset_id],
     )?;
     if !indexed {
         transaction.execute(

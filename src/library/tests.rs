@@ -2,7 +2,11 @@
 //! The small WAV fixture is self-contained; tagged FLAC fixtures use the existing
 //! developer FFmpeg executable only to create inputs, never to perform indexing.
 use super::*;
-use std::{fs, process::Command};
+use std::{
+    fs,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -20,6 +24,7 @@ impl Scratch {
             let mut connection = Connection::open(&database).unwrap();
             let transaction = connection.transaction().unwrap();
             migrate(&transaction).unwrap();
+            migrate_v5(&transaction).unwrap();
             transaction.commit().unwrap();
         }
         Library::start(database).unwrap()
@@ -929,4 +934,137 @@ fn malformed_filters_are_typed_located_and_bounded_for_all_projections() {
         panic!("expected roots");
     };
     assert!(page.entries.is_empty());
+}
+
+fn database(scratch: &Scratch) -> Connection {
+    Connection::open(scratch.path("library.sqlite")).unwrap()
+}
+
+#[tokio::test]
+async fn rescan_reextracts_assets_with_old_metadata_version() {
+    let scratch = Scratch::new();
+    flac(
+        &scratch.path("music/a.flac"),
+        &[("title", "A"), ("date", "1959-08-17"), ("genre", "Jazz")],
+    );
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let connection = database(&scratch);
+    let year: Option<i64> = connection
+        .query_row("SELECT year FROM library_tracks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(year, Some(1959));
+    connection
+        .execute_batch(
+            "UPDATE library_assets SET metadata_version=1; UPDATE library_tracks SET year=NULL;",
+        )
+        .unwrap();
+    let scan = rescan(&library, root).await;
+    assert_eq!((scan.updated, scan.unchanged), (1, 0));
+    let (year, version): (Option<i64>, i64) = connection
+        .query_row(
+            "SELECT t.year,a.metadata_version FROM library_tracks t JOIN library_assets a ON a.id=t.asset_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((year, version), (Some(1959), 2));
+    let scan = rescan(&library, root).await;
+    assert_eq!((scan.updated, scan.unchanged), (0, 1));
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn date_added_uses_birth_time_and_survives_reindex() {
+    let scratch = Scratch::new();
+    let source = scratch.path("music/a.flac");
+    flac(&source, &[("title", "A")]);
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let connection = database(&scratch);
+    let added = |connection: &Connection| -> i64 {
+        connection
+            .query_row("SELECT date_added FROM library_tracks", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let first = added(&connection);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!(first > 0 && first <= now, "date_added {first}, now {now}");
+    let created: Option<i64> = connection
+        .query_row("SELECT created_ns FROM library_assets", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(created.is_some());
+    let file = fs::OpenOptions::new().write(true).open(&source).unwrap();
+    file.set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    drop(file);
+    let scan = rescan(&library, root).await;
+    assert_eq!(scan.updated, 1);
+    assert_eq!(added(&connection), first);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn genres_are_normalized_rows_in_tag_order() {
+    let scratch = Scratch::new();
+    flac(
+        &scratch.path("music/a.flac"),
+        &[("title", "A"), ("genre", "Soul;Jazz;soul")],
+    );
+    flac(
+        &scratch.path("music/b.flac"),
+        &[("title", "B"), ("genre", "jazz")],
+    );
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let connection = database(&scratch);
+    let genres = |title: &str| -> Vec<String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT g.name FROM library_track_genres tg
+                JOIN library_genres g ON g.id=tg.genre_id
+                JOIN library_tracks t ON t.id=tg.track_id
+                WHERE t.title_sort=?1 ORDER BY tg.position",
+            )
+            .unwrap();
+        statement
+            .query_map([title], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(genres("a"), ["Soul", "Jazz"]);
+    // One row per lowercased name; the first spelling stored wins.
+    assert_eq!(genres("b"), ["Jazz"]);
+    let rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM library_genres", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 2);
+    let search: String = connection
+        .query_row(
+            "SELECT search FROM library_tracks WHERE title_sort='a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(search.contains("soul\njazz"), "{search}");
+    // Reindex with changed genres replaces the rows.
+    flac(
+        &scratch.path("music/a.flac"),
+        &[("title", "A"), ("genre", "Blues")],
+    );
+    let scan = rescan(&library, root).await;
+    assert_eq!(scan.updated, 1);
+    assert_eq!(genres("a"), ["Blues"]);
+    library.shutdown().unwrap();
 }
