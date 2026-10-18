@@ -1277,7 +1277,7 @@ async fn upgrade_flag_rescans_every_root_once_and_clears() {
 
 #[tokio::test]
 async fn upgraded_tracks_without_date_added_are_not_recent() {
-    // Task 6 adds the Recent source and finishes this with a source assertion.
+    use crate::listing::{Browser, Grouping, ListDescription, ListSource, compile};
     let scratch = Scratch::new();
     flac(&scratch.path("music/a.flac"), &[("title", "A")]);
     let library = scratch.library();
@@ -1296,5 +1296,29 @@ async fn upgraded_tracks_without_date_added_are_not_recent() {
         })
         .unwrap();
     assert_eq!(added, 0);
+    // Even with a cutoff that admits every date, an unknown date is not recent.
+    let connection = database(&scratch);
+    let recent = ListDescription {
+        source: ListSource::Recent,
+        browser: Browser::default(),
+        query: String::new(),
+        sort: Vec::new(),
+        group: Grouping::None,
+    };
+    let count = |list: &ListDescription| -> i64 {
+        let compiled = compile(&connection, list, i64::MIN, 1).unwrap();
+        connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM ({})", compiled.sql),
+                rusqlite::params_from_iter(compiled.values),
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let library_list = ListDescription {
+        source: ListSource::Library,
+        ..recent.clone()
+    };
+    assert_eq!((count(&library_list), count(&recent)), (1, 0));
     library.shutdown().unwrap();
 }

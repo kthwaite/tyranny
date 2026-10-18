@@ -15,14 +15,14 @@ use std::{
 };
 
 mod playlists;
-pub(crate) use playlists::{PlaylistChange, PlaylistEdit, PlaylistFailure};
+pub(crate) use playlists::{PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule};
 #[cfg(test)]
 mod playlists_tests;
 const APPLICATION_ID: i64 = 0x7479726e;
 const SCHEMA_VERSION: i64 = 5;
 
 /// Runs the migration ladder up to `target`; tests use a lower target to build old schemas.
-fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
+pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
     let mut version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let application: i64 = connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     ensure!(

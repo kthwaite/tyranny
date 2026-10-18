@@ -94,6 +94,27 @@ fn header(connection: &Connection, id: u64, expected: Option<u64>) -> Result<Pla
     )?;
     Ok(playlist)
 }
+/// A list source names playlist `id` at `revision`, smart exactly when `smart`.
+/// Returns the smart rule. Unknown, stale and wrong-kind playlists are rejected.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "list queries (Task 7) are the first caller of compile"
+    )
+)]
+pub(crate) fn list_source_rule(
+    connection: &Connection,
+    id: u64,
+    revision: u64,
+    smart: bool,
+) -> Result<Option<String>> {
+    match (header(connection, id, Some(revision))?.query, smart) {
+        (rule @ Some(_), true) | (rule @ None, false) => Ok(rule),
+        (Some(_), false) => Err(invalid("playlist source names a smart playlist")),
+        (None, true) => Err(invalid("smart source names a regular playlist")),
+    }
+}
 fn playlist_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Playlist> {
     let query: Option<String> = row.get(4)?;
     Ok(Playlist {

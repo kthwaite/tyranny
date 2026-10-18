@@ -7,6 +7,7 @@ pub mod decoder;
 mod filter;
 pub mod library;
 pub mod library_types;
+pub mod listing;
 mod metadata;
 pub mod output;
 pub mod owner;
