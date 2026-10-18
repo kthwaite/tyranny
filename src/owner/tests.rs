@@ -441,3 +441,42 @@ fn a_play_counted_just_before_its_entry_is_deleted_is_recorded() {
         let _ = fs::remove_dir_all(&root);
     }
 }
+
+/// The owner exits when every controller is gone. Plays still waiting for a
+/// history write are written first, as on shutdown.
+#[test]
+fn a_disconnected_owner_writes_its_pending_plays() {
+    let root = std::env::temp_dir().join(format!("tyranny-exit-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let database_path = root.join("state.sqlite");
+    let mut actor = Actor::open(OwnerConfig {
+        database_path: database_path.clone(),
+        output: OutputConfig::Capture {
+            path: root.join("capture.f32"),
+            clocked: true,
+        },
+    })
+    .unwrap();
+    actor.pending_plays.push(PlayRecord {
+        entry_id: 1,
+        track_id: None,
+        path: "/music/a.flac".into(),
+        title: "a".into(),
+        artist: String::new(),
+        album: String::new(),
+        duration_ms: None,
+        source: None,
+        played_at: 1_700_000_000,
+    });
+    // An earlier write failed, so the loop leaves the play for its retry.
+    actor.retrying_plays = true;
+    let (sender, receiver) = mpsc::channel(1);
+    drop(sender);
+    actor.run(receiver).unwrap();
+    let page = Store::open(&database_path)
+        .unwrap()
+        .history_page(0, 10)
+        .unwrap();
+    assert_eq!(page.total, 1);
+    let _ = fs::remove_dir_all(&root);
+}

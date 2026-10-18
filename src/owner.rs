@@ -1905,6 +1905,7 @@ impl Actor {
                     Err(mpsc::error::TryRecvError::Disconnected) => {
                         let checkpoint = self.checkpoint();
                         self.player.pause();
+                        self.write_plays();
                         let library = self.library.shutdown();
                         let saved = self.store.checkpoint(checkpoint, &self.settings);
                         return library.and(saved);
