@@ -687,6 +687,48 @@ fn seek_and_gain_reselection_keep_the_shuffled_next() {
     }
 }
 
+#[test]
+fn repeat_one_counts_each_pass() {
+    let scratch = Scratch::new();
+    let source = scratch.path("repeat.wav");
+    let capture = scratch.path("capture.f32");
+    wav(&source, 4_800);
+    let mut player = Player::new(
+        vec![source],
+        OutputConfig::Capture {
+            path: capture.clone(),
+            clocked: true,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    player.set_repeat(RepeatMode::One);
+    player.play();
+    let mut counted = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while counted.len() < 3 {
+        assert!(Instant::now() < deadline, "{counted:?}");
+        player.pump().unwrap();
+        counted.extend(player.take_counted_plays());
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Repeat Off ends the queue after the pass being heard.
+    player.set_repeat(RepeatMode::Off);
+    while !player.completed() {
+        assert!(Instant::now() < deadline, "{:?}", player.snapshot());
+        player.pump().unwrap();
+        counted.extend(player.take_counted_plays());
+        thread::sleep(Duration::from_millis(1));
+    }
+    player.pump().unwrap();
+    counted.extend(player.take_counted_plays());
+    drop(player);
+    let heard = pcm(&capture);
+    assert_eq!(heard.len() % 4_800, 0);
+    // Every pass counts, each once.
+    assert_eq!(counted, vec![1; heard.len() / 4_800]);
+}
+
 #[cfg(target_os = "macos")]
 mod coreaudio_hardware {
     use super::*;

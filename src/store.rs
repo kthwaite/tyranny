@@ -19,8 +19,10 @@ use std::{
     time::Duration,
 };
 
+mod history;
 mod playlists;
 mod selection;
+pub(crate) use history::{PlayRecord, count_threshold_frames};
 pub(crate) use playlists::{PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule};
 #[cfg(test)]
 mod playlists_tests;
@@ -195,6 +197,41 @@ fn file_stem(path: &str) -> String {
         |stem| stem.to_string_lossy().into_owned(),
     )
 }
+/// A queue entry with the display fields of its track; read by `queue_item`.
+const QUEUE_ITEM: &str = "SELECT q.id,q.path,q.track_id,q.source_kind,q.source_name,q.run_id,
+        q.played_seq,json_extract(t.metadata,'$.title'),json_extract(t.metadata,'$.artist'),
+        al.title,t.album_id,json_extract(t.metadata,'$.duration_ms')
+    FROM queue q
+    LEFT JOIN library_tracks t ON t.id=q.track_id
+    LEFT JOIN library_albums al ON al.id=t.album_id";
+fn queue_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueItem> {
+    let path: String = row.get(1)?;
+    let title: Option<String> = row.get(7)?;
+    Ok(QueueItem {
+        id: row.get(0)?,
+        track_id: row.get(2)?,
+        source: source(row.get(3)?, row.get(4)?),
+        run_id: row.get(5)?,
+        played: row.get::<_, Option<u64>>(6)?.is_some(),
+        title: title
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| file_stem(&path)),
+        artist: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+        album: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        album_id: row.get(10)?,
+        duration_ms: row.get(11)?,
+        path,
+    })
+}
+/// A stored source label. A kind this server does not know reads as none.
+fn source(kind: Option<String>, name: Option<String>) -> Option<QueueSource> {
+    kind.as_deref()
+        .and_then(SourceKind::parse)
+        .map(|kind| QueueSource {
+            kind,
+            name: name.unwrap_or_default(),
+        })
+}
 pub(crate) struct Store {
     connection: Connection,
 }
@@ -288,44 +325,20 @@ impl Store {
     }
 
     pub fn queue_page(&self, offset: usize, limit: usize) -> Result<Vec<QueueItem>> {
-        let mut query = self.connection.prepare(
-            "SELECT q.id,q.path,q.track_id,q.source_kind,q.source_name,q.run_id,q.played_seq,
-                    json_extract(t.metadata,'$.title'),json_extract(t.metadata,'$.artist'),
-                    al.title,t.album_id,json_extract(t.metadata,'$.duration_ms')
-             FROM queue q
-             LEFT JOIN library_tracks t ON t.id=q.track_id
-             LEFT JOIN library_albums al ON al.id=t.album_id
-             ORDER BY q.ordinal LIMIT ?1 OFFSET ?2",
-        )?;
+        let mut query = self.connection.prepare(&format!(
+            "{QUEUE_ITEM} ORDER BY q.ordinal LIMIT ?1 OFFSET ?2"
+        ))?;
         Ok(query
-            .query_map(params![limit, offset], |row| {
-                let path: String = row.get(1)?;
-                let kind: Option<String> = row.get(3)?;
-                let name: Option<String> = row.get(4)?;
-                let title: Option<String> = row.get(7)?;
-                Ok(QueueItem {
-                    id: row.get(0)?,
-                    track_id: row.get(2)?,
-                    source: kind
-                        .as_deref()
-                        .and_then(SourceKind::parse)
-                        .map(|kind| QueueSource {
-                            kind,
-                            name: name.unwrap_or_default(),
-                        }),
-                    run_id: row.get(5)?,
-                    played: row.get::<_, Option<u64>>(6)?.is_some(),
-                    title: title
-                        .filter(|title| !title.is_empty())
-                        .unwrap_or_else(|| file_stem(&path)),
-                    artist: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                    album: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                    album_id: row.get(10)?,
-                    duration_ms: row.get(11)?,
-                    path,
-                })
-            })?
+            .query_map(params![limit, offset], queue_item)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Queue entry `id` as queue pages show it, or `None` when it is gone.
+    pub fn queue_entry(&self, id: u64) -> Result<Option<QueueItem>> {
+        Ok(self
+            .connection
+            .query_row(&format!("{QUEUE_ITEM} WHERE q.id=?1"), [id], queue_item)
+            .optional()?)
     }
 
     /// The indexed track behind queue entry `entry_id`, or `None` when it has

@@ -5,9 +5,10 @@ use super::{
 };
 use serde_json::{Value, json};
 use tyranny::{
+    library_types::Page,
     listing::Grouping,
     play_order::RepeatMode,
-    protocol::{Playlist, QueueSource, SourceKind},
+    protocol::{HistoryEntry, Playlist, QueueSource, SourceKind},
 };
 
 fn list(source: Value) -> Value {
@@ -1298,6 +1299,171 @@ async fn next_and_previous_under_repeat_one_move_to_other_entries() {
     assert_eq!(next(&mut client).await, 3);
     // As Repeat All would, Next wraps within the context.
     assert_eq!(next(&mut client).await, 1);
+    running.stop().await;
+}
+
+/// Indexes tracks `frames` long named `names`, and returns the library
+/// revision and their track IDs in title order.
+async fn index_frames(
+    scratch: &Scratch,
+    client: &mut PlaybackClient,
+    names: &[&str],
+    frames: u32,
+) -> (u64, Vec<u64>) {
+    let music = scratch.path("music");
+    fs::create_dir(&music).unwrap();
+    for name in names {
+        tagged_wav(&music.join(format!("{name}.wav")), frames, name.as_bytes());
+    }
+    ok(client, json!({"command":"add_root","path":music})).await;
+    client
+        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .await;
+    list_track_ids(client, songs()).await
+}
+async fn history(client: &mut PlaybackClient) -> Page<HistoryEntry> {
+    match ok(
+        client,
+        json!({"command":"history","revision":null,"offset":0,"limit":500}),
+    )
+    .await
+    {
+        Response::History { page } => page,
+        response => panic!("expected history: {response:?}"),
+    }
+}
+/// Library rows sorted by play count, most played first.
+async fn by_plays(client: &mut PlaybackClient) -> Vec<(u64, u64, bool)> {
+    let list = json!({"source":{"kind":"library"},"query":"",
+        "sort":[{"field":"plays","descending":true}],"group":"none"});
+    let Response::ListTracks { page, .. } = ok(client, list_tracks(list, None, 0, 500)).await
+    else {
+        panic!("expected a list page");
+    };
+    page.entries
+        .iter()
+        .map(|row| {
+            let track = &row.track;
+            (track.id, track.play_count, track.last_played.is_some())
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_counts_once_at_half_duration_despite_seeks() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    // Two seconds: the play counts at one second.
+    let (library, tracks) = index_frames(&scratch, &mut client, &["Seeker"], 96_000).await;
+    let command = play_ids(&client, library, &tracks);
+    let entry = applied_entry(ok(&mut client, command).await);
+    let queue_revision = client.state.queue_revision;
+    // Seeks before the threshold keep the pass; it counts by position.
+    client.until(|state| state.position_frames >= 12_000).await;
+    client.seek(entry, 0).await;
+    client.until(|state| state.position_frames >= 12_000).await;
+    client.seek(entry, 24_000).await;
+    assert_eq!(client.state.history_revision, 0);
+    client.until(|state| state.history_revision > 0).await;
+    assert_eq!(client.state.current_id, Some(entry));
+    assert!(client.state.position_frames >= 48_000, "{:?}", client.state);
+    // A seek after counting, and the natural end, do not count it again.
+    client.seek(entry, 0).await;
+    client
+        .until(|state| state.transport == Transport::Ended)
+        .await;
+    assert_eq!(client.state.history_revision, 1);
+    let page = history(&mut client).await;
+    assert_eq!((page.revision, page.total), (1, 1));
+    let played = &page.entries[0];
+    assert_eq!(
+        (
+            played.id,
+            played.track_id,
+            played.title.as_str(),
+            played.artist.as_str(),
+            played.album.as_str(),
+            played.duration_ms,
+            played.source.clone()
+        ),
+        (
+            1,
+            Some(tracks[0]),
+            "Seeker",
+            "Fixture Artist",
+            "Fixture Album",
+            Some(2_000),
+            stamp(SourceKind::Album, "Fixture Album")
+        )
+    );
+    assert!(played.played_at > 1_600_000_000);
+    assert_eq!(by_plays(&mut client).await, [(tracks[0], 1, true)]);
+    // Recording a play edits neither the library nor the queue.
+    assert_eq!(client.state.library.revision, library);
+    assert_eq!(client.state.queue_revision, queue_revision);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_restored_past_its_threshold_does_not_count_again() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (library, tracks) = index_frames(&scratch, &mut client, &["Restored"], 96_000).await;
+    let command = play_ids(&client, library, &tracks);
+    ok(&mut client, command).await;
+    client.until(|state| state.history_revision == 1).await;
+    ok(&mut client, json!({"command":"pause"})).await;
+    running.stop().await;
+
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    assert_eq!(client.state.history_revision, 1);
+    assert!(client.state.position_frames >= 48_000, "{:?}", client.state);
+    ok(&mut client, json!({"command":"play","entry_id":null})).await;
+    client
+        .until(|state| state.transport == Transport::Ended)
+        .await;
+    assert_eq!(client.state.history_revision, 1);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plays_sort_uses_track_stats() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (library, tracks) =
+        index_frames(&scratch, &mut client, &["Alpha", "Beta", "Gamma"], 9_600).await;
+    let (alpha, beta, gamma) = (tracks[0], tracks[1], tracks[2]);
+    let command = play_ids(&client, library, &[beta, gamma]);
+    ok(&mut client, command).await;
+    client.until(|state| state.history_revision == 2).await;
+    client
+        .until(|state| state.transport == Transport::Ended)
+        .await;
+    let command = play_ids(&client, library, &[gamma]);
+    ok(&mut client, command).await;
+    client.until(|state| state.history_revision == 3).await;
+    assert_eq!(
+        by_plays(&mut client).await,
+        [(gamma, 2, true), (beta, 1, true), (alpha, 0, false)]
+    );
+    let page = history(&mut client).await;
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.track_id.unwrap())
+            .collect::<Vec<_>>(),
+        [gamma, gamma, beta]
+    );
+    client
+        .reject(
+            json!({"command":"history","revision":null,"offset":0,"limit":501}),
+            ErrorCode::InvalidCommand,
+        )
+        .await;
     running.stop().await;
 }
 

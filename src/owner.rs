@@ -17,8 +17,8 @@ use crate::{
         TrackSelection, Transport,
     },
     store::{
-        Checkpoint, Edit, EntryTrack, LoadedEntry, PlaylistChange, PlaylistEdit, PlaylistFailure,
-        Store, UpcomingEdit, played_overflow,
+        Checkpoint, Edit, EntryTrack, LoadedEntry, PlayRecord, PlaylistChange, PlaylistEdit,
+        PlaylistFailure, Store, UpcomingEdit, played_overflow,
     },
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -487,6 +487,8 @@ struct Actor {
     /// The entry last made the newest played entry. Output starting it again
     /// (after a selection, or a seek) does not mark it twice.
     marked: Option<u64>,
+    /// The newest play history ID, or 0.
+    history_revision: u64,
 }
 impl Actor {
     fn open(config: OwnerConfig) -> Result<Self> {
@@ -514,6 +516,7 @@ impl Actor {
             ) {
                 Ok(prepared) => {
                     player.commit_selection(prepared);
+                    player.restored_selection();
                     if loaded.settings.resume_on_start && loaded.checkpoint.playing {
                         player.play();
                     }
@@ -523,6 +526,7 @@ impl Actor {
                 }
             }
         }
+        let history_revision = store.history_revision()?;
         let library = Library::start(config.database_path)?;
         let (events, _) = broadcast::channel(32);
         let last = ControlState {
@@ -541,6 +545,7 @@ impl Actor {
             error: None,
             underruns: 0,
             library: library.state(),
+            history_revision,
         };
         let mut actor = Self {
             player,
@@ -554,6 +559,7 @@ impl Actor {
             library,
             now_track: RefCell::new(None),
             marked: loaded.checkpoint.current_id,
+            history_revision,
         };
         actor.publish();
         Ok(actor)
@@ -601,6 +607,7 @@ impl Actor {
             error,
             underruns: state.output.underruns,
             library,
+            history_revision: self.history_revision,
         }
     }
     /// Adds the indexed track, album and format to the player's metadata. The
@@ -801,6 +808,18 @@ impl Actor {
             .mark_current(self.revision(), id, &trimmed, fresh, None)?;
         self.player.clear_played(fresh);
         self.commit_trim(id, removal);
+        Ok(())
+    }
+
+    /// A pass over queue entry `id` counted as a play: one small commit adds
+    /// it to the history and its track's statistics. An entry already gone
+    /// from the queue has nothing to describe it, and is not recorded.
+    fn record_play(&mut self, id: u64) -> Result<()> {
+        let Some(item) = self.store.queue_entry(id)? else {
+            return Ok(());
+        };
+        self.store.record_play(&PlayRecord::of(item, unix_now()))?;
+        self.history_revision = self.store.history_revision()?;
         Ok(())
     }
 
@@ -1184,6 +1203,22 @@ impl Actor {
                     offset,
                     entries,
                 })
+            }
+            Command::History {
+                revision: _,
+                offset,
+                limit,
+            } => {
+                if limit == 0 || limit > MAX_PAGE_SIZE || offset > i64::MAX as usize {
+                    return Err(Failure::invalid(format!(
+                        "page limit must be 1..={MAX_PAGE_SIZE}"
+                    )));
+                }
+                let page = self
+                    .store
+                    .history_page(offset, limit)
+                    .map_err(Failure::persistence)?;
+                Ok(Response::History { page })
             }
             Command::Append {
                 expected_revision,
@@ -1664,6 +1699,16 @@ impl Actor {
                     self.player.pause();
                     self.fault = Some(format!("audio output: {error:#}"));
                 }
+                // Before the advances, whose trims may remove a counted entry.
+                let counted = self.player.take_counted_plays();
+                for id in &counted {
+                    if let Err(error) = self.record_play(*id) {
+                        self.player.pause();
+                        self.fault = Some(format!(
+                            "recording a play failed; playback paused: {error:#}"
+                        ));
+                    }
+                }
                 // Natural advance: each pass output starts marks its entry played.
                 for (id, fresh) in self.player.take_advances() {
                     if let Err(error) = self.advance(id, &fresh) {
@@ -1674,6 +1719,9 @@ impl Actor {
                     }
                 }
                 self.player.clear_diagnostics();
+                if !counted.is_empty() {
+                    self.publish();
+                }
                 match receiver.try_recv() {
                     Ok(Work::Subscribe(reply)) => {
                         // No command or publication can intervene between these.

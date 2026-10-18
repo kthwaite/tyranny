@@ -225,6 +225,8 @@ pub struct Player {
     advances: Vec<(u64, Vec<u64>)>,
     /// The entry last recorded in the play order's history.
     last_heard: Option<u64>,
+    /// The entry of each pass that counted as a play, not yet taken.
+    counted_plays: Vec<u64>,
 }
 
 impl Player {
@@ -335,6 +337,7 @@ impl Player {
             silent: 0,
             advances: Vec::new(),
             last_heard: None,
+            counted_plays: Vec::new(),
         })
     }
 
@@ -1427,8 +1430,10 @@ impl Player {
             "queue changed after selection preparation"
         );
         assert_eq!(self.queue[prepared.index].id, prepared.id);
-        // A seek or gain change keeps what was planned after the entry.
+        // A seek or gain change keeps what was planned after the entry, and
+        // continues its pass.
         let kept = self.current_plan().filter(|(id, _)| *id == prepared.id);
+        let counted = self.counted_pass_of(prepared.id);
         self.output.set_paused(true);
         self.invalidate_buffer();
         self.queue[prepared.index].metadata = Some(prepared.metadata);
@@ -1443,6 +1448,7 @@ impl Player {
         self.selection = Some((prepared.id, prepared.frame));
         self.output.mark_end(false);
         self.begin_pass();
+        self.passes.back_mut().expect("a pass just began").counted = counted;
         if let Some((_, plan)) = kept {
             self.plan = plan;
         }

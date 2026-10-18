@@ -5,7 +5,7 @@ use super::Player;
 use crate::{
     output::{OutputSnapshot, TrackToken},
     play_order::{self, RepeatMode, ShuffleStrategy, Slot},
-    store::played_overflow,
+    store::{count_threshold_frames, played_overflow},
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -24,6 +24,11 @@ pub(super) struct Pass {
     /// Under Repeat All: this pass starts a fresh pass over its context,
     /// whose entries these are.
     pub fresh: Option<Vec<u64>>,
+    /// The position at which this pass counts as a play (see
+    /// `count_threshold_frames`).
+    pub threshold: Option<u64>,
+    /// This pass, or the pass a seek or gain change continued, counted as a play.
+    pub counted: bool,
 }
 
 /// What the player decodes after a pass.
@@ -74,6 +79,38 @@ impl Player {
     /// entry, and the entries whose played state a fresh Repeat All pass clears.
     pub(crate) fn take_advances(&mut self) -> Vec<(u64, Vec<u64>)> {
         std::mem::take(&mut self.advances)
+    }
+
+    /// The entry of each pass that counted as a play since the last call,
+    /// oldest first. A pass counts once: when output reaches its threshold
+    /// position, or when it ends naturally. Re-selecting the current entry (a
+    /// seek or gain change) continues its pass; any other selection, and each
+    /// replay (Repeat One, a Repeat All wrap), is a new pass.
+    pub fn take_counted_plays(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.counted_plays)
+    }
+
+    /// The selection was restored from a checkpoint. At or past its
+    /// threshold it counted before the restart, so its pass does not count again.
+    pub(crate) fn restored_selection(&mut self) {
+        if let (Some((id, position)), Some(pass)) = (self.selection, self.passes.back_mut())
+            && pass.id == id
+            && pass
+                .threshold
+                .is_some_and(|threshold| position >= threshold)
+        {
+            pass.counted = true;
+        }
+    }
+
+    /// Whether `id`'s current pass has counted, for a selection that
+    /// re-selects it. Completed playback has no current pass to continue.
+    pub(super) fn counted_pass_of(&self, id: u64) -> bool {
+        !self.completed()
+            && self
+                .current_pass(&self.output.snapshot())
+                .and_then(|(_, pass, _)| pass)
+                .is_some_and(|pass| self.passes[pass].id == id && self.passes[pass].counted)
     }
 
     /// Clears the played state of `ids`, as the store does for a fresh pass.
@@ -161,6 +198,10 @@ impl Player {
     /// Starts a pass over the cursor's entry. It gets a fresh token; earlier
     /// passes keep theirs, as their PCM may still be playing.
     pub(super) fn begin_pass(&mut self) {
+        let duration = self
+            .decoder
+            .as_ref()
+            .and_then(|decoder| decoder.duration_frames());
         let entry = &mut self.queue[self.cursor];
         entry.token = TrackToken::new(entry.id);
         self.passes.push_back(Pass {
@@ -170,6 +211,8 @@ impl Player {
             prefilled: 0,
             heard: false,
             fresh: self.opening.take(),
+            threshold: count_threshold_frames(duration),
+            counted: false,
         });
         self.plan = self.decide(self.cursor);
     }
@@ -197,9 +240,10 @@ impl Player {
     }
 
     /// Notes the passes output has started, oldest first. Passes before the
-    /// latest one are complete, and are dropped.
+    /// latest one ended naturally, and are dropped. Counts plays.
     pub(super) fn hear(&mut self) {
-        let rendered = self.output.snapshot().rendered_frames;
+        let output = self.output.snapshot();
+        let rendered = output.rendered_frames;
         let Some(latest) = self
             .passes
             .iter()
@@ -216,7 +260,23 @@ impl Player {
             let (id, fresh) = (pass.id, pass.fresh.take());
             self.heard(id, fresh);
         }
-        self.passes.drain(..latest);
+        for pass in self.passes.drain(..latest) {
+            if !pass.counted {
+                self.counted_plays.push(pass.id);
+            }
+        }
+        // The latest pass counts at its threshold, or once output drains
+        // after it with no failure: the queue ended there.
+        let ended = self.finished && output.drained && self.failure.is_none();
+        let pass = &mut self.passes[0];
+        let reached = output.entry_id == pass.id
+            && pass
+                .threshold
+                .is_some_and(|threshold| output.position_frames >= threshold);
+        if !pass.counted && pass.token.is_valid() && (reached || ended) {
+            pass.counted = true;
+            self.counted_plays.push(pass.id);
+        }
     }
 
     fn heard(&mut self, id: u64, fresh: Option<Vec<u64>>) {

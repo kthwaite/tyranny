@@ -182,6 +182,14 @@ pub enum Command {
         #[serde(deserialize_with = "required")]
         revision: Option<u64>,
     },
+    /// Counted plays, newest first. A `revision` other than the current
+    /// history revision is not rejected: the reply carries the current one.
+    History {
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
+        offset: usize,
+        limit: usize,
+    },
     AppendTrack {
         expected_revision: u64,
         library_revision: u64,
@@ -422,6 +430,8 @@ pub struct ControlState {
     pub error: Option<String>,
     pub underruns: u64,
     pub library: LibraryState,
+    /// The newest play history ID, or 0. It changes when a play is counted.
+    pub history_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -437,6 +447,21 @@ pub struct QueueItem {
     pub album: String,
     pub album_id: Option<u64>,
     pub duration_ms: Option<u64>,
+}
+
+/// One counted play, as the History view shows it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub id: u64,
+    /// UTC seconds.
+    pub played_at: i64,
+    /// `None` for an unindexed (direct-path) entry.
+    pub track_id: Option<u64>,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: Option<u64>,
+    pub source: Option<QueueSource>,
 }
 
 /// Longest `QueueSource::name`, in UTF-8 bytes.
@@ -626,6 +651,10 @@ pub enum Response {
     PlaylistApplied {
         snapshot: Box<ControlState>,
         playlist: Option<Playlist>,
+    },
+    History {
+        #[serde(flatten)]
+        page: Page<HistoryEntry>,
     },
 }
 
@@ -973,6 +1002,53 @@ mod tests {
         let request = serde_json::from_value::<Request>(command).unwrap();
         assert!(
             matches!(request.command, Command::PlaylistEntries { query, .. } if query.is_empty())
+        );
+    }
+
+    #[test]
+    fn history_requires_every_field_and_replies_as_a_page() {
+        let command = serde_json::json!({
+            "id":1,"command":"history","revision":null,"offset":0,"limit":10
+        });
+        let request = serde_json::from_value::<Request>(command.clone()).unwrap();
+        assert!(matches!(
+            request.command,
+            Command::History {
+                revision: None,
+                offset: 0,
+                limit: 10
+            }
+        ));
+        for field in ["revision", "offset", "limit"] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Request>(missing).is_err(),
+                "{field}"
+            );
+        }
+        let response = Response::History {
+            page: Page {
+                revision: 4,
+                total: 1,
+                offset: 0,
+                entries: vec![HistoryEntry {
+                    id: 4,
+                    played_at: 1_700_000_000,
+                    track_id: None,
+                    title: "Loose".into(),
+                    artist: String::new(),
+                    album: String::new(),
+                    duration_ms: None,
+                    source: None,
+                }],
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({"kind":"history","revision":4,"total":1,"offset":0,
+                "entries":[{"id":4,"played_at":1_700_000_000_i64,"track_id":null,"title":"Loose",
+                    "artist":"","album":"","duration_ms":null,"source":null}]})
         );
     }
 }
