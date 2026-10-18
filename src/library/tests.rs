@@ -688,8 +688,11 @@ fn structured_filter_fixture() -> Connection {
     let mut connection = Connection::open_in_memory().unwrap();
     let transaction = connection.transaction().unwrap();
     migrate(&transaction).unwrap();
+    migrate_v5(&transaction).unwrap();
     transaction.execute_batch(
         "INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/music','/music',1);
+         INSERT INTO library_genres(id,name,search) VALUES(1,'Jazz','jazz'),(2,'Free Jazz','free jazz'),
+         (3,'Folk','folk'),(4,'Éclectique','éclectique');
          INSERT INTO library_artists(id,identity,name,search) VALUES
          (1,'miles','Miles Davis','miles davis'),(2,'ornette','Ornette Coleman','ornette coleman'),
          (3,'various','Various Artists','various artists');
@@ -736,8 +739,98 @@ fn structured_filter_fixture() -> Connection {
                 title.to_lowercase()],
         ).unwrap();
     }
+    transaction
+        .execute_batch(
+            "UPDATE library_tracks SET year=1959 WHERE id IN (1,2,5);
+             UPDATE library_tracks SET year=1961 WHERE id=3;
+             UPDATE library_tracks SET year=1975 WHERE id=4;
+             INSERT INTO library_track_genres(track_id,genre_id,position) VALUES
+             (1,1,0),(2,2,0),(2,1,1),(3,3,0),(4,3,0),(4,4,1),(5,1,0);",
+        )
+        .unwrap();
     transaction.commit().unwrap();
     connection
+}
+
+#[test]
+fn structured_filters_support_genre_year_and_album_artist() {
+    let mut connection = structured_filter_fixture();
+    for (filter, expected) in [
+        ("genre:jazz", vec![1, 2]),
+        ("genre:\"Free Jazz\"", vec![2]),
+        ("genre:ÉCLEC", vec![4]),
+        (r#"genre:["Folk", "Free Jazz"]"#, vec![2, 3, 4]),
+        ("genre:jazz & !genre:free", vec![1]),
+        ("!genre:jazz", vec![3, 4, 6]),
+        ("year:1959", vec![1, 2]),
+        ("year:[1959, 1961]", vec![1, 2, 3]),
+        ("year:1959..1961", vec![1, 2, 3]),
+        ("year:1961..1961", vec![3]),
+        ("year:1970..1979", vec![4]),
+        ("year:[1959..1959, 1975]", vec![1, 2, 4]),
+        ("!year:1959", vec![3, 4, 6]),
+        ("year:\"1960..1970\"", vec![3]),
+        ("albumartist:various", vec![3, 4, 6]),
+        ("albumartist:\"Miles Davis\"", vec![1]),
+        ("albumartist:[miles, ORNETTE]", vec![1, 2]),
+        ("artist:miles & albumartist:various", vec![3]),
+        ("albumartist:Hidden", vec![]),
+        ("genre:folk year:1975 albumartist:various", vec![4]),
+    ] {
+        let LibraryReply::Tracks(page) = query::execute(
+            &mut connection,
+            LibraryCommand::Tracks {
+                album_id: None,
+                page: page_request(Some(7), 0, 500, filter),
+            },
+        )
+        .unwrap() else {
+            panic!("expected tracks");
+        };
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            expected,
+            "{filter}"
+        );
+    }
+}
+
+#[test]
+fn year_ranges_are_inclusive_and_malformed_years_are_located() {
+    let mut connection = structured_filter_fixture();
+    for (filter, position) in [
+        ("year:19x9", 5),
+        ("year:1979..1970", 5),
+        ("year:195", 5),
+        ("year:12345", 5),
+        ("year:1959..", 5),
+        ("year:..1959", 5),
+        ("year:-1959", 5),
+        ("year:+195", 5),
+        ("year:[1959, 19x9]", 12),
+        ("title:x year:1970...1979", 13),
+        ("year:", 5),
+    ] {
+        let error = classify(
+            query::execute(
+                &mut connection,
+                LibraryCommand::Tracks {
+                    album_id: None,
+                    page: page_request(None, 0, 10, filter),
+                },
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(error.kind, LibraryErrorKind::InvalidFilter, "{filter}");
+        assert!(
+            error.message.contains(&format!("UTF-8 byte {position}:")),
+            "{filter}: {}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -878,7 +971,7 @@ fn malformed_filters_are_typed_located_and_bounded_for_all_projections() {
     let mut connection = structured_filter_fixture();
     for filter in [
         "artist:",
-        "genre:jazz",
+        "mood:jazz",
         "artist:[]",
         "artist:[Miles,]",
         "artist:[,Miles]",

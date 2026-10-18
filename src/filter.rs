@@ -35,9 +35,13 @@ enum Field {
     Title,
     Artist,
     Album,
+    AlbumArtist,
+    Genre,
+    Year,
 }
 enum Expr {
     Term(Field, String),
+    Years(u16, u16),
     Not(Box<Expr>),
     And(Vec<Expr>),
     Or(Vec<Expr>),
@@ -215,10 +219,13 @@ impl Parser {
                 "title" => Field::Title,
                 "artist" => Field::Artist,
                 "album" => Field::Album,
+                "albumartist" => Field::AlbumArtist,
+                "genre" => Field::Genre,
+                "year" => Field::Year,
                 _ => {
                     return Err(invalid(
                         position,
-                        "unknown field; expected title, artist or album",
+                        "unknown field; expected title, artist, album, albumartist, genre or year",
                     ));
                 }
             };
@@ -250,8 +257,34 @@ impl Parser {
             }
             _ => return Err(invalid(position, "expected nonempty filter value")),
         };
+        if matches!(field, Field::Year) {
+            let Some((low, high)) = years(&value) else {
+                return Err(invalid(
+                    position,
+                    "expected a 4-digit year or an ascending range like 1970..1979",
+                ));
+            };
+            self.cursor += 1;
+            return self.node(Expr::Years(low, high));
+        }
         self.cursor += 1;
         self.node(Expr::Term(field, value))
+    }
+}
+
+/// `1959` or `1970..1979` (inclusive, ascending). Years are exactly four ASCII digits.
+fn years(value: &str) -> Option<(u16, u16)> {
+    let year = |text: &str| {
+        (text.len() == 4 && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<u16>().ok())
+            .flatten()
+    };
+    match value.split_once("..") {
+        None => year(value).map(|year| (year, year)),
+        Some((low, high)) => {
+            let (low, high) = (year(low)?, year(high)?);
+            (low <= high).then_some((low, high))
+        }
     }
 }
 
@@ -289,17 +322,46 @@ impl Filter {
     }
     fn compile(&mut self, expression: Expr, first: usize) {
         match expression {
+            Expr::Years(low, high) => {
+                let parameter = first + self.values.len();
+                self.values.push(Value::Integer(low.into()));
+                if low == high {
+                    write!(self.sql, "(t.year IS NOT NULL AND t.year=?{parameter})").unwrap();
+                } else {
+                    self.values.push(Value::Integer(high.into()));
+                    write!(
+                        self.sql,
+                        "(t.year IS NOT NULL AND t.year BETWEEN ?{parameter} AND ?{})",
+                        parameter + 1
+                    )
+                    .unwrap();
+                }
+            }
+            Expr::Term(Field::Genre, value) => {
+                let parameter = first + self.values.len();
+                self.values.push(Value::Text(value));
+                write!(
+                    self.sql,
+                    "EXISTS(SELECT 1 FROM library_track_genres tg JOIN library_genres g ON g.id=tg.genre_id \
+                     WHERE tg.track_id=t.id AND instr(g.search,?{parameter})>0)"
+                )
+                .unwrap();
+            }
             Expr::Term(field, value) => {
                 let parameter = first + self.values.len();
                 self.values.push(Value::Text(value));
                 let title = "t.title_sort";
                 let artist = "(SELECT fa.search FROM library_artists fa WHERE fa.id=t.artist_id)";
                 let album = "(SELECT fl.title_sort FROM library_albums fl WHERE fl.id=t.album_id)";
+                let album_artist = "(SELECT aa.search FROM library_artists aa WHERE aa.id=\
+                     (SELECT fl.artist_id FROM library_albums fl WHERE fl.id=t.album_id))";
                 let column = match field {
                     Field::Any => "t.search",
                     Field::Title => title,
                     Field::Artist => artist,
                     Field::Album => album,
+                    Field::AlbumArtist => album_artist,
+                    Field::Genre | Field::Year => unreachable!(),
                 };
                 write!(self.sql, "instr({column},?{parameter})>0").unwrap();
             }
