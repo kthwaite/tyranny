@@ -5,7 +5,7 @@
 use crate::{
     filter::Filter,
     library_types::*,
-    listing::{CompiledList, Grouping, ListDescription, compile, recent_cutoff},
+    listing::{CompiledList, Grouping, ListDescription, compile, compile_members, recent_cutoff},
     protocol::MAX_PAGE_SIZE,
 };
 use anyhow::{Result, anyhow};
@@ -109,7 +109,8 @@ pub(super) fn execute(
             ..
         } => {
             let compiled = compile(&transaction, &list, cutoff, 1)?;
-            let (page, totals) = list_tracks(&transaction, compiled, offset, limit)?;
+            let members = compile_members(&transaction, &list, cutoff, 1)?;
+            let (page, totals) = list_tracks(&transaction, compiled, members, offset, limit)?;
             LibraryReply::ListTracks {
                 page: Page { revision, ..page },
                 totals,
@@ -129,7 +130,8 @@ pub(super) fn execute(
                 group: Grouping::None,
                 ..list
             };
-            let CompiledList { sql, values } = compile(&transaction, &membership, cutoff, 1)?;
+            let CompiledList { sql, values } =
+                compile_members(&transaction, &membership, cutoff, 1)?;
             let direction = if descending { "DESC" } else { "ASC" };
             let order = match sort {
                 AlbumSort::AlbumArtist => format!("artist_search {direction}"),
@@ -217,17 +219,22 @@ pub(super) fn execute(
 fn list_tracks(
     transaction: &Transaction<'_>,
     CompiledList { sql, mut values }: CompiledList,
+    members: CompiledList,
     offset: usize,
     limit: usize,
 ) -> Result<(Page<ListRow>, Option<ListTotals>)> {
+    let CompiledList {
+        sql: members,
+        values: member_values,
+    } = members;
     let (total, totals) = if offset == 0 {
         let totals = transaction.query_row(
             &format!(
                 "SELECT COUNT(*),COALESCE(SUM(json_extract(t.metadata,'$.duration_ms')),0),
                  COALESCE(SUM(t.file_size),0)
-                 FROM ({sql}) l JOIN library_tracks t ON t.id=l.track_id"
+                 FROM ({members}) l JOIN library_tracks t ON t.id=l.track_id"
             ),
-            params_from_iter(values.iter()),
+            params_from_iter(member_values.iter()),
             |row| {
                 Ok(ListTotals {
                     tracks: row.get(0)?,
@@ -239,8 +246,8 @@ fn list_tracks(
         (totals.tracks, Some(totals))
     } else {
         let total = transaction.query_row(
-            &format!("SELECT COUNT(*) FROM ({sql})"),
-            params_from_iter(values.iter()),
+            &format!("SELECT COUNT(*) FROM ({members})"),
+            params_from_iter(member_values.iter()),
             |row| row.get(0),
         )?;
         (total, None)
@@ -250,10 +257,12 @@ fn list_tracks(
     values.extend([Value::Integer(offset as i64), Value::Integer(limit as i64)]);
     let mut statement = transaction.prepare(&format!(
         "SELECT l.row_id,l.artist_key,l.album_key,l.available,{TRACK_COLUMNS}
-         FROM ({sql}) l JOIN library_tracks t ON t.id=l.track_id
+         FROM (SELECT * FROM ({sql}) WHERE position>?{offset_parameter}
+               AND position<=?{offset_parameter}+?{limit_parameter}) l
+         CROSS JOIN library_tracks t ON t.id=l.track_id
          JOIN library_assets a ON a.id=t.asset_id JOIN library_albums al ON al.id=t.album_id
          LEFT JOIN track_stats s ON s.track_id=t.id
-         WHERE l.position>?{offset_parameter} ORDER BY l.position LIMIT ?{limit_parameter}"
+         ORDER BY l.position"
     ))?;
     let entries = statement
         .query_map(params_from_iter(values.iter()), |row| {
@@ -310,7 +319,7 @@ fn track_summary(row: &Row<'_>, first: usize) -> rusqlite::Result<TrackSummary> 
 }
 
 /// Summaries of the distinct album IDs that `albums` selects, over each
-/// album's visible tracks. Albums without a visible track are left out.
+/// album's visible tracks. Sums that read every track's JSON run for the page only. Albums without a visible track are left out.
 /// Returns the count of summarized albums and one page in `order`.
 fn albums_page(
     transaction: &Transaction<'_>,
@@ -324,8 +333,6 @@ fn albums_page(
         "WITH listed(id) AS ({albums}), summary AS (
          SELECT al.id,al.title,al.album_artist,al.artist_id,al.compilation,MIN(t.year) AS year,
          COUNT(*) AS track_count,MAX(MAX(t.disc_number,t.disc_total,1)) AS disc_count,
-         COALESCE(SUM(json_extract(t.metadata,'$.duration_ms')),0) AS duration_ms,
-         MAX(json_extract(t.metadata,'$.album_gain_db')) AS album_gain_db,
          MAX(t.date_added) AS date_added,al.musicbrainz_release_id,
          aa.search AS artist_search,al.title_sort
          FROM listed JOIN library_albums al ON al.id=listed.id
@@ -342,9 +349,15 @@ fn albums_page(
     let offset_parameter = limit_parameter + 1;
     values.extend([Value::Integer(limit as i64), Value::Integer(offset as i64)]);
     let mut statement = transaction.prepare(&format!(
-        "{summary} SELECT id,title,album_artist,artist_id,compilation,year,track_count,
-         disc_count,duration_ms,album_gain_db,date_added,musicbrainz_release_id
-         FROM summary ORDER BY {order} LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}"
+        "{summary}, page AS (SELECT * FROM summary ORDER BY {order}
+         LIMIT ?{limit_parameter} OFFSET ?{offset_parameter})
+         SELECT id,title,album_artist,artist_id,compilation,year,track_count,disc_count,
+         (SELECT COALESCE(SUM(json_extract(t.metadata,'$.duration_ms')),0)
+          FROM library_tracks t {ASSET} WHERE t.album_id=page.id AND {VISIBLE}),
+         (SELECT MAX(json_extract(t.metadata,'$.album_gain_db'))
+          FROM library_tracks t {ASSET} WHERE t.album_id=page.id AND {VISIBLE}),
+         date_added,musicbrainz_release_id
+         FROM page ORDER BY {order}"
     ))?;
     let mut entries = statement
         .query_map(params_from_iter(values.iter()), |row| {

@@ -47,11 +47,42 @@ def distribution(samples):
                 p95_ms=percentile(.95), p99_ms=percentile(.99), maximum_ms=ordered[-1])
 
 
+GENRES = ["Rock", "Jazz", "Classical", "Electronic", "Hip Hop", "Folk", "Blues", "Metal", "Pop", "Soul",
+          "Reggae", "Country", "Ambient", "Punk", "Funk", "Latin", "World", "Soundtrack", "Gospel", "Disco"]
+NOW = int(time.time())
+
+
+def audio_profile(n):
+    """Deterministic format mix: FLAC 16/24-bit and MP3 320/VBR."""
+    kind = n % 10
+    if kind < 4:
+        return "flac", 16, 900 + n % 400, 30_000_000
+    if kind < 6:
+        return "flac", 24, 1800 + n % 900, 60_000_000
+    if kind < 8:
+        return "mp3", None, 320, 9_000_000
+    return "mp3", None, 190 + n % 60, 5_500_000
+
+
 def seed(database_path, root, scan_root, playing):
-    """Only call while the daemon is stopped; use its own migrated schema."""
+    """Only call while the daemon is stopped; use its own migrated schema.
+
+    Asset paths are real hard links to one tiny WAV so run enqueue can
+    canonicalize them; link creation time is returned separately."""
+    link_started = time.perf_counter()
+    audio = root.parent / "link-source.wav"
+    with wave.open(str(playing), "rb") as wav:
+        frames = wav.readframes(4800)
+    with wave.open(str(audio), "wb") as wav:
+        wav.setparams((2, 2, 48000, 0, "NONE", "not compressed"))
+        wav.writeframes(frames)
+    for n in range(1, TRACKS + 1):
+        os.link(audio, root / f"Metadata only {n:05}.flac")
+    link_seconds = time.perf_counter() - link_started
+    seed_started = time.perf_counter()
     with sqlite3.connect(database_path) as db:
         db.execute("PRAGMA foreign_keys=ON")
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
         assert db.execute("SELECT count(*) FROM library_tracks").fetchone()[0] == 0
         for identity, path in [(1, root), (2, scan_root)]:
             db.execute("INSERT INTO library_roots(id,path,search) VALUES(?,?,?)",
@@ -64,7 +95,7 @@ def seed(database_path, root, scan_root, playing):
                          f"Scale Artist {(n - 1) // 10 + 1:04}",
                          f"scale album {n:04} scale artist {(n - 1) // 10 + 1:04}", f"scale album {n:04}")
                         for n in range(1, 5001)))
-        db.executemany("INSERT INTO library_assets(id,root_id,path,indexed,last_seen_scan) VALUES(?,1,?,1,0)",
+        db.executemany("INSERT INTO library_assets(id,root_id,path,indexed,last_seen_scan,metadata_version) VALUES(?,1,?,1,0,2)",
                        ((n, str(root / f"Metadata only {n:05}.flac")) for n in range(1, TRACKS + 1)))
         def tracks():
             for n in range(1, TRACKS + 1):
@@ -76,14 +107,35 @@ def seed(database_path, root, scan_root, playing):
                                 compilation=False, duration_ms=120000, sample_rate=48000, channels=2)
                 search = f"{title} {metadata['artist']} {metadata['album']}".lower()
                 yield (n, n, artist, album, json.dumps(metadata), search, title.lower(), track)
-        db.executemany("INSERT INTO library_tracks(id,asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number) VALUES(?,?,?,?,?,?,?,1,1,?)", tracks())
-        db.execute("UPDATE library_state SET revision=revision+1,root_count=2,track_count=? WHERE singleton=1", (TRACKS,))
+        def full_tracks():
+            for n, *rest in tracks():
+                codec, depth, bitrate, size = audio_profile(n)
+                year = 1950 + (n * 7919) % 76
+                # One in ten tracks was added in the last 30 days; the rest over five years.
+                added = NOW - (n * 104729) % 2_000_000 if n % 10 == 0 else NOW - 2_592_000 - (n * 104729) % 155_000_000
+                yield (n, *rest, year, codec, depth, bitrate, size, added)
+        db.executemany("INSERT INTO library_tracks(id,asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number,year,codec,bit_depth,bitrate_kbps,file_size,date_added) VALUES(?,?,?,?,?,?,?,1,1,?,?,?,?,?,?,?)", full_tracks())
+        db.executemany("INSERT INTO library_genres(id,name,search) VALUES(?,?,?)",
+                       ((i, name, name.lower()) for i, name in enumerate(GENRES, 1)))
+        def track_genres():
+            for n in range(1, TRACKS + 1):
+                first = n % len(GENRES) + 1
+                yield (n, first, 0)
+                if n % 3 == 0:
+                    yield (n, (first + 6) % len(GENRES) + 1, 1)
+        db.executemany("INSERT INTO library_track_genres(track_id,genre_id,position) VALUES(?,?,?)", track_genres())
+        db.executemany("INSERT INTO track_stats(track_id,play_count,last_played) VALUES(?,?,?)",
+                       ((n, 1 + n % 40, NOW - n * 600) for n in range(1, TRACKS + 1, 5)))
+        db.execute("UPDATE library_state SET revision=revision+1,root_count=2,track_count=?,pending_upgrade=0 WHERE singleton=1", (TRACKS,))
         db.executemany("INSERT INTO queue(id,ordinal,path,track_id) VALUES(?,?,?,NULL)",
                        ((n, n - 1, str(playing)) for n in range(1, QUEUE + 1)))
         db.execute("UPDATE control SET revision=revision+1,next_id=?,current_id=1,position_frames=0,playing=0 WHERE singleton=1", (QUEUE + 1,))
         assert not db.execute("PRAGMA foreign_key_check").fetchall()
         counts = {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                  for table in ["library_artists", "library_albums", "library_tracks", "queue"]}
+                  for table in ["library_artists", "library_albums", "library_tracks", "library_genres",
+                                "library_track_genres", "track_stats", "queue"]}
+    counts["asset_hard_link_creation_seconds"] = link_seconds
+    counts["sql_seed_seconds"] = time.perf_counter() - seed_started
     return counts
 
 
@@ -110,6 +162,7 @@ def main():
     parser.add_argument("--native-runs", type=int, default=3)
     parser.add_argument("--scan-files", type=int, default=16384)
     parser.add_argument("--coreaudio", action="store_true")
+    parser.add_argument("--record", help="Merge the v9 list/enqueue results into this JSON file (for example spike-results/scale-gate.json)")
     parser.add_argument("--queries-only", action="store_true", help="Explicitly incomplete native gate; report marks native coverage absent")
     args = parser.parse_args()
     if args.samples < 20 or args.native_runs < 2 or args.scan_files < 1:
@@ -348,13 +401,81 @@ def main():
             summary["target_p95_ms"] = 100
             summary["target_met"] = summary["p95_ms"] < 100
             report["query_distributions"][name] = summary
+        # v9 list families: every wire field explicit, nulls included.
+        snapshot = control.state()
+        library_revision = snapshot["library"]["revision"]
+        underruns = dict(before_legacy_queries=before_queries["underruns"], after_legacy_queries=snapshot["underruns"])
+        everything = dict(source=dict(kind="library"), browser=dict(genre_ids=[], artist_ids=[], compilations=False, album_ids=[]),
+                          query="", sort=[], group="none")
+        def described(**changes):
+            return {**everything, **changes}
+        list_families = [
+            ("list_tracks_first_window", "list_tracks", dict(list=described(), revision=None, offset=0, limit=200), TRACKS),
+            ("list_tracks_deep_window", "list_tracks", dict(list=described(), revision=None, offset=TRACKS - 200, limit=200), TRACKS),
+            ("list_tracks_sorted_year_desc", "list_tracks", dict(list=described(sort=[dict(field="year", descending=True)]),
+                                                               revision=None, offset=0, limit=200), TRACKS),
+            ("list_tracks_grouped_artist_album", "list_tracks", dict(list=described(group="artist_album"),
+                                                                    revision=None, offset=0, limit=200), TRACKS),
+            ("list_tracks_filtered_genre", "list_tracks", dict(list=described(browser=dict(genre_ids=[2], artist_ids=[], compilations=False, album_ids=[])),
+                                                              revision=None, offset=0, limit=200), None),
+            ("list_tracks_filtered_genre_query", "list_tracks", dict(list=described(query="genre:Jazz"),
+                                                                    revision=None, offset=0, limit=200), None),
+            ("list_albums_by_year", "list_albums", dict(list=described(), sort="year", descending=True,
+                                                       revision=None, offset=0, limit=200), None),
+        ]
+        families = {}
+        for name, command, fields, expected_total in list_families:
+            samples = []
+            for iteration in range(args.samples):
+                started = time.perf_counter_ns()
+                result = control.request(command, **fields)
+                samples.append((time.perf_counter_ns() - started) / 1_000_000)
+                assert result["offset"] == fields["offset"] and 0 < len(result["entries"]) <= 200, (name, result["total"])
+                if expected_total is not None:
+                    assert result["total"] == expected_total, (name, result["total"])
+            summary = distribution(samples)
+            summary.update(target_p95_ms=100, target_met=summary["p95_ms"] < 100, total=result["total"],
+                           returned=len(result["entries"]), samples_ms=samples)
+            families[name] = summary
+            print(f"{name}: p50 {summary['p50_ms']:.1f} p95 {summary['p95_ms']:.1f} max {summary['maximum_ms']:.1f} ms", flush=True)
+        report["v9_list_distributions"] = families
+        underruns["after_list_families"] = control.state()["underruns"]
+        report["v9_library_revision"] = library_revision
+        # 50k run enqueue: ReplaceUpcoming of the whole library, queue length asserted.
+        enqueue_samples = []
+        for iteration in range(3):
+            snapshot = control.state()
+            current = 1 if snapshot["current_id"] is not None else 0
+            started = time.perf_counter_ns()
+            result = control.request("enqueue_tracks",
+                selection=dict(kind="list", list=described(), library_revision=snapshot["library"]["revision"],
+                               ranges=[[0, 18446744073709551615]], excluded=[], first_row_id=None),
+                expected_revision=snapshot["queue_revision"], placement="replace_upcoming", play=False,
+                source=dict(kind="songs", name="Songs"))
+            elapsed = (time.perf_counter_ns() - started) / 1_000_000
+            after = control.state()
+            assert after["queue_length"] == current + TRACKS, (after["queue_length"], current)
+            enqueue_samples.append(elapsed)
+            underruns[f"after_enqueue_{iteration}"] = after["underruns"]
+            print(f"enqueue_run_50k #{iteration}: {elapsed:.1f} ms queue_length {after['queue_length']}", flush=True)
+        enqueue = distribution(enqueue_samples)
+        enqueue.update(target_p95_ms=None, target_met=None, samples_ms=enqueue_samples,
+                       expected_queue_length=current + TRACKS, queue_length_asserted=True)
+        report["v9_enqueue_run_50k"] = enqueue
+        report["v9_underrun_counters"] = underruns
+        report["v9_list_targets_met"] = all(family["target_met"] for family in families.values())
+
         final = control.state()
         report["final_snapshot"] = final
         report["playback_observation"] = dict(before=before_queries, after=final,
             advanced=final["current_id"] != before_queries["current_id"] or final["position_frames"] > before_queries["position_frames"],
             underrun_delta=final["underruns"] - before_queries["underruns"])
         assert final["transport"] == "playing" and report["playback_observation"]["advanced"]
-        assert report["playback_observation"]["underrun_delta"] == 0, "playback underruns during query measurements"
+        # Queries must not disturb playback. The 50k enqueue's own effect is a finding: reported, not asserted.
+        query_underruns = underruns["after_list_families"] - before_queries["underruns"]
+        report["playback_observation"]["query_phase_underrun_delta"] = query_underruns
+        report["playback_observation"]["enqueue_phase_underrun_delta"] = final["underruns"] - underruns["after_list_families"]
+        assert query_underruns == 0, "playback underruns during query measurements"
         if not args.queries_only:
             for index in range(1, args.native_runs):
                 native_run(index, ready, scan=index == args.native_runs - 1)
@@ -403,6 +524,19 @@ def main():
         for log in logs:
             log.close()
         (run / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        if args.record and "v9_list_distributions" in report:
+            record = Path(args.record)
+            merged = json.loads(record.read_text()) if record.exists() else {}
+            merged["library_server_v9_scale"] = dict(
+                run_report=str(run / "report.json"), passed=report["passed"], error=report.get("error"),
+                native_coverage="ABSENT: --queries-only; native UI, Accessibility and Screen Recording runs not exercised" if args.queries_only else "present",
+                fixture=report["fixture"], binaries=report["binaries"], environment=report["environment"],
+                server_profile=args.server_profile, samples_per_family=args.samples, library_revision=report["v9_library_revision"],
+                list_distributions=report["v9_list_distributions"], list_targets_met=report["v9_list_targets_met"],
+                enqueue_run_50k=report["v9_enqueue_run_50k"], underrun_counters=report["v9_underrun_counters"],
+                playback_observation={k: v for k, v in report["playback_observation"].items() if k not in ("before", "after")},
+                note="Latency is end-to-end authenticated WebSocket round trip on this machine; seeding time (hard links and SQL) is reported in fixture.persisted_counts and excluded from enqueue timing")
+            record.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
         print(json.dumps(dict(report=str(run / "report.json"), passed=report["passed"], targets_met=report["targets_met"])))
     return 0 if report["passed"] else 1
 

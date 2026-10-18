@@ -133,28 +133,33 @@ pub(crate) struct CompiledList {
 }
 
 /// `t` is the track, `a`/`r` its asset and root, `al` its album, `aa` the album
-/// artist, `ta` the track artist and `s` its play statistics.
+/// artist, `ta` (added only for the artist sort) the track artist and `s` its play statistics.
 const JOINS: &str = "JOIN library_assets a ON a.id=t.asset_id
     JOIN library_roots r ON r.id=a.root_id
     JOIN library_albums al ON al.id=t.album_id
     JOIN library_artists aa ON aa.id=al.artist_id
-    JOIN library_artists ta ON ta.id=t.artist_id
     LEFT JOIN track_stats s ON s.track_id=t.id";
+/// Only the artist sort reads the track artist `ta`; a join per row is wasted otherwise.
+const TRACK_ARTIST: &str = " JOIN library_artists ta ON ta.id=t.artist_id";
 const VISIBLE: &str = "a.indexed=1 AND a.last_seen_scan>=r.completed_scan";
 /// Compilations group under artist key 0, not under their album artist.
 const ARTIST_KEY: &str = "CASE WHEN al.compilation=1 THEN 0 ELSE al.artist_id END";
 const GENRE: &str = "(SELECT g.search FROM library_track_genres tg
     JOIN library_genres g ON g.id=tg.genre_id WHERE tg.track_id=t.id AND tg.position=0)";
-/// Appended to every sort; ends with the row ID, so the order is total.
-const TIEBREAK: [&str; 7] = [
-    "aa.search",
-    "al.title_sort",
-    "t.album_id",
+/// Appended to every sort; ends with the row ID, so the order is total. The
+/// album rank `ar.rank` stands for album artist, album title and album ID,
+/// ranked once over the albums, so each track compares one integer.
+const TIEBREAK: [&str; 5] = [
+    "ar.rank",
     "t.disc_number",
     "t.track_number",
     "t.title_sort",
     "a.path",
 ];
+/// Ranks every album by album artist, title and ID.
+const ALBUM_RANK: &str = "WITH ar(id,rank) AS MATERIALIZED (
+    SELECT al.id,ROW_NUMBER() OVER (ORDER BY aa.search,al.title_sort,al.id)
+    FROM library_albums al JOIN library_artists aa ON aa.id=al.artist_id)";
 
 fn sort_columns(field: SortField) -> &'static [&'static str] {
     match field {
@@ -163,7 +168,9 @@ fn sort_columns(field: SortField) -> &'static [&'static str] {
         SortField::AlbumArtist => &["aa.search"],
         SortField::Album => &["al.title_sort"],
         SortField::Duration => &["json_extract(t.metadata,'$.duration_ms')"],
-        SortField::Year => &["t.year"],
+        // The unary plus keeps SQLite from walking `library_tracks_year`: a full
+        // sort of the window is faster than 50,000 index-ordered row reads.
+        SortField::Year => &["+t.year"],
         SortField::Genre => &[GENRE],
         SortField::Format => &[
             "t.codec",
@@ -175,8 +182,8 @@ fn sort_columns(field: SortField) -> &'static [&'static str] {
         // Date added 0 is unknown and sorts with NULL, last in both directions.
         SortField::DateAdded => &["NULLIF(t.date_added,0)"],
         SortField::LastPlayed => &["s.last_played"],
-        // The tiebreak's album prefix: album artist, album, album ID, disc, track.
-        SortField::AlbumOrder => &TIEBREAK[..5],
+        // The tiebreak's album prefix: album rank, disc, track.
+        SortField::AlbumOrder => &TIEBREAK[..3],
         SortField::PlaylistOrder => &["e.ordinal"],
     }
 }
@@ -229,6 +236,28 @@ pub(crate) fn compile(
     list: &ListDescription,
     recent_cutoff: i64,
     first_parameter: usize,
+) -> Result<CompiledList> {
+    build(connection, list, recent_cutoff, first_parameter, true)
+}
+
+/// The rows of `list` without positions or order, for counts, totals and
+/// album membership. Yields `row_id, track_id, artist_key, album_key,
+/// available`. Sorting every row costs far more than the filter itself.
+pub(crate) fn compile_members(
+    connection: &Connection,
+    list: &ListDescription,
+    recent_cutoff: i64,
+    first_parameter: usize,
+) -> Result<CompiledList> {
+    build(connection, list, recent_cutoff, first_parameter, false)
+}
+
+fn build(
+    connection: &Connection,
+    list: &ListDescription,
+    recent_cutoff: i64,
+    first_parameter: usize,
+    ordered: bool,
 ) -> Result<CompiledList> {
     let browser = &list.browser;
     if [&browser.genre_ids, &browser.artist_ids, &browser.album_ids]
@@ -346,10 +375,25 @@ pub(crate) fn compile(
         conditions.insert(0, VISIBLE.into());
         (format!("FROM library_tracks t {JOINS}"), "1".into())
     };
+    if !ordered {
+        return Ok(CompiledList {
+            sql: format!(
+                "SELECT {row_id} AS row_id,t.id AS track_id,{ARTIST_KEY} AS artist_key,
+                 t.album_id AS album_key,{available} AS available {from} WHERE {}",
+                conditions.join(" AND ")
+            ),
+            values: parameters.values,
+        });
+    }
     let rows = format!(
         "SELECT ROW_NUMBER() OVER (ORDER BY {order}) AS row_order,{row_id} AS row_id,
          t.id AS track_id,{ARTIST_KEY} AS artist_key,t.album_id AS album_key,
-         {available} AS available {from} WHERE {}",
+         {available} AS available {from} JOIN ar ON ar.id=t.album_id{} WHERE {}",
+        if order.contains("ta.search") {
+            TRACK_ARTIST
+        } else {
+            ""
+        },
         conditions.join(" AND ")
     );
     // Each group takes the position of its first row in the list's sort. Its
@@ -364,21 +408,34 @@ pub(crate) fn compile(
     };
     let sql = if groups.is_empty() {
         format!(
-            "SELECT row_order AS position,row_id,track_id,artist_key,album_key,available
+            "{ALBUM_RANK} SELECT row_order AS position,row_id,track_id,artist_key,album_key,available
              FROM ({rows}) ORDER BY position"
         )
     } else {
-        let windows: Vec<String> = groups
+        // One narrow pass finds each group's first row; joining it back needs
+        // no wide window per group key.
+        let firsts: String = groups
             .iter()
-            .map(|key| format!("MIN(row_order) OVER (PARTITION BY {key}) AS {key}_order"))
+            .map(|key| {
+                format!(
+                    ",{key}_first AS MATERIALIZED (SELECT {key},MIN(row_order) AS first_row
+                     FROM listed GROUP BY {key})"
+                )
+            })
             .collect();
-        let order: Vec<String> = groups.iter().map(|key| format!("{key}_order")).collect();
+        let joins: String = groups
+            .iter()
+            .map(|key| format!(" JOIN {key}_first ON {key}_first.{key}=listed.{key}"))
+            .collect();
+        let order: String = groups
+            .iter()
+            .map(|key| format!("{key}_first.first_row,"))
+            .collect();
         format!(
-            "SELECT ROW_NUMBER() OVER (ORDER BY {},row_order) AS position,
-             row_id,track_id,artist_key,album_key,available
-             FROM (SELECT *,{} FROM ({rows})) ORDER BY position",
-            order.join(","),
-            windows.join(",")
+            "{ALBUM_RANK},listed AS MATERIALIZED ({rows}){firsts}
+             SELECT ROW_NUMBER() OVER (ORDER BY {order}listed.row_order) AS position,
+             listed.row_id,listed.track_id,listed.artist_key,listed.album_key,listed.available
+             FROM listed{joins} ORDER BY position"
         )
     };
     Ok(CompiledList {
@@ -511,6 +568,58 @@ mod tests {
                 ..
             }) => ErrorCode::InvalidCommand,
             _ => panic!("unexpected list error: {error:#}"),
+        }
+    }
+
+    #[test]
+    fn unordered_members_match_the_ordered_rows() {
+        let connection = fixture();
+        for source in [ListSource::Library, ListSource::Compilations] {
+            for group in [Grouping::None, Grouping::ArtistAlbum] {
+                let list = ListDescription {
+                    group,
+                    ..list(source.clone())
+                };
+                let ordered = compile(&connection, &list, 0, 1).unwrap();
+                let members = compile_members(&connection, &list, 0, 1).unwrap();
+                let mut expected: Vec<(u64, u64, u64, u64, bool)> = connection
+                    .prepare(&format!(
+                        "SELECT row_id,track_id,artist_key,album_key,available FROM ({})",
+                        ordered.sql
+                    ))
+                    .unwrap()
+                    .query_map(params_from_iter(ordered.values.iter()), |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                let mut actual: Vec<(u64, u64, u64, u64, bool)> = connection
+                    .prepare(&members.sql)
+                    .unwrap()
+                    .query_map(params_from_iter(members.values.iter()), |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                expected.sort_unstable();
+                actual.sort_unstable();
+                assert!(!actual.is_empty());
+                assert_eq!(actual, expected);
+            }
         }
     }
 
