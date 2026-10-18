@@ -27,7 +27,7 @@ pub(super) struct Pass {
 }
 
 /// What the player decodes after a pass.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Plan {
     /// `None` ends the queue.
     pub id: Option<u64>,
@@ -85,6 +85,7 @@ impl Player {
         for entry in &mut self.queue {
             if ids.contains(&entry.id) {
                 entry.played = false;
+                entry.visited = false;
             }
         }
     }
@@ -248,18 +249,107 @@ impl Player {
         })
     }
 
-    /// The entry after pass `pass`: the next prepared pass, else what the
-    /// decoder plans or opens next.
-    pub(super) fn following(&self, pass: usize) -> Option<u64> {
-        if let Some(next) = self.passes.get(pass + 1) {
-            Some(next.id)
-        } else if self.decoder.is_some() {
-            self.plan.id
-        } else if self.finished {
-            None
-        } else {
-            self.queue.get(self.cursor).map(|entry| entry.id)
+    /// The current entry's queue index, its pass if prepared, and the
+    /// position. A callback already in flight may publish old PCM after a stop
+    /// or selection; only a valid pass token makes that publication count.
+    pub(super) fn current_pass(
+        &self,
+        output: &OutputSnapshot,
+    ) -> Option<(usize, Option<usize>, u64)> {
+        if self.stopped {
+            return None;
         }
+        let heard = self.heard_pass(output).and_then(|pass| {
+            let index = self.index_of(self.passes[pass].id)?;
+            Some((index, Some(pass), output.position_frames))
+        });
+        heard.or_else(|| {
+            let (id, position) = self.selection?;
+            let index = self.queue.iter().position(|entry| {
+                entry.id == id && !entry.token.consumed_by(output.rendered_frames)
+            })?;
+            let token = &self.queue[index].token;
+            let pass = self
+                .passes
+                .iter()
+                .position(|pass| Arc::ptr_eq(&pass.token, token));
+            Some((index, pass, position))
+        })
+    }
+
+    /// The entry after pass `pass`, and the context its fresh pass clears: the
+    /// next prepared pass, else what the decoder plans or opens next.
+    pub(super) fn following(&self, pass: usize) -> (Option<u64>, Option<&[u64]>) {
+        if let Some(next) = self.passes.get(pass + 1) {
+            (Some(next.id), next.fresh.as_deref())
+        } else if self.decoder.is_some() {
+            (self.plan.id, self.plan.fresh.as_deref())
+        } else if self.finished {
+            (None, None)
+        } else {
+            let next = self.queue.get(self.cursor).map(|entry| entry.id);
+            (next, self.opening.as_deref())
+        }
+    }
+
+    /// The current entry and what follows it.
+    pub(super) fn current_plan(&self) -> Option<(u64, Plan)> {
+        let (index, pass, _) = self.current_pass(&self.output.snapshot())?;
+        let (id, fresh) = self.following(pass?);
+        let plan = Plan {
+            id,
+            fresh: fresh.map(<[u64]>::to_vec),
+        };
+        Some((self.queue[index].id, plan))
+    }
+
+    /// The entries a user jump onto `id` starts a fresh Repeat All pass over:
+    /// a planned fresh pass that begins with `id`, or `id`'s context when
+    /// every entry of it was heard in this pass.
+    pub(crate) fn jump_fresh(&self, id: u64) -> Vec<u64> {
+        if self.repeat != RepeatMode::All {
+            return Vec::new();
+        }
+        if let Some((_, plan)) = self.current_plan()
+            && plan.id == Some(id)
+            && let Some(fresh) = plan.fresh
+        {
+            return fresh;
+        }
+        let Some(index) = self.index_of(id) else {
+            return Vec::new();
+        };
+        let heard: Vec<Slot> = self
+            .queue
+            .iter()
+            .map(|entry| Slot {
+                id: entry.id,
+                run: entry.run,
+                played: entry.visited,
+            })
+            .collect();
+        let context = play_order::context(&heard, index);
+        if heard[context.clone()].iter().all(|slot| slot.played) {
+            heard[context].iter().map(|slot| slot.id).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Where user Next goes, and the context its fresh pass clears. Under
+    /// Repeat One it moves on as Repeat All would; only the entry's natural
+    /// end replays it.
+    pub(crate) fn next_jump(&mut self) -> Option<(u64, Vec<u64>)> {
+        if self.repeat != RepeatMode::One {
+            let next = self.snapshot().next_id?;
+            return Some((next, self.jump_fresh(next)));
+        }
+        let current = self.snapshot().current_id?;
+        let index = self.index_of(current)?;
+        self.order.set_repeat(RepeatMode::All);
+        let plan = self.decide(index);
+        self.order.set_repeat(RepeatMode::One);
+        Some((plan.id?, plan.fresh.unwrap_or_default()))
     }
 
     /// The entry Previous returns to from `index`. Without shuffle the order
@@ -358,6 +448,7 @@ mod tests {
         decoder::GainMode,
         output::OutputConfig,
         play_order::{RepeatScope, RunInfo},
+        playback::Start,
         store::LoadedEntry,
     };
     use std::{fs, path::PathBuf};
@@ -400,11 +491,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_selection_never_inherits_a_planned_fresh_pass() -> anyhow::Result<()> {
-        let directory =
-            std::env::temp_dir().join(format!("tyranny-fresh-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory)?;
+    /// 100 frames of stereo 16-bit silence.
+    fn silence(directory: &std::path::Path) -> anyhow::Result<PathBuf> {
         let source = directory.join("source.wav");
         let mut bytes = b"RIFF".to_vec();
         bytes.extend_from_slice(&(36 + 400_u32).to_le_bytes());
@@ -416,6 +504,59 @@ mod tests {
         bytes.extend_from_slice(&400_u32.to_le_bytes());
         bytes.resize(bytes.len() + 400, 0);
         fs::write(&source, bytes)?;
+        Ok(source)
+    }
+
+    /// Always picks the last candidate.
+    struct Last;
+    impl ShuffleStrategy for Last {
+        fn choose(&mut self, candidates: &[u64]) -> usize {
+            candidates.len() - 1
+        }
+    }
+
+    #[test]
+    fn shuffled_start_plays_a_pick_within_the_new_run() -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("tyranny-start-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        let source = silence(&directory)?;
+        let mut player = Player::new(
+            vec![source.clone()],
+            OutputConfig::Capture {
+                path: directory.join("capture.f32"),
+                clocked: false,
+            },
+            GainMode::Off,
+        )?;
+        player.set_shuffle(Some(Box::new(Last)));
+        // Runs 2..=4 then 5..=7: without a shuffled start the run's first
+        // entry plays; with one, the strategy's pick does.
+        for (start_from, start) in [(Start::First, 2), (Start::Pick, 7)] {
+            let revision = player.snapshot().queue_revision;
+            let prepared = player.prepare_replace_upcoming(
+                vec![source.clone(); 3].into_iter(),
+                crate::protocol::Placement::ReplaceUpcoming,
+                revision,
+                Some(start_from),
+                RepeatScope::Run,
+                &[],
+            )?;
+            assert_eq!(prepared.start_id(), start);
+            player.commit_replace_upcoming(prepared);
+            assert_eq!(player.snapshot().current_id, Some(start));
+        }
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_selection_never_inherits_a_planned_fresh_pass() -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("tyranny-fresh-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        let source = silence(&directory)?;
         let mut player = Player::new(
             vec![source.clone(), source],
             OutputConfig::Capture {

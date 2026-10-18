@@ -99,6 +99,8 @@ pub(crate) struct PreparedInsert {
 /// the new entries and where they go, and with `play` the first one opened.
 pub(crate) struct PreparedReplace {
     append: PreparedAppend,
+    /// Index among the new entries of the one played first.
+    start: usize,
     /// The entry current at preparation. The edit is relative to it, even if
     /// output moves on before the commit.
     anchor: Option<u64>,
@@ -119,6 +121,10 @@ impl PreparedReplace {
     pub fn first_id(&self) -> u64 {
         self.append.first_id()
     }
+    /// The new entry played first, with `play`.
+    pub fn start_id(&self) -> u64 {
+        self.append.entries[self.start].id
+    }
     /// Entries removed before the new ones are inserted, in queue order.
     pub fn removed(&self) -> &[u64] {
         &self.removed_ids
@@ -127,6 +133,15 @@ impl PreparedReplace {
     pub fn before(&self) -> Option<u64> {
         self.before
     }
+}
+
+/// Where an enqueue that plays starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Start {
+    /// The first new entry.
+    First,
+    /// Under shuffle, a shuffle pick among the new entries; else the first.
+    Pick,
 }
 
 /// A batch removal prepared without touching audible state.
@@ -443,33 +458,12 @@ impl Player {
 
     pub fn snapshot(&self) -> Snapshot {
         let output = self.output.snapshot();
-        // A callback already in flight may publish old PCM after stop/selection.
-        // Only a currently valid pass token can make that publication authoritative.
-        let heard = self.heard_pass(&output).and_then(|pass| {
-            let index = self.index_of(self.passes[pass].id)?;
-            Some((index, Some(pass), output.position_frames))
-        });
-        let selected = if self.stopped {
-            None
-        } else {
-            heard.or_else(|| {
-                let (id, position) = self.selection?;
-                let index = self.queue.iter().position(|entry| {
-                    entry.id == id && !entry.token.consumed_by(output.rendered_frames)
-                })?;
-                let token = &self.queue[index].token;
-                let pass = self
-                    .passes
-                    .iter()
-                    .position(|pass| Arc::ptr_eq(&pass.token, token));
-                Some((index, pass, position))
-            })
-        };
-        let selected =
-            selected.map(|(index, pass, position)| (index, &self.queue[index], pass, position));
+        let selected = self
+            .current_pass(&output)
+            .map(|(index, pass, position)| (index, &self.queue[index], pass, position));
         let current_id = selected.map(|(_, entry, _, _)| entry.id);
         let position = selected.map_or(0, |(_, _, _, position)| position);
-        let next_id = selected.and_then(|(_, _, pass, _)| self.following(pass?));
+        let next_id = selected.and_then(|(_, _, pass, _)| self.following(pass?).0);
         let previous_id = selected.map(|(index, entry, _, position)| {
             if position >= u64::from(SAMPLE_RATE) * 3 {
                 return entry.id;
@@ -936,15 +930,15 @@ impl Player {
     }
 
     /// Prepares one enqueue: `placement` decides what is removed and where the
-    /// new entries go, relative to the current entry. With `play` the first new
-    /// entry is opened, as selecting it would, and is played; `trim` names
+    /// new entries go, relative to the current entry. With `play` the new entry
+    /// it names is opened, as selecting it would, and is played; `trim` names
     /// played entries the same edit removes.
     pub(crate) fn prepare_replace_upcoming(
         &mut self,
         paths: impl ExactSizeIterator<Item = PathBuf>,
         placement: Placement,
         expected_revision: u64,
-        play: bool,
+        play: Option<Start>,
         scope: RepeatScope,
         trim: &[u64],
     ) -> Result<PreparedReplace> {
@@ -988,7 +982,7 @@ impl Player {
             .map(|(entry, _)| entry.id);
         let mut append = self.prepare_append(paths, expected_revision, false, scope)?;
         let mut tokens = Vec::new();
-        if play || destination < kept || !removed_ids.is_empty() {
+        if play.is_some() || destination < kept || !removed_ids.is_empty() {
             tokens.try_reserve_exact(kept)?;
             tokens.extend(
                 self.queue
@@ -998,14 +992,21 @@ impl Player {
                     .map(|(entry, _)| TrackToken::new(entry.id)),
             );
         }
-        if play {
+        let mut start = 0;
+        if let Some(play) = play {
+            if play == Start::Pick {
+                let ids: Vec<u64> = append.entries.iter().map(|entry| entry.id).collect();
+                start = self.order.pick(&ids).unwrap_or(0);
+            }
+            let first = &append.entries[start];
             append.selection =
-                Some(self.prepare_first(&append.entries[0], append.revision, destination)?);
-            append.entries[0].played = true;
-            append.entries[0].visited = true;
+                Some(self.prepare_first(first, append.revision, destination + start)?);
+            append.entries[start].played = true;
+            append.entries[start].visited = true;
         }
         Ok(PreparedReplace {
             append,
+            start,
             anchor,
             removed,
             removed_ids,
@@ -1421,6 +1422,8 @@ impl Player {
             "queue changed after selection preparation"
         );
         assert_eq!(self.queue[prepared.index].id, prepared.id);
+        // A seek or gain change keeps what was planned after the entry.
+        let kept = self.current_plan().filter(|(id, _)| *id == prepared.id);
         self.output.set_paused(true);
         self.invalidate_buffer();
         self.queue[prepared.index].metadata = Some(prepared.metadata);
@@ -1435,6 +1438,9 @@ impl Player {
         self.selection = Some((prepared.id, prepared.frame));
         self.output.mark_end(false);
         self.begin_pass();
+        if let Some((_, plan)) = kept {
+            self.plan = plan;
+        }
     }
 
     pub fn seek(&mut self, frame: u64) -> Result<()> {
@@ -1645,7 +1651,7 @@ mod batch_tests {
             vec![run_a.clone()].into_iter(),
             Placement::ReplaceUpcoming,
             1,
-            false,
+            None,
             RepeatScope::Queue,
             &[],
         )?;
@@ -1657,7 +1663,7 @@ mod batch_tests {
             vec![run_a, run_b.clone()].into_iter(),
             Placement::ReplaceUpcoming,
             1,
-            false,
+            None,
             RepeatScope::Queue,
             &[],
         )?;
@@ -1699,7 +1705,7 @@ mod batch_tests {
             vec![run_b].into_iter(),
             Placement::ReplaceUpcoming,
             1,
-            true,
+            Some(Start::First),
             RepeatScope::Queue,
             &[],
         )?;
@@ -1849,7 +1855,7 @@ mod batch_tests {
                     vec![run.clone()].into_iter(),
                     Placement::Next,
                     1,
-                    true,
+                    Some(Start::First),
                     RepeatScope::Queue,
                     &[9],
                 )
@@ -1859,7 +1865,7 @@ mod batch_tests {
             vec![run].into_iter(),
             Placement::Next,
             1,
-            true,
+            Some(Start::First),
             RepeatScope::Queue,
             &[1],
         )?;
@@ -1990,7 +1996,7 @@ mod batch_tests {
             vec![run].into_iter(),
             Placement::ReplaceUpcoming,
             1,
-            false,
+            None,
             RepeatScope::Queue,
             &[],
         )?;

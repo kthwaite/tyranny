@@ -123,6 +123,12 @@ impl PlayOrder {
         self.invalidate();
     }
 
+    /// With shuffle on, an index into `candidates` (non-empty) to start with.
+    pub fn pick(&mut self, candidates: &[u64]) -> Option<usize> {
+        let shuffle = self.shuffle.as_mut()?;
+        Some(shuffle.choose(candidates).min(candidates.len() - 1))
+    }
+
     /// Drops the cached decision. Call after any queue edit.
     pub fn invalidate(&mut self) {
         self.planned = None;

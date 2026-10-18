@@ -10,7 +10,7 @@ use crate::{
     listing::{recent_cutoff, unix_now},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, ShuffleStrategy, UniformShuffle},
-    playback::{Player, PreparedRemove},
+    playback::{Player, PreparedRemove, Start},
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
         NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
@@ -461,13 +461,14 @@ fn shuffle_strategy() -> Box<dyn ShuffleStrategy> {
 }
 
 /// Why an entry is selected.
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Jump {
     /// A new position in the current entry; nothing is marked.
     Seek,
-    /// Next or Play: the entry becomes the newest played entry.
-    Forward,
-    /// Previous: as `Forward`, and the play order's history steps back.
+    /// Next or Play: the entry becomes the newest played entry. A fresh
+    /// Repeat All pass first clears the played state of `fresh`, its context.
+    Forward { fresh: Vec<u64> },
+    /// Previous: the entry becomes the newest played entry, and the play
+    /// order's history steps back.
     Back,
 }
 
@@ -703,14 +704,26 @@ impl Actor {
             position_frames,
             playing,
         };
+        let (seek, back) = (matches!(jump, Jump::Seek), matches!(jump, Jump::Back));
+        let fresh = match jump {
+            Jump::Forward { fresh } => fresh,
+            _ => Vec::new(),
+        };
         // `Some` once the entry is marked; holds the trim's player removal.
         let mut marked = None;
-        if jump != Jump::Seek && self.marked != Some(entry_id) {
+        let renews = fresh.iter().any(|entry| *entry != entry_id);
+        if !seek && (self.marked != Some(entry_id) || renews) {
             let (trimmed, removal) = self
                 .prepare_trim(entry_id, Some(entry_id))
                 .map_err(Failure::persistence)?;
             self.store
-                .mark_current(self.revision(), entry_id, &trimmed, &[], Some(checkpoint))
+                .mark_current(
+                    self.revision(),
+                    entry_id,
+                    &trimmed,
+                    &fresh,
+                    Some(checkpoint),
+                )
                 .map_err(Failure::persistence)?;
             marked = Some(removal);
         } else {
@@ -718,11 +731,15 @@ impl Actor {
                 .checkpoint(checkpoint, &self.settings)
                 .map_err(Failure::persistence)?;
         }
+        if marked.is_some() {
+            // Before the selection decides what follows, in the new pass.
+            self.player.clear_played(&fresh);
+        }
         self.player.commit_selection(prepared);
         if let Some(removal) = marked {
             self.commit_trim(entry_id, removal);
         }
-        if jump == Jump::Back {
+        if back {
             self.player.retreat_to(entry_id);
         }
         if playing {
@@ -1053,12 +1070,19 @@ impl Actor {
                 paths,
                 placement,
                 expected_revision,
-                play,
+                // A list played without a clicked row starts at a shuffle pick.
+                play.then_some(match selection {
+                    TrackSelection::List {
+                        first_row_id: None, ..
+                    } => Start::Pick,
+                    _ => Start::First,
+                }),
                 source.kind.repeat_scope(),
                 &trim,
             )
             .map_err(Failure::playback)?;
         let first_id = prepared.first_id();
+        let start_id = prepared.start_id();
         self.store
             .replace_upcoming(
                 expected_revision,
@@ -1068,7 +1092,7 @@ impl Actor {
                     before: prepared.before(),
                     source: &source,
                     checkpoint: play.then_some(Checkpoint {
-                        current_id: Some(first_id),
+                        current_id: Some(start_id),
                         position_frames: 0,
                         playing: true,
                     }),
@@ -1082,7 +1106,7 @@ impl Actor {
         self.player.commit_replace_upcoming(prepared);
         if play {
             self.fault = None;
-            self.marked = Some(first_id);
+            self.marked = Some(start_id);
         }
         // Queue rows and any new selection were committed together; no second
         // fallible checkpoint may reject an already audible run.
@@ -1467,9 +1491,12 @@ impl Actor {
             }
             Command::Next | Command::Previous => {
                 let state = self.player.snapshot();
-                let destination = match command {
-                    Command::Next => state.next_id,
-                    Command::Previous => state.previous_id,
+                let (destination, jump) = match command {
+                    Command::Next => self
+                        .player
+                        .next_jump()
+                        .map(|(id, fresh)| (id, Jump::Forward { fresh })),
+                    Command::Previous => state.previous_id.map(|id| (id, Jump::Back)),
                     _ => unreachable!(),
                 }
                 .ok_or_else(|| Failure::invalid("no available queue occurrence"))?;
@@ -1478,10 +1505,6 @@ impl Actor {
                     && !self.player.completed()
                     && self.player.error().is_none()
                     && self.fault.is_none();
-                let jump = match command {
-                    Command::Previous => Jump::Back,
-                    _ => Jump::Forward,
-                };
                 self.select(destination, 0, active, jump)
             }
             Command::Play { entry_id } => {
@@ -1496,7 +1519,8 @@ impl Actor {
                     }
                 });
                 if let Some(id) = selection {
-                    return self.select(id, 0, true, Jump::Forward);
+                    let fresh = self.player.jump_fresh(id);
+                    return self.select(id, 0, true, Jump::Forward { fresh });
                 }
                 if self.player.queue_entries().len() == 0 {
                     return Err(Failure::invalid("queue is empty"));

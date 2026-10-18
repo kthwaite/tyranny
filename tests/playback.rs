@@ -647,6 +647,46 @@ fn shuffle_plays_each_upcoming_entry_once_then_stops_under_off() {
     assert_passes(&pcm(&capture), &heard);
 }
 
+#[test]
+fn seek_and_gain_reselection_keep_the_shuffled_next() {
+    let scratch = Scratch::new();
+    let paths = (0..8)
+        .map(|index| {
+            let path = scratch.path(&format!("{index}.wav"));
+            wav(&path, 96_000);
+            path
+        })
+        .collect();
+    let mut player = Player::new(
+        paths,
+        OutputConfig::Capture {
+            path: scratch.path("capture.f32"),
+            clocked: true,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    player.set_shuffle(Some(Box::new(UniformShuffle::seeded(11))));
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while player.snapshot().current_id != Some(1) {
+        assert!(Instant::now() < deadline, "playback did not start");
+        player.pump().unwrap();
+        thread::sleep(Duration::from_millis(1));
+    }
+    let next = player.snapshot().next_id;
+    assert!(next.is_some());
+    // Re-selecting the current entry never rerolls the shuffled next.
+    for frame in [4_800, 24_000, 1_000, 48_000, 2_400] {
+        player.seek(frame).unwrap();
+        assert_eq!(player.snapshot().next_id, next);
+        let prepared = player.prepare_selection(1, frame, GainMode::Track).unwrap();
+        player.commit_selection(prepared);
+        assert_eq!(player.snapshot().next_id, next);
+        player.pump().unwrap();
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod coreaudio_hardware {
     use super::*;

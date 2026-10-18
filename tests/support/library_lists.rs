@@ -1180,3 +1180,129 @@ async fn repeat_all_wrap_starts_a_fresh_pass_over_the_run() {
     );
     running.stop().await;
 }
+
+/// Indexes long tracks named `names`, and returns the library revision and
+/// their track IDs in title order.
+async fn index_songs(
+    scratch: &Scratch,
+    client: &mut PlaybackClient,
+    names: &[&str],
+) -> (u64, Vec<u64>) {
+    index(scratch, client, names).await;
+    list_track_ids(client, songs()).await
+}
+fn play_ids(client: &PlaybackClient, library: u64, tracks: &[u64]) -> Value {
+    json!({"command":"enqueue_tracks",
+        "selection":{"kind":"ids","library_revision":library,"track_ids":tracks},
+        "expected_revision":client.state.queue_revision,"placement":"replace_upcoming",
+        "play":true,"source":{"kind":"album","name":"Fixture Album"}})
+}
+/// Presses Next and returns the new current entry.
+async fn next(client: &mut PlaybackClient) -> u64 {
+    ok(client, json!({"command":"next"})).await;
+    client.state.current_id.unwrap()
+}
+/// `(id, played)` for the queue entries `run` names.
+async fn run_played(client: &mut PlaybackClient, run: &[u64]) -> Vec<(u64, bool)> {
+    let items = whole_queue(client).await;
+    run.iter()
+        .map(|id| {
+            (
+                *id,
+                items.iter().find(|item| item.id == *id).unwrap().played,
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn next_at_the_end_of_a_repeat_all_run_starts_a_fresh_pass() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (library, tracks) = index_songs(&scratch, &mut client, &["Alpha", "Beta", "Gamma"]).await;
+    ok(&mut client, json!({"command":"set_repeat","mode":"all"})).await;
+
+    // In order: Next from the run's last entry wraps and empties its history.
+    let command = play_ids(&client, library, &tracks);
+    let first = applied_entry(ok(&mut client, command).await);
+    let run = [first, first + 1, first + 2];
+    assert_eq!(next(&mut client).await, run[1]);
+    assert_eq!(next(&mut client).await, run[2]);
+    assert_eq!(next(&mut client).await, run[0]);
+    assert_eq!(
+        run_played(&mut client, &run).await,
+        [(run[0], true), (run[1], false), (run[2], false)]
+    );
+    assert_eq!(next(&mut client).await, run[1]);
+
+    // Shuffled: the second pass plays each entry once, from emptied history.
+    ok(&mut client, json!({"command":"set_shuffle","enabled":true})).await;
+    let command = play_ids(&client, library, &tracks);
+    let first = applied_entry(ok(&mut client, command).await);
+    let run = [first, first + 1, first + 2];
+    let mut heard = vec![first, next(&mut client).await, next(&mut client).await];
+    heard.sort_unstable();
+    assert_eq!(heard, run);
+    let wrapped = next(&mut client).await;
+    let played: Vec<(u64, bool)> = run.iter().map(|id| (*id, *id == wrapped)).collect();
+    assert_eq!(run_played(&mut client, &run).await, played);
+    let mut heard = vec![wrapped, next(&mut client).await, next(&mut client).await];
+    heard.sort_unstable();
+    assert_eq!(heard, run);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn next_and_previous_under_repeat_one_move_to_other_entries() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    append_long(&scratch, &mut client, &["One", "Two", "Three"]).await;
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    ok(&mut client, json!({"command":"set_repeat","mode":"one"})).await;
+    assert_eq!(next(&mut client).await, 2);
+    assert_eq!(next(&mut client).await, 3);
+    ok(&mut client, json!({"command":"previous"})).await;
+    assert_eq!(client.state.current_id, Some(2));
+    assert_eq!(next(&mut client).await, 3);
+    // As Repeat All would, Next wraps within the context.
+    assert_eq!(next(&mut client).await, 1);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shuffled_play_of_a_list_without_a_clicked_row_starts_at_a_pick() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let names: Vec<String> = (0..10).map(|index| format!("Song {index:02}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (library, tracks) = index_songs(&scratch, &mut client, &names).await;
+    ok(&mut client, json!({"command":"set_shuffle","enabled":true})).await;
+    let list = |first_row_id: Option<u64>| {
+        json!({"kind":"list","list":songs(),"library_revision":library,
+            "ranges":[[0, u64::MAX]],"excluded":[],"first_row_id":first_row_id})
+    };
+    // A clicked row, or IDs, start at the first new entry.
+    for selection in [
+        list(Some(tracks[0])),
+        json!({"kind":"ids","library_revision":library,"track_ids":tracks}),
+    ] {
+        let command = enqueue(&client, selection, "replace_upcoming", true, "Songs");
+        let first = applied_entry(ok(&mut client, command).await);
+        assert_eq!(client.state.current_id, Some(first));
+    }
+    // Without one, each play starts at a shuffle pick within the new run.
+    // Ten plays all starting at the first entry has odds of 10^-10.
+    let mut starts = Vec::new();
+    for _ in 0..10 {
+        let command = enqueue(&client, list(None), "replace_upcoming", true, "Songs");
+        let first = applied_entry(ok(&mut client, command).await);
+        let current = client.state.current_id.unwrap();
+        assert!((first..first + 10).contains(&current));
+        starts.push(current - first);
+    }
+    assert!(starts.iter().any(|offset| *offset != 0), "{starts:?}");
+    running.stop().await;
+}
