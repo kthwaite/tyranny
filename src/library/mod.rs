@@ -11,7 +11,7 @@ use crate::{
     scanner::{ScanEvent, Scanner},
 };
 use anyhow::{Context, Result, anyhow, ensure};
-pub(crate) use db::{migrate, resolve_track};
+pub(crate) use db::{migrate, migrate_v5, resolve_track};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{
     path::{Path, PathBuf},

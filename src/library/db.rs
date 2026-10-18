@@ -91,6 +91,59 @@ pub(crate) fn migrate(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Schema 5: richer track fields, genres, play statistics and history. Existing
+/// rows keep blank new fields; `pending_upgrade` asks for a rescan to fill them.
+pub(crate) fn migrate_v5(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE library_tracks ADD COLUMN year INTEGER;
+        ALTER TABLE library_tracks ADD COLUMN codec TEXT;
+        ALTER TABLE library_tracks ADD COLUMN bit_depth INTEGER;
+        ALTER TABLE library_tracks ADD COLUMN bitrate_kbps INTEGER;
+        ALTER TABLE library_tracks ADD COLUMN file_size INTEGER;
+        ALTER TABLE library_tracks ADD COLUMN date_added INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE library_assets ADD COLUMN metadata_version INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE library_assets ADD COLUMN created_ns INTEGER;
+        ALTER TABLE library_state ADD COLUMN pending_upgrade INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE library_genres (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            search TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE library_track_genres (
+            track_id INTEGER NOT NULL REFERENCES library_tracks(id),
+            genre_id INTEGER NOT NULL REFERENCES library_genres(id),
+            position INTEGER NOT NULL,
+            PRIMARY KEY(track_id,genre_id)
+        );
+        CREATE TABLE track_stats (
+            track_id INTEGER PRIMARY KEY REFERENCES library_tracks(id),
+            play_count INTEGER NOT NULL DEFAULT 0,
+            last_played INTEGER
+        );
+        CREATE TABLE play_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            played_at INTEGER NOT NULL,
+            entry_id INTEGER NOT NULL,
+            track_id INTEGER REFERENCES library_tracks(id),
+            path TEXT NOT NULL,
+            title TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            album TEXT NOT NULL,
+            duration_ms INTEGER,
+            source_kind TEXT,
+            source_name TEXT
+        );
+        CREATE INDEX library_tracks_year ON library_tracks(year,id);
+        CREATE INDEX library_tracks_added ON library_tracks(date_added,id);
+        CREATE INDEX library_track_genres_genre ON library_track_genres(genre_id,track_id);
+        CREATE INDEX track_stats_count ON track_stats(play_count,track_id);
+        CREATE INDEX track_stats_last ON track_stats(last_played,track_id);
+        UPDATE library_state SET pending_upgrade=
+            EXISTS(SELECT 1 FROM library_tracks) WHERE singleton=1;",
+    )?;
+    Ok(())
+}
+
 /// One statement also works inside the caller's queue transaction; the revision
 /// and optional path necessarily belong to the same SQLite read snapshot.
 pub(crate) fn resolve_track(
