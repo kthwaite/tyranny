@@ -28,6 +28,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TAGS: usize = 1_024;
 const MAX_TAG_BYTES: usize = 256 * 1_024;
 const MAX_VALUE_BYTES: usize = 64 * 1_024;
+/// Genres kept per track; further genres are ignored.
+const MAX_GENRES: usize = 32;
+/// Individual genre values longer than this are skipped.
+const MAX_GENRE_BYTES: usize = 256;
 
 pub(crate) fn probe(path: &Path, cancelled: &Arc<AtomicBool>) -> Result<TrackMetadata> {
     probe_before(path, cancelled, Instant::now() + PROBE_TIMEOUT)
@@ -250,6 +254,8 @@ struct Tags {
     gain: GainMetadata,
     /// Index into `YEAR_KEYS` of the tag that supplied `metadata.year`.
     year_rank: Option<usize>,
+    /// Lowercased genres already held, for case-insensitive dedupe.
+    genre_keys: std::collections::HashSet<String>,
 }
 
 const YEAR_KEYS: [&str; 4] = ["date", "year", "originaldate", "originalyear"];
@@ -388,11 +394,10 @@ impl Tags {
             }
         } else if key_is(key, "genre") {
             for genre in split_genres(value) {
-                if !metadata
-                    .genres
-                    .iter()
-                    .any(|known| known.to_lowercase() == genre.to_lowercase())
-                {
+                if metadata.genres.len() >= MAX_GENRES {
+                    break;
+                }
+                if genre.len() <= MAX_GENRE_BYTES && self.genre_keys.insert(genre.to_lowercase()) {
                     metadata.genres.push(genre.to_owned());
                 }
             }
@@ -693,5 +698,23 @@ mod tests {
         assert_eq!(codec_label(Id::PCM_S16LE, "mov"), "PCM");
         assert_eq!(codec_label(Id::MP3, "mp3"), "MP3");
         assert_eq!(codec_label(Id::H264, "mp4"), "Other");
+    }
+
+    #[test]
+    fn genre_count_and_length_are_capped() {
+        let mut tags = Tags::default();
+        let many: Vec<String> = (0..40).map(|n| format!("G{n}")).collect();
+        tags.tag("genre", &many.join(";"));
+        assert_eq!(tags.metadata.genres, many[..MAX_GENRES]);
+        tags.tag("genre", "extra");
+        assert_eq!(tags.metadata.genres.len(), MAX_GENRES);
+        let mut tags = Tags::default();
+        tags.tag(
+            "genre",
+            &format!("{};Kept", "x".repeat(MAX_GENRE_BYTES + 1)),
+        );
+        assert_eq!(tags.metadata.genres, ["Kept"]);
+        tags.tag("genre", &"y".repeat(MAX_GENRE_BYTES));
+        assert_eq!(tags.metadata.genres.len(), 2);
     }
 }
