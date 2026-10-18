@@ -96,7 +96,15 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
             "ALTER TABLE queue ADD COLUMN source_kind TEXT;
                 ALTER TABLE queue ADD COLUMN source_name TEXT;
                 ALTER TABLE queue ADD COLUMN run_id INTEGER;
-                ALTER TABLE queue ADD COLUMN played_seq INTEGER;",
+                ALTER TABLE queue ADD COLUMN played_seq INTEGER;
+            -- Schema 4 kept no play order. The entries up to the checkpoint's
+            -- current entry were played in queue order; the current one last.
+            UPDATE queue SET played_seq=ranked.seq
+            FROM (SELECT q.id,ROW_NUMBER() OVER (ORDER BY q.ordinal) AS seq
+                  FROM queue q
+                  WHERE q.ordinal<=(SELECT c.ordinal FROM control
+                                    JOIN queue c ON c.id=control.current_id)) AS ranked
+            WHERE queue.id=ranked.id;",
         )?;
         transaction.pragma_update(None, "user_version", 5)?;
         transaction.commit()?;
@@ -950,7 +958,7 @@ mod tests {
             let counts: (i64, i64, i64) = connection.query_row(
                 "SELECT (SELECT COUNT(*) FROM playlist_entries),
                         (SELECT COUNT(*) FROM playlists WHERE query IS NOT NULL),
-                        (SELECT COUNT(*) FROM queue WHERE source_kind IS NULL AND run_id IS NULL AND played_seq IS NULL)",
+                        (SELECT COUNT(*) FROM queue WHERE source_kind IS NULL AND run_id IS NULL AND played_seq=1)",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
@@ -958,7 +966,42 @@ mod tests {
             Ok(())
         })();
         let _ = fs::remove_file(&path);
-        result
+        result?;
+        // The entries up to the checkpoint's current entry were played, in
+        // queue order: they get played ranks, the current entry the highest.
+        // Without a current entry nothing was played.
+        for (current, played) in [
+            (
+                Some(3),
+                vec![(1, Some(1)), (2, Some(2)), (3, Some(3)), (4, None)],
+            ),
+            (None, vec![(1, None), (2, None), (3, None), (4, None)]),
+        ] {
+            let path = schema_4_file(true);
+            let result = (|| -> Result<()> {
+                let connection = Connection::open(&path)?;
+                // Ordinals need not be contiguous.
+                connection.execute_batch(
+                    "INSERT INTO queue(id,ordinal,path) VALUES(2,5,'/music/b.flac'),
+                        (3,9,'/music/c.flac'),(4,12,'/music/d.flac');
+                    UPDATE control SET next_id=5;",
+                )?;
+                connection.execute("UPDATE control SET current_id=?1", [current])?;
+                drop(connection);
+                Store::open(&path)?;
+                let connection = Connection::open(&path)?;
+                let mut query =
+                    connection.prepare("SELECT id,played_seq FROM queue ORDER BY ordinal")?;
+                let rows = query
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<(u64, Option<u64>)>>>()?;
+                assert_eq!(rows, played, "current {current:?}");
+                Ok(())
+            })();
+            let _ = fs::remove_file(&path);
+            result?;
+        }
+        Ok(())
     }
     #[test]
     fn empty_schema_4_database_migrates_without_pending_upgrade() -> Result<()> {
