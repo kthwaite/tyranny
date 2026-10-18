@@ -197,8 +197,8 @@ async fn imports_persist_without_rescan_and_unchanged_files_skip_probing() {
         resolve_track(&connection, imported.id, library.state().revision).unwrap(),
         source.to_str().unwrap()
     );
-    let stale = resolve_track(&connection, imported.id, revision).unwrap_err();
-    assert!(stale.downcast_ref::<StaleLibraryRevision>().is_some());
+    // An unchanged rescan only moves scan status, so the revision holds.
+    assert_eq!(library.state().revision, revision);
     library.shutdown().unwrap();
 }
 
@@ -552,6 +552,14 @@ async fn unicode_literal_filters_pages_and_revisions_are_consistent() {
     };
     assert_eq!(literal.total, 1);
     assert_eq!(literal.entries[0].metadata.title, "ÉTÉ %_");
+    // A changed file installs a track, which moves the content revision.
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(scratch.path("music/été second.wav"))
+        .unwrap();
+    file.set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    drop(file);
     rescan(&library, root).await;
     let stale = library
         .handle()
@@ -1066,5 +1074,134 @@ async fn genres_are_normalized_rows_in_tag_order() {
     let scan = rescan(&library, root).await;
     assert_eq!(scan.updated, 1);
     assert_eq!(genres("a"), ["Blues"]);
+    library.shutdown().unwrap();
+}
+
+async fn upgrade_cleared(scratch: &Scratch) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let connection = database(scratch);
+    loop {
+        let pending: i64 = connection
+            .query_row("SELECT pending_upgrade FROM library_state", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        if pending == 0 {
+            return;
+        }
+        assert!(Instant::now() < deadline, "upgrade rescan did not drain");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn scan_progress_does_not_change_revision_but_installs_do() {
+    let scratch = Scratch::new();
+    for name in ["a", "b", "c"] {
+        flac(
+            &scratch.path(&format!("music/{name}.flac")),
+            &[("title", name)],
+        );
+    }
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let revision = library.state().revision;
+    let scan = rescan(&library, root).await;
+    assert_eq!((scan.unchanged, scan.updated, scan.processed), (3, 0, 3));
+    assert_eq!(library.state().revision, revision);
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(scratch.path("music/b.flac"))
+        .unwrap();
+    file.set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    drop(file);
+    let scan = rescan(&library, root).await;
+    assert_eq!(scan.updated, 1);
+    assert!(library.state().revision > revision);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn stale_enqueue_revision_is_rejected_after_a_concurrent_install() {
+    let scratch = Scratch::new();
+    flac(&scratch.path("music/a.flac"), &[("title", "A")]);
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let old = library.state().revision;
+    let track = tracks(&library).await.entries.remove(0);
+    flac(&scratch.path("music/b.flac"), &[("title", "B")]);
+    rescan(&library, root).await;
+    let connection = database(&scratch);
+    let stale = resolve_track(&connection, track.id, old).unwrap_err();
+    assert!(stale.downcast_ref::<StaleLibraryRevision>().is_some());
+    assert!(resolve_track(&connection, track.id, library.state().revision).is_ok());
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn upgrade_flag_rescans_every_root_once_and_clears() {
+    let scratch = Scratch::new();
+    flac(&scratch.path("one/a.flac"), &[("title", "A")]);
+    flac(&scratch.path("two/b.flac"), &[("title", "B")]);
+    let library = scratch.library();
+    add(&library, &scratch.path("one")).await;
+    finished(&library).await;
+    add(&library, &scratch.path("two")).await;
+    finished(&library).await;
+    library.shutdown().unwrap();
+    database(&scratch)
+        .execute_batch("UPDATE library_assets SET metadata_version=1; UPDATE library_state SET pending_upgrade=1;")
+        .unwrap();
+    let library = scratch.library();
+    upgrade_cleared(&scratch).await;
+    finished(&library).await;
+    let connection = database(&scratch);
+    let versions: Vec<i64> = connection
+        .prepare("SELECT metadata_version FROM library_assets")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(versions, vec![db::METADATA_VERSION; 2]);
+    let phases: Vec<ScanPhase> = connection
+        .prepare("SELECT last_scan FROM library_roots")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|json| {
+            serde_json::from_str::<ScanStatus>(&json.unwrap())
+                .unwrap()
+                .phase
+        })
+        .collect();
+    assert_eq!(phases, vec![ScanPhase::Complete; 2]);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn upgraded_tracks_without_date_added_are_not_recent() {
+    // Task 6 adds the Recent source and finishes this with a source assertion.
+    let scratch = Scratch::new();
+    flac(&scratch.path("music/a.flac"), &[("title", "A")]);
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    library.shutdown().unwrap();
+    database(&scratch)
+        .execute_batch(
+            "UPDATE library_tracks SET date_added=0; UPDATE library_assets SET metadata_version=1;",
+        )
+        .unwrap();
+    let library = scratch.library();
+    let added: i64 = database(&scratch)
+        .query_row("SELECT date_added FROM library_tracks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(added, 0);
     library.shutdown().unwrap();
 }

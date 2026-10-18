@@ -199,10 +199,22 @@ pub(super) fn state(connection: &Connection) -> Result<LibraryState> {
     })
 }
 
+/// The revision is the content revision: it changes only when rows visible to
+/// list queries change, so clients may cache windows keyed by it. Call once per
+/// transaction that makes such a change.
+fn bump_revision(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        "UPDATE library_state SET revision=revision+1 WHERE singleton=1",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Scan status only; scan progress never changes the content revision.
 pub(super) fn save_status(transaction: &Transaction<'_>, status: &ScanStatus) -> Result<()> {
     let json = serde_json::to_string(status)?;
     transaction.execute(
-        "UPDATE library_state SET scan=?1,revision=revision+1 WHERE singleton=1",
+        "UPDATE library_state SET scan=?1 WHERE singleton=1",
         [&json],
     )?;
     if let Some(root_id) = status.root_id {
@@ -298,6 +310,9 @@ pub(super) fn discover(
         "UPDATE library_state SET track_count=track_count+?1 WHERE singleton=1",
         [restored],
     )?;
+    if restored > 0 {
+        bump_revision(&transaction)?;
+    }
     save_status(&transaction, &next)?;
     transaction.commit()?;
     *status = next;
@@ -488,6 +503,7 @@ pub(super) fn probed(
     ensure!(results.len() <= BATCH, "scanner probe batch exceeded bound");
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut next = status.clone();
+    let mut changed = false;
     for probe in results {
         let path = probe
             .candidate
@@ -509,10 +525,17 @@ pub(super) fn probed(
         match probe.result {
             Ok(metadata) => {
                 install(&transaction, &probe.candidate, metadata)?;
+                changed = true;
                 next.updated += 1;
             }
             Err(error) => {
                 let error = bounded_error(error);
+                let indexed: bool = transaction.query_row(
+                    "SELECT indexed FROM library_assets WHERE path=?1",
+                    [path],
+                    |row| row.get(0),
+                )?;
+                changed |= indexed;
                 transaction.execute(
                     "UPDATE library_assets SET error=?1 WHERE path=?2",
                     params![error, path],
@@ -526,6 +549,9 @@ pub(super) fn probed(
             params![serial, path],
         )?;
         next.processed += 1;
+    }
+    if changed {
+        bump_revision(&transaction)?;
     }
     save_status(&transaction, &next)?;
     transaction.commit()?;
@@ -569,6 +595,11 @@ pub(super) fn finish(
             "UPDATE library_state SET track_count=track_count-?1 WHERE singleton=1",
             [missing],
         )?;
+        // Advancing the watermark only changes visible rows when it hides
+        // assets the scan did not see.
+        if missing > 0 {
+            bump_revision(&transaction)?;
+        }
         next.phase = ScanPhase::Complete;
     } else {
         next.phase = ScanPhase::Failed;

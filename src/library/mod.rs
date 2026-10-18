@@ -14,6 +14,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 pub(crate) use db::{migrate, migrate_v5, resolve_track};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock,
@@ -198,6 +199,10 @@ struct Coordinator {
     published: Instant,
     dirty: bool,
     cleanup_pending: bool,
+    /// Roots still to rescan after a schema upgrade; `pending_upgrade` stays set
+    /// in the database until this drains and no scan is active.
+    pending_rescans: VecDeque<u64>,
+    upgrading: bool,
 }
 impl Coordinator {
     fn open(path: PathBuf, shared: Arc<RwLock<LibraryState>>) -> Result<Self> {
@@ -212,6 +217,19 @@ impl Coordinator {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         publish(&shared, db::recover(&mut connection)?);
+        let upgrading: bool = connection.query_row(
+            "SELECT pending_upgrade FROM library_state WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        let pending_rescans = if upgrading {
+            connection
+                .prepare("SELECT id FROM library_roots ORDER BY id")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<VecDeque<u64>>>()?
+        } else {
+            VecDeque::new()
+        };
         Ok(Self {
             connection,
             active: None,
@@ -219,6 +237,8 @@ impl Coordinator {
             published: Instant::now(),
             dirty: false,
             cleanup_pending: true,
+            pending_rescans,
+            upgrading,
         })
     }
     fn run(mut self, mut receiver: mpsc::Receiver<Work>, stop: Arc<AtomicBool>) -> Result<()> {
@@ -235,6 +255,9 @@ impl Coordinator {
             }
             if self.active.is_some() {
                 self.scan_tick()?;
+            }
+            if self.upgrading && self.active.is_none() {
+                self.upgrade_step()?;
             }
             if self.cleanup_pending {
                 let removed = db::discard_old_work(
@@ -255,6 +278,23 @@ impl Coordinator {
             self.persist(&active.status)?;
             self.publish(true)?;
             stopped?;
+        }
+        Ok(())
+    }
+    /// Runs while idle. Starts the next queued rescan; a root that fails to start
+    /// or scan is not retried. Clears the database flag once the queue drains.
+    fn upgrade_step(&mut self) -> Result<()> {
+        match self.pending_rescans.pop_front() {
+            Some(root_id) => {
+                let _ = self.rescan(root_id);
+            }
+            None => {
+                self.connection.execute(
+                    "UPDATE library_state SET pending_upgrade=0 WHERE singleton=1",
+                    [],
+                )?;
+                self.upgrading = false;
+            }
         }
         Ok(())
     }
@@ -371,6 +411,7 @@ impl Coordinator {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (serial, status) = db::begin_scan(&transaction, root_id)?;
         transaction.commit()?;
+        self.pending_rescans.retain(|queued| *queued != root_id);
         self.launch(path.into(), serial, status)?;
         Ok(LibraryReply::ScanAccepted { root_id })
     }

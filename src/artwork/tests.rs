@@ -262,15 +262,9 @@ async fn folder_variants_are_normalized_and_folder_only_rescan_invalidates() {
     fixture.rescan(root).await;
     let (new_album, new_revision) = fixture.album().await;
     assert_eq!(new_album, album);
-    assert!(matches!(
-        handle
-            .request(album_request(album, revision, ArtworkSize::Display))
-            .await,
-        Reply::Error {
-            code: ErrorCode::StaleLibraryRevision,
-            ..
-        }
-    ));
+    // A folder-only rescan changes no list rows, so the content revision holds;
+    // the completed scan watermark in the cache key does the invalidating.
+    assert_eq!(new_revision, revision);
     let refreshed = artwork(
         &handle,
         album_request(album, new_revision, ArtworkSize::Display),
