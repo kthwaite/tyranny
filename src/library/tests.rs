@@ -2230,3 +2230,55 @@ fn list_commands_check_page_bounds_browser_caps_and_revisions() {
         other => panic!("unexpected albums reply: {other:?}"),
     }
 }
+
+#[test]
+fn album_format_votes_by_codec_class_and_averages_lossy_bitrates() {
+    let track = |id, album, codec, depth, bitrate| Fixture {
+        id,
+        album,
+        artist: 1,
+        title: "Track",
+        disc: 1,
+        track: id as u32,
+        year: None,
+        codec,
+        depth,
+        rate: 44_100,
+        bitrate,
+        added: 0,
+        duration: None,
+        gain: None,
+        visible: true,
+    };
+    let mut connection = connection(&[
+        // VBR MP3: per-track bitrates differ; the album shows their rounded mean.
+        track(1, 1, "MP3", None, Some(241)),
+        track(2, 1, "MP3", None, Some(245)),
+        track(3, 1, "MP3", None, Some(250)),
+        track(4, 1, "MP3", None, None),
+        // Two FLAC 16/44.1 and two MP3 tie as classes.
+        track(5, 2, "FLAC", Some(16), Some(900)),
+        track(6, 2, "FLAC", Some(16), Some(950)),
+        track(7, 2, "MP3", None, Some(320)),
+        track(8, 2, "MP3", None, Some(256)),
+        // A lossy class without any bitrate reports the codec alone.
+        track(9, 3, "AAC", None, None),
+        // Lossless classes still split by depth and rate.
+        track(10, 4, "FLAC", Some(24), Some(2500)),
+        track(11, 4, "FLAC", Some(24), Some(2400)),
+        track(12, 4, "FLAC", Some(16), Some(900)),
+    ]);
+    let formats: Vec<(u64, String)> = album_summaries(&mut connection, vec![1, 2, 3, 4])
+        .into_iter()
+        .map(|album| (album.id, album.format))
+        .collect();
+    assert_eq!(
+        formats,
+        [
+            (1, "MP3 245".into()),
+            (2, "Mixed".into()),
+            (3, "AAC".into()),
+            (4, "FLAC 24/44.1".into())
+        ]
+    );
+}

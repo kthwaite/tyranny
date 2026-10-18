@@ -370,9 +370,20 @@ fn albums_page(
     Ok((total, entries))
 }
 
+/// One format class's share of an album. A lossless class is its full
+/// `format_label`; a lossy class is the codec alone, so variable bitrates vote
+/// together and the album reports their mean.
+#[derive(Default)]
+struct FormatVote {
+    tracks: u64,
+    lossy: bool,
+    kbps_sum: u64,
+    kbps_tracks: u64,
+}
+
 /// Fills `format` and `genre` by a vote of each album's visible tracks.
-/// Tracks without a format or a genre do not vote. A format tie is "Mixed";
-/// a genre tie goes to the first genre by name.
+/// Tracks without a format or a genre do not vote. A format class tie is
+/// "Mixed"; a genre tie goes to the first genre by name.
 fn album_votes(transaction: &Transaction<'_>, albums: &mut [AlbumSummary]) -> Result<()> {
     if albums.is_empty() {
         return Ok(());
@@ -387,15 +398,25 @@ fn album_votes(transaction: &Transaction<'_>, albums: &mut [AlbumSummary]) -> Re
          WHERE {VISIBLE} AND t.album_id IN ({})",
         placeholders.join(",")
     ))?;
-    type Votes = (HashMap<String, u64>, HashMap<(String, String), u64>);
+    type Votes = (HashMap<String, FormatVote>, HashMap<(String, String), u64>);
     let mut votes: HashMap<u64, Votes> = HashMap::new();
     let mut rows = statement.query(params_from_iter(albums.iter().map(|album| album.id as i64)))?;
     while let Some(row) = rows.next()? {
         let (formats, genres) = votes.entry(row.get(0)?).or_default();
         let codec: Option<String> = row.get(1)?;
-        let format = format_label(codec.as_deref(), row.get(2)?, row.get(3)?, row.get(4)?);
-        if !format.is_empty() {
-            *formats.entry(format).or_default() += 1;
+        let bitrate: Option<u32> = row.get(4)?;
+        let label = format_label(codec.as_deref(), row.get(2)?, row.get(3)?, bitrate);
+        if let Some(codec) = codec.filter(|_| !label.is_empty()) {
+            let lossy = !is_lossless(&codec);
+            let vote = formats
+                .entry(if lossy { codec } else { label })
+                .or_default();
+            vote.tracks += 1;
+            vote.lossy = lossy;
+            if let Some(kbps) = bitrate.filter(|_| lossy) {
+                vote.kbps_sum += u64::from(kbps);
+                vote.kbps_tracks += 1;
+            }
         }
         if let (Some(search), Some(name)) = (row.get(5)?, row.get(6)?) {
             *genres.entry((search, name)).or_default() += 1;
@@ -405,10 +426,14 @@ fn album_votes(transaction: &Transaction<'_>, albums: &mut [AlbumSummary]) -> Re
         let Some((formats, genres)) = votes.remove(&album.id) else {
             continue;
         };
-        let most = formats.values().copied().max().unwrap_or(0);
-        let mut leaders = formats.into_iter().filter(|(_, count)| *count == most);
+        let most = formats.values().map(|vote| vote.tracks).max().unwrap_or(0);
+        let mut leaders = formats.into_iter().filter(|(_, vote)| vote.tracks == most);
         album.format = match (leaders.next(), leaders.next()) {
-            (Some((format, _)), None) => format,
+            (Some((class, vote)), None) if vote.lossy && vote.kbps_tracks > 0 => {
+                let mean = (vote.kbps_sum + vote.kbps_tracks / 2) / vote.kbps_tracks;
+                format!("{class} {mean}")
+            }
+            (Some((class, _)), None) => class,
             (Some(_), Some(_)) => "Mixed".into(),
             (None, _) => String::new(),
         };

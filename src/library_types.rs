@@ -192,9 +192,10 @@ pub struct ListTotals {
     pub duration_ms: u64,
     pub size_bytes: u64,
 }
-/// Album facts over its visible tracks. `format` is the most common track
-/// format, or "Mixed" on a tie; `genre` is the most common first genre;
-/// `date_added` is the newest track's.
+/// Album facts over its visible tracks. `format` is the most common format
+/// class, or "Mixed" on a tie: a lossless class is its full label, a lossy
+/// class its codec, reported with the class's mean bitrate. `genre` is the
+/// most common first genre; `date_added` is the newest track's.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AlbumSummary {
     pub id: u64,
