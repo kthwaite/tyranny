@@ -450,9 +450,11 @@ impl Player {
     }
 
     /// The entry Previous returns to from `index`. Without shuffle the order
-    /// steps back one entry, which needs no slots.
+    /// steps back one entry, which needs no slots. Under Repeat All it never
+    /// leaves the entry's context: from the context's first entry (or from
+    /// history outside it) it wraps to the context's last entry.
     pub(super) fn previous_index(&self, index: usize) -> Option<usize> {
-        if !self.shuffled {
+        if !self.shuffled && self.repeat != RepeatMode::All {
             return index.checked_sub(1);
         }
         // Previous reads only the IDs.
@@ -465,7 +467,17 @@ impl Player {
                 played: entry.visited,
             })
             .collect();
-        self.order.previous(&slots, index)
+        if self.repeat != RepeatMode::All {
+            return self.order.previous(&slots, index);
+        }
+        let context = play_order::context(&slots, index);
+        let within = index - context.start;
+        let back = if self.shuffled {
+            self.order.previous(&slots[context.clone()], within)
+        } else {
+            within.checked_sub(1)
+        };
+        Some(context.start + back.unwrap_or(context.len() - 1))
     }
 
     /// Whether output may yet play entry `id` from what is prepared: a pass,
@@ -586,6 +598,56 @@ mod tests {
         assert_eq!(player.trimmed(&newest_first, 106), [3, 2, 1]);
         // A song's context is the whole queue: nothing is trimmed.
         assert!(player.trimmed(&newest_first, 50).is_empty());
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn previous_under_repeat_all_wraps_within_the_context() -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("tyranny-previous-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        // A loose song, a three-entry album run, then another loose song.
+        let loaded = |id: u64, run_id: u64, scope: RepeatScope| LoadedEntry {
+            id,
+            path: PathBuf::from(format!("/music/{id}.flac")),
+            run: Some(RunInfo { run_id, scope }),
+            played_seq: None,
+        };
+        let entries = vec![
+            loaded(1, 1, RepeatScope::Queue),
+            loaded(2, 2, RepeatScope::Run),
+            loaded(3, 2, RepeatScope::Run),
+            loaded(4, 2, RepeatScope::Run),
+            loaded(5, 5, RepeatScope::Queue),
+        ];
+        let mut player = Player::from_loaded(
+            entries,
+            1,
+            6,
+            OutputConfig::Capture {
+                path: directory.join("capture.f32"),
+                clocked: false,
+            },
+            GainMode::Off,
+        )?;
+        // Off steps back one entry, out of the run, and stops at the start.
+        assert_eq!(player.previous_index(1), Some(0));
+        assert_eq!(player.previous_index(0), None);
+        player.set_repeat(RepeatMode::All);
+        // From the run's first entry to its last; inside it, one back.
+        assert_eq!(player.previous_index(1), Some(3));
+        assert_eq!(player.previous_index(2), Some(1));
+        // A loose song's context is the whole queue.
+        assert_eq!(player.previous_index(0), Some(4));
+        // Shuffled, history from before the run does not leave it either.
+        player.set_shuffle(Some(Box::new(Last)));
+        player.order.advanced(1);
+        assert_eq!(player.previous_index(1), Some(3));
+        player.order.advanced(3);
+        player.order.advanced(2);
+        assert_eq!(player.previous_index(1), Some(2));
         drop(player);
         fs::remove_dir_all(&directory)?;
         Ok(())
