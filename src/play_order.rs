@@ -92,6 +92,8 @@ const HISTORY_LIMIT: usize = 100;
 /// Decides next and previous entries under repeat and shuffle.
 ///
 /// The context of an entry is its run when its scope is `Run`, else the whole queue.
+/// Repeat All cycles over the context. With repeat off, playback moves on past
+/// the context's end, and stops at the end of the queue.
 pub struct PlayOrder {
     repeat: RepeatMode,
     shuffle: Option<Box<dyn ShuffleStrategy>>,
@@ -170,7 +172,8 @@ impl PlayOrder {
             let mut candidates = unplayed(slots, &ctx, current);
             if candidates.is_empty() {
                 if self.repeat == RepeatMode::Off {
-                    return None;
+                    // Off stops only at the end of the queue.
+                    return (ctx.end < slots.len()).then_some(ctx.end);
                 }
                 candidates = ctx.clone().filter(|&k| Some(k) != current).collect();
                 if candidates.is_empty() {
@@ -189,7 +192,7 @@ impl PlayOrder {
         } else if self.repeat == RepeatMode::All {
             Some(ctx.start)
         } else {
-            None
+            (ctx.end < slots.len()).then_some(ctx.end)
         }
     }
 
@@ -229,7 +232,7 @@ impl PlayOrder {
 }
 
 /// The range an entry repeats over.
-fn context(slots: &[Slot], i: usize) -> Range<usize> {
+pub(crate) fn context(slots: &[Slot], i: usize) -> Range<usize> {
     let Some(RunInfo {
         run_id,
         scope: RepeatScope::Run,
@@ -320,6 +323,23 @@ mod tests {
         assert_eq!(order.next(&slots, Some(4)), Some(2));
         assert_eq!(order.wrapped(&slots, 4, 2), Some(2..5));
         assert_eq!(order.wrapped(&slots, 3, 4), None);
+    }
+
+    #[test]
+    fn off_continues_past_the_run_to_the_queue_end() {
+        // Entries 0,1 are one album run; 2 is a loose song after it.
+        let mut slots = vec![run_slot(10, 10), run_slot(11, 10), queue_slot(12)];
+        let mut order = PlayOrder::new(RepeatMode::Off, None);
+        assert_eq!(order.next(&slots, Some(1)), Some(2));
+        order.invalidate();
+        assert_eq!(order.next(&slots, Some(2)), None);
+        // Shuffle picks within the run, then moves on past it.
+        let mut order = PlayOrder::new(RepeatMode::Off, seeded(3));
+        slots[0].played = true;
+        assert_eq!(order.next(&slots, Some(0)), Some(1));
+        slots[1].played = true;
+        order.invalidate();
+        assert_eq!(order.next(&slots, Some(1)), Some(2));
     }
 
     #[test]

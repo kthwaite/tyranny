@@ -9,6 +9,7 @@ use std::{
 use tyranny::{
     decoder::{Decoder, GainMode},
     output::OutputConfig,
+    play_order::{RepeatMode, RepeatScope, UniformShuffle},
     playback::Player,
 };
 
@@ -459,6 +460,191 @@ fn exhausted_revisions_reject_queue_mutations_without_partial_changes() {
     assert_eq!(player.next_id(), 9);
     assert_eq!(player.snapshot().queue_revision, u64::MAX);
     assert!(player.snapshot().stopped);
+}
+
+/// The capture holds whole passes of `waveform`, one per length, in order.
+fn assert_passes(actual: &[[f32; 2]], lengths: &[usize]) {
+    assert_eq!(actual.len(), lengths.iter().sum::<usize>());
+    let mut frames = actual.iter();
+    for &length in lengths {
+        for frame in 0..length {
+            assert_eq!(
+                *frames.next().unwrap(),
+                waveform(frame).map(|value| value as f32 / 32768.0)
+            );
+        }
+    }
+}
+
+#[test]
+fn repeat_one_replays_the_entry_gaplessly_with_correct_position() {
+    let scratch = Scratch::new();
+    let source = scratch.path("repeat.wav");
+    let capture = scratch.path("capture.f32");
+    wav(&source, 9_600);
+    let mut player = Player::new(
+        vec![source],
+        OutputConfig::Capture {
+            path: capture.clone(),
+            clocked: true,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    player.set_repeat(RepeatMode::One);
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Pass 1 then pass 2: the entry stays current and the position restarts.
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "pass 2 was not heard: {:?}",
+            player.snapshot()
+        );
+        player.pump().unwrap();
+        let state = player.snapshot();
+        let rendered = state.output.rendered_frames;
+        if rendered > 0 {
+            assert_eq!(state.current_id, Some(1), "{state:?}");
+            assert_eq!(state.next_id, Some(1), "{state:?}");
+        }
+        if rendered > 9_600 {
+            assert!(rendered < 19_200, "{state:?}");
+            assert_eq!(state.position_frames, rendered - 9_600, "{state:?}");
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Mid-pass-2, Repeat Off ends the queue after this pass.
+    player.set_repeat(RepeatMode::Off);
+    let state = player.snapshot();
+    assert_eq!(state.current_id, Some(1));
+    assert!(state.position_frames < 9_600, "{state:?}");
+    assert_eq!(state.next_id, None);
+    finish(&mut player);
+    assert_eq!(player.snapshot().output.underruns, 0);
+    assert_eq!(player.started_entries(), &[1]);
+    drop(player);
+    assert_passes(&pcm(&capture), &[9_600, 9_600]);
+}
+
+#[test]
+fn repeat_all_album_run_wraps_without_reaching_following_entries() {
+    let scratch = Scratch::new();
+    let capture = scratch.path("capture.f32");
+    let lengths = [3_001, 4_801, 7_207, 2_003];
+    let paths: Vec<PathBuf> = lengths
+        .iter()
+        .enumerate()
+        .map(|(index, frames)| {
+            let path = scratch.path(&format!("{index}.wav"));
+            wav(&path, *frames);
+            path
+        })
+        .collect();
+    // A loose entry, an album run of two entries, then a following entry.
+    let mut player = Player::new(
+        vec![paths[0].clone()],
+        OutputConfig::Capture {
+            path: capture.clone(),
+            clocked: true,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    let run = player
+        .append_run(paths[1..3].to_vec(), 1, RepeatScope::Run)
+        .unwrap();
+    assert_eq!(run, 2);
+    assert_eq!(player.append(paths[3].clone(), 2).unwrap(), 4);
+    player.set_repeat(RepeatMode::All);
+    let prepared = player.prepare_selection(2, 0, GainMode::Off).unwrap();
+    player.commit_selection(prepared);
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // The run wraps twice, and never reaches entry 1 or entry 4.
+    while player.started_entries().len() < 5 {
+        assert!(
+            Instant::now() < deadline,
+            "run did not wrap: {:?}",
+            player.started_entries()
+        );
+        player.pump().unwrap();
+        let state = player.snapshot();
+        assert!(matches!(state.current_id, None | Some(2 | 3)), "{state:?}");
+        assert!(matches!(state.next_id, None | Some(2 | 3)), "{state:?}");
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Repeat Off plays out the run, then the following entry.
+    player.set_repeat(RepeatMode::Off);
+    finish(&mut player);
+    let started = player.started_entries().to_vec();
+    let (last, wrapped) = started.split_last().unwrap();
+    assert_eq!(*last, 4, "{started:?}");
+    assert!(wrapped.len() >= 6 && wrapped.len() % 2 == 0, "{started:?}");
+    for (index, id) in wrapped.iter().enumerate() {
+        assert_eq!(*id, 2 + index as u64 % 2, "{started:?}");
+    }
+    drop(player);
+    let heard: Vec<usize> = started.iter().map(|id| lengths[*id as usize - 1]).collect();
+    assert_passes(&pcm(&capture), &heard);
+}
+
+#[test]
+fn shuffle_plays_each_upcoming_entry_once_then_stops_under_off() {
+    let scratch = Scratch::new();
+    let capture = scratch.path("capture.f32");
+    let lengths: Vec<usize> = (0..6).map(|index| 4_800 + 480 * index).collect();
+    let paths = lengths
+        .iter()
+        .enumerate()
+        .map(|(index, frames)| {
+            let path = scratch.path(&format!("{index}.wav"));
+            wav(&path, *frames);
+            path
+        })
+        .collect();
+    let mut player = Player::new(
+        paths,
+        OutputConfig::Capture {
+            path: capture.clone(),
+            clocked: true,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    player.set_shuffle(Some(Box::new(UniformShuffle::seeded(7))));
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // What the snapshot said would follow each current entry.
+    let mut following = std::collections::HashMap::new();
+    while !player.completed() {
+        assert!(Instant::now() < deadline, "playback did not finish");
+        player.pump().unwrap();
+        let state = player.snapshot();
+        if let Some(current) = state.current_id {
+            let next = *following.entry(current).or_insert(state.next_id);
+            assert_eq!(next, state.next_id, "next of {current} changed");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    player.pump().unwrap();
+    let started = player.started_entries().to_vec();
+    let mut sorted = started.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(started[0], 1);
+    assert_ne!(started, sorted, "seed 7 should not keep queue order");
+    // The decided next is the entry that played next.
+    for pair in started.windows(2) {
+        if let Some(next) = following.get(&pair[0]) {
+            assert_eq!(*next, Some(pair[1]), "{started:?}");
+        }
+    }
+    assert_eq!(following.get(started.last().unwrap()), Some(&None));
+    drop(player);
+    let heard: Vec<usize> = started.iter().map(|id| lengths[*id as usize - 1]).collect();
+    assert_passes(&pcm(&capture), &heard);
 }
 
 #[cfg(target_os = "macos")]

@@ -455,13 +455,15 @@ impl Store {
     }
 
     /// Makes `current` the newest played entry and deletes the played entries
-    /// `trimmed` in one commit, with `checkpoint` when given. Trimming bumps the
-    /// queue revision; marking alone does not.
+    /// `trimmed` in one commit, with `checkpoint` when given. `cleared` entries
+    /// become unplayed first: Repeat All starts a fresh pass over them. Trimming
+    /// bumps the queue revision; marking and clearing do not.
     pub fn mark_current(
         &mut self,
         expected: u64,
         current: u64,
         trimmed: &[u64],
+        cleared: &[u64],
         checkpoint: Option<Checkpoint>,
     ) -> Result<()> {
         let transaction = self
@@ -476,6 +478,11 @@ impl Store {
                     delete.execute(params![id, current])? == 1,
                     "trimmed queue occurrence is not a played entry"
                 );
+            }
+            // A cleared entry may have been removed since the pass was planned.
+            let mut clear = transaction.prepare("UPDATE queue SET played_seq=NULL WHERE id=?1")?;
+            for &id in cleared {
+                clear.execute([id])?;
             }
         }
         mark_newest(&transaction, current)?;
@@ -825,26 +832,26 @@ mod tests {
                 )?;
             }
             for id in [1, 2, 3] {
-                store.mark_current(5, id, &[], None)?;
+                store.mark_current(5, id, &[], &[], None)?;
             }
             assert_eq!(store.played_newest_first()?, [3, 2, 1]);
             // Becoming current again makes an entry the newest.
-            store.mark_current(5, 1, &[], None)?;
+            store.mark_current(5, 1, &[], &[], None)?;
             assert_eq!(store.played_newest_first()?, [1, 3, 2]);
             // Marking alone keeps the revision.
             assert_eq!(store.load()?.revision, 5);
             // Stale revisions, the current entry and unplayed entries are refused,
             // and change nothing.
-            assert!(store.mark_current(4, 4, &[], None).is_err());
-            assert!(store.mark_current(5, 3, &[3], None).is_err());
-            assert!(store.mark_current(5, 3, &[4], None).is_err());
+            assert!(store.mark_current(4, 4, &[], &[], None).is_err());
+            assert!(store.mark_current(5, 3, &[3], &[], None).is_err());
+            assert!(store.mark_current(5, 3, &[4], &[], None).is_err());
             assert_eq!(store.played_newest_first()?, [1, 3, 2]);
             let checkpoint = Checkpoint {
                 current_id: Some(4),
                 position_frames: 0,
                 playing: true,
             };
-            store.mark_current(5, 4, &[2], Some(checkpoint))?;
+            store.mark_current(5, 4, &[2], &[], Some(checkpoint))?;
             let loaded = store.load()?;
             assert_eq!(
                 loaded
@@ -857,6 +864,10 @@ mod tests {
             assert_eq!(loaded.revision, 6);
             assert_eq!(loaded.checkpoint.current_id, Some(4));
             assert_eq!(store.played_newest_first()?, [4, 1, 3]);
+            // A fresh pass clears its entries, removed ones included, then marks.
+            store.mark_current(6, 3, &[], &[1, 3, 4, 2], None)?;
+            assert_eq!(store.played_newest_first()?, [3]);
+            assert_eq!(store.load()?.revision, 6);
             Ok(())
         })();
         let _ = fs::remove_file(&path);

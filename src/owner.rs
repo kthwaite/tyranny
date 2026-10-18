@@ -9,7 +9,7 @@ use crate::{
     },
     listing::{recent_cutoff, unix_now},
     output::OutputConfig,
-    play_order::UniformShuffle,
+    play_order::{RepeatMode, RepeatScope, ShuffleStrategy, UniformShuffle},
     playback::{Player, PreparedRemove},
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
@@ -455,6 +455,22 @@ fn capture_destination(config: &OwnerConfig, entries: &[LoadedEntry]) -> Result<
 /// `(entry id, library revision)` and what the library said about that entry.
 type NowTrack = ((u64, u64), Option<EntryTrack>);
 
+/// The order shuffle uses on the server.
+fn shuffle_strategy() -> Box<dyn ShuffleStrategy> {
+    Box::new(UniformShuffle::from_entropy())
+}
+
+/// Why an entry is selected.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Jump {
+    /// A new position in the current entry; nothing is marked.
+    Seek,
+    /// Next or Play: the entry becomes the newest played entry.
+    Forward,
+    /// Previous: as `Forward`, and the play order's history steps back.
+    Back,
+}
+
 struct Actor {
     player: Player,
     store: Store,
@@ -483,6 +499,10 @@ impl Actor {
             config.output,
             loaded.settings.gain_mode,
         )?;
+        player.set_repeat(loaded.settings.repeat);
+        if loaded.settings.shuffle {
+            player.set_shuffle(Some(shuffle_strategy()));
+        }
         let mut fault = None;
         if let Some(id) = loaded.checkpoint.current_id {
             match player.prepare_selection(
@@ -665,14 +685,14 @@ impl Actor {
             entry_id,
         })
     }
-    /// With `mark`, the selected entry becomes the newest played entry and the
-    /// played prefix is trimmed, in the checkpoint's commit.
+    /// Unless `jump` is a seek, the selected entry becomes the newest played
+    /// entry and the played prefix is trimmed, in the checkpoint's commit.
     fn select(
         &mut self,
         entry_id: u64,
         position_frames: u64,
         playing: bool,
-        mark: bool,
+        jump: Jump,
     ) -> CommandResult<Response> {
         let prepared = self
             .player
@@ -685,12 +705,12 @@ impl Actor {
         };
         // `Some` once the entry is marked; holds the trim's player removal.
         let mut marked = None;
-        if mark && self.marked != Some(entry_id) {
+        if jump != Jump::Seek && self.marked != Some(entry_id) {
             let (trimmed, removal) = self
                 .prepare_trim(entry_id, Some(entry_id))
                 .map_err(Failure::persistence)?;
             self.store
-                .mark_current(self.revision(), entry_id, &trimmed, Some(checkpoint))
+                .mark_current(self.revision(), entry_id, &trimmed, &[], Some(checkpoint))
                 .map_err(Failure::persistence)?;
             marked = Some(removal);
         } else {
@@ -701,6 +721,9 @@ impl Actor {
         self.player.commit_selection(prepared);
         if let Some(removal) = marked {
             self.commit_trim(entry_id, removal);
+        }
+        if jump == Jump::Back {
+            self.player.retreat_to(entry_id);
         }
         if playing {
             self.player.play();
@@ -723,7 +746,7 @@ impl Actor {
         anchor: Option<u64>,
     ) -> Result<(Vec<u64>, Option<PreparedRemove>)> {
         let played = self.store.played_newest_first()?;
-        let mut trimmed = played_overflow(&played, |entry| entry == id);
+        let mut trimmed = self.player.trimmed(&played, id);
         trimmed.retain(|entry| Some(*entry) != anchor);
         if trimmed.is_empty() {
             return Ok((trimmed, None));
@@ -743,16 +766,22 @@ impl Actor {
         self.marked = Some(id);
     }
 
-    /// Output started entry `id`: it becomes the newest played entry, and the
-    /// played prefix is trimmed, in one small commit.
-    fn advance(&mut self, id: u64) -> Result<()> {
-        if self.marked == Some(id) || !self.player.queue_entries().any(|entry| entry.0 == id) {
+    /// Output started a pass over entry `id`: it becomes the newest played
+    /// entry, and the played prefix is trimmed, in one small commit. A fresh
+    /// Repeat All pass first clears the played state of `fresh`, its context.
+    fn advance(&mut self, id: u64, fresh: &[u64]) -> Result<()> {
+        if !self.player.queue_entries().any(|entry| entry.0 == id) {
+            return Ok(());
+        }
+        // A selection, a seek or Repeat One starts the marked entry again.
+        if self.marked == Some(id) && fresh.iter().all(|entry| *entry == id) {
             return Ok(());
         }
         let anchor = self.player.snapshot().current_id;
         let (trimmed, removal) = self.prepare_trim(id, anchor)?;
         self.store
-            .mark_current(self.revision(), id, &trimmed, None)?;
+            .mark_current(self.revision(), id, &trimmed, fresh, None)?;
+        self.player.clear_played(fresh);
         self.commit_trim(id, removal);
         Ok(())
     }
@@ -992,8 +1021,11 @@ impl Actor {
             .try_reserve_exact(sources.len())
             .map_err(|error| Failure::playback(error.into()))?;
         // With play the first new entry becomes current: trim the played
-        // entries this edit keeps.
-        let trim = if play {
+        // entries this edit keeps. Repeat All over the whole queue keeps them.
+        let trim = if play
+            && !(self.settings.repeat == RepeatMode::All
+                && source.kind.repeat_scope() == RepeatScope::Queue)
+        {
             let removed: HashSet<u64> = if placement == Placement::ReplaceUpcoming {
                 self.player
                     .upcoming_ids()
@@ -1446,7 +1478,11 @@ impl Actor {
                     && !self.player.completed()
                     && self.player.error().is_none()
                     && self.fault.is_none();
-                self.select(destination, 0, active, true)
+                let jump = match command {
+                    Command::Previous => Jump::Back,
+                    _ => Jump::Forward,
+                };
+                self.select(destination, 0, active, jump)
             }
             Command::Play { entry_id } => {
                 let state = self.player.snapshot();
@@ -1460,7 +1496,7 @@ impl Actor {
                     }
                 });
                 if let Some(id) = selection {
-                    return self.select(id, 0, true, true);
+                    return self.select(id, 0, true, Jump::Forward);
                 }
                 if self.player.queue_entries().len() == 0 {
                     return Err(Failure::invalid("queue is empty"));
@@ -1514,7 +1550,7 @@ impl Actor {
                     && !self.player.completed()
                     && self.player.error().is_none()
                     && self.fault.is_none();
-                self.select(entry_id, position_frames, active, false)
+                self.select(entry_id, position_frames, active, Jump::Seek)
             }
             Command::SetResume { enabled } => {
                 let mut settings = self.settings.clone();
@@ -1523,6 +1559,31 @@ impl Actor {
                     .checkpoint(self.checkpoint(), &settings)
                     .map_err(Failure::persistence)?;
                 self.settings = settings;
+                self.published(None)
+            }
+            Command::SetRepeat { mode } => {
+                let mut settings = self.settings.clone();
+                settings.repeat = mode;
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                if self.player.repeat() != mode {
+                    self.player.set_repeat(mode);
+                }
+                self.published(None)
+            }
+            Command::SetShuffle { enabled } => {
+                let mut settings = self.settings.clone();
+                settings.shuffle = enabled;
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                let changed = self.settings.shuffle != enabled;
+                self.settings = settings;
+                if changed {
+                    self.player.set_shuffle(enabled.then(shuffle_strategy));
+                }
                 self.published(None)
             }
             Command::SetGain { mode } => {
@@ -1565,10 +1626,9 @@ impl Actor {
                     self.player.pause();
                     self.fault = Some(format!("audio output: {error:#}"));
                 }
-                // Natural advance: each entry output starts becomes played.
-                for index in 0..self.player.started_entries().len() {
-                    let id = self.player.started_entries()[index];
-                    if let Err(error) = self.advance(id) {
+                // Natural advance: each pass output starts marks its entry played.
+                for (id, fresh) in self.player.take_advances() {
+                    if let Err(error) = self.advance(id, &fresh) {
                         self.player.pause();
                         self.fault = Some(format!(
                             "recording a played entry failed; playback paused: {error:#}"

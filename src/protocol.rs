@@ -5,7 +5,10 @@ use crate::library_types::{
     ListTotals, NamedCount, Page, Root, Track, TrackMetadata,
 };
 use crate::listing::ListDescription;
-use crate::{decoder::GainMode, play_order::RepeatScope};
+use crate::{
+    decoder::GainMode,
+    play_order::{RepeatMode, RepeatScope},
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
@@ -96,6 +99,12 @@ pub enum Command {
         mode: GainMode,
     },
     SetResume {
+        enabled: bool,
+    },
+    SetRepeat {
+        mode: RepeatMode,
+    },
+    SetShuffle {
         enabled: bool,
     },
     AddRoot {
@@ -342,12 +351,18 @@ pub struct Artwork {
 pub struct Settings {
     pub gain_mode: GainMode,
     pub resume_on_start: bool,
+    #[serde(default)]
+    pub repeat: RepeatMode,
+    #[serde(default)]
+    pub shuffle: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             gain_mode: GainMode::Off,
             resume_on_start: false,
+            repeat: RepeatMode::Off,
+            shuffle: false,
         }
     }
 }

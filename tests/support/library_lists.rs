@@ -6,6 +6,7 @@ use super::{
 use serde_json::{Value, json};
 use tyranny::{
     listing::Grouping,
+    play_order::RepeatMode,
     protocol::{Playlist, QueueSource, SourceKind},
 };
 
@@ -1108,5 +1109,74 @@ async fn play_on_an_early_entry_trims_played_entries_after_it() {
     // tail. Each is played again; none is trimmed, as 100 others stay played.
     client.until(|state| state.current_id == Some(103)).await;
     assert_eq!(client.state.queue_length, 101);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeat_and_shuffle_settings_survive_restart() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    assert_eq!(client.state.settings.repeat, RepeatMode::Off);
+    assert!(!client.state.settings.shuffle);
+    ok(&mut client, json!({"command":"set_repeat","mode":"one"})).await;
+    assert_eq!(client.state.settings.repeat, RepeatMode::One);
+    ok(&mut client, json!({"command":"set_repeat","mode":"all"})).await;
+    ok(&mut client, json!({"command":"set_shuffle","enabled":true})).await;
+    assert_eq!(client.state.settings.repeat, RepeatMode::All);
+    assert!(client.state.settings.shuffle);
+    running.stop().await;
+
+    let running = Running::start(&scratch).await;
+    let mut restored = PlaybackClient::connect(&running).await;
+    assert_eq!(restored.state.settings.repeat, RepeatMode::All);
+    assert!(restored.state.settings.shuffle);
+    ok(
+        &mut restored,
+        json!({"command":"set_shuffle","enabled":false}),
+    )
+    .await;
+    ok(&mut restored, json!({"command":"set_repeat","mode":"off"})).await;
+    running.stop().await;
+
+    let running = Running::start(&scratch).await;
+    let restored = PlaybackClient::connect(&running).await;
+    assert_eq!(restored.state.settings.repeat, RepeatMode::Off);
+    assert!(!restored.state.settings.shuffle);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeat_all_wrap_starts_a_fresh_pass_over_the_run() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let music = scratch.path("music");
+    fs::create_dir(&music).unwrap();
+    // One-second tracks: each current entry is published at least once.
+    for name in ["One", "Two"] {
+        tagged_wav(&music.join(format!("{name}.wav")), 48_000, name.as_bytes());
+    }
+    ok(&mut client, json!({"command":"add_root","path":music})).await;
+    client
+        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .await;
+    let (library, rows) = list_track_ids(&mut client, songs()).await;
+    ok(&mut client, json!({"command":"set_repeat","mode":"all"})).await;
+    let command = json!({"command":"enqueue_tracks",
+        "selection":{"kind":"ids","library_revision":library,"track_ids":rows},
+        "expected_revision":client.state.queue_revision,"placement":"replace_upcoming",
+        "play":true,"source":{"kind":"album","name":"Fixture Album"}});
+    let first = applied_entry(ok(&mut client, command).await);
+    let second = first + 1;
+    append_long(&scratch, &mut client, &["Following"]).await;
+    client.until(|state| state.current_id == Some(second)).await;
+    client.until(|state| state.current_id == Some(first)).await;
+    // The wrap cleared the run's played state; only the new current entry is played.
+    let items = whole_queue(&mut client).await;
+    assert_eq!(
+        ids_and_played(&items),
+        [(first, true), (second, false), (second + 1, false)]
+    );
     running.stop().await;
 }

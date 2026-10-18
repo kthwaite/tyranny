@@ -4,31 +4,36 @@ use crate::{
     BLOCK_FRAMES, Frame, SAMPLE_RATE,
     decoder::{Decoder, GainMode},
     output::{Output, OutputConfig, OutputSnapshot, TrackToken},
-    play_order::{RepeatScope, RunInfo, ShuffleStrategy},
+    play_order::{PlayOrder, RepeatMode, RepeatScope, RunInfo, ShuffleStrategy},
     protocol::{NowPlaying, Placement},
     store::LoadedEntry,
 };
 use anyhow::{Context, Result, ensure};
+use order::{Pass, Plan};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+mod order;
 
 const PREBUFFER_FRAMES: usize = SAMPLE_RATE as usize / 2;
 
 struct Entry {
     id: u64,
     path: PathBuf,
+    /// The token of the entry's latest pass, or a fresh one.
     token: Arc<TrackToken>,
-    prefilled_frames: usize,
     metadata: Option<Arc<NowPlaying>>,
-    /// Read by Repeat All to find the run an entry repeats within.
-    #[allow(dead_code)]
+    /// The run the entry repeats within under Repeat All.
     run: Option<RunInfo>,
     /// The entry has been current. Upcoming edits with nothing current keep it.
     /// Kept in step with the store's `played_seq`.
     played: bool,
+    /// Played in the current pass over its context, as the play order sees it.
+    /// Output hearing the entry sets it; a fresh Repeat All pass clears it.
+    visited: bool,
 }
 
 /// A validated decoder replacement. Commit on the same player without an
@@ -187,6 +192,24 @@ pub struct Player {
     selection: Option<(u64, u64)>,
     gains: Vec<f64>,
     starts: Vec<u64>,
+    order: PlayOrder,
+    repeat: RepeatMode,
+    shuffled: bool,
+    /// Passes whose PCM may still be in the output, oldest first. While a
+    /// decoder is open, the last is the pass it decodes.
+    passes: VecDeque<Pass>,
+    /// What follows the pass being decoded.
+    plan: Plan,
+    /// With no decoder open: the entries the cursor's next pass starts a fresh
+    /// Repeat All pass over.
+    opening: Option<Vec<u64>>,
+    /// Passes that ended with no PCM since one with PCM; bounds an empty loop.
+    silent: usize,
+    /// Each pass output started: its entry, and the entries its fresh Repeat
+    /// All pass clears.
+    advances: Vec<(u64, Vec<u64>)>,
+    /// The entry last recorded in the play order's history.
+    last_heard: Option<u64>,
 }
 
 impl Player {
@@ -203,10 +226,10 @@ impl Player {
                     id,
                     path,
                     token: TrackToken::new(id),
-                    prefilled_frames: 0,
                     metadata: None,
                     run: None,
                     played: false,
+                    visited: false,
                 }
             })
             .collect();
@@ -252,10 +275,10 @@ impl Player {
                 id: entry.id,
                 path: entry.path,
                 token: TrackToken::new(entry.id),
-                prefilled_frames: 0,
                 metadata: None,
                 run: entry.run,
                 played: entry.played_seq.is_some(),
+                visited: entry.played_seq.is_some(),
             })
             .collect();
         Self::open(queue, revision, next_id, output, mode)
@@ -288,6 +311,15 @@ impl Player {
             selection: None,
             gains: Vec::new(),
             starts: Vec::new(),
+            order: PlayOrder::new(RepeatMode::Off, None),
+            repeat: RepeatMode::Off,
+            shuffled: false,
+            passes: VecDeque::new(),
+            plan: Plan::default(),
+            opening: None,
+            silent: 0,
+            advances: Vec::new(),
+            last_heard: None,
         })
     }
 
@@ -321,12 +353,12 @@ impl Player {
     }
 
     fn invalidate_buffer(&mut self) {
+        self.drop_passes();
         self.started = false;
         self.prefilled_frames = 0;
         for entry in &mut self.queue {
             entry.token.invalidate();
             entry.token = TrackToken::new(entry.id);
-            entry.prefilled_frames = 0;
             entry.metadata = None;
         }
     }
@@ -338,6 +370,7 @@ impl Player {
         while let Some(id) = self.output.take_started() {
             self.starts.push(id);
         }
+        self.hear();
         if self.stopped {
             return Ok(());
         }
@@ -370,13 +403,14 @@ impl Player {
             self.gains.push(decoder.gain_db());
             self.decoder = Some(decoder);
             self.decoded_position = 0;
+            self.begin_pass();
         }
         if self.pending == 0 {
             self.pending = self.decoder.as_mut().unwrap().read(&mut self.block[..])?;
             if self.pending == 0 {
                 self.decoder = None;
-                self.cursor += 1;
                 self.decoded_position = 0;
+                self.end_pass();
                 return Ok(());
             }
         }
@@ -385,9 +419,11 @@ impl Player {
             self.decoded_position,
             &self.block[..self.pending],
         )? {
+            let pass = self.passes.back_mut().expect("an open decoder has a pass");
+            pass.frames += self.pending;
             if !self.started {
                 self.prefilled_frames += self.pending;
-                self.queue[self.cursor].prefilled_frames += self.pending;
+                pass.prefilled += self.pending;
             }
             self.decoded_position += self.pending as u64;
             self.pending = 0;
@@ -408,42 +444,40 @@ impl Player {
     pub fn snapshot(&self) -> Snapshot {
         let output = self.output.snapshot();
         // A callback already in flight may publish old PCM after stop/selection.
-        // Only the currently valid token can make that publication authoritative.
-        let consumed = self
-            .queue
-            .iter()
-            .enumerate()
-            .find(|(_, entry)| {
-                entry.id == output.entry_id && entry.token.consumed_by(output.rendered_frames)
-            })
-            .map(|(index, entry)| (index, entry, output.position_frames));
+        // Only a currently valid pass token can make that publication authoritative.
+        let heard = self.heard_pass(&output).and_then(|pass| {
+            let index = self.index_of(self.passes[pass].id)?;
+            Some((index, Some(pass), output.position_frames))
+        });
         let selected = if self.stopped {
             None
         } else {
-            consumed.or_else(|| {
+            heard.or_else(|| {
                 let (id, position) = self.selection?;
-                self.queue
+                let index = self.queue.iter().position(|entry| {
+                    entry.id == id && !entry.token.consumed_by(output.rendered_frames)
+                })?;
+                let token = &self.queue[index].token;
+                let pass = self
+                    .passes
                     .iter()
-                    .enumerate()
-                    .find(|(_, entry)| {
-                        entry.id == id && !entry.token.consumed_by(output.rendered_frames)
-                    })
-                    .map(|(index, entry)| (index, entry, position))
+                    .position(|pass| Arc::ptr_eq(&pass.token, token));
+                Some((index, pass, position))
             })
         };
-        let current_id = selected.map(|(_, entry, _)| entry.id);
-        let position = selected.map_or(0, |(_, _, position)| position);
-        let next_id = selected
-            .and_then(|(index, _, _)| self.queue.get(index + 1))
-            .map(|entry| entry.id);
-        let previous_id = selected.map(|(index, entry, position)| {
-            if position >= u64::from(SAMPLE_RATE) * 3 || index == 0 {
-                entry.id
-            } else {
-                self.queue[index - 1].id
+        let selected =
+            selected.map(|(index, pass, position)| (index, &self.queue[index], pass, position));
+        let current_id = selected.map(|(_, entry, _, _)| entry.id);
+        let position = selected.map_or(0, |(_, _, _, position)| position);
+        let next_id = selected.and_then(|(_, _, pass, _)| self.following(pass?));
+        let previous_id = selected.map(|(index, entry, _, position)| {
+            if position >= u64::from(SAMPLE_RATE) * 3 {
+                return entry.id;
             }
+            self.previous_index(index)
+                .map_or(entry.id, |previous| self.queue[previous].id)
         });
-        let now_playing = selected.and_then(|(_, entry, _)| entry.metadata.clone());
+        let now_playing = selected.and_then(|(_, entry, _, _)| entry.metadata.clone());
         let prepared_id = self
             .queue
             .get(self.cursor)
@@ -483,6 +517,7 @@ impl Player {
     pub fn clear_diagnostics(&mut self) {
         self.gains.clear();
         self.starts.clear();
+        self.advances.clear();
     }
 
     pub fn queue_entries(&self) -> impl ExactSizeIterator<Item = (u64, &Path)> {
@@ -524,21 +559,42 @@ impl Player {
             id,
             path,
             token: TrackToken::new(id),
-            prefilled_frames: 0,
             metadata: None,
             run: Some(RunInfo {
                 run_id: id,
                 scope: RepeatScope::Queue,
             }),
             played: false,
+            visited: false,
         });
         self.next_id = next_id;
         self.revision = revision;
+        self.resume_after_append();
+        Ok(id)
+    }
+
+    /// Appends `paths` as one run with `scope`, as a run enqueue does, and
+    /// returns the first new entry.
+    pub fn append_run(
+        &mut self,
+        paths: Vec<PathBuf>,
+        expected_revision: u64,
+        scope: RepeatScope,
+    ) -> Result<u64> {
+        let prepared = self.prepare_append(paths.into_iter(), expected_revision, false, scope)?;
+        let first = prepared.first_id();
+        self.commit_append(prepared);
+        Ok(first)
+    }
+
+    /// New entries follow the queue. Decoding resumes if it had ended, and
+    /// the next entry is decided again.
+    fn resume_after_append(&mut self) {
         if self.failure.is_none() {
             self.finished = false;
             self.output.mark_end(false);
         }
-        Ok(id)
+        self.replan();
     }
 
     pub(crate) fn prepare_append(
@@ -569,13 +625,13 @@ impl Player {
                 id,
                 path,
                 token: TrackToken::new(id),
-                prefilled_frames: 0,
                 metadata: None,
                 run: Some(RunInfo {
                     run_id: self.next_id,
                     scope,
                 }),
                 played: false,
+                visited: false,
             });
         }
         let (selection, replacement_tokens) = if play {
@@ -634,31 +690,37 @@ impl Player {
         self.playing = true;
         self.selection = Some((selection.id, 0));
         self.output.mark_end(false);
+        self.begin_pass();
     }
 
-    /// No allocation, reopening, or fallible work after the durable transaction.
-    /// Plain enqueue leaves existing PCM/tokens and play intent untouched.
+    /// No reopening or fallible work after the durable transaction. Plain
+    /// enqueue leaves existing PCM/tokens and play intent untouched.
     pub(crate) fn commit_append(&mut self, prepared: PreparedAppend) {
+        if let Some(selection) = self.extend(prepared) {
+            self.adopt_first(selection);
+        } else {
+            self.resume_after_append();
+        }
+    }
+
+    /// Adds the prepared entries last. With a selection, every old token and
+    /// pass is invalidated first, and the selection is returned to adopt.
+    fn extend(&mut self, prepared: PreparedAppend) -> Option<PreparedSelection> {
         assert_eq!(self.revision + 1, prepared.revision);
         assert_eq!(self.next_id, prepared.first_id());
         if prepared.selection.is_some() {
             self.output.set_paused(true);
+            self.drop_passes();
             for (entry, token) in self.queue.iter_mut().zip(prepared.replacement_tokens) {
                 entry.token.invalidate();
                 entry.token = token;
-                entry.prefilled_frames = 0;
                 entry.metadata = None;
             }
         }
         self.queue.extend(prepared.entries);
         self.next_id = prepared.next_id;
         self.revision = prepared.revision;
-        if let Some(selection) = prepared.selection {
-            self.adopt_first(selection);
-        } else if self.failure.is_none() {
-            self.finished = false;
-            self.output.mark_end(false);
-        }
+        prepared.selection
     }
 
     /// Removing the active entry stops playback. Future edits invalidate all
@@ -675,9 +737,8 @@ impl Player {
             .checked_add(1)
             .context("queue revision exhausted")?;
         let current = self.snapshot().current_id;
-        let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
         self.queue[index].token.invalidate();
-        self.prefilled_frames -= self.queue[index].prefilled_frames;
+        self.forget_passes(&[id]);
         self.queue.remove(index);
         self.revision = revision;
         if self.selection.is_some_and(|(selected, _)| selected == id) {
@@ -686,7 +747,7 @@ impl Player {
         if current == Some(id) {
             self.stop();
         } else {
-            self.rebuild_future(current, decoding);
+            self.rebuild_future(current);
         }
         Ok(())
     }
@@ -777,7 +838,6 @@ impl Player {
     /// fresh token, and decoding resumes after `current`.
     fn apply_move(&mut self, mut prepared: PreparedMove, current: Option<u64>) {
         assert_eq!(self.revision + 1, prepared.revision);
-        let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
         self.replace_future_tokens(current, prepared.tokens);
         for index in 0..prepared.destinations.len() {
             while prepared.destinations[index] != index {
@@ -787,7 +847,7 @@ impl Player {
             }
         }
         self.revision = prepared.revision;
-        self.relocate_decoder(current, decoding);
+        self.relocate_decoder(current);
     }
 
     pub fn move_before(
@@ -836,12 +896,12 @@ impl Player {
 
     pub(crate) fn commit_insert(&mut self, prepared: PreparedInsert) {
         let current = self.snapshot().current_id;
-        let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
         let count = prepared.append.entries.len();
         self.replace_future_tokens(current, prepared.tokens);
-        self.commit_append(prepared.append);
+        let selection = self.extend(prepared.append);
+        debug_assert!(selection.is_none(), "an insert never plays");
         self.queue[prepared.destination..].rotate_right(count);
-        self.relocate_decoder(current, decoding);
+        self.relocate_decoder(current);
     }
 
     /// The current entry, and per queue index whether the entry is upcoming:
@@ -942,6 +1002,7 @@ impl Player {
             append.selection =
                 Some(self.prepare_first(&append.entries[0], append.revision, destination)?);
             append.entries[0].played = true;
+            append.entries[0].visited = true;
         }
         Ok(PreparedReplace {
             append,
@@ -961,6 +1022,7 @@ impl Player {
             append,
             anchor,
             removed,
+            removed_ids,
             destination,
             tokens,
             ..
@@ -975,16 +1037,16 @@ impl Player {
         assert_eq!(self.revision + 1, revision);
         assert_eq!(self.next_id, entries[0].id);
         assert_eq!(self.queue.len(), removed.len());
-        let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
         if selection.is_some() {
             self.output.set_paused(true);
+            self.drop_passes();
         }
         for (entry, gone) in self.queue.iter().zip(&removed) {
             if *gone {
                 entry.token.invalidate();
-                self.prefilled_frames -= entry.prefilled_frames;
             }
         }
+        self.forget_passes(&removed_ids);
         let mut index = 0;
         self.queue.retain(|_| {
             index += 1;
@@ -1000,7 +1062,6 @@ impl Player {
             for (entry, token) in self.queue.iter_mut().zip(tokens) {
                 entry.token.invalidate();
                 entry.token = token;
-                entry.prefilled_frames = 0;
                 entry.metadata = None;
             }
         } else {
@@ -1014,10 +1075,9 @@ impl Player {
         if let Some(selection) = selection {
             self.adopt_first(selection);
         } else if rewrites {
-            self.relocate_decoder(anchor, decoding);
-        } else if self.failure.is_none() {
-            self.finished = false;
-            self.output.mark_end(false);
+            self.relocate_decoder(anchor);
+        } else {
+            self.resume_after_append();
         }
     }
 
@@ -1079,10 +1139,12 @@ impl Player {
                 .map(|(entry, _)| entry.id),
         );
         let anchor_index = anchor.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
+        // Under repeat or shuffle an entry before the anchor can still be ahead.
         let rewrites = removed
             .iter()
             .enumerate()
-            .any(|(index, gone)| *gone && anchor_index.is_none_or(|anchor| index > anchor));
+            .any(|(index, gone)| *gone && anchor_index.is_none_or(|anchor| index > anchor))
+            || removed_ids.iter().any(|id| self.ahead(*id));
         let mut tokens = Vec::new();
         if rewrites {
             tokens.try_reserve_exact(self.queue.len() - removed_ids.len())?;
@@ -1110,12 +1172,11 @@ impl Player {
             revision,
             anchor,
             removed,
+            removed_ids,
             tokens,
-            ..
         } = prepared;
         assert_eq!(self.revision + 1, revision);
         assert_eq!(self.queue.len(), removed.len());
-        let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
         let before_cursor = removed
             .iter()
             .take(self.cursor)
@@ -1124,9 +1185,9 @@ impl Player {
         for (entry, gone) in self.queue.iter().zip(&removed) {
             if *gone {
                 entry.token.invalidate();
-                self.prefilled_frames -= entry.prefilled_frames;
             }
         }
+        self.forget_passes(&removed_ids);
         let mut index = 0;
         self.queue.retain(|_| {
             index += 1;
@@ -1139,10 +1200,11 @@ impl Player {
         }
         self.revision = revision;
         if tokens.is_empty() {
+            // Nothing removed was ahead, so the plan stands.
             self.cursor -= before_cursor;
         } else {
             self.replace_future_tokens(anchor, tokens);
-            self.relocate_decoder(anchor, decoding);
+            self.relocate_decoder(anchor);
         }
     }
 
@@ -1233,6 +1295,7 @@ impl Player {
     pub(crate) fn mark_played(&mut self, id: u64) {
         if let Some(entry) = self.queue.iter_mut().find(|entry| entry.id == id) {
             entry.played = true;
+            entry.visited = true;
         }
     }
 
@@ -1251,17 +1314,15 @@ impl Player {
         Ok(())
     }
 
-    fn rebuild_future(&mut self, current: Option<u64>, decoding: Option<u64>) {
+    fn rebuild_future(&mut self, current: Option<u64>) {
         for entry in &mut self.queue {
             if Some(entry.id) != current {
                 entry.token.invalidate();
                 entry.token = TrackToken::new(entry.id);
-                self.prefilled_frames -= entry.prefilled_frames;
-                entry.prefilled_frames = 0;
                 entry.metadata = None;
             }
         }
-        self.relocate_decoder(current, decoding);
+        self.relocate_decoder(current);
     }
 
     fn replace_future_tokens(&mut self, current: Option<u64>, tokens: Vec<Arc<TrackToken>>) {
@@ -1269,23 +1330,33 @@ impl Player {
             if Some(entry.id) != current {
                 entry.token.invalidate();
                 entry.token = token;
-                self.prefilled_frames -= entry.prefilled_frames;
-                entry.prefilled_frames = 0;
                 entry.metadata = None;
             }
         }
     }
 
-    fn relocate_decoder(&mut self, current: Option<u64>, decoding: Option<u64>) {
-        let current_index =
-            current.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
-        if current.is_some() && decoding == current && self.decoder.is_some() {
-            self.cursor = current_index.unwrap();
-        } else {
-            self.decoder = None;
-            self.pending = 0;
-            self.decoded_position = 0;
-            self.cursor = current_index.map_or(0, |index| index + 1);
+    /// Keeps `current`'s heard pass and drops every pass after it. Decoding
+    /// goes on with that pass, or resumes with the entry the order puts next.
+    fn relocate_decoder(&mut self, current: Option<u64>) {
+        self.cut_after(current);
+        let current_index = current.and_then(|id| self.index_of(id));
+        match (current_index, self.decoder.is_some()) {
+            (Some(index), true) => {
+                self.cursor = index;
+                self.plan = self.decide(index);
+            }
+            (index, _) => {
+                self.decoder = None;
+                self.pending = 0;
+                self.decoded_position = 0;
+                self.plan = Plan::default();
+                self.opening = None;
+                self.cursor = 0;
+                if let Some(index) = index {
+                    self.plan = self.decide(index);
+                    self.follow_plan();
+                }
+            }
         }
         self.finished = false;
         self.failure = None;
@@ -1363,6 +1434,7 @@ impl Player {
         self.stopped = false;
         self.selection = Some((prepared.id, prepared.frame));
         self.output.mark_end(false);
+        self.begin_pass();
     }
 
     pub fn seek(&mut self, frame: u64) -> Result<()> {

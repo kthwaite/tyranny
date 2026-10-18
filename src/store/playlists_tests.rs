@@ -42,13 +42,11 @@ fn legacy_database(path: &Path, version: u32) -> Result<()> {
          position_frames INTEGER NOT NULL,playing INTEGER NOT NULL,settings TEXT NOT NULL);
          INSERT INTO queue VALUES(3,0,'/music/retained.wav'),(9,1,'/music/retained.wav');"
     )?;
-    let settings = Settings {
-        gain_mode: GainMode::Album,
-        resume_on_start: true,
-    };
+    // Settings as an older schema wrote them, without later fields.
+    let settings = serde_json::json!({"gain_mode": GainMode::Album, "resume_on_start": true});
     connection.execute(
         "INSERT INTO control VALUES(1,7,12,9,48000,1,?1)",
-        [serde_json::to_string(&settings)?],
+        [settings.to_string()],
     )?;
     if version == 2 {
         let transaction = connection.transaction()?;
@@ -115,7 +113,8 @@ fn schema_one_and_two_migrations_preserve_queue_checkpoint_settings_and_library(
             loaded.settings,
             Settings {
                 gain_mode: GainMode::Album,
-                resume_on_start: true
+                resume_on_start: true,
+                ..Settings::default()
             }
         );
         assert!(
