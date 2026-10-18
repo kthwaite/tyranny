@@ -604,7 +604,8 @@ async fn run_enqueue_of_600_rows_plays_from_clicked_row() {
     for (index, item) in run.iter().enumerate() {
         assert_eq!(item.id, first + index as u64);
         assert_eq!(item.source, stamp(SourceKind::Songs, "Songs"));
-        assert_eq!((item.run_id, item.played), (Some(first), false));
+        // The first entry is current, so it is played.
+        assert_eq!((item.run_id, item.played), (Some(first), index == 0));
     }
     assert_eq!(run[0].title, "Song 0120");
     running.stop().await;
@@ -845,5 +846,197 @@ async fn playlist_add_selection_rejects_smart_destinations() {
             ErrorCode::InvalidCommand,
         )
         .await;
+    running.stop().await;
+}
+
+/// Appends a long tagged WAV from outside the library for each name.
+async fn append_long(scratch: &Scratch, client: &mut PlaybackClient, names: &[&str]) {
+    for name in names {
+        let path = scratch.path(&format!("{name}.wav"));
+        tagged_wav(&path, 240_000, name.as_bytes());
+        client.append(&path).await;
+    }
+}
+fn ids_and_played(items: &[tyranny::protocol::QueueItem]) -> Vec<(u64, bool)> {
+    items.iter().map(|item| (item.id, item.played)).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shuffle_upcoming_permutes_only_entries_after_current() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let upcoming: Vec<String> = (0..20)
+        .map(|index| format!("Upcoming {index:02}"))
+        .collect();
+    let mut names = vec!["History", "Current"];
+    names.extend(upcoming.iter().map(String::as_str));
+    append_long(&scratch, &mut client, &names).await;
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    ok(&mut client, json!({"command":"next"})).await;
+    assert_eq!(client.state.current_id, Some(2));
+    let before = whole_queue(&mut client).await;
+    // Entries become played when they become current.
+    assert_eq!(
+        ids_and_played(&before[..3]),
+        [(1, true), (2, true), (3, false)]
+    );
+
+    let expected = client.state.queue_revision;
+    client
+        .reject(
+            json!({"command":"shuffle_upcoming","expected_revision":expected - 1}),
+            ErrorCode::StaleRevision,
+        )
+        .await;
+    assert_eq!(whole_queue(&mut client).await, before);
+    ok(
+        &mut client,
+        json!({"command":"shuffle_upcoming","expected_revision":expected}),
+    )
+    .await;
+    assert_eq!(client.state.queue_revision, expected + 1);
+    assert_eq!(client.state.current_id, Some(2));
+    let after = whole_queue(&mut client).await;
+    assert_eq!(after[..2], before[..2]);
+    let order: Vec<u64> = after[2..].iter().map(|item| item.id).collect();
+    let mut sorted = order.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, (3..=22).collect::<Vec<_>>());
+    // 20! orders: the identity means the command did not shuffle.
+    assert_ne!(order, sorted);
+    assert!(after[2..].iter().all(|item| !item.played));
+    running.stop().await;
+
+    // The shuffled order is durable.
+    let running = Running::start(&scratch).await;
+    let mut restored = PlaybackClient::connect(&running).await;
+    assert_eq!(whole_queue(&mut restored).await, after);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn save_upcoming_creates_regular_playlist() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (_, tracks) = index(&scratch, &mut client, &["Alpha", "Beta", "Gamma"]).await;
+    let library = tracks.revision;
+    let id = |title: &str| {
+        tracks
+            .entries
+            .iter()
+            .find(|track| track.metadata.title == title)
+            .unwrap()
+            .id
+    };
+    let append_track = |client: &PlaybackClient, track: u64| {
+        json!({"command":"append_track","expected_revision":client.state.queue_revision,
+            "library_revision":library,"track_id":track})
+    };
+    // Current (track Gamma), then Alpha, a loose file without a track, and Beta.
+    let command = append_track(&client, id("Gamma"));
+    ok(&mut client, command).await;
+    let command = append_track(&client, id("Alpha"));
+    ok(&mut client, command).await;
+    append_long(&scratch, &mut client, &["Loose"]).await;
+    let command = append_track(&client, id("Beta"));
+    ok(&mut client, command).await;
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    let save = |client: &PlaybackClient, name: &str| {
+        json!({"command":"save_upcoming","expected_revision":client.state.queue_revision,
+            "expected_playlists_revision":client.state.playlists_revision,"name":name})
+    };
+
+    // Stale revisions change nothing.
+    let catalog = client.state.playlists_revision;
+    let mut stale = save(&client, "Up Next");
+    stale["expected_playlists_revision"] = json!(catalog - 1);
+    client.reject(stale, ErrorCode::StalePlaylistRevision).await;
+    let mut stale = save(&client, "Up Next");
+    stale["expected_revision"] = json!(client.state.queue_revision - 1);
+    client.reject(stale, ErrorCode::StaleRevision).await;
+    assert_eq!(client.state.playlists_revision, catalog);
+
+    let command = save(&client, "Up Next");
+    let Response::PlaylistApplied {
+        playlist: Some(saved),
+        ..
+    } = ok(&mut client, command).await
+    else {
+        panic!("expected a saved playlist");
+    };
+    assert_eq!(client.state.playlists_revision, catalog + 1);
+    assert_eq!(saved.name, "Up Next");
+    assert_eq!(saved.kind, tyranny::protocol::PlaylistKind::Regular);
+    assert_eq!(saved.entry_count, Some(2));
+    assert_eq!(
+        playlist_rows(&mut client, saved.id)
+            .await
+            .iter()
+            .map(|(_, track)| *track)
+            .collect::<Vec<_>>(),
+        [id("Alpha"), id("Beta")]
+    );
+    // Playlist names stay unique, ignoring case.
+    let command = save(&client, "up next");
+    client.reject(command, ErrorCode::InvalidCommand).await;
+
+    // Clear Upcoming keeps the current entry playing.
+    let expected = client.state.queue_revision;
+    client
+        .reject(
+            json!({"command":"clear_upcoming","expected_revision":expected - 1}),
+            ErrorCode::StaleRevision,
+        )
+        .await;
+    ok(
+        &mut client,
+        json!({"command":"clear_upcoming","expected_revision":expected}),
+    )
+    .await;
+    assert_eq!(client.state.queue_revision, expected + 1);
+    assert_eq!(
+        (client.state.current_id, client.state.queue_length),
+        (Some(1), 1)
+    );
+    assert!(matches!(
+        client.state.transport,
+        Transport::Playing | Transport::Buffering
+    ));
+    assert_eq!(ids_and_played(&whole_queue(&mut client).await), [(1, true)]);
+    // With nothing upcoming there is nothing to save.
+    let command = save(&client, "Empty");
+    client.reject(command, ErrorCode::InvalidCommand).await;
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn played_prefix_is_trimmed_to_100() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    // 105 entries of 0.05 s, then a long current entry and one unplayed entry.
+    for index in 0..105 {
+        let path = scratch.path(&format!("{index:03}.wav"));
+        tagged_wav(&path, 2_400, format!("Short {index:03}").as_bytes());
+        client.append(&path).await;
+    }
+    append_long(&scratch, &mut client, &["Current", "Upcoming"]).await;
+    assert_eq!(client.state.queue_length, 107);
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    client
+        .until(|state| state.current_id.is_some_and(|id| id >= 50))
+        .await;
+    let revision = client.state.queue_revision;
+    client
+        .until(|state| state.current_id == Some(106) && state.queue_length == 102)
+        .await;
+    // Each trim bumps the queue revision like a removal.
+    assert!(client.state.queue_revision > revision);
+    let items = whole_queue(&mut client).await;
+    let mut expected: Vec<(u64, bool)> = (6..=106).map(|id| (id, true)).collect();
+    expected.push((107, false));
+    assert_eq!(ids_and_played(&items), expected);
     running.stop().await;
 }

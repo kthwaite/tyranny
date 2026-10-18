@@ -9,7 +9,8 @@ use crate::{
     },
     listing::{recent_cutoff, unix_now},
     output::OutputConfig,
-    playback::Player,
+    play_order::{ShuffleStrategy, UniformShuffle},
+    playback::{Player, PreparedRemove},
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
         NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
@@ -17,12 +18,13 @@ use crate::{
     },
     store::{
         Checkpoint, Edit, EntryTrack, LoadedEntry, PlaylistChange, PlaylistEdit, PlaylistFailure,
-        Store, UpcomingEdit,
+        Store, UpcomingEdit, played_overflow,
     },
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
     cell::RefCell,
+    collections::HashSet,
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -465,6 +467,9 @@ struct Actor {
     library: Library,
     /// Last library lookup for the playing entry, keyed by entry and library revision.
     now_track: RefCell<Option<NowTrack>>,
+    /// The entry last made the newest played entry. Output starting it again
+    /// (after a selection, or a seek) does not mark it twice.
+    marked: Option<u64>,
 }
 impl Actor {
     fn open(config: OwnerConfig) -> Result<Self> {
@@ -526,6 +531,7 @@ impl Actor {
             capture_path,
             library,
             now_track: RefCell::new(None),
+            marked: loaded.checkpoint.current_id,
         };
         actor.publish();
         Ok(actor)
@@ -659,27 +665,43 @@ impl Actor {
             entry_id,
         })
     }
+    /// With `mark`, the selected entry becomes the newest played entry and the
+    /// played prefix is trimmed, in the checkpoint's commit.
     fn select(
         &mut self,
         entry_id: u64,
         position_frames: u64,
         playing: bool,
+        mark: bool,
     ) -> CommandResult<Response> {
         let prepared = self
             .player
             .prepare_selection(entry_id, position_frames, self.settings.gain_mode)
             .map_err(Failure::playback)?;
-        self.store
-            .checkpoint(
-                Checkpoint {
-                    current_id: Some(entry_id),
-                    position_frames,
-                    playing,
-                },
-                &self.settings,
-            )
-            .map_err(Failure::persistence)?;
+        let checkpoint = Checkpoint {
+            current_id: Some(entry_id),
+            position_frames,
+            playing,
+        };
+        // `Some` once the entry is marked; holds the trim's player removal.
+        let mut marked = None;
+        if mark && self.marked != Some(entry_id) {
+            let (trimmed, removal) = self
+                .prepare_trim(entry_id, Some(entry_id))
+                .map_err(Failure::persistence)?;
+            self.store
+                .mark_current(self.revision(), entry_id, &trimmed, Some(checkpoint))
+                .map_err(Failure::persistence)?;
+            marked = Some(removal);
+        } else {
+            self.store
+                .checkpoint(checkpoint, &self.settings)
+                .map_err(Failure::persistence)?;
+        }
         self.player.commit_selection(prepared);
+        if let Some(removal) = marked {
+            self.commit_trim(entry_id, removal);
+        }
         if playing {
             self.player.play();
         } else {
@@ -689,6 +711,50 @@ impl Actor {
         // Preparation and the single durable checkpoint are complete. A second
         // fallible save here could report rejection after the audible commit.
         self.published(None)
+    }
+
+    /// What making `id` current trims, and the player's removal of it.
+    /// `anchor` is the entry the output treats as current when the trim
+    /// commits. It can still be the entry before `id`, so it counts towards the
+    /// retention, but it is never trimmed.
+    fn prepare_trim(
+        &self,
+        id: u64,
+        anchor: Option<u64>,
+    ) -> Result<(Vec<u64>, Option<PreparedRemove>)> {
+        let played = self.store.played_newest_first()?;
+        let mut trimmed = played_overflow(&played, |entry| entry == id);
+        trimmed.retain(|entry| Some(*entry) != anchor);
+        if trimmed.is_empty() {
+            return Ok((trimmed, None));
+        }
+        let removal = self
+            .player
+            .prepare_remove_batch(&trimmed, anchor, self.revision())?;
+        Ok((trimmed, Some(removal)))
+    }
+
+    /// Applies a committed `mark_current` to the player.
+    fn commit_trim(&mut self, id: u64, removal: Option<PreparedRemove>) {
+        if let Some(removal) = removal {
+            self.player.commit_remove_batch(removal);
+        }
+        self.player.mark_played(id);
+        self.marked = Some(id);
+    }
+
+    /// Output started entry `id`: it becomes the newest played entry, and the
+    /// played prefix is trimmed, in one small commit.
+    fn advance(&mut self, id: u64) -> Result<()> {
+        if self.marked == Some(id) || !self.player.queue_entries().any(|entry| entry.0 == id) {
+            return Ok(());
+        }
+        let anchor = self.player.snapshot().current_id;
+        let (trimmed, removal) = self.prepare_trim(id, anchor)?;
+        self.store
+            .mark_current(self.revision(), id, &trimmed, None)?;
+        self.commit_trim(id, removal);
+        Ok(())
     }
 
     fn playlist_applied(&mut self, change: PlaylistChange) -> CommandResult<Response> {
@@ -925,6 +991,26 @@ impl Actor {
         track_ids
             .try_reserve_exact(sources.len())
             .map_err(|error| Failure::playback(error.into()))?;
+        // With play the first new entry becomes current: trim the played
+        // entries this edit keeps.
+        let trim = if play {
+            let removed: HashSet<u64> = if placement == Placement::ReplaceUpcoming {
+                self.player
+                    .upcoming_ids()
+                    .map_err(Failure::playback)?
+                    .into_iter()
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let played = self
+                .store
+                .played_newest_first()
+                .map_err(Failure::persistence)?;
+            played_overflow(&played, |id| removed.contains(&id))
+        } else {
+            Vec::new()
+        };
         let paths = sources.into_iter().map(|(track_id, path)| {
             track_ids.push(track_id);
             path
@@ -937,6 +1023,7 @@ impl Actor {
                 expected_revision,
                 play,
                 source.kind.repeat_scope(),
+                &trim,
             )
             .map_err(Failure::playback)?;
         let first_id = prepared.first_id();
@@ -963,6 +1050,7 @@ impl Actor {
         self.player.commit_replace_upcoming(prepared);
         if play {
             self.fault = None;
+            self.marked = Some(first_id);
         }
         // Queue rows and any new selection were committed together; no second
         // fallible checkpoint may reject an already audible run.
@@ -1290,6 +1378,54 @@ impl Actor {
                     .map_err(Failure::committed)?;
                 self.applied(None)
             }
+            Command::ClearUpcoming { expected_revision } => {
+                self.check_revision(expected_revision)?;
+                let prepared = self
+                    .player
+                    .prepare_clear_upcoming(expected_revision)
+                    .map_err(Failure::playback)?;
+                if let Some(prepared) = prepared {
+                    self.store
+                        .remove_entries(expected_revision, prepared.removed())
+                        .map_err(Failure::playlist)?;
+                    self.player.commit_remove_batch(prepared);
+                }
+                self.published(None)
+            }
+            Command::ShuffleUpcoming { expected_revision } => {
+                self.check_revision(expected_revision)?;
+                let mut ids = self.player.upcoming_ids().map_err(Failure::playback)?;
+                // Fisher-Yates: each place takes a uniform pick of those left.
+                let mut strategy = UniformShuffle::from_entropy();
+                for end in (1..ids.len()).rev() {
+                    let pick = strategy.choose(&ids[..=end]);
+                    ids.swap(pick, end);
+                }
+                let prepared = self
+                    .player
+                    .prepare_reorder(&ids, expected_revision)
+                    .map_err(Failure::playback)?;
+                if let Some(prepared) = prepared {
+                    self.store
+                        .reorder_queue(expected_revision, &ids)
+                        .map_err(Failure::playlist)?;
+                    self.player.commit_move(prepared);
+                }
+                self.published(None)
+            }
+            Command::SaveUpcoming {
+                expected_revision,
+                expected_playlists_revision,
+                name,
+            } => {
+                self.check_revision(expected_revision)?;
+                let ids = self.player.upcoming_ids().map_err(Failure::playback)?;
+                let change = self
+                    .store
+                    .save_upcoming(expected_revision, expected_playlists_revision, &name, &ids)
+                    .map_err(Failure::playlist)?;
+                self.playlist_applied(change)
+            }
             Command::TogglePlayPause => {
                 let active = matches!(
                     self.state().transport,
@@ -1314,7 +1450,7 @@ impl Actor {
                     && !self.player.completed()
                     && self.player.error().is_none()
                     && self.fault.is_none();
-                self.select(destination, 0, active)
+                self.select(destination, 0, active, true)
             }
             Command::Play { entry_id } => {
                 let state = self.player.snapshot();
@@ -1328,7 +1464,7 @@ impl Actor {
                     }
                 });
                 if let Some(id) = selection {
-                    return self.select(id, 0, true);
+                    return self.select(id, 0, true, true);
                 }
                 if self.player.queue_entries().len() == 0 {
                     return Err(Failure::invalid("queue is empty"));
@@ -1382,7 +1518,7 @@ impl Actor {
                     && !self.player.completed()
                     && self.player.error().is_none()
                     && self.fault.is_none();
-                self.select(entry_id, position_frames, active)
+                self.select(entry_id, position_frames, active, false)
             }
             Command::SetResume { enabled } => {
                 let mut settings = self.settings.clone();
@@ -1432,6 +1568,16 @@ impl Actor {
                 if let Err(error) = self.player.pump() {
                     self.player.pause();
                     self.fault = Some(format!("audio output: {error:#}"));
+                }
+                // Natural advance: each entry output starts becomes played.
+                for index in 0..self.player.started_entries().len() {
+                    let id = self.player.started_entries()[index];
+                    if let Err(error) = self.advance(id) {
+                        self.player.pause();
+                        self.fault = Some(format!(
+                            "recording a played entry failed; playback paused: {error:#}"
+                        ));
+                    }
                 }
                 self.player.clear_diagnostics();
                 match receiver.try_recv() {

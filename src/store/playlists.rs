@@ -233,6 +233,15 @@ fn name_parts(
     }
     Ok((name.to_owned(), search))
 }
+/// Inserts an empty regular playlist under the unique-name rules.
+fn create_regular(transaction: &Transaction<'_>, name: &str) -> Result<u64> {
+    let (name, search) = name_parts(transaction, name, None)?;
+    transaction.execute(
+        "INSERT INTO playlists(name,search,revision) VALUES(?1,?2,1)",
+        params![name, search],
+    )?;
+    Ok(transaction.last_insert_rowid() as u64)
+}
 fn batch(ids: &[u64], distinct: bool) -> Result<()> {
     if ids.is_empty() || ids.len() > MAX_PAGE_SIZE {
         return Err(invalid("playlist batch must contain 1..=500 IDs"));
@@ -730,12 +739,7 @@ impl Store {
                 if existing.is_some() {
                     return Err(invalid("create must not specify a playlist"));
                 }
-                let (name, search) = name_parts(&transaction, &name, None)?;
-                transaction.execute(
-                    "INSERT INTO playlists(name,search,revision) VALUES(?1,?2,1)",
-                    params![name, search],
-                )?;
-                Some(transaction.last_insert_rowid() as u64)
+                Some(create_regular(&transaction, &name)?)
             }
             PlaylistEdit::CreateSmart { name, query } => {
                 if existing.is_some() {
@@ -883,12 +887,7 @@ impl Store {
             .as_deref()
             .ok_or_else(|| invalid("playlist is not smart"))?;
         let (source, values) = smart_source(rule, "", 2)?;
-        let (name, search) = name_parts(&transaction, name, None)?;
-        transaction.execute(
-            "INSERT INTO playlists(name,search,revision) VALUES(?1,?2,1)",
-            params![name, search],
-        )?;
-        let new_id = transaction.last_insert_rowid() as u64;
+        let new_id = create_regular(&transaction, name)?;
         let parameters = std::iter::once(Value::Integer(new_id as i64)).chain(values);
         transaction.execute(
             &format!(
@@ -904,6 +903,54 @@ impl Store {
             [revision],
         )?;
         let playlist = Some(header(&transaction, new_id, None)?);
+        transaction.commit()?;
+        Ok(PlaylistChange { revision, playlist })
+    }
+
+    /// Creates regular playlist `name` from the queue entries `entry_ids` that
+    /// have a library track, in that order, with one catalog revision bump.
+    pub fn save_upcoming(
+        &mut self,
+        expected_queue: u64,
+        expected_catalog: u64,
+        name: &str,
+        entry_ids: &[u64],
+    ) -> Result<PlaylistChange> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::queue_revision(&transaction, expected_queue)?;
+        let catalog = catalog_revision(&transaction)?;
+        check_revision(
+            Some(expected_catalog),
+            catalog,
+            ErrorCode::StalePlaylistRevision,
+            "playlist catalog",
+        )?;
+        let mut track_ids = Vec::new();
+        {
+            let mut track = transaction.prepare("SELECT track_id FROM queue WHERE id=?1")?;
+            for &id in entry_ids {
+                let track_id: Option<u64> = track
+                    .query_row([id], |row| row.get(0))
+                    .optional()?
+                    .ok_or_else(|| invalid("queue occurrence not found"))?;
+                track_ids.extend(track_id);
+            }
+        }
+        if track_ids.is_empty() || track_ids.len() > MAX_RUN_ENTRIES {
+            return Err(invalid(format!(
+                "saving requires 1..={MAX_RUN_ENTRIES} upcoming entries with library tracks"
+            )));
+        }
+        let id = create_regular(&transaction, name)?;
+        add_tracks(&transaction, id, track_ids, None)?;
+        let revision = next_revision(catalog)?;
+        transaction.execute(
+            "UPDATE playlists_state SET revision=?1 WHERE singleton=1",
+            [revision],
+        )?;
+        let playlist = Some(header(&transaction, id, None)?);
         transaction.commit()?;
         Ok(PlaylistChange { revision, playlist })
     }

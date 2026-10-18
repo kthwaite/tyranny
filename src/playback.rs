@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -26,7 +26,8 @@ struct Entry {
     /// Read by Repeat All to find the run an entry repeats within.
     #[allow(dead_code)]
     run: Option<RunInfo>,
-    /// The entry has played. Replacing upcoming entries with nothing current keeps it.
+    /// The entry has been current. Upcoming edits with nothing current keep it.
+    /// Kept in step with the store's `played_seq`.
     played: bool,
 }
 
@@ -105,6 +106,25 @@ impl PreparedReplace {
     /// The kept entry the new entries go before; `None` puts them last.
     pub fn before(&self) -> Option<u64> {
         self.before
+    }
+}
+
+/// A batch removal prepared without touching audible state.
+pub(crate) struct PreparedRemove {
+    revision: u64,
+    /// The entry current at preparation. The edit is relative to it.
+    anchor: Option<u64>,
+    /// Per queue index: whether this edit removes the entry.
+    removed: Vec<bool>,
+    removed_ids: Vec<u64>,
+    /// Fresh tokens for the kept entries, in order. Empty when every removed
+    /// entry is before the anchor, which leaves all prepared PCM valid.
+    tokens: Vec<Arc<TrackToken>>,
+}
+impl PreparedRemove {
+    /// The removed entries, in queue order.
+    pub fn removed(&self) -> &[u64] {
+        &self.removed_ids
     }
 }
 
@@ -803,9 +823,41 @@ impl Player {
         self.relocate_decoder(current, decoding);
     }
 
+    /// The current entry, and per queue index whether the entry is upcoming:
+    /// after the current one, or with nothing current, unplayed.
+    fn upcoming(&self) -> Result<(Option<u64>, Option<usize>, Vec<bool>)> {
+        let anchor = self.snapshot().current_id;
+        let current = anchor.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
+        let mut upcoming = Vec::new();
+        upcoming.try_reserve_exact(self.queue.len())?;
+        upcoming.extend(
+            self.queue
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| current.map_or(!entry.played, |current| index > current)),
+        );
+        Ok((anchor, current, upcoming))
+    }
+
+    /// The upcoming entries in queue order (see `upcoming`).
+    pub(crate) fn upcoming_ids(&self) -> Result<Vec<u64>> {
+        let (_, _, upcoming) = self.upcoming()?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(upcoming.iter().filter(|next| **next).count())?;
+        ids.extend(
+            self.queue
+                .iter()
+                .zip(&upcoming)
+                .filter(|(_, next)| **next)
+                .map(|(entry, _)| entry.id),
+        );
+        Ok(ids)
+    }
+
     /// Prepares one enqueue: `placement` decides what is removed and where the
     /// new entries go, relative to the current entry. With `play` the first new
-    /// entry is opened, as selecting it would.
+    /// entry is opened, as selecting it would, and is played; `trim` names
+    /// played entries the same edit removes.
     pub(crate) fn prepare_replace_upcoming(
         &mut self,
         paths: impl ExactSizeIterator<Item = PathBuf>,
@@ -813,16 +865,22 @@ impl Player {
         expected_revision: u64,
         play: bool,
         scope: RepeatScope,
+        trim: &[u64],
     ) -> Result<PreparedReplace> {
         self.check_revision(expected_revision)?;
-        let anchor = self.snapshot().current_id;
-        let current = anchor.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
-        let mut removed = Vec::new();
-        removed.try_reserve_exact(self.queue.len())?;
-        removed.extend(self.queue.iter().enumerate().map(|(index, entry)| {
-            placement == Placement::ReplaceUpcoming
-                && current.map_or(!entry.played, |current| index > current)
-        }));
+        let (anchor, current, mut removed) = self.upcoming()?;
+        if placement != Placement::ReplaceUpcoming {
+            removed.fill(false);
+        }
+        let trim: HashSet<u64> = trim.iter().copied().collect();
+        let mut trimmed = 0;
+        for (gone, entry) in removed.iter_mut().zip(&self.queue) {
+            if trim.contains(&entry.id) {
+                trimmed += 1;
+                *gone = true;
+            }
+        }
+        ensure!(trimmed == trim.len(), "trimmed queue entry not found");
         let mut removed_ids = Vec::new();
         removed_ids.try_reserve_exact(removed.iter().filter(|gone| **gone).count())?;
         removed_ids.extend(
@@ -834,7 +892,10 @@ impl Player {
         );
         let kept = self.queue.len() - removed_ids.len();
         let destination = match (placement, current) {
-            (Placement::Next, Some(current)) => current + 1,
+            // Straight after the current entry, among the kept entries.
+            (Placement::Next, Some(current)) => {
+                removed[..=current].iter().filter(|gone| !**gone).count()
+            }
             _ => kept,
         };
         let before = self
@@ -859,6 +920,7 @@ impl Player {
         if play {
             append.selection =
                 Some(self.prepare_first(&append.entries[0], append.revision, destination)?);
+            append.entries[0].played = true;
         }
         Ok(PreparedReplace {
             append,
@@ -935,6 +997,187 @@ impl Player {
         } else if self.failure.is_none() {
             self.finished = false;
             self.output.mark_end(false);
+        }
+    }
+
+    /// Prepares removing every upcoming entry (see `upcoming`). `None` when
+    /// nothing is upcoming.
+    pub(crate) fn prepare_clear_upcoming(
+        &self,
+        expected_revision: u64,
+    ) -> Result<Option<PreparedRemove>> {
+        self.check_revision(expected_revision)?;
+        let (anchor, _, removed) = self.upcoming()?;
+        if !removed.contains(&true) {
+            return Ok(None);
+        }
+        self.prepare_removal(anchor, removed).map(Some)
+    }
+
+    /// Prepares removing `ids` relative to `anchor`, the entry that is (or is
+    /// about to be) current. The anchor keeps its PCM.
+    pub(crate) fn prepare_remove_batch(
+        &self,
+        ids: &[u64],
+        anchor: Option<u64>,
+        expected_revision: u64,
+    ) -> Result<PreparedRemove> {
+        self.check_revision(expected_revision)?;
+        let selected: HashSet<_> = ids.iter().copied().collect();
+        ensure!(
+            !ids.is_empty() && selected.len() == ids.len(),
+            "removed occurrences must be distinct and non-empty"
+        );
+        let mut removed = Vec::new();
+        removed.try_reserve_exact(self.queue.len())?;
+        removed.extend(self.queue.iter().map(|entry| selected.contains(&entry.id)));
+        ensure!(
+            removed.iter().filter(|gone| **gone).count() == ids.len(),
+            "queue entry not found"
+        );
+        self.prepare_removal(anchor, removed)
+    }
+
+    fn prepare_removal(&self, anchor: Option<u64>, removed: Vec<bool>) -> Result<PreparedRemove> {
+        let revision = self
+            .revision
+            .checked_add(1)
+            .filter(|revision| *revision <= i64::MAX as u64)
+            .context("queue revision exhausted")?;
+        let mut removed_ids = Vec::new();
+        removed_ids.try_reserve_exact(removed.iter().filter(|gone| **gone).count())?;
+        removed_ids.extend(
+            self.queue
+                .iter()
+                .zip(&removed)
+                .filter(|(_, gone)| **gone)
+                .map(|(entry, _)| entry.id),
+        );
+        let anchor_index = anchor.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
+        let rewrites = removed
+            .iter()
+            .enumerate()
+            .any(|(index, gone)| *gone && anchor_index.is_none_or(|anchor| index > anchor));
+        let mut tokens = Vec::new();
+        if rewrites {
+            tokens.try_reserve_exact(self.queue.len() - removed_ids.len())?;
+            tokens.extend(
+                self.queue
+                    .iter()
+                    .zip(&removed)
+                    .filter(|(_, gone)| !**gone)
+                    .map(|(entry, _)| TrackToken::new(entry.id)),
+            );
+        }
+        Ok(PreparedRemove {
+            revision,
+            anchor,
+            removed,
+            removed_ids,
+            tokens,
+        })
+    }
+
+    /// Infallible after preparation with no intervening queue mutation. The
+    /// anchor keeps its PCM; removing only entries before it keeps all PCM.
+    pub(crate) fn commit_remove_batch(&mut self, prepared: PreparedRemove) {
+        let PreparedRemove {
+            revision,
+            anchor,
+            removed,
+            tokens,
+            ..
+        } = prepared;
+        assert_eq!(self.revision + 1, revision);
+        assert_eq!(self.queue.len(), removed.len());
+        let decoding = self.queue.get(self.cursor).map(|entry| entry.id);
+        let before_cursor = removed
+            .iter()
+            .take(self.cursor)
+            .filter(|gone| **gone)
+            .count();
+        for (entry, gone) in self.queue.iter().zip(&removed) {
+            if *gone {
+                entry.token.invalidate();
+                self.prefilled_frames -= entry.prefilled_frames;
+            }
+        }
+        let mut index = 0;
+        self.queue.retain(|_| {
+            index += 1;
+            !removed[index - 1]
+        });
+        if let Some((selected, _)) = self.selection
+            && !self.queue.iter().any(|entry| entry.id == selected)
+        {
+            self.selection = None;
+        }
+        self.revision = revision;
+        if tokens.is_empty() {
+            self.cursor -= before_cursor;
+        } else {
+            self.replace_future_tokens(anchor, tokens);
+            self.relocate_decoder(anchor, decoding);
+        }
+    }
+
+    /// Prepares putting the entries `ids` names in that order, in the queue
+    /// positions they already occupy. `None` when the order does not change.
+    pub(crate) fn prepare_reorder(
+        &self,
+        ids: &[u64],
+        expected_revision: u64,
+    ) -> Result<Option<PreparedMove>> {
+        self.check_revision(expected_revision)?;
+        let rank: HashMap<u64, usize> = ids
+            .iter()
+            .enumerate()
+            .map(|(rank, id)| (*id, rank))
+            .collect();
+        ensure!(
+            rank.len() == ids.len(),
+            "reordered occurrences must be distinct"
+        );
+        let slots: Vec<usize> = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| rank.contains_key(&entry.id))
+            .map(|(index, _)| index)
+            .collect();
+        ensure!(slots.len() == ids.len(), "queue entry not found");
+        let mut destinations: Vec<usize> = (0..self.queue.len()).collect();
+        for &slot in &slots {
+            destinations[slot] = slots[rank[&self.queue[slot].id]];
+        }
+        if destinations
+            .iter()
+            .enumerate()
+            .all(|(index, destination)| index == *destination)
+        {
+            return Ok(None);
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .filter(|revision| *revision <= i64::MAX as u64)
+            .context("queue revision exhausted")?;
+        let tokens = self
+            .queue
+            .iter()
+            .map(|entry| TrackToken::new(entry.id))
+            .collect();
+        Ok(Some(PreparedMove {
+            revision,
+            destinations,
+            tokens,
+        }))
+    }
+
+    /// Records that entry `id` became current, as the store's `played_seq` does.
+    pub(crate) fn mark_played(&mut self, id: u64) {
+        if let Some(entry) = self.queue.iter_mut().find(|entry| entry.id == id) {
+            entry.played = true;
         }
     }
 
@@ -1277,6 +1520,7 @@ mod batch_tests {
             1,
             false,
             RepeatScope::Queue,
+            &[],
         )?;
         drop(abandoned);
         assert_eq!(player.queue_ids(), [1, 2, 3, 4]);
@@ -1288,6 +1532,7 @@ mod batch_tests {
             1,
             false,
             RepeatScope::Queue,
+            &[],
         )?;
         assert_eq!(prepared.first_id(), 5);
         assert_eq!(prepared.removed(), [3, 4]);
@@ -1329,6 +1574,7 @@ mod batch_tests {
             1,
             true,
             RepeatScope::Queue,
+            &[],
         )?;
         assert_eq!(prepared.removed(), [1, 3]);
         player.commit_replace_upcoming(prepared);
@@ -1339,6 +1585,99 @@ mod batch_tests {
         assert_eq!(player.started_entries(), &[4]);
         drop(player);
         assert_pcm(&fs::read(scratch.0.join("idle.f32"))?, &[(101, 6000)]);
+        Ok(())
+    }
+    #[test]
+    fn clear_upcoming_keeps_current_audible() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let played = source(&scratch.0, "played.wav", 97, 500);
+        let current = source(&scratch.0, "current.wav", 48_000, 1000);
+        let second = source(&scratch.0, "second.wav", 311, 2000);
+        let third = source(&scratch.0, "third.wav", 137, 3000);
+        let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
+            id,
+            path: path.clone(),
+            run: None,
+            played_seq: played.then_some(id),
+        };
+        let output = |name: &str| OutputConfig::Capture {
+            path: scratch.0.join(name),
+            clocked: true,
+        };
+
+        // Entry 2 is current and playing; entry 3 is already decoding into the output.
+        let mut player = Player::from_loaded(
+            vec![
+                loaded(1, &played, true),
+                loaded(2, &current, true),
+                loaded(3, &second, false),
+                loaded(4, &third, false),
+            ],
+            1,
+            5,
+            output("current.f32"),
+            GainMode::Off,
+        )?;
+        let selection = player.prepare_selection(2, 0, GainMode::Off)?;
+        player.commit_selection(selection);
+        player.play();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while player.snapshot().current_id != Some(2) || player.snapshot().prepared_id != Some(3) {
+            assert!(
+                Instant::now() < deadline,
+                "next occurrence was not prepared"
+            );
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(player.prepare_clear_upcoming(2).is_err());
+        let abandoned = player.prepare_clear_upcoming(1)?.unwrap();
+        drop(abandoned);
+        assert_eq!(player.queue_ids(), [1, 2, 3, 4]);
+        assert_eq!(player.snapshot().prepared_id, Some(3));
+        let prepared = player.prepare_clear_upcoming(1)?.unwrap();
+        assert_eq!(prepared.removed(), [3, 4]);
+        player.commit_remove_batch(prepared);
+        assert_eq!(player.queue_ids(), [1, 2]);
+        let after = player.snapshot();
+        assert_eq!(after.current_id, Some(2));
+        assert_eq!(after.queue_revision, 2);
+        assert!(after.playing);
+        // Nothing is upcoming now, so there is nothing to clear.
+        assert!(player.prepare_clear_upcoming(2)?.is_none());
+        // Trimming a played entry before the current one leaves its PCM alone.
+        assert!(player.prepare_remove_batch(&[1, 1], Some(2), 2).is_err());
+        assert!(player.prepare_remove_batch(&[9], Some(2), 2).is_err());
+        let prepared = player.prepare_remove_batch(&[1], Some(2), 2)?;
+        player.commit_remove_batch(prepared);
+        assert_eq!(player.queue_ids(), [2]);
+        assert_eq!(player.snapshot().queue_revision, 3);
+        finish(&mut player, deadline)?;
+        // The current entry plays out whole; the cleared entries' prefetched PCM
+        // never does.
+        assert_eq!(player.started_entries(), &[2]);
+        drop(player);
+        assert_pcm(&fs::read(scratch.0.join("current.f32"))?, &[(48_000, 1000)]);
+
+        // With nothing current, every unplayed entry goes and played ones stay.
+        let mut player = Player::from_loaded(
+            vec![
+                loaded(1, &second, false),
+                loaded(2, &played, true),
+                loaded(3, &third, false),
+            ],
+            1,
+            4,
+            output("idle.f32"),
+            GainMode::Off,
+        )?;
+        assert_eq!(player.snapshot().current_id, None);
+        let prepared = player.prepare_clear_upcoming(1)?.unwrap();
+        assert_eq!(prepared.removed(), [1, 3]);
+        player.commit_remove_batch(prepared);
+        assert_eq!(player.queue_ids(), [2]);
         Ok(())
     }
     #[test]
@@ -1374,6 +1713,7 @@ mod batch_tests {
             1,
             false,
             RepeatScope::Queue,
+            &[],
         )?;
         assert_eq!(prepared.removed(), [2, 3]);
         // The store commit takes time; output moves on into a removed entry.

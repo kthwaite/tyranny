@@ -5,7 +5,8 @@ use crate::{
     library_types::format_label,
     play_order::RunInfo,
     protocol::{
-        ErrorCode, MAX_RUN_ENTRIES, QueueItem, QueueSource, Settings, SourceKind, TrackSelection,
+        ErrorCode, MAX_RUN_ENTRIES, PLAYED_RETENTION, QueueItem, QueueSource, Settings, SourceKind,
+        TrackSelection,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -113,7 +114,7 @@ pub(crate) struct LoadedEntry {
     pub id: u64,
     pub path: PathBuf,
     pub run: Option<RunInfo>,
-    /// Set once the entry has played. Task 12 writes it.
+    /// Play order: set to the next value each time the entry becomes current.
     pub played_seq: Option<u64>,
 }
 /// What the library knows about a queue entry's indexed track.
@@ -151,8 +152,41 @@ pub(crate) struct UpcomingEdit<'a> {
     /// The kept entry the new entries go before; `None` puts them last.
     pub before: Option<u64>,
     pub source: &'a QueueSource,
-    /// Selects the first new entry in the same commit.
+    /// Selects the first new entry in the same commit, and makes it the newest
+    /// played entry.
     pub checkpoint: Option<Checkpoint>,
+}
+/// The played entries to trim, given every played entry newest first: those
+/// beyond the newest `PLAYED_RETENTION`. Entries `exempt` names are neither
+/// counted nor trimmed (the current entry, entries the same edit removes).
+pub(crate) fn played_overflow(newest_first: &[u64], exempt: impl Fn(u64) -> bool) -> Vec<u64> {
+    newest_first
+        .iter()
+        .copied()
+        .filter(|id| !exempt(*id))
+        .skip(PLAYED_RETENTION)
+        .collect()
+}
+/// Makes queue entry `id` the newest played entry.
+fn mark_newest(connection: &Connection, id: u64) -> Result<()> {
+    ensure!(
+        connection.execute(
+            "UPDATE queue SET played_seq=(SELECT COALESCE(MAX(played_seq),0)+1 FROM queue) WHERE id=?1",
+            [id],
+        )? == 1,
+        "persisted queue occurrence not found"
+    );
+    Ok(())
+}
+/// The queue revision, after checking it is `expected`.
+fn queue_revision(connection: &Connection, expected: u64) -> Result<u64> {
+    let revision = connection.query_row(
+        "SELECT revision FROM control WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    playlists::check_revision(Some(expected), revision, ErrorCode::StaleRevision, "queue")?;
+    Ok(revision)
 }
 /// File name without extension, for entries the library cannot describe.
 fn file_stem(path: &str) -> String {
@@ -394,6 +428,9 @@ impl Store {
             params![revision, following_id],
         )?;
         if let Some(checkpoint) = edit.checkpoint {
+            if let Some(current) = checkpoint.current_id {
+                mark_newest(&transaction, current)?;
+            }
             transaction.execute(
                 "UPDATE control SET current_id=?1,position_frames=?2,playing=?3 WHERE singleton=1",
                 params![
@@ -403,6 +440,122 @@ impl Store {
                 ],
             )?;
         }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Every played queue entry, newest first.
+    pub fn played_newest_first(&self) -> Result<Vec<u64>> {
+        let mut query = self.connection.prepare(
+            "SELECT id FROM queue WHERE played_seq IS NOT NULL ORDER BY played_seq DESC",
+        )?;
+        Ok(query
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Makes `current` the newest played entry and deletes the played entries
+    /// `trimmed` in one commit, with `checkpoint` when given. Trimming bumps the
+    /// queue revision; marking alone does not.
+    pub fn mark_current(
+        &mut self,
+        expected: u64,
+        current: u64,
+        trimmed: &[u64],
+        checkpoint: Option<Checkpoint>,
+    ) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let revision = queue_revision(&transaction, expected)?;
+        {
+            let mut delete = transaction
+                .prepare("DELETE FROM queue WHERE id=?1 AND id<>?2 AND played_seq IS NOT NULL")?;
+            for &id in trimmed {
+                ensure!(
+                    delete.execute(params![id, current])? == 1,
+                    "trimmed queue occurrence is not a played entry"
+                );
+            }
+        }
+        mark_newest(&transaction, current)?;
+        if !trimmed.is_empty() {
+            transaction.execute(
+                "UPDATE control SET revision=?1 WHERE singleton=1",
+                [playlists::next_revision(revision)?],
+            )?;
+        }
+        if let Some(checkpoint) = checkpoint {
+            transaction.execute(
+                "UPDATE control SET current_id=?1,position_frames=?2,playing=?3 WHERE singleton=1",
+                params![
+                    checkpoint.current_id,
+                    checkpoint.position_frames,
+                    checkpoint.playing
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Deletes the queue entries `ids` in one commit and bumps the revision.
+    pub fn remove_entries(&mut self, expected: u64, ids: &[u64]) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let revision = queue_revision(&transaction, expected)?;
+        {
+            let mut delete = transaction.prepare("DELETE FROM queue WHERE id=?1")?;
+            for &id in ids {
+                ensure!(
+                    delete.execute([id])? == 1,
+                    "persisted queue occurrence not found"
+                );
+            }
+        }
+        transaction.execute(
+            "UPDATE control SET revision=?1 WHERE singleton=1",
+            [playlists::next_revision(revision)?],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Puts the queue entries `ids` in that order, in the positions they already
+    /// occupy, in one commit that bumps the revision.
+    pub fn reorder_queue(&mut self, expected: u64, ids: &[u64]) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let revision = queue_revision(&transaction, expected)?;
+        let mut ordinals = Vec::with_capacity(ids.len());
+        {
+            let mut ordinal = transaction.prepare("SELECT ordinal FROM queue WHERE id=?1")?;
+            let mut park =
+                transaction.prepare("UPDATE queue SET ordinal=-ordinal-1 WHERE id=?1")?;
+            for &id in ids {
+                let value: i64 = ordinal
+                    .query_row([id], |row| row.get(0))
+                    .optional()?
+                    .ok_or_else(|| playlists::invalid("queue occurrence not found"))?;
+                // A parked (negative) ordinal means the ID was named twice.
+                ensure!(value >= 0, "reordered occurrences must be distinct");
+                ordinals.push(value);
+                park.execute([id])?;
+            }
+        }
+        ordinals.sort_unstable();
+        {
+            let mut place = transaction.prepare("UPDATE queue SET ordinal=?2 WHERE id=?1")?;
+            for (&id, ordinal) in ids.iter().zip(ordinals) {
+                place.execute(params![id, ordinal])?;
+            }
+        }
+        transaction.execute(
+            "UPDATE control SET revision=?1 WHERE singleton=1",
+            [playlists::next_revision(revision)?],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -645,6 +798,65 @@ mod tests {
                     (None, None, false)
                 ]
             );
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+    #[test]
+    fn mark_current_renumbers_and_trims_the_oldest_played() -> Result<()> {
+        let newest_first: Vec<u64> = (1..=103).rev().collect();
+        assert_eq!(played_overflow(&newest_first, |id| id == 103), [2, 1]);
+        assert!(played_overflow(&newest_first[..101], |id| id == 103).is_empty());
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let mut store = Store::open(&path)?;
+            for id in 1..=4 {
+                store.edit(
+                    Edit::Append {
+                        id,
+                        path: &format!("/music/{id}.flac"),
+                        track: None,
+                        source: None,
+                        run_id: None,
+                    },
+                    id + 1,
+                    id + 1,
+                )?;
+            }
+            for id in [1, 2, 3] {
+                store.mark_current(5, id, &[], None)?;
+            }
+            assert_eq!(store.played_newest_first()?, [3, 2, 1]);
+            // Becoming current again makes an entry the newest.
+            store.mark_current(5, 1, &[], None)?;
+            assert_eq!(store.played_newest_first()?, [1, 3, 2]);
+            // Marking alone keeps the revision.
+            assert_eq!(store.load()?.revision, 5);
+            // Stale revisions, the current entry and unplayed entries are refused,
+            // and change nothing.
+            assert!(store.mark_current(4, 4, &[], None).is_err());
+            assert!(store.mark_current(5, 3, &[3], None).is_err());
+            assert!(store.mark_current(5, 3, &[4], None).is_err());
+            assert_eq!(store.played_newest_first()?, [1, 3, 2]);
+            let checkpoint = Checkpoint {
+                current_id: Some(4),
+                position_frames: 0,
+                playing: true,
+            };
+            store.mark_current(5, 4, &[2], Some(checkpoint))?;
+            let loaded = store.load()?;
+            assert_eq!(
+                loaded
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>(),
+                [1, 3, 4]
+            );
+            assert_eq!(loaded.revision, 6);
+            assert_eq!(loaded.checkpoint.current_id, Some(4));
+            assert_eq!(store.played_newest_first()?, [4, 1, 3]);
             Ok(())
         })();
         let _ = fs::remove_file(&path);

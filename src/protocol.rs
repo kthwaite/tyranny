@@ -15,6 +15,8 @@ pub const MAX_PAGE_SIZE: usize = 500;
 pub const MAX_RUN_ENTRIES: usize = 100_000;
 /// The most ranges one list selection may name.
 pub const MAX_SELECTION_RANGES: usize = 64;
+/// Played entries the queue keeps, not counting the current entry.
+pub const PLAYED_RETENTION: usize = 100;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Request {
@@ -61,6 +63,22 @@ pub enum Command {
     },
     Clear {
         expected_revision: u64,
+    },
+    /// Removes the entries after the current one, which keeps playing. With
+    /// nothing current, removes every unplayed entry.
+    ClearUpcoming {
+        expected_revision: u64,
+    },
+    /// Puts the upcoming entries (as `ClearUpcoming` defines them) in a uniform
+    /// random order. Other entries keep their places.
+    ShuffleUpcoming {
+        expected_revision: u64,
+    },
+    /// Creates a regular playlist of the upcoming entries that have a library track.
+    SaveUpcoming {
+        expected_revision: u64,
+        expected_playlists_revision: u64,
+        name: String,
     },
     Play {
         entry_id: Option<u64>,
@@ -876,6 +894,46 @@ mod tests {
             (Placement::ReplaceUpcoming, "replace_upcoming"),
         ] {
             assert_eq!(serde_json::to_value(placement).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn upcoming_commands_require_every_field() {
+        let commands = [
+            serde_json::json!({"id":1,"command":"clear_upcoming","expected_revision":3}),
+            serde_json::json!({"id":1,"command":"shuffle_upcoming","expected_revision":3}),
+            serde_json::json!({"id":1,"command":"save_upcoming","expected_revision":3,
+                "expected_playlists_revision":4,"name":"Up Next"}),
+        ];
+        for command in commands {
+            let request = serde_json::from_value::<Request>(command.clone())
+                .unwrap_or_else(|error| panic!("rejected {command}: {error}"));
+            match &request.command {
+                Command::ClearUpcoming {
+                    expected_revision: 3,
+                }
+                | Command::ShuffleUpcoming {
+                    expected_revision: 3,
+                } => {}
+                Command::SaveUpcoming {
+                    expected_revision: 3,
+                    expected_playlists_revision: 4,
+                    name,
+                } => assert_eq!(name, "Up Next"),
+                other => panic!("decoded {command} as {other:?}"),
+            }
+            assert_eq!(serde_json::to_value(&request).unwrap(), command);
+            for field in command.as_object().unwrap().keys() {
+                if field == "id" || field == "command" {
+                    continue;
+                }
+                let mut missing = command.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(serde_json::from_value::<Request>(missing).is_err());
+            }
+            let mut extra = command.clone();
+            extra["path"] = serde_json::json!("/private/source");
+            assert!(serde_json::from_value::<Request>(extra).is_err());
         }
     }
 
