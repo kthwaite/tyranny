@@ -290,6 +290,11 @@ fn build(
             "t.id IN (SELECT track_id FROM library_track_genres WHERE genre_id={})",
             parameters.id(*id)?
         )),
+        // Recent membership depends on request time: `recent_cutoff` counts
+        // back from each request's `unix_now`. Near the 30-day edge a track can
+        // be in one request's Recent list and gone from the next, even at one
+        // library revision, so page totals and positions can drift between
+        // requests.
         ListSource::Recent => conditions.push(format!(
             "t.date_added>0 AND t.date_added>={}",
             parameters.bind(Value::Integer(recent_cutoff))
