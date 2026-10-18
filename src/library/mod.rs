@@ -298,7 +298,11 @@ impl Coordinator {
     fn upgrade_step(&mut self) -> Result<()> {
         match self.pending_rescans.pop_front() {
             Some(root_id) => {
-                let _ = self.rescan(root_id);
+                if let Err(error) = self.rescan(root_id) {
+                    eprintln!(
+                        "tyranny: upgrade rescan of root {root_id} failed to start: {error:#}"
+                    );
+                }
             }
             None => {
                 self.connection.execute(
