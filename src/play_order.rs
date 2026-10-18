@@ -126,13 +126,23 @@ impl PlayOrder {
         self.planned = None;
     }
 
-    /// Records that `to` actually started playing.
+    /// Records that `to` started playing on a forward move (next, or a pick).
+    /// For Previous use `retreated` instead.
     pub fn advanced(&mut self, to: u64) {
         self.planned = None;
         if self.history.len() == HISTORY_LIMIT {
             self.history.pop_front();
         }
         self.history.push_back(to);
+    }
+
+    /// Records that Previous moved back to `to`. Drops history after its latest
+    /// occurrence, so a second Previous goes further back.
+    pub fn retreated(&mut self, to: u64) {
+        self.planned = None;
+        if let Some(p) = self.history.iter().rposition(|&id| id == to) {
+            self.history.truncate(p + 1);
+        }
     }
 
     /// The entry to play after `current`, decided once until `invalidate` or `advanced`.
@@ -149,7 +159,10 @@ impl PlayOrder {
     }
 
     fn decide(&mut self, slots: &[Slot], current: Option<usize>) -> Option<usize> {
-        if self.repeat == RepeatMode::One {
+        if current.is_some_and(|i| i >= slots.len()) {
+            return None; // stale index
+        }
+        if self.repeat == RepeatMode::One && current.is_some() {
             return current;
         }
         let ctx = current.map_or(0..slots.len(), |i| context(slots, i));
@@ -182,6 +195,9 @@ impl PlayOrder {
 
     /// The entry to return to: the last one actually played under shuffle, else `current - 1`.
     pub fn previous(&self, slots: &[Slot], current: usize) -> Option<usize> {
+        if current >= slots.len() {
+            return None;
+        }
         if self.shuffle.is_some() {
             let here = slots.get(current).map(|s| s.id);
             let back = self
@@ -378,6 +394,44 @@ mod tests {
         let sequential = PlayOrder::new(RepeatMode::Off, None);
         assert_eq!(sequential.previous(&shrunk, 4), Some(3));
         assert_eq!(sequential.previous(&shrunk, 0), None);
+    }
+
+    #[test]
+    fn previous_walks_back_with_retreated() {
+        let slots = songs(10);
+        let mut order = PlayOrder::new(RepeatMode::Off, seeded(5));
+        order.advanced(7);
+        order.advanced(2);
+        order.advanced(9);
+        assert_eq!(order.previous(&slots, 9), Some(2));
+        order.retreated(2);
+        assert_eq!(order.previous(&slots, 2), Some(7));
+    }
+
+    #[test]
+    fn next_without_current_starts_playback() {
+        let slots = songs(3);
+        for mode in [RepeatMode::Off, RepeatMode::One, RepeatMode::All] {
+            let mut order = PlayOrder::new(mode, None);
+            assert_eq!(order.next(&slots, None), Some(0), "{mode:?}");
+        }
+        for mode in [RepeatMode::Off, RepeatMode::One, RepeatMode::All] {
+            let mut order = PlayOrder::new(mode, seeded(11));
+            assert!(order.next(&slots, None).is_some_and(|i| i < 3), "{mode:?}");
+        }
+        let mut order = PlayOrder::new(RepeatMode::Off, None);
+        assert_eq!(order.next(&[], None), None);
+    }
+
+    #[test]
+    fn out_of_range_current_returns_none() {
+        let slots = songs(3);
+        for shuffle in [None, seeded(1)] {
+            let mut order = PlayOrder::new(RepeatMode::All, shuffle);
+            assert_eq!(order.next(&slots, Some(5)), None);
+            assert_eq!(order.previous(&slots, 5), None);
+            assert_eq!(order.wrapped(&slots, 5, 0), None);
+        }
     }
 
     #[test]
