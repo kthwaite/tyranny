@@ -5,7 +5,7 @@ public enum DisplayRow: Equatable, Sendable {
     /// `blockIndex` = row index within its album block (0-based), nil outside album blocks.
     case track(position: Int, blockIndex: Int?)
     /// Pads a short album to the cover's height.
-    case blockFiller(albumKey: UInt64, blockIndex: Int)
+    case blockFiller(albumKey: UInt64?, blockIndex: Int)
     case blockGap
 }
 
@@ -20,7 +20,7 @@ public struct GroupLayout: Sendable {
         /// Tracks only, no cover (artist grouping).
         case plain(albumKey: UInt64?)
         /// Tracks, fillers, then one gap.
-        case album(albumKey: UInt64)
+        case album(albumKey: UInt64?)
     }
 
     private struct Block: Sendable {
@@ -36,7 +36,26 @@ public struct GroupLayout: Sendable {
     private var trackBlocks: [Int] = []
     public private(set) var count: Int = 0
 
-    public init(grouping: Grouping, total: Int, spans: [GroupSpan]) {
+    /// Spans are clamped to `total`: zero-count, overlapping and non-ascending spans are
+    /// dropped, and portions at or after `total` are cut. Gaps between spans stay uncovered.
+    private static func sanitized(_ spans: [GroupSpan], total: Int) -> [GroupSpan] {
+        var result: [GroupSpan] = []
+        var cursor = 0
+        for span in spans {
+            guard span.start < UInt64(max(total, 0)) else { continue }
+            let start = Int(span.start)
+            guard start >= cursor else { continue }
+            let n = Int(min(span.count, UInt64(total - start)))
+            guard n > 0 else { continue }
+            result.append(GroupSpan(artist_key: span.artist_key, album_key: span.album_key,
+                                    start: span.start, count: UInt64(n)))
+            cursor = start + n
+        }
+        return result
+    }
+
+    public init(grouping: Grouping, total: Int, spans rawSpans: [GroupSpan]) {
+        let spans = grouping == .none ? [] : Self.sanitized(rawSpans, total: total)
         var display = 0
         func append(_ position: Int, _ tracks: Int, _ rows: Int, _ kind: Kind) {
             if tracks > 0 { trackBlocks.append(blocks.count) }
@@ -60,13 +79,13 @@ public struct GroupLayout: Sendable {
             var i = 0
             while i < spans.count {
                 let key = spans[i].artist_key
-                var j = i, runCount = 0
+                var j = i
                 while j < spans.count, spans[j].artist_key == key {
-                    runCount += Int(spans[j].count)
                     j += 1
                 }
                 let start = Int(spans[i].start)
-                append(start, 0, 1, .header(artistKey: key, span: start..<(start + runCount)))
+                let end = Int(spans[j - 1].start + spans[j - 1].count)
+                append(start, 0, 1, .header(artistKey: key, span: start..<end))
                 for k in i..<j { Self.appendAlbum(spans[k], append) }
                 i = j
             }
@@ -76,11 +95,11 @@ public struct GroupLayout: Sendable {
 
     private static func appendAlbum(_ span: GroupSpan, _ append: (Int, Int, Int, Kind) -> Void) {
         let n = Int(span.count)
-        append(Int(span.start), n, max(n, minimumBlockRows) + 1, .album(albumKey: span.album_key ?? 0))
+        append(Int(span.start), n, max(n, minimumBlockRows) + 1, .album(albumKey: span.album_key))
     }
 
-    public func row(at displayIndex: Int) -> DisplayRow {
-        precondition(displayIndex >= 0 && displayIndex < count, "display index out of range")
+    public func row(at displayIndex: Int) -> DisplayRow? {
+        guard displayIndex >= 0, displayIndex < count else { return nil }
         let block = blocks[blockIndex(containingDisplay: displayIndex)]
         let offset = displayIndex - block.displayStart
         switch block.kind {
@@ -98,20 +117,21 @@ public struct GroupLayout: Sendable {
         }
     }
 
-    public func displayIndex(ofPosition position: Int) -> Int {
+    public func displayIndex(ofPosition position: Int) -> Int? {
         var lo = 0, hi = trackBlocks.count - 1
-        precondition(hi >= 0, "position out of range")
+        guard hi >= 0, position >= 0 else { return nil }
         while lo < hi {
             let mid = (lo + hi + 1) / 2
             if blocks[trackBlocks[mid]].positionStart <= position { lo = mid } else { hi = mid - 1 }
         }
         let block = blocks[trackBlocks[lo]]
         let offset = position - block.positionStart
-        precondition(offset >= 0 && offset < block.trackCount, "position out of range")
+        guard offset >= 0, offset < block.trackCount else { return nil }
         return block.displayStart + offset
     }
 
     public func albumKey(atDisplayIndex displayIndex: Int) -> UInt64? {
+        guard displayIndex >= 0, displayIndex < count else { return nil }
         switch blocks[blockIndex(containingDisplay: displayIndex)].kind {
         case .album(let key): return key
         case .plain, .header: return nil
