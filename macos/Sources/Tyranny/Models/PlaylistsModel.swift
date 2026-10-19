@@ -282,6 +282,21 @@ final class PlaylistsModel {
         }
     }
 
+    /// Removes entries by playlist entry ID. A stale revision refetches and retries once with the
+    /// same IDs. Entries that went in the meantime make the server refuse the whole command;
+    /// nothing is removed then, and the status bar says so.
+    func remove(in playlist: Playlist, entryIDs: [UInt64]) async throws {
+        do {
+            let _: PlaylistApplied = try await edit("playlist_remove", playlist: playlist.id) { current, _ in
+                ["playlist_id": .uint(playlist.id), "expected_revision": .uint(current?.revision ?? playlist.revision),
+                 "entry_ids": .uints(entryIDs)]
+            }
+        } catch let failure as ServerFailure where failure.message.contains("does not belong") {
+            throw ListChangedError()
+        }
+        player?.message = PlaylistRemoval.status(count: entryIDs.count, playlist: playlist.name)
+    }
+
     /// Creates a regular playlist and adds a selection to it. If the add fails the playlist
     /// exists and the error says so.
     func createAdding(name: String, selection: TrackSelection, count: Int,

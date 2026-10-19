@@ -102,8 +102,8 @@ do {
         case "key":
             guard arguments.count >= 5,
                   let key: CGKeyCode = ["left": 123, "right": 124, "down": 125, "up": 126,
-                                        "return": 36, "escape": 53][arguments[4]] else {
-                throw DriverFailure(message: "Arrow, return or escape key required")
+                                        "return": 36, "escape": 53, "delete": 51][arguments[4]] else {
+                throw DriverFailure(message: "Arrow, return, escape or delete key required")
             }
             try check(AXUIElementSetAttributeValue(control, kAXFocusedAttribute as CFString, kCFBooleanTrue), "Focus control")
             // AX focus changes are asynchronous to AppKit's key-window update.

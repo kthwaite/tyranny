@@ -6,6 +6,8 @@ import TyrannyCore
 final class ActivatingTableView: NSTableView {
     var onActivate: ((ActivationAction) -> Void)?
     var onPlayPause: (() -> Void)?
+    /// Delete and ⌘Delete. Nil in lists that cannot remove rows.
+    var onRemove: (() -> Void)?
     /// Builds the menu for the row under the pointer, selecting it first when it is not selected.
     var contextMenu: ((Int) -> NSMenu?)?
 
@@ -19,6 +21,9 @@ final class ActivatingTableView: NSTableView {
                                                  otherModifiers: !flags.subtracting(.option).isEmpty) {
                 onActivate?(action)
             }
+        case 51 where onRemove != nil && PlaylistRemoval.isRemoveKey(keyCode: 51, otherModifiers: !flags.subtracting(.command).isEmpty),
+             117 where onRemove != nil && PlaylistRemoval.isRemoveKey(keyCode: 117, otherModifiers: !flags.subtracting(.command).isEmpty):
+            onRemove?()
         case 49 where flags.isEmpty && onPlayPause != nil:
             onPlayPause?()
         default:
@@ -36,6 +41,10 @@ extension VirtualTrackTable.Coordinator {
     func configureInput(_ table: ActivatingTableView) {
         table.onActivate = { [weak self] action in self?.parent.list.activateSelected(action, asRun: true) }
         table.onPlayPause = { [weak self] in self?.parent.player.transport.playPause() }
+        table.onRemove = { [weak self] in
+            guard let list = self?.parent.list, list.canRemoveEntries else { return }
+            list.removeSelected()
+        }
         table.contextMenu = { [weak self] row in self?.menu(forRow: row) }
     }
 
@@ -67,6 +76,9 @@ extension VirtualTrackTable.Coordinator {
         add(to: menu, "Add to Up Next", "track-menu-add-to-up-next", #selector(menuAddToUpNext), enabled: !busy)
         menu.addItem(.separator())
         add(to: menu, "Add to Playlist…", "track-menu-add-to-playlist", #selector(menuAddToPlaylist), enabled: !busy)
+        if parent.list.canRemoveEntries {
+            add(to: menu, "Remove from Playlist", "track-menu-remove-from-playlist", #selector(menuRemove), enabled: !busy)
+        }
         menu.addItem(.separator())
         add(to: menu, "Show in Album", "track-menu-show-album", #selector(menuShowAlbum), enabled: true)
         add(to: menu, "Show in Artist", "track-menu-show-artist", #selector(menuShowArtist), enabled: true)
@@ -85,6 +97,7 @@ extension VirtualTrackTable.Coordinator {
     @objc private func menuPlayNext() { parent.list.activateSelected(.playNext) }
     @objc private func menuAddToUpNext() { parent.list.activateSelected(.addToUpNext) }
     @objc private func menuAddToPlaylist() { parent.list.requestPlaylistPicker() }
+    @objc private func menuRemove() { parent.list.removeSelected() }
     @objc private func menuShowAlbum() { parent.list.showInAlbum() }
     @objc private func menuShowArtist() { parent.list.showInArtist() }
 }

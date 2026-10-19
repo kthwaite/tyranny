@@ -234,6 +234,24 @@ enum NativePlaylistSmoke {
                       "Up Next entries lack the playlist as their source")
         try kit.capture("after-drag")
         kit.passed("native-drag-on-up-next-appends-with-the-playlist-as-source")
+
+        // Delete removes the selected entries by entry ID. The playlist's other entries stay.
+        let remaining = try await kit.entries(created)
+        try kit.check(remaining.count == 5, "The removal case needs the five-entry playlist")
+        try await kit.select(tableID, [0, 2])
+        try await kit.wait("two entries selected") { list.selectedPositions == IndexSet([0, 2]) }
+        let removedIDs = Set([remaining[0].id, remaining[2].id])
+        let queueLength = model.snapshot?.queue_length
+        try await kit.drive("key", tableID, "delete")
+        try await kit.wait("entries removed") { !model.busy && list.cache.total == 3 }
+        let left = try await kit.entries(created)
+        try kit.check(left.map(\.id) == [remaining[1].id, remaining[3].id, remaining[4].id]
+                      && removedIDs.isDisjoint(with: left.map(\.id)), "Delete removed the wrong entries")
+        try kit.check(model.snapshot?.queue_length == queueLength, "Removing entries changed the queue")
+        try await kit.drive("expect-text", "list-count", "3 songs")
+        try kit.check(list.selectedPositions.isEmpty, "The selection survived the removal")
+        try kit.capture("after-remove")
+        kit.passed("native-delete-removes-the-selected-playlist-entries-by-entry-id")
     }
 
     private static func songsList(_ kit: NativePlaylistKit) async throws -> ListModel {

@@ -108,4 +108,32 @@ extension ListModel {
         }
         return true
     }
+
+    // MARK: Remove
+
+    /// A regular playlist's list: Delete, ⌘Delete and "Remove from Playlist" apply.
+    var canRemoveEntries: Bool {
+        guard case .playlist = source, let playlist, !playlist.isSmart else { return false }
+        return true
+    }
+
+    /// Removes the selected entries, by entry ID, under any sort, grouping or filter. Only when
+    /// every selected row is loaded.
+    func removeSelected() {
+        guard canRemoveEntries, let player, let playlist else { return }
+        switch PlaylistRemoval.plan(positions: selectedPositions, entryID: { [cache] in cache.loadedRow(at: $0)?.row_id }) {
+        case .nothing:
+            return
+        case .notLoaded:
+            player.message = PlaylistRemoval.notLoadedStatus
+        case .tooMany:
+            player.message = PlaylistRemoval.tooManyStatus
+        case .remove(let ids):
+            guard player.canMutate else { return }
+            player.mutate { [weak self, player] in
+                try await player.savedPlaylists.remove(in: playlist, entryIDs: ids)
+                self?.userSelected(IndexSet())
+            }
+        }
+    }
 }
