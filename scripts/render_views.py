@@ -74,6 +74,10 @@ def prepare(control):
     control.request("pause")
     enqueue(tagged[:7], "append", False, "album", "Jazz Album 0")
     enqueue(tagged[10:13], "append", False, "drag", "Songs")
+    # Play the second entry, so Up Next shows all three sections: HISTORY, NOW PLAYING, UP NEXT.
+    queue = control.request("queue_page", revision=None, offset=0, limit=20)["entries"]
+    control.request("play", entry_id=queue[1]["id"])
+    control.request("pause")
     state = control.state()
     created = control.request("create_playlist", expected_revision=state["playlists_revision"], name="Road Mix")["playlist"]
     control.request("playlist_add", playlist_id=created["id"], expected_revision=created["revision"],

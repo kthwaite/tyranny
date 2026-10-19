@@ -175,7 +175,9 @@ struct UpNextTable: NSViewRepresentable {
             focusCurrent = false
             guard let current = parent.context.currentID, let position = cache.position(of: current),
                   let scroll = table.enclosingScrollView, position > 0 else { return }
-            let y = table.rect(ofRow: position - 1).minY
+            // Below the header: tile first, so the clip view's top inset counts the header.
+            scroll.tile()
+            let y = table.rect(ofRow: position - 1).minY - scroll.contentView.contentInsets.top
             scroll.contentView.scroll(to: NSPoint(x: scroll.contentView.bounds.origin.x, y: y))
             scroll.reflectScrolledClipView(scroll.contentView)
         }
@@ -223,8 +225,10 @@ struct UpNextTable: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let id = tableColumn?.identifier.rawValue,
                   let column = UpNextTable.columns.first(where: { $0.id == id }) else { return nil }
-            let cell = tableView.makeView(withIdentifier: QueueCellView.reuse, owner: nil) as? QueueCellView
-                ?? QueueCellView()
+            let numbered = id == "number"
+            let reuse = numbered ? QueueCellView.numberReuse : QueueCellView.reuse
+            let cell = tableView.makeView(withIdentifier: reuse, owner: nil) as? QueueCellView
+                ?? QueueCellView(sectioned: numbered)
             let font: NSFont = column.monospaced
                 ? .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
                 : .systemFont(ofSize: NSFont.systemFontSize)
@@ -254,7 +258,7 @@ struct UpNextTable: NSViewRepresentable {
             let shown = weight == .semibold ? NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: weight) : font
             cell.show(text: text, font: shown, alignment: column.alignment, dimmed: section == .history,
                       identifier: identifier)
-            cell.show(section: id == "number" ? startsSection(row) : nil)
+            if numbered { cell.show(section: startsSection(row)) }
             cell.toolTip = text.isEmpty ? nil : text
             return cell
         }
@@ -364,17 +368,20 @@ final class QueueNSTableView: NSTableView {
 /// A queue row. Its section label lives in the # cell, which knows its live width.
 final class QueueRowView: NSTableRowView {}
 
-/// A queue table cell: one text field, or the playing indicator.
+/// A queue table cell: one text field, or the playing indicator. The # column's cells
+/// (`sectioned`) also carry the section label, at the leading edge, left of the number.
 final class QueueCellView: NSTableCellView {
     static let reuse = NSUserInterfaceItemIdentifier("up-next-cell")
+    static let numberReuse = NSUserInterfaceItemIdentifier("up-next-number-cell")
     private let field = NSTextField(labelWithString: "")
     private let icon = NSImageView()
     /// Only in the # column: the section name, truncated so it stays clear of the number.
-    private let sectionLabel = NSTextField(labelWithString: "")
+    private let sectionLabel: NSTextField?
 
-    init() {
+    init(sectioned: Bool) {
+        sectionLabel = sectioned ? NSTextField(labelWithString: "") : nil
         super.init(frame: .zero)
-        identifier = Self.reuse
+        identifier = sectioned ? Self.numberReuse : Self.reuse
         field.lineBreakMode = .byTruncatingTail
         field.cell?.usesSingleLineMode = true
         field.translatesAutoresizingMaskIntoConstraints = false
@@ -385,26 +392,35 @@ final class QueueCellView: NSTableCellView {
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
         addSubview(icon)
         textField = field
+        NSLayoutConstraint.activate([
+            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            field.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.centerXAnchor.constraint(equalTo: centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        guard let sectionLabel else {
+            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2).isActive = true
+            return
+        }
         sectionLabel.font = .systemFont(ofSize: 9, weight: .bold)
         sectionLabel.textColor = .secondaryLabelColor
         sectionLabel.lineBreakMode = .byTruncatingTail
         sectionLabel.cell?.usesSingleLineMode = true
         sectionLabel.translatesAutoresizingMaskIntoConstraints = false
+        // The label keeps its full width unless the number needs the room; then it truncates.
         sectionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sectionLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         sectionLabel.isHidden = true
         addSubview(sectionLabel)
         field.setContentCompressionResistancePriority(.defaultHigh + 50, for: .horizontal)
+        // Below the label's compression resistance: the number never pushes a fitting label out.
         let fieldLeading = field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2)
-        fieldLeading.priority = .defaultHigh
+        fieldLeading.priority = NSLayoutConstraint.Priority(200)
         NSLayoutConstraint.activate([
             fieldLeading,
             field.leadingAnchor.constraint(greaterThanOrEqualTo: sectionLabel.trailingAnchor, constant: 4),
             sectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
             sectionLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
-            field.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.centerXAnchor.constraint(equalTo: centerXAnchor),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -413,7 +429,7 @@ final class QueueCellView: NSTableCellView {
 
     func show(text: String, font: NSFont, alignment: NSTextAlignment, dimmed: Bool, identifier: String?) {
         icon.isHidden = true
-        sectionLabel.isHidden = true
+        sectionLabel?.isHidden = true
         field.isHidden = false
         field.stringValue = text
         field.font = font
@@ -423,6 +439,7 @@ final class QueueCellView: NSTableCellView {
     }
 
     func show(section: QueueSection?) {
+        guard let sectionLabel else { return }
         sectionLabel.isHidden = section == nil
         sectionLabel.stringValue = section?.title ?? ""
         sectionLabel.toolTip = section?.title
@@ -432,7 +449,7 @@ final class QueueCellView: NSTableCellView {
 
     func showPlaying(_ playing: Bool, identifier: String) {
         field.isHidden = true
-        sectionLabel.isHidden = true
+        sectionLabel?.isHidden = true
         field.stringValue = ""
         icon.isHidden = !playing
         icon.setAccessibilityIdentifier(identifier)
