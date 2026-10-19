@@ -160,9 +160,9 @@ struct VirtualTrackTable: NSViewRepresentable {
 
         private func reloadVisible(columns: IndexSet? = nil) {
             guard let table else { return }
-            let rows = table.rows(in: table.visibleRect)
-            guard rows.length > 0 else { return }
-            table.reloadData(forRowIndexes: IndexSet(integersIn: rows.location..<rows.location + rows.length),
+            let rows = table.preparedRows
+            guard !rows.isEmpty else { return }
+            table.reloadData(forRowIndexes: rows,
                              columnIndexes: columns ?? IndexSet(integersIn: 0..<table.numberOfColumns))
         }
 
@@ -307,6 +307,18 @@ struct VirtualTrackTable: NSViewRepresentable {
             dragItems = 0
             dragLifetime = nil
         }
+    }
+}
+
+extension NSTableView {
+    /// The rows that have views: the visible rows and those responsive scrolling prepared
+    /// around them. Reloads must cover all of them, or prepared rows keep stale content.
+    var preparedRows: IndexSet {
+        let visible = rows(in: visibleRect)
+        let prepared = rows(in: preparedContentRect)
+        var result = IndexSet(integersIn: visible.location..<visible.location + visible.length)
+        result.insert(integersIn: prepared.location..<prepared.location + prepared.length)
+        return result.filteredIndexSet { $0 < numberOfRows }
     }
 }
 

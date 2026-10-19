@@ -241,9 +241,7 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
                     shownCount = count
                     table.reloadData()
                 } else {
-                    let visible = table.rows(in: table.visibleRect)
-                    table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<visible.location + visible.length),
-                                     columnIndexes: IndexSet(integer: 0))
+                    table.reloadData(forRowIndexes: table.preparedRows, columnIndexes: IndexSet(integer: 0))
                 }
             }
             if changed || parent.selected != shownSelection {

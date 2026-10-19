@@ -8,17 +8,21 @@ import Foundation
 /// The `Basis` says what the positions refer to: the list description (`epoch`) and
 /// the page revision. While the basis holds, positions are stable: a row that loads at
 /// a selected position joins `ids`, and a loaded row whose ID is selected is shown
-/// selected. When the revision changes, rows may have moved, so loaded rows are
+/// selected. When the revision changes or a refresh commits, rows may have moved, so loaded rows are
 /// selected exactly when their ID is. When the description changes, every old position
 /// is dropped and rows are reselected by ID as they load.
 public struct RowSelection: Equatable, Sendable {
     public struct Basis: Equatable, Sendable {
         public var epoch: UInt64
         public var revision: UInt64?
+        /// Counts committed refreshes. A refresh may move rows without a revision change,
+        /// for example a play-count change under a Plays sort.
+        public var refresh: UInt64
 
-        public init(epoch: UInt64, revision: UInt64?) {
+        public init(epoch: UInt64, revision: UInt64?, refresh: UInt64 = 0) {
             self.epoch = epoch
             self.revision = revision
+            self.refresh = refresh
         }
     }
 
@@ -42,7 +46,7 @@ public struct RowSelection: Equatable, Sendable {
         if next.epoch != basis?.epoch {
             selected = IndexSet()
             for row in loaded where ids.contains(row.id) { selected.insert(row.position) }
-        } else if next.revision != basis?.revision {
+        } else if next.revision != basis?.revision || next.refresh != basis?.refresh {
             for row in loaded {
                 if ids.contains(row.id) { selected.insert(row.position) } else { selected.remove(row.position) }
             }

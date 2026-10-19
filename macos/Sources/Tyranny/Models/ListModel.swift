@@ -40,6 +40,8 @@ final class ListModel {
     @ObservationIgnored private var sort: [SortKey] = []
     @ObservationIgnored private var query = ""
     @ObservationIgnored private var filterTask: Task<Void, Never>?
+    /// The typed filter waiting out the debounce.
+    @ObservationIgnored private var pendingFilter: String?
     @ObservationIgnored private var totalsTask: Task<Void, Never>?
     @ObservationIgnored private var session: UInt64?
     @ObservationIgnored private var needsReset = true
@@ -78,11 +80,14 @@ final class ListModel {
         let filter = navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
         if filter != query {
             if filter.isEmpty || needsReset {
-                filterTask?.cancel()
+                cancelFilter()
                 query = filter
-            } else {
-                scheduleFilter()
+            } else if filter != pendingFilter {
+                // Revision changes during a scan call sync() too; they must not restart the wait.
+                scheduleFilter(filter)
             }
+        } else if pendingFilter != nil {
+            cancelFilter()
         }
         let library = snapshot.library.revision
         let history = snapshot.history_revision
@@ -130,14 +135,22 @@ final class ListModel {
     }
 
     /// Typing waits 250 ms before the list refetches.
-    private func scheduleFilter() {
+    private func scheduleFilter(_ filter: String) {
         filterTask?.cancel()
+        pendingFilter = filter
         filterTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-            guard let self else { return }
-            self.query = self.navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let self, self.pendingFilter == filter else { return }
+            self.pendingFilter = nil
+            self.query = filter
             self.sync()
         }
+    }
+
+    private func cancelFilter() {
+        filterTask?.cancel()
+        filterTask = nil
+        pendingFilter = nil
     }
 
     // MARK: Table
@@ -148,7 +161,9 @@ final class ListModel {
         if let row = cache.loadedRow(at: range.lowerBound) { anchorRowID = row.row_id }
     }
 
-    var selectionBasis: RowSelection.Basis { RowSelection.Basis(epoch: epoch, revision: cache.revision) }
+    var selectionBasis: RowSelection.Basis {
+        RowSelection.Basis(epoch: epoch, revision: cache.revision, refresh: cache.refreshes)
+    }
 
     func userSelected(_ positions: IndexSet) {
         rows.select(positions, rowID: { cache.loadedRow(at: $0)?.row_id }, basis: selectionBasis)

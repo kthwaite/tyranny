@@ -112,6 +112,11 @@ private final class FakeList {
         rows.insert(contentsOf: added, at: position)
     }
 
+    /// Swaps two rows without a revision change, as a play-count change does to a Plays sort.
+    func swapWithoutRevision(_ first: Int, _ second: Int) {
+        rows.swapAt(first, second)
+    }
+
     func remove(id: UInt64) {
         revision += 1
         rows.removeAll { $0.id == id }
@@ -547,5 +552,19 @@ struct ListWindowCacheTests {
         #expect(rows.last?.position == 799 && rows.last?.row.id == 800)
         await drain()
         #expect(fake.log.count == logged, "peeking requested a window")
+    }
+
+    @Test func refreshPassCommitCountsAtTheSameRevision() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 1000, autoComplete: true)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("settled") { cache.row(at: 0) != nil && cache.isSettled }
+        #expect(cache.refreshes == 0)
+        fake.swapWithoutRevision(0, 1)
+        cache.serverRevisionChanged(99, anchor: nil)
+        await until("pass committed") { cache.refreshes == 1 }
+        #expect(cache.revision == 1, "the page revision did not change")
+        #expect(cache.row(at: 0)?.id == 2)
     }
 }

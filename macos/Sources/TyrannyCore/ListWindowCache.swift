@@ -48,6 +48,9 @@ public enum WindowFetchError: Error {
     public private(set) var total: Int = 0
     /// The adopted page revision. nil until the first window arrives, and after `reset` or `discard`.
     public private(set) var revision: UInt64?
+    /// Counts committed refresh passes. Rows may move at the same revision, for example when
+    /// play counts change a Plays sort, so selection keyed to positions must remap.
+    public private(set) var refreshes: UInt64 = 0
     /// Bumps when rows change. Views observe this.
     public private(set) var generation: UInt64 = 0
     /// The anchor row's position after the last `serverRevisionChanged` refresh pass committed.
@@ -310,6 +313,7 @@ public enum WindowFetchError: Error {
     /// Applies a whole refresh pass in one step. A failed window keeps its old rows or placeholder.
     private func commit(_ done: Pass) {
         pass = nil
+        refreshes &+= 1
         var totalChanged = false
         if let newest = done.replies.values.max(by: { $0.page.revision < $1.page.revision })?.page,
             newest.revision >= revision ?? 0 {

@@ -7,8 +7,8 @@ private func rows(_ ids: [Int: UInt64]) -> [(position: Int, id: UInt64)] {
     ids.sorted { $0.key < $1.key }.map { (position: $0.key, id: $0.value) }
 }
 
-private func basis(_ epoch: UInt64, _ revision: UInt64?) -> RowSelection.Basis {
-    RowSelection.Basis(epoch: epoch, revision: revision)
+private func basis(_ epoch: UInt64, _ revision: UInt64?, refresh: UInt64 = 0) -> RowSelection.Basis {
+    RowSelection.Basis(epoch: epoch, revision: revision, refresh: refresh)
 }
 
 @Suite struct RowSelectionTests {
@@ -40,6 +40,17 @@ private func basis(_ epoch: UInt64, _ revision: UInt64?) -> RowSelection.Basis {
         selection.rowsChanged(loaded: rows([0: 98, 1: 99, 2: 10, 3: 11, 4: 12, 5: 13]), total: 6, basis: basis(1, 2))
         #expect(selection.positions == IndexSet([3, 4]))
         #expect(selection.ids == [11, 12])
+    }
+
+    @Test func refreshAtTheSameRevisionRemapsLoadedRowsByID() {
+        // Sorted by Plays: a play moves C above A without a library revision change.
+        var selection = RowSelection()
+        let before: [Int: UInt64] = [2: 30, 3: 10, 4: 20]
+        selection.select(IndexSet([3]), rowID: { before[$0] }, basis: basis(1, 5, refresh: 0))
+        #expect(selection.ids == [10])
+        selection.rowsChanged(loaded: rows([2: 20, 3: 30, 4: 10]), total: 10, basis: basis(1, 5, refresh: 1))
+        #expect(selection.positions == IndexSet([4]), "the row now at the old position joined the selection")
+        #expect(selection.ids == [10])
     }
 
     @Test func revisionChangeKeepsSelectedPlaceholderPositions() {
