@@ -49,8 +49,9 @@ struct SourceList: View {
         case .albums: return counts.albums
         case .artists: return counts.artists
         case .genres: return counts.genres
-        // Up Next counts need the queue's played state (Task 11); History has none.
-        case .recent, .upNext, .history, .playlist: return nil
+        case .upNext: return model.upNext.upcomingCount.map { UInt64($0) }
+        // History has no count.
+        case .recent, .history, .playlist: return nil
         }
     }
 

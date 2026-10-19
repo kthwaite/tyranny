@@ -27,13 +27,14 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
-    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums", "artists", "history"], default="spike",
+    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums", "artists", "history", "upnext"], default="spike",
                         help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
                              "albums: the album grid, its inline panel and album Play; "
                              "artists: Artists with Compilations and Appears On, and Genres; "
-                             "history: Recently Added, a played track in History and its Plays count")
+                             "history: Recently Added, a played track in History and its Plays count; "
+                             "upnext: Up Next sections and Added From labels, Clear, Save as Playlist and the drawer")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -100,6 +101,10 @@ def main():
                 return
             if args.scenario == "history":
                 history(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "upnext":
+                upnext(report, run, app, port, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             for mode in ["initial", "relaunch"]:
@@ -385,6 +390,46 @@ def history(report, run, app, port, ready, source, controller, screenshots):
     for image in sorted(output.glob("history*.png")):
         shutil.copy2(image, screenshots / image.name)
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("history*.png"))]
+
+
+def upnext(report, run, app, port, ready, source, controller, screenshots):
+    """Drive Up Next: two album runs and a playlist-sourced run show their Added From labels
+    behind the playing track, Clear keeps that track playing with nothing upcoming, Save as
+    Playlist creates a playlist, and the drawer lists the queue and takes a drop."""
+    report["scenario"] = "upnext"
+    music = run / "Songs fixture"
+    songs_fixture(music, source)
+    controller.request("add_root", path=str(music))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 1129, seconds=180)
+    output = run / "upnext"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--upnext-smoke-output", str(output),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "upnext.stdout").open("w") as stdout, (run / "upnext.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=240)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["upnext"] = native
+    assert native["passed"], native.get("error")
+    # The server, not the app, holds the saved playlist and the dropped entries.
+    saved = controller.request("saved_playlists", revision=None, offset=0, limit=50, query="", kind=None)
+    playlist = next((entry for entry in saved["entries"] if entry["name"] == "Saved From Up Next"), None)
+    assert playlist is not None and playlist["kind"] == "regular" and playlist["entry_count"] == 2, saved
+    assert playlist["id"] == native["observations"]["saved_playlist"]["id"], (playlist, native["observations"])
+    page = controller.request("queue_page", revision=None, offset=0, limit=500)
+    assert page["total"] == 6, page
+    dropped = page["entries"][-3:]
+    assert [entry["track_id"] for entry in dropped] == native["observations"]["dropped_track_ids"], page
+    assert all(entry["source"] == {"kind": "drag", "name": "Songs"} for entry in dropped), dropped
+    assert page["entries"][0]["id"] == native["observations"]["current_id"], page
+    report["cases"].append({"name": "upnext-server-holds-playlist-current-and-drawer-drop",
+                            "playlist": playlist["id"], "queue_total": page["total"]})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("*.png")):
+        shutil.copy2(image, screenshots / ("upnext-" + image.name if not image.name.startswith("upnext") else image.name))
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
 
 
 if __name__ == "__main__":

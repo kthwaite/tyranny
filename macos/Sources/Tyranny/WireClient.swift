@@ -368,7 +368,8 @@ final class WireClient {
         case "snapshot": return "snapshot"
         case "queue_page", "library_roots", "library_artists", "library_albums", "library_tracks", "saved_playlists", "playlist_entries", "artwork": return command
         case "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history": return command
-        case "enqueue_tracks": return "applied"
+        case "enqueue_tracks", "insert_tracks", "clear_upcoming", "shuffle_upcoming": return "applied"
+        case "save_upcoming": return "playlist_applied"
         case "create_playlist", "create_smart_playlist", "update_smart_playlist", "snapshot_smart_playlist", "rename_playlist", "delete_playlist", "playlist_add", "playlist_add_selection", "playlist_remove", "playlist_move": return "playlist_applied"
         case "enqueue_playlist": return "applied"
         case "add_root": return "root_added"

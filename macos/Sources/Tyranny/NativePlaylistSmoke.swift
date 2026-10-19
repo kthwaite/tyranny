@@ -132,7 +132,7 @@ enum NativePlaylistSmoke {
 
         try await press("playlist-enqueue")
         try await wait("whole playlist enqueue") { !model.busy && model.snapshot?.queue_length == 103 }
-        let firstQueued = model.queue?.entries.first?.id
+        let firstQueued = model.snapshot?.current_id
         try await press("playlist-play")
         try await wait("whole playlist append and play") {
             !model.busy && model.snapshot?.queue_length == 206 && model.snapshot?.transport == "playing"
@@ -164,7 +164,7 @@ enum NativePlaylistSmoke {
             try await wait("first library page before mouse scenario") { model.tracks?.offset == 0 && model.tracks?.entries.count == 100 }
         }
         try await press("tracks-next")
-        try await wait("library for mouse activation") { !model.showPlaylists && !model.showQueue && model.tracks?.entries.count == 5 }
+        try await wait("library for mouse activation") { !model.showPlaylists && model.tracks?.entries.count == 5 }
         let tracks = model.tracks!.entries
         try await select("track-table", [1])
         try await wait("different row selected before single click") { model.selectedTracks == [tracks[1].id] }
@@ -182,23 +182,7 @@ enum NativePlaylistSmoke {
                 && model.snapshot?.now_playing?.title == tracks[1].metadata.title
         }
         cases.append("mouse-single-click-selects-double-click-plays-exact-library-row")
-
-        try await press("transport-play")
-        try await wait("pause before queue activation") { !model.busy && model.snapshot?.transport == "paused" }
-        try await press("toggle-queue")
-        try await wait("queue for mouse activation") { model.showQueue && (model.queue?.entries.count ?? 0) >= 2 }
-        let queueID = model.queue!.entries[1].id
-        try await select("queue-table", [0, 1])
-        try await NativeSmoke.drive("double-click-row", "queue-table", "1,0.8")
-        try await wait("queue activation resumes exact existing occurrence") {
-            !model.busy && model.snapshot?.current_id == queueID && model.snapshot?.transport == "playing"
-        }
-        try check(model.snapshot?.queue_length == originalLength + 1, "Queue activation appended a duplicate")
-        try await NativeSmoke.drive("slider-value", "seek-slider", "8")
-        try await wait("seek before restart") { !model.busy && model.positionSeconds >= 8 }
-        try await NativeSmoke.drive("double-click-row", "queue-table", "1,0.8")
-        try await wait("double click restarts current occurrence") { !model.busy && model.snapshot?.current_id == queueID && model.positionSeconds < 2 }
-        cases.append("mouse-queue-double-click-resumes-and-restarts-without-appending")
+        let queueID = model.snapshot?.current_id
 
         try await press("toggle-playlists")
         try await wait("saved entries for mouse activation") { model.showPlaylists && model.playlistReady }

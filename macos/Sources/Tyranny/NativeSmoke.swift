@@ -138,18 +138,6 @@ enum NativeSmoke {
         try await wait("resume") { !model.busy && model.snapshot?.transport == "playing" }
         cases.append("native-pause-seek-resume")
 
-        try await press("toggle-queue")
-        try await wait("queue surface") { model.showQueue && model.queue?.entries.count == 2 }
-        let firstOrder = model.queue!.entries.map(\.id)
-        try await select("queue-table", indexes: [1])
-        try await wait("queue selection") { model.selectedQueue.count == 1 }
-        try await press("queue-up")
-        try await wait("queue move") { !model.busy && model.queue?.entries.map(\.id) == firstOrder.reversed().map { $0 } }
-        try capture("queue")
-        try await press("queue-remove")
-        try await wait("queue remove") { !model.busy && model.snapshot?.queue_length == 1 && model.queue?.entries.count == 1 }
-        cases.append("native-queue-reorder-and-remove")
-        try await press("toggle-queue")
         try await value("library-filter", "no-such-track-ui-smoke")
         try await wait("live filter") { model.tracks?.total == 0 && model.filter == "no-such-track-ui-smoke" }
         try check(model.snapshot?.now_playing == playingMetadata && model.currentName.contains(playingMetadata.title),

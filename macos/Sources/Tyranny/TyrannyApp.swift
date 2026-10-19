@@ -60,6 +60,10 @@ struct TyrannyApp: App {
                     navigation.columnBrowserVisible.toggle()
                 }
                 .keyboardShortcut("b")
+                Button(navigation.upNextDrawerVisible ? "Hide Up Next Drawer" : "Show Up Next Drawer") {
+                    navigation.upNextDrawerVisible.toggle()
+                }
+                .keyboardShortcut("u", modifiers: [.command, .option])
             }
         }
         Settings {
@@ -88,7 +92,6 @@ private struct MainWindow: View {
                 NativeLifecycle.startIfRequested(model)
                 NativeScale.startIfRequested(model)
                 NativePlaylistSmoke.startIfRequested(model)
-                NativeDragSmoke.startIfRequested(model)
                 NativeFilterSmoke.startIfRequested(model)
                 NativeSmartPlaylistSmoke.startIfRequested(model)
                 NativeArtworkSmoke.startIfRequested(model)
@@ -97,6 +100,7 @@ private struct MainWindow: View {
                 NativeAlbumsSmoke.startIfRequested(model, navigation: navigation)
                 NativeArtistsSmoke.startIfRequested(model, navigation: navigation)
                 NativeHistorySmoke.startIfRequested(model, navigation: navigation)
+                NativeUpNextSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }

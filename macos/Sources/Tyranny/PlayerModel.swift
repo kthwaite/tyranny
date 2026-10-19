@@ -19,15 +19,15 @@ final class PlayerModel {
     let artwork = ArtworkStore()
     /// Transport commands and the toolbar display. Owns the system media controls.
     let transport = TransportModel()
+    /// The Up Next view's and drawer's queue windows.
+    let upNext = UpNextModel()
     private(set) var artists: Page<AlbumArtist>?
     private(set) var albums: Page<Album>?
     private(set) var tracks: Page<Track>?
-    private(set) var queue: Page<QueueItem>?
     private(set) var roots: Page<Root>?
     var selectedArtist: UInt64?
     var selectedAlbum: UInt64?
     var selectedTracks: Set<UInt64> = []
-    var selectedQueue: Set<UInt64> = []
     var filter = "" {
         didSet { if oldValue != filter { filterChanged() } }
     }
@@ -37,7 +37,6 @@ final class PlayerModel {
     private var loadedLibraryArtist: UInt64?
     private var loadedLibraryAlbum: UInt64?
     var message: String?
-    var showQueue = false
     var showPlaylists = false
     var playlistFilter = ""
     var playlistEntryFilter = "" {
@@ -85,23 +84,19 @@ final class PlayerModel {
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTimer: Task<Void, Never>?
-    @ObservationIgnored private var queueTask: Task<Void, Never>?
     @ObservationIgnored private var needsLibrary = false
-    @ObservationIgnored private var needsQueue = false
     @ObservationIgnored private var session: UInt64 = 0
     private var queryEpoch: UInt64 = 0
     @ObservationIgnored private var libraryFilterDeadline = Date.distantPast
-    @ObservationIgnored private var queueEpoch: UInt64 = 0
     @ObservationIgnored private var artistOffset = 0
     @ObservationIgnored private var albumOffset = 0
     @ObservationIgnored private var trackOffset = 0
     @ObservationIgnored private var rootOffset = 0
-    @ObservationIgnored private var queueOffset = 0
     @ObservationIgnored private var previousArtist: UInt64?
     @ObservationIgnored private var previousAlbum: UInt64?
     @ObservationIgnored private var lastLibraryRefresh = Date.distantPast
     static let pageSize = 100
-    @ObservationIgnored private var activeDrag: TrackDrag?
+    @ObservationIgnored var activeDrag: TrackDrag?
 
     init() {
         let arguments = CommandLine.arguments
@@ -123,6 +118,7 @@ final class PlayerModel {
         wire.onSnapshot = { [weak self] state, instance in self?.accept(state, newInstance: instance != nil) }
         wire.onDisconnect = { [weak self] reason in self?.lostConnection(reason) }
         transport.attach(self)
+        upNext.attach(self)
         updateMediaControls()
     }
 
@@ -162,6 +158,7 @@ final class PlayerModel {
 
     private func updateMediaControls() {
         transport.stateChanged()
+        upNext.sync()
     }
 
     private func updateArtwork(invalidate: Bool = false) {
@@ -249,13 +246,13 @@ final class PlayerModel {
         needsPlaylists = false; needsEntries = false
         playlistCatalogError = nil; playlistEntryError = nil
         snapshot = nil
-        artists = nil; albums = nil; tracks = nil; roots = nil; queue = nil
+        artists = nil; albums = nil; tracks = nil; roots = nil
         selectedArtist = nil; selectedAlbum = nil
         previousArtist = nil; previousAlbum = nil
-        selectedTracks = []; selectedQueue = []
-        artistOffset = 0; albumOffset = 0; trackOffset = 0; rootOffset = 0; queueOffset = 0
-        queryEpoch &+= 1; queueEpoch &+= 1
-        needsLibrary = false; needsQueue = false
+        selectedTracks = []
+        artistOffset = 0; albumOffset = 0; trackOffset = 0; rootOffset = 0
+        queryEpoch &+= 1
+        needsLibrary = false
     }
     private func lostConnection(_ reason: String) {
         clearRemoteState()
@@ -333,7 +330,6 @@ final class PlayerModel {
             updateArtwork(invalidate: true)
         }
         guard connected else { return }
-        if previous?.queue_revision != state.queue_revision { requestQueue() }
         if previous?.playlists_revision != state.playlists_revision {
             if currentPlaylist?.isSmart == true { selectedPlaylistEntries = [] }
             requestPlaylists()
@@ -366,7 +362,7 @@ final class PlayerModel {
     var hasUpcoming: Bool {
         guard let state = snapshot else { return false }
         return UpNext.hasUpcoming(queueLength: state.queue_length, currentID: state.current_id,
-                                  queueRevision: state.queue_revision, page: queue)
+                                  queueRevision: state.queue_revision, page: upNext.loadedPage)
     }
     private func pageFields(offset: Int, revision: UInt64?, query: String) -> [String: JSONValue] {
         ["offset": .int(offset), "limit": .int(Self.pageSize),
@@ -375,7 +371,6 @@ final class PlayerModel {
     func refresh() {
         queryEpoch &+= 1
         requestLibrary(after: 0)
-        requestQueue()
         requestPlaylists()
         requestPlaylistEntries()
     }
@@ -467,37 +462,6 @@ final class PlayerModel {
             }
         }
     }
-    private func requestQueue() {
-        guard connected else { return }
-        needsQueue = true
-        guard queueTask == nil else { return }
-        queueTask = Task { [weak self] in
-            guard let self else { return }
-            defer { queueTask = nil }
-            while needsQueue, connected {
-                needsQueue = false
-                let generation = session, epoch = queueEpoch, offset = queueOffset
-                do {
-                    let page: Page<QueueItem> = try await request("queue_page", [
-                        "revision": snapshot.map { .uint($0.queue_revision) } ?? .null,
-                        "offset": .int(offset), "limit": .int(Self.pageSize)])
-                    guard generation == session, epoch == queueEpoch, connected else { continue }
-                    if offset > 0, page.entries.isEmpty {
-                        queueOffset = max(0, ((max(1, page.total) - 1) / Self.pageSize) * Self.pageSize)
-                        queueEpoch &+= 1; needsQueue = true; continue
-                    }
-                    queue = page
-                    selectedQueue.formIntersection(Set(page.entries.map(\.id)))
-                } catch {
-                    guard generation == session, epoch == queueEpoch, connected else { continue }
-                    if let failure = error as? ServerFailure, failure.code == "stale_revision" {
-                        let fresh: SnapshotReply? = try? await request("snapshot")
-                        if let fresh { accept(fresh.snapshot, newInstance: false); needsQueue = true }
-                    } else { message = error.localizedDescription }
-                }
-            }
-        }
-    }
     private func offset(_ current: Int, _ delta: Int, _ total: Int) -> Int {
         min(max(0, current + delta * Self.pageSize), max(0, ((max(1, total) - 1) / Self.pageSize) * Self.pageSize))
     }
@@ -505,7 +469,6 @@ final class PlayerModel {
     func pageAlbums(_ delta: Int) { albumOffset = offset(albumOffset, delta, albums?.total ?? 0); selectedAlbum = nil; selectionChanged(); queryEpoch &+= 1; requestLibrary(after: 0) }
     func pageTracks(_ delta: Int) { trackOffset = offset(trackOffset, delta, tracks?.total ?? 0); selectedTracks = []; queryEpoch &+= 1; requestLibrary(after: 0) }
     func pageRoots(_ delta: Int) { rootOffset = offset(rootOffset, delta, roots?.total ?? 0); queryEpoch &+= 1; requestLibrary(after: 0) }
-    func pageQueue(_ delta: Int) { queueOffset = offset(queueOffset, delta, queue?.total ?? 0); selectedQueue = []; queueEpoch &+= 1; requestQueue() }
 
     func chooseFolder() {
         guard canMutate,
@@ -535,14 +498,13 @@ final class PlayerModel {
         } catch { message = error.localizedDescription }
     }
     /// Runs one user mutation: marks the model busy, reports failure in `message`,
-    /// and refreshes the queue afterwards.
+    /// afterwards.
     func mutate(_ action: @escaping @MainActor () async throws -> Void) {
         guard canMutate else { return }
         busy = true; message = nil
         Task {
             defer { busy = false }
             do { try await action() } catch { message = error.localizedDescription }
-            if connected { requestQueue() }
         }
     }
     func rescan(_ rootID: UInt64) {
@@ -601,57 +563,6 @@ final class PlayerModel {
             }
         }
     }
-    func playQueueEntry(_ id: UInt64) {
-        guard queue?.entries.contains(where: { $0.id == id }) == true else { return }
-        mutate { let _: Applied = try await self.request("play", ["entry_id": .uint(id)]) }
-    }
-    func playQueueSelection() {
-        guard let item = queue?.entries.first(where: { selectedQueue.contains($0.id) }) else { return }
-        mutate { let _: Applied = try await self.request("play", ["entry_id": .uint(item.id)]) }
-    }
-    func removeQueueSelection() {
-        let ids = queue?.entries.filter { selectedQueue.contains($0.id) }.map(\.id) ?? []
-        guard !ids.isEmpty else { return }
-        mutate {
-            for id in ids {
-                guard let revision = self.snapshot?.queue_revision else { throw CancellationError() }
-                let _: Applied = try await self.request("remove", ["expected_revision": .uint(revision), "entry_id": .uint(id)])
-            }
-        }
-    }
-    func canMoveQueue(_ delta: Int) -> Bool {
-        guard delta == -1 || delta == 1, selectedQueue.count == 1, let page = queue,
-              let index = page.entries.firstIndex(where: { selectedQueue.contains($0.id) }) else { return false }
-        return (0..<page.total).contains(page.offset + index + delta)
-    }
-    func moveQueueSelection(_ delta: Int) {
-        guard canMoveQueue(delta), let page = queue,
-              let index = page.entries.firstIndex(where: { selectedQueue.contains($0.id) }) else { return }
-        let beforeIndex = page.offset + index + (delta < 0 ? -1 : 2)
-        mutate {
-            let before: UInt64?
-            if beforeIndex == page.total {
-                before = nil
-            } else if (page.offset..<(page.offset + page.entries.count)).contains(beforeIndex) {
-                before = page.entries[beforeIndex - page.offset].id
-            } else {
-                let neighbor: Page<QueueItem> = try await self.request("queue_page", [
-                    "revision": .uint(page.revision), "offset": .int(beforeIndex), "limit": .int(1)])
-                guard let item = neighbor.entries.first else {
-                    throw ServerFailure(code: "stale_revision", message: "The adjacent queue entry is unavailable. Refresh before moving.")
-                }
-                before = item.id
-            }
-            let _: Applied = try await self.request("move", [
-                "expected_revision": .uint(page.revision), "entry_ids": .uints([page.entries[index].id]),
-                "before": before.map(JSONValue.uint) ?? .null])
-        }
-    }
-    func clearQueue() {
-        guard let revision = snapshot?.queue_revision else { return }
-        mutate { let _: Applied = try await self.request("clear", ["expected_revision": .uint(revision)]) }
-    }
-
     var currentPlaylist: Playlist? {
         let visible = playlists?.entries.first { $0.id == selectedPlaylist }
         guard let retainedPlaylist, retainedPlaylist.id == selectedPlaylist else { return visible }
@@ -1061,7 +972,7 @@ final class PlayerModel {
                         self.playlistFilter = ""; self.playlistOffset = 0
                         self.playlistEntryFilter = ""
                         self.selectedPlaylist = playlist.id
-                        self.showPlaylists = true; self.showQueue = false
+                        self.showPlaylists = true
                     }
                     if playlist.id == self.selectedPlaylist {
                         self.retainedPlaylist = playlist
@@ -1094,10 +1005,8 @@ extension PlayerModel {
             revision = page.revision
             positions = []
         case .queue:
-            guard let page = queue, page.revision == state.queue_revision else { return nil }
-            ordered = page.entries.filter { selected.contains($0.id) }.map(\.id)
-            revision = page.revision
-            positions = page.entries.indices.filter { selected.contains(page.entries[$0].id) }.map { page.offset + $0 }
+            // Up Next drags start in `UpNextModel.beginDrag`.
+            return nil
         case .playlist(let id):
             guard currentPlaylist?.isSmart == false, playlistReady, let page = playlistEntries, page.playlist_id == id else { return nil }
             ordered = page.entries.filter { selected.contains($0.id) }.map(\.id)
@@ -1168,7 +1077,7 @@ extension PlayerModel {
         return true
     }
 
-    private func appendSelection(_ selection: TrackSelection, label: String, connection: UInt64) async throws {
+    func appendSelection(_ selection: TrackSelection, label: String, connection: UInt64) async throws {
         var retried = false
         while true {
             guard connected, playlistSession == connection, let state = snapshot else {
@@ -1236,18 +1145,7 @@ extension PlayerModel {
         let destinationIndex: Int
         let destinationQuery = playlistEntryFilter, destinationFilterEpoch = entryFilterEpoch
         switch destination {
-        case .library: return false
-        case .queue:
-            guard let page = queue, page.revision == state.queue_revision, let row,
-                  (0...page.entries.count).contains(row) else {
-                message = "Wait for the queue page to finish loading before dropping."
-                return false
-            }
-            revision = page.revision
-            libraryRevision = state.library.revision
-            before = row < page.entries.count ? page.entries[row].id : nil
-            boundary = row == page.entries.count && page.offset + row < page.total ? page.offset + row : nil
-            destinationIndex = page.offset + row
+        case .library, .queue: return false
         case .playlist(let id):
             guard let playlist = playlists?.entries.first(where: { $0.id == id }), !playlist.isSmart,
                   playlists?.revision == state.playlists_revision, !playlistsLoading else {
@@ -1284,17 +1182,13 @@ extension PlayerModel {
                 var anchor = before
                 if let boundary {
                     switch destination {
-                    case .queue:
-                        let neighbor: Page<QueueItem> = try await self.request("queue_page", [
-                            "revision": .uint(revision), "offset": .int(boundary), "limit": .int(1)])
-                        anchor = neighbor.entries.first?.id
                     case .playlist(let id):
                         let neighbor: PlaylistEntries = try await self.request("playlist_entries", [
                             "playlist_id": .uint(id), "revision": .uint(revision),
                             "library_revision": .uint(libraryRevision), "query": .string(destinationQuery),
                             "offset": .int(boundary), "limit": .int(1)])
                         anchor = neighbor.entries.first?.id
-                    case .library: return
+                    case .library, .queue: return
                     }
                     guard anchor != nil else {
                         throw ServerFailure(code: "stale_revision", message: "The next-page insertion anchor is unavailable.")
@@ -1321,17 +1215,6 @@ extension PlayerModel {
                     fields["entry_ids"] = .uints(drag.ids)
                 }
                 switch destination {
-                case .queue:
-                    let _: Applied = try await self.request(drag.source == .library ? "insert_tracks" : "move", fields)
-                    guard self.playlistSession == drag.connection else { return }
-                    if drag.source == .queue {
-                        self.selectedQueue = Set(drag.ids)
-                        if !drag.ids.contains(anchor ?? 0) {
-                            let insertion = destinationIndex - drag.positions.filter { $0 < destinationIndex }.count
-                            self.queueOffset = (max(0, insertion) / Self.pageSize) * Self.pageSize
-                            self.queueEpoch &+= 1
-                        }
-                    }
                 case .playlist(let id):
                     fields["playlist_id"] = .uint(id)
                     let _: PlaylistApplied = try await self.request(drag.source == .library ? "playlist_add" : "playlist_move", fields)
@@ -1349,7 +1232,7 @@ extension PlayerModel {
                             + (self.playlistEntryFilterActive ? " Some added tracks may be hidden by the entry filter; clear it to see all tracks." : "")
                     }
                     self.requestPlaylists(); self.requestPlaylistEntries()
-                case .library: break
+                case .library, .queue: break
                 }
             } catch {
                 self.message = "\(error.localizedDescription) Drop was not replayed; review refreshed state before trying again."

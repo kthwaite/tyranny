@@ -68,7 +68,7 @@ enum NativeScale {
         }
         try await wait("initial bounded native pages", seconds: 45) {
             model.connected && !model.loading && model.tracks?.total == 50_000
-                && model.queue?.total == 10_000 && model.artists != nil && model.albums != nil
+                && model.snapshot?.queue_length == 10_000 && model.artists != nil && model.albums != nil
                 && NSApp.windows.contains { $0.title == "Tyranny" && $0.isVisible }
         }
         let modelReady = now
@@ -107,16 +107,6 @@ enum NativeScale {
         try observePages(model, label: "tracks-next")
         try await NativeSmoke.drive("press", "tracks-previous")
         try await wait("previous bounded track page") { model.tracks?.offset == 0 && !model.loading }
-        try await NativeSmoke.drive("press", "toggle-queue")
-        try await wait("native queue") { model.showQueue && model.queue?.total == 10_000 }
-        try await NativeSmoke.drive("press", "queue-next")
-        try await wait("next bounded queue page") { model.queue?.offset == 100 }
-        try observePages(model, label: "queue-next")
-        try await capture("queue-10000")
-        try await NativeSmoke.drive("press", "queue-previous")
-        try await wait("previous bounded queue page") { model.queue?.offset == 0 }
-        try await NativeSmoke.drive("press", "toggle-queue")
-
         for _ in 0..<3 {
             try await filter(model, text: "Scale Track 00001", expected: 1, label: "selective-during-playback")
             try await filter(model, text: "scale-no-match", expected: 0, label: "empty-during-playback")
@@ -199,12 +189,11 @@ enum NativeScale {
 
     private static func observePages(_ model: PlayerModel, label: String) throws {
         let counts = ["artists": model.artists?.entries.count ?? 0, "albums": model.albums?.entries.count ?? 0,
-                      "tracks": model.tracks?.entries.count ?? 0, "queue": model.queue?.entries.count ?? 0,
+                      "tracks": model.tracks?.entries.count ?? 0,
                       "roots": model.roots?.entries.count ?? 0]
         try check(counts.values.allSatisfy { $0 <= PlayerModel.pageSize }, "Native page exceeded configured bound")
         pages.append(["label": label, "counts": counts, "page_bound": PlayerModel.pageSize,
-                      "track_total": model.tracks?.total ?? 0, "track_offset": model.tracks?.offset ?? 0,
-                      "queue_total": model.queue?.total ?? 0, "queue_offset": model.queue?.offset ?? 0])
+                      "track_total": model.tracks?.total ?? 0, "track_offset": model.tracks?.offset ?? 0])
     }
 
     private static var now: Double { ProcessInfo.processInfo.systemUptime }

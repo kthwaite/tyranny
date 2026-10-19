@@ -29,13 +29,24 @@ struct MainWindowView: View {
         }
     }
 
+    /// The drawer follows the toggle while connected. Up Next itself already lists the queue.
+    private var showsDrawer: Bool {
+        navigation.upNextDrawerVisible && model.connected && navigation.destination != .upNext
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             NavigationSplitView {
                 SourceList(model: model, navigation: navigation)
                     .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 300)
             } detail: {
-                mainArea
+                HStack(spacing: 0) {
+                    mainArea
+                    if showsDrawer {
+                        Divider()
+                        UpNextDrawer(model: model.upNext, player: model)
+                    }
+                }
             }
             Divider()
             StatusBar(model: model, totals: currentList?.totals, filteredFrom: currentList?.filteredFrom) {
@@ -97,6 +108,12 @@ struct MainWindowView: View {
             .help(repeatTitle)
             .accessibilityValue(transport.repeat.rawValue)
             .accessibilityIdentifier("transport-repeat")
+            Toggle(isOn: $navigation.upNextDrawerVisible) {
+                Label("Up Next Drawer", systemImage: "sidebar.right")
+            }
+            .help("Show or hide the Up Next drawer (⌥⌘U)")
+            .accessibilityValue(navigation.upNextDrawerVisible ? "shown" : "hidden")
+            .accessibilityIdentifier("up-next-drawer-toggle")
             filterField
         }
     }
@@ -168,6 +185,8 @@ struct MainWindowView: View {
         } else if navigation.destination == .genres {
             GenresView(model: lists.browse(.genres, player: model, navigation: navigation), player: model,
                        navigation: navigation)
+        } else if navigation.destination == .upNext {
+            UpNextView(model: model.upNext, player: model)
         } else if navigation.destination == .history {
             HistoryView(model: lists.history(player: model), player: model)
         } else if let list = currentList {
