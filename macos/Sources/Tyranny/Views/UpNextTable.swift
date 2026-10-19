@@ -6,7 +6,7 @@ import TyrannyCore
 /// Added From, one row per queue position, windowed through `UpNextModel.cache`.
 ///
 /// A row that starts a section (HISTORY, NOW PLAYING, UP NEXT; `UpNextSections.startsSection`)
-/// is taller and shows the section label above its cells. History rows are dimmed. Selection is
+/// shows the section label beside its number; all rows have one height. History rows are dimmed. Selection is
 /// held by entry ID. Rows drag to reorder, and library rows drop between them.
 struct UpNextTable: NSViewRepresentable {
     let model: UpNextModel
@@ -28,7 +28,7 @@ struct UpNextTable: NSViewRepresentable {
 
     static let columns = [
         Column(id: "status", title: "", width: 24),
-        Column(id: "number", title: "#", width: 44, alignment: .right, monospaced: true),
+        Column(id: "number", title: "#", width: 96, alignment: .right, monospaced: true),
         Column(id: "title", title: "Title", width: 240),
         Column(id: "artist", title: "Artist", width: 160),
         Column(id: "album", title: "Album", width: 180),
@@ -103,7 +103,6 @@ struct UpNextTable: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, @MainActor NSTableViewDataSource, NSTableViewDelegate,
         @MainActor NSMenuDelegate {
         static let rowHeight: CGFloat = 20
-        static let sectionHeight: CGFloat = 18
         var parent: UpNextTable
         weak var table: QueueNSTableView?
         private var updating = false
@@ -202,16 +201,13 @@ struct UpNextTable: NSViewRepresentable {
 
         func numberOfRows(in tableView: NSTableView) -> Int { cache.total }
 
+        /// Rows have one height. A row that starts a section shows its label beside the number.
         private func startsSection(_ position: Int) -> QueueSection? {
             guard let item = cache.loadedRow(at: position) else { return nil }
             let starts = UpNextSections.startsSection(
                 item: item, previous: position > 0 ? cache.loadedRow(at: position - 1) : nil,
                 position: position, currentID: parent.currentID)
             return starts ? UpNextSections.section(of: item, currentID: parent.currentID) : nil
-        }
-
-        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            startsSection(row) == nil ? Self.rowHeight : Self.rowHeight + Self.sectionHeight
         }
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -312,7 +308,6 @@ struct UpNextTable: NSViewRepresentable {
                 let ids = positions.compactMap { cache.loadedRow(at: $0)?.id }
                 dragToken = model.beginDrag(ids: ids.isEmpty ? [item.id] : ids)
                 dragItems = 0
-                if dragToken == nil { parent.player.message = "Wait for Up Next to load, then drag again." }
             }
             guard let dragToken, dragItems < 24 else { return nil }
             dragItems += 1
@@ -365,20 +360,20 @@ final class QueueNSTableView: NSTableView {
     }
 }
 
-/// A queue row. A row that starts a section shows its label in a strip above the cells.
+/// A queue row. A row that starts a section shows its label over the left of the # column.
 final class QueueRowView: NSTableRowView {
     private let label = NSTextField(labelWithString: "")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.font = .systemFont(ofSize: 9, weight: .bold)
         label.textColor = .secondaryLabelColor
         label.translatesAutoresizingMaskIntoConstraints = false
         label.isHidden = true
         addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 34),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -392,8 +387,7 @@ final class QueueRowView: NSTableRowView {
     }
 }
 
-/// A queue table cell: one text field, or the playing indicator, at the bottom of the row so a
-/// section strip can sit above it.
+/// A queue table cell: one text field, or the playing indicator.
 final class QueueCellView: NSTableCellView {
     static let reuse = NSUserInterfaceItemIdentifier("up-next-cell")
     private let field = NSTextField(labelWithString: "")
@@ -412,13 +406,12 @@ final class QueueCellView: NSTableCellView {
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
         addSubview(icon)
         textField = field
-        let rowHeight = UpNextTable.Coordinator.rowHeight
         NSLayoutConstraint.activate([
             field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
-            field.centerYAnchor.constraint(equalTo: bottomAnchor, constant: -rowHeight / 2),
+            field.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.centerXAnchor.constraint(equalTo: centerXAnchor),
-            icon.centerYAnchor.constraint(equalTo: bottomAnchor, constant: -rowHeight / 2),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 

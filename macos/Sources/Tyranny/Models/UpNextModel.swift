@@ -235,14 +235,20 @@ final class UpNextModel {
     /// nil on success. The caller (the sheet) shows it.
     func savePlaylist(name: String) async -> String? {
         guard let player, player.canMutate else { return "Wait for the current command to finish." }
-        do {
-            let _: PlaylistApplied = try await edit("save_upcoming", fields: { state in
-                ["expected_revision": .uint(state.queue_revision),
-                 "expected_playlists_revision": .uint(state.playlists_revision), "name": .string(name)] })
-            player.message = "Saved \"\(name)\" as a playlist."
-            return nil
-        } catch {
-            return error.localizedDescription
+        // Through `mutate`, so the model is busy and Clear and Shuffle are disabled meanwhile.
+        return await withCheckedContinuation { continuation in
+            player.mutate { [weak self] in
+                do {
+                    guard let self else { throw CancellationError() }
+                    let _: PlaylistApplied = try await self.edit("save_upcoming", fields: { state in
+                        ["expected_revision": .uint(state.queue_revision),
+                         "expected_playlists_revision": .uint(state.playlists_revision), "name": .string(name)] })
+                    player.message = "Saved \"\(name)\" as a playlist."
+                    continuation.resume(returning: nil)
+                } catch {
+                    continuation.resume(returning: error.localizedDescription)
+                }
+            }
         }
     }
 
@@ -272,7 +278,19 @@ final class UpNextModel {
 
     /// Starts a drag of the selected rows (or the dragged row when it is not selected).
     func beginDrag(ids: [UInt64]) -> String? {
-        guard let player, let state = player.snapshot, player.canMutate, !ids.isEmpty, ids.count <= 500 else { return nil }
+        guard let player else { return nil }
+        guard ids.count <= 500 else {
+            player.message = "Select 500 or fewer rows to drag."
+            return nil
+        }
+        guard !ids.isEmpty, let state = player.snapshot else {
+            player.message = "Wait for Up Next to load, then drag again."
+            return nil
+        }
+        guard player.canMutate else {
+            player.message = "Wait for the current command to finish, then drag again."
+            return nil
+        }
         let drag = TrackDrag(token: UUID().uuidString, connection: player.playlistConnectionGeneration,
                              source: .queue, ids: ids, positions: [], revision: state.queue_revision,
                              libraryRevision: state.library.revision)
