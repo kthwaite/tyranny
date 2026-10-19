@@ -281,7 +281,7 @@ final class AlbumGridModel {
         }
     }
 
-    /// Regular playlists from the loaded catalog.
+    /// Regular playlists from the same catalog the Add to Playlist picker lists (all loaded windows).
     var regularPlaylists: [Playlist] { player?.savedPlaylists.rows.filter { !$0.isSmart } ?? [] }
 
     // MARK: Fetching

@@ -262,5 +262,6 @@ struct AlbumExpansionContent: View {
         }
         .controlSize(.small)
         .disabled(!player.canMutate)
+        .onAppear { player.savedPlaylists.loadAll() }
     }
 }

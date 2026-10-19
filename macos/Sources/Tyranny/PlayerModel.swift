@@ -303,10 +303,20 @@ final class PlayerModel {
                 let generation = session
                 lastRootsRefresh = Date()
                 do {
-                    let page: Page<Root> = try await request("library_roots", [
-                        "offset": .int(0), "limit": .int(Self.catalogLimit), "revision": .null, "query": .string("")])
-                    guard generation == session, connected else { continue }
-                    roots = page
+                    // Every page, so no folder is hidden from Settings.
+                    var all: [Root] = []
+                    var last: Page<Root>?
+                    repeat {
+                        let page: Page<Root> = try await request("library_roots", [
+                            "offset": .int(all.count), "limit": .int(Self.catalogLimit),
+                            "revision": last.map { JSONValue.uint($0.revision) } ?? .null, "query": .string("")])
+                        guard generation == session, connected else { break }
+                        all += page.entries
+                        last = page
+                        if page.entries.isEmpty { break }
+                    } while all.count < (last?.total ?? 0)
+                    guard generation == session, connected, let last else { continue }
+                    roots = Page(revision: last.revision, total: last.total, offset: 0, entries: all)
                 } catch {
                     guard generation == session, connected else { continue }
                     message = error.localizedDescription
