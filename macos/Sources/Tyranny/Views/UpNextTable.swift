@@ -14,7 +14,8 @@ struct UpNextTable: NSViewRepresentable {
     /// Read in the parent's body so SwiftUI updates the table when they change.
     let generation: UInt64
     let epoch: UInt64
-    let currentID: UInt64?
+    /// The current entry, its position and the shuffle state: what decides the sections.
+    let context: QueueContext
 
     static let identifier = "up-next-table"
 
@@ -108,7 +109,7 @@ struct UpNextTable: NSViewRepresentable {
         private var updating = false
         private var shownGeneration: UInt64?
         private var shownEpoch: UInt64?
-        private var shownCurrent: UInt64?
+        private var shownContext: QueueContext?
         private var shownCount = -1
         private var focusCurrent = true
         private var shownRefreshes: UInt64 = 0
@@ -131,11 +132,11 @@ struct UpNextTable: NSViewRepresentable {
             guard let table else { return }
             let count = cache.total
             if parent.generation != shownGeneration || parent.epoch != shownEpoch
-                || parent.currentID != shownCurrent || count != shownCount {
+                || parent.context != shownContext || count != shownCount {
                 let epochChanged = parent.epoch != shownEpoch
                 shownGeneration = parent.generation
                 shownEpoch = parent.epoch
-                shownCurrent = parent.currentID
+                shownContext = parent.context
                 shownCount = count
                 if epochChanged {
                     reported = nil
@@ -172,7 +173,7 @@ struct UpNextTable: NSViewRepresentable {
         private func focusCurrentEntry(_ table: NSTableView) {
             guard focusCurrent, cache.loadedRow(at: 0) != nil else { return }
             focusCurrent = false
-            guard let current = parent.currentID, let position = cache.position(of: current),
+            guard let current = parent.context.currentID, let position = cache.position(of: current),
                   let scroll = table.enclosingScrollView, position > 0 else { return }
             let y = table.rect(ofRow: position - 1).minY
             scroll.contentView.scroll(to: NSPoint(x: scroll.contentView.bounds.origin.x, y: y))
@@ -206,8 +207,8 @@ struct UpNextTable: NSViewRepresentable {
             guard let item = cache.loadedRow(at: position) else { return nil }
             let starts = UpNextSections.startsSection(
                 item: item, previous: position > 0 ? cache.loadedRow(at: position - 1) : nil,
-                position: position, currentID: parent.currentID)
-            return starts ? UpNextSections.section(of: item, currentID: parent.currentID) : nil
+                position: position, in: parent.context)
+            return starts ? UpNextSections.section(of: item, at: position, in: parent.context) : nil
         }
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -233,7 +234,7 @@ struct UpNextTable: NSViewRepresentable {
                 cell.toolTip = nil
                 return cell
             }
-            let section = UpNextSections.section(of: item, currentID: parent.currentID)
+            let section = UpNextSections.section(of: item, at: row, in: parent.context)
             let identifier = "\(UpNextTable.identifier)-cell-\(item.id)-\(id)"
             if id == "status" {
                 cell.showPlaying(section == .nowPlaying, identifier: identifier)

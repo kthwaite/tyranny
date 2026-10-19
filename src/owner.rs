@@ -619,6 +619,8 @@ impl Actor {
             underruns: 0,
             library: library.state(),
             history_revision,
+            current_index: None,
+            upcoming_count: 0,
         };
         let mut actor = Self {
             player,
@@ -666,6 +668,7 @@ impl Actor {
         let now_playing = state
             .now_playing
             .map(|now| self.describe(now, library.revision));
+        let (current_index, upcoming_count) = self.player.upcoming_summary(state.current_id);
         ControlState {
             sequence: self.last.sequence,
             queue_revision: state.queue_revision,
@@ -683,6 +686,8 @@ impl Actor {
             underruns: state.output.underruns,
             library,
             history_revision: self.history_revision,
+            current_index,
+            upcoming_count,
         }
     }
     /// Adds the indexed track, album and format to the player's metadata. The

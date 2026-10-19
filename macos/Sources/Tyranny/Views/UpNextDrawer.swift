@@ -5,8 +5,6 @@ import TyrannyCore
 /// that appends dropped tracks.
 struct UpNextDrawer: View {
     static let width: CGFloat = 244
-    /// Upcoming rows the drawer lists; the rest show as "and N more".
-    private static let rowLimit = 100
 
     let model: UpNextModel
     let player: PlayerModel
@@ -67,7 +65,7 @@ struct UpNextDrawer: View {
     // MARK: Upcoming
 
     private var upcomingList: some View {
-        let rows = model.upcoming(limit: Self.rowLimit)
+        let rows = model.upcoming(limit: UpNextModel.drawerLimit)
         let more = max(0, (model.upcomingCount ?? rows.count) - rows.count)
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {

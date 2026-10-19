@@ -1044,6 +1044,47 @@ async fn save_upcoming_creates_regular_playlist() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upcoming_follows_the_shuffle_state() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    append_long(&scratch, &mut client, &["Skipped", "Current", "Later"]).await;
+    assert_eq!(
+        (client.state.current_index, client.state.upcoming_count),
+        (None, 3)
+    );
+    // Entry 1 is skipped: it stays unplayed before the current entry.
+    ok(&mut client, json!({"command":"play","entry_id":2})).await;
+    assert_eq!(
+        ids_and_played(&whole_queue(&mut client).await),
+        [(1, false), (2, true), (3, false)]
+    );
+    // Shuffle off: only the entry after the current one is upcoming.
+    assert_eq!(
+        (client.state.current_index, client.state.upcoming_count),
+        (Some(1), 1)
+    );
+    // Shuffle on: every unplayed entry other than the current one.
+    ok(&mut client, json!({"command":"set_shuffle","enabled":true})).await;
+    assert_eq!(
+        (client.state.current_index, client.state.upcoming_count),
+        (Some(1), 2)
+    );
+    let expected = client.state.queue_revision;
+    ok(
+        &mut client,
+        json!({"command":"clear_upcoming","expected_revision":expected}),
+    )
+    .await;
+    assert_eq!(ids_and_played(&whole_queue(&mut client).await), [(2, true)]);
+    assert_eq!(
+        (client.state.current_index, client.state.upcoming_count),
+        (Some(0), 0)
+    );
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn played_prefix_is_trimmed_to_100() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;

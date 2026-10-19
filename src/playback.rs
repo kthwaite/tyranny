@@ -907,8 +907,19 @@ impl Player {
         self.relocate_decoder(current);
     }
 
-    /// The current entry, and per queue index whether the entry is upcoming:
-    /// after the current one, or with nothing current, unplayed.
+    /// Whether the entry at `index` is upcoming, given the current entry's
+    /// index. Shuffle off: after the current entry in queue order. Shuffle on:
+    /// unplayed and not current. Nothing current: unplayed.
+    fn is_upcoming(&self, current: Option<usize>, index: usize, entry: &Entry) -> bool {
+        match current {
+            Some(current) if !self.shuffled => index > current,
+            Some(current) => index != current && !entry.played,
+            None => !entry.played,
+        }
+    }
+
+    /// The current entry, and per queue index whether the entry is upcoming
+    /// (see `is_upcoming`).
     fn upcoming(&self) -> Result<(Option<u64>, Option<usize>, Vec<bool>)> {
         let anchor = self.snapshot().current_id;
         let current = anchor.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
@@ -918,9 +929,22 @@ impl Player {
             self.queue
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| current.map_or(!entry.played, |current| index > current)),
+                .map(|(index, entry)| self.is_upcoming(current, index, entry)),
         );
         Ok((anchor, current, upcoming))
+    }
+
+    /// The queue index of `current`, the entry the snapshot names current, and
+    /// the number of upcoming entries (see `upcoming`). Allocates nothing.
+    pub(crate) fn upcoming_summary(&self, current: Option<u64>) -> (Option<usize>, usize) {
+        let index = current.and_then(|id| self.queue.iter().position(|entry| entry.id == id));
+        let count = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(position, entry)| self.is_upcoming(index, *position, entry))
+            .count();
+        (index, count)
     }
 
     /// The upcoming entries in queue order (see `upcoming`).
@@ -1827,6 +1851,89 @@ mod batch_tests {
         assert_eq!(prepared.removed(), [1, 3]);
         player.commit_remove_batch(prepared);
         assert_eq!(player.queue_ids(), [2]);
+        Ok(())
+    }
+    #[test]
+    fn upcoming_follows_queue_order_without_shuffle_and_played_marks_with_it() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let skipped = source(&scratch.0, "skipped.wav", 97, 500);
+        let current = source(&scratch.0, "current.wav", 48_000, 1000);
+        let later = source(&scratch.0, "later.wav", 311, 2000);
+        let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
+            id,
+            path: path.clone(),
+            run: None,
+            played_seq: played.then_some(id),
+        };
+        let open = |name: &str| -> Result<Player> {
+            // Entry 1 was skipped (unplayed) before the current entry 2.
+            let mut player = Player::from_loaded(
+                vec![
+                    loaded(1, &skipped, false),
+                    loaded(2, &current, true),
+                    loaded(3, &later, false),
+                ],
+                1,
+                4,
+                OutputConfig::Capture {
+                    path: scratch.0.join(name),
+                    clocked: true,
+                },
+                GainMode::Off,
+            )?;
+            let selection = player.prepare_selection(2, 0, GainMode::Off)?;
+            player.commit_selection(selection);
+            Ok(player)
+        };
+
+        // Shuffle off: only entries after the current one, in queue order.
+        let mut player = open("off.f32")?;
+        assert_eq!(player.upcoming_ids()?, [3]);
+        assert_eq!(player.upcoming_summary(Some(2)), (Some(1), 1));
+        let prepared = player.prepare_clear_upcoming(1)?.unwrap();
+        assert_eq!(prepared.removed(), [3]);
+        player.commit_remove_batch(prepared);
+        assert_eq!(player.queue_ids(), [1, 2]);
+        assert_eq!(player.upcoming_summary(Some(2)), (Some(1), 0));
+        drop(player);
+
+        // Shuffle on: every unplayed entry other than the current one.
+        let mut player = open("on.f32")?;
+        player.set_shuffle(Some(Box::new(First)));
+        assert_eq!(player.upcoming_ids()?, [1, 3]);
+        assert_eq!(player.upcoming_summary(Some(2)), (Some(1), 2));
+        let prepared = player.prepare_clear_upcoming(1)?.unwrap();
+        assert_eq!(prepared.removed(), [1, 3]);
+        player.commit_remove_batch(prepared);
+        assert_eq!(player.queue_ids(), [2]);
+        assert_eq!(player.upcoming_summary(Some(2)), (Some(0), 0));
+        drop(player);
+
+        // Shuffle on, Replace Upcoming removes the skipped entry too.
+        let mut player = open("replace.f32")?;
+        player.set_shuffle(Some(Box::new(First)));
+        let prepared = player.prepare_replace_upcoming(
+            vec![later.clone()].into_iter(),
+            Placement::ReplaceUpcoming,
+            1,
+            None,
+            RepeatScope::Queue,
+            &[],
+        )?;
+        assert_eq!(prepared.removed(), [1, 3]);
+        player.commit_replace_upcoming(prepared);
+        assert_eq!(player.queue_ids(), [2, 4]);
+        drop(player);
+
+        // Nothing current: every unplayed entry, whatever the shuffle state.
+        let mut player = open("idle.f32")?;
+        player.stop();
+        assert_eq!(player.upcoming_summary(None), (None, 2));
+        player.set_shuffle(Some(Box::new(First)));
+        assert_eq!(player.upcoming_ids()?, [1, 3]);
+        assert_eq!(player.upcoming_summary(None), (None, 2));
         Ok(())
     }
     #[test]

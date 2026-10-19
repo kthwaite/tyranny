@@ -59,12 +59,17 @@ public struct ControlState: Codable, Sendable, Equatable {
     public let underruns: UInt64
     public let library: LibraryState
     public let history_revision: UInt64
+    /// The queue position of `current_id`; nil with nothing current.
+    public let current_index: Int?
+    /// The upcoming entries, by the server's shuffle-aware rule (see `UpNextSections`).
+    public let upcoming_count: Int
 
     public init(
         sequence: UInt64, queue_revision: UInt64, playlists_revision: UInt64, queue_length: Int,
         current_id: UInt64?, can_next: Bool, can_previous: Bool, now_playing: NowPlaying?,
         position_frames: UInt64, sample_rate: UInt32, transport: String, settings: PlayerSettings,
-        error: String?, underruns: UInt64, library: LibraryState, history_revision: UInt64
+        error: String?, underruns: UInt64, library: LibraryState, history_revision: UInt64,
+        current_index: Int?, upcoming_count: Int
     ) {
         self.sequence = sequence
         self.queue_revision = queue_revision
@@ -82,13 +87,15 @@ public struct ControlState: Codable, Sendable, Equatable {
         self.underruns = underruns
         self.library = library
         self.history_revision = history_revision
+        self.current_index = current_index
+        self.upcoming_count = upcoming_count
     }
 
     private enum CodingKeys: String, CodingKey {
         case sequence, queue_revision, queue_length, current_id, can_next, can_previous, now_playing
         case playlists_revision
         case position_frames, sample_rate, transport, settings, error, underruns, library
-        case history_revision
+        case history_revision, current_index, upcoming_count
     }
 
     public init(from decoder: any Decoder) throws {
@@ -109,6 +116,8 @@ public struct ControlState: Codable, Sendable, Equatable {
         underruns = try values.decode(UInt64.self, forKey: .underruns)
         library = try values.decode(LibraryState.self, forKey: .library)
         history_revision = try values.decode(UInt64.self, forKey: .history_revision)
+        current_index = try values.decode(Int?.self, forKey: .current_index)
+        upcoming_count = try values.decode(Int.self, forKey: .upcoming_count)
         guard now_playing?.entry_id == current_id else {
             throw DecodingError.dataCorruptedError(
                 forKey: .now_playing, in: values,

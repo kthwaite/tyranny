@@ -5,8 +5,9 @@ import TyrannyCore
 /// The queue as the Up Next view and the drawer show it.
 ///
 /// Two window caches read `queue_page`: `cache` for the Up Next view (only while it is shown) and
-/// `drawer` for the drawer and the sidebar count (always, near the start of the queue). Sections
-/// come from `QueueItem.played` and `current_id`, never from the queue position.
+/// `drawer` for the drawer (always: after the current entry with shuffle off, else from the start
+/// of the queue). Sections follow the server's shuffle-aware rule (`UpNextSections`); the counts
+/// come from the snapshot's `upcoming_count`.
 ///
 /// `sync()` follows the connection and three counters. A change of the queue revision, the
 /// library revision (display fields come from the library) or `current_id` (played marks and
@@ -36,8 +37,11 @@ final class UpNextModel {
     @ObservationIgnored private var queueRevision: UInt64?
     @ObservationIgnored private var libraryRevision: UInt64?
     @ObservationIgnored private var currentID: UInt64?
-    @ObservationIgnored private var countMemo: (generation: UInt64, value: Int?)?
-    @ObservationIgnored private var drawerCurrent: UInt64?
+    /// The queue positions the drawer last asked for.
+    @ObservationIgnored private var drawerRange: Range<Int>?
+
+    /// Upcoming rows the drawer lists; the rest show as "and N more".
+    static let drawerLimit = 100
 
     init() {
         cache = ListWindowCache { _, _, _ in throw WindowFetchError.failed("not started") }
@@ -84,13 +88,18 @@ final class UpNextModel {
             needsReset = false
             queueRevision = queue; libraryRevision = library; currentID = current
             drawer.reset(fetch: makeFetch())
-            drawer.visible(0..<1)
+            drawerRange = nil
             viewStale = true
             if viewShown { resetView() }
         } else if queue != queueRevision || library != libraryRevision || current != currentID {
             queueRevision = queue; libraryRevision = library; currentID = current
             drawer.serverRevisionChanged(queue, anchor: nil)
             if viewShown { cache.serverRevisionChanged(queue, anchor: anchorID) } else { viewStale = true }
+        }
+        let range = UpNextSections.drawerRange(in: QueueContext(snapshot), limit: Self.drawerLimit)
+        if range != drawerRange {
+            drawerRange = range
+            drawer.visible(range)
         }
     }
 
@@ -132,41 +141,15 @@ final class UpNextModel {
 
     // MARK: Reading
 
-    var currentEntryID: UInt64? { player?.snapshot?.current_id }
+    /// The current entry, its queue position and the shuffle state, from the snapshot.
+    var context: QueueContext { QueueContext(player?.snapshot) }
 
-    func section(of item: QueueItem) -> QueueSection {
-        UpNextSections.section(of: item, currentID: currentEntryID)
-    }
+    /// Entries still to play, as the server counts them. nil without a snapshot.
+    var upcomingCount: Int? { player?.snapshot?.upcoming_count }
 
-    /// Entries still to play. nil until the start of the queue is loaded. Played entries sit
-    /// near the start (the server keeps at most 100 and trims from the front).
-    var upcomingCount: Int? {
-        let generation = drawer.generation
-        if let memo = countMemo, memo.generation == generation { return memo.value }
-        let value = computeCount()
-        countMemo = (generation, value)
-        return value
-    }
-
-    private func computeCount() -> Int? {
-        guard drawer.revision != nil, drawer.loadedRow(at: 0) != nil || drawer.total == 0 else { return nil }
-        let current = player?.snapshot?.current_id
-        let played = drawer.loadedRows().reduce(0) { count, entry in
-            count + (entry.row.played && entry.row.id != current ? 1 : 0)
-        }
-        let hasCurrent = current != nil
-        return UpNextSections.upcomingCount(total: drawer.total, playedNotCurrent: played, hasCurrent: hasCurrent)
-    }
-
-    /// The drawer's upcoming entries among the loaded windows.
+    /// The drawer's upcoming entries among the loaded windows, in queue order.
     func upcoming(limit: Int) -> [QueueItem] {
-        let current = player?.snapshot?.current_id
-        var result: [QueueItem] = []
-        for (_, row) in drawer.loadedRows() where !row.played && row.id != current {
-            result.append(row)
-            if result.count == limit { break }
-        }
-        return result
+        UpNextSections.upcoming(drawer.loadedRows(), in: context, limit: limit)
     }
 
     // MARK: Selection

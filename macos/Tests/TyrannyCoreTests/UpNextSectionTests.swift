@@ -1,5 +1,28 @@
+import Foundation
 import Testing
 @testable import TyrannyCore
+
+/// A snapshot as the server sends it, with the queue fields that decide Up Next.
+func snapshot(currentID: UInt64?, currentIndex: Int?, upcoming: Int, shuffle: Bool,
+              queueLength: Int = 10) throws -> ControlState {
+    let current = currentID.map(String.init) ?? "null"
+    let index = currentIndex.map(String.init) ?? "null"
+    let playing = currentID.map {
+        #"{"entry_id":\#($0),"title":"T","artist":"A","album":"B","duration_frames":null,"metadata_error":null,"#
+            + #""track_id":null,"album_id":null,"format":"","gain_db":null}"#
+    } ?? "null"
+    let text = """
+        {"sequence":1,"queue_revision":4,"playlists_revision":1,"queue_length":\(queueLength),
+         "current_id":\(current),"can_next":true,"can_previous":true,"now_playing":\(playing),
+         "position_frames":0,"sample_rate":48000,"transport":"paused",
+         "settings":{"gain_mode":"off","resume_on_start":false,"volume":100,"repeat":"off","shuffle":\(shuffle)},
+         "error":null,"underruns":0,
+         "library":{"revision":1,"roots":0,"tracks":0,"duration_ms":0,"size_bytes":0,
+                    "scan":{"root_id":null,"phase":"idle","discovered":0,"processed":0,"total":null,"updated":0,"unchanged":0,"failures":0,"skipped":0,"last_error":null}},
+         "history_revision":0,"current_index":\(index),"upcoming_count":\(upcoming)}
+        """
+    return try JSONDecoder().decode(ControlState.self, from: Data(text.utf8))
+}
 
 @Suite struct UpNextSectionTests {
     private func item(_ id: UInt64, played: Bool, source: QueueSource? = nil) -> QueueItem {
@@ -7,49 +30,80 @@ import Testing
                   title: "T\(id)", artist: "A", album: "B", album_id: 1, duration_ms: 1000)
     }
 
-    @Test func playedNotCurrentIsHistory() {
-        #expect(UpNextSections.section(of: item(1, played: true), currentID: 2) == .history)
-    }
+    private let off = QueueContext(currentID: 2, currentIndex: 1, shuffle: false)
+    private let on = QueueContext(currentID: 2, currentIndex: 1, shuffle: true)
 
     @Test func currentIsNowPlayingEvenWhenPlayed() {
-        #expect(UpNextSections.section(of: item(2, played: true), currentID: 2) == .nowPlaying)
-        #expect(UpNextSections.section(of: item(2, played: false), currentID: 2) == .nowPlaying)
+        for context in [off, on] {
+            #expect(UpNextSections.section(of: item(2, played: true), at: 1, in: context) == .nowPlaying)
+            #expect(UpNextSections.section(of: item(2, played: false), at: 1, in: context) == .nowPlaying)
+        }
     }
 
-    @Test func unplayedNotCurrentIsUpNext() {
-        #expect(UpNextSections.section(of: item(3, played: false), currentID: 2) == .upNext)
+    /// Shuffle off: the queue order decides. Every entry before the current one is HISTORY,
+    /// played or skipped; every entry after it is UP NEXT, played or not.
+    @Test func withoutShuffleSectionsFollowTheQueueOrder() {
+        let queue = [item(7, played: false), item(2, played: true), item(5, played: true), item(4, played: false)]
+        let sections = queue.enumerated().map { UpNextSections.section(of: $1, at: $0, in: off) }
+        #expect(sections == [.history, .nowPlaying, .upNext, .upNext])
+    }
+
+    /// Shuffle on: the played marks decide. A skipped entry before the current one is still to
+    /// play; a played entry after it is history.
+    @Test func withShuffleSectionsFollowThePlayedMarks() {
+        let queue = [item(7, played: false), item(2, played: true), item(5, played: true), item(4, played: false)]
+        let sections = queue.enumerated().map { UpNextSections.section(of: $1, at: $0, in: on) }
+        #expect(sections == [.upNext, .nowPlaying, .history, .upNext])
     }
 
     @Test func noCurrentEntrySplitsOnPlayedOnly() {
-        #expect(UpNextSections.section(of: item(1, played: true), currentID: nil) == .history)
-        #expect(UpNextSections.section(of: item(1, played: false), currentID: nil) == .upNext)
+        for shuffle in [false, true] {
+            let none = QueueContext(currentID: nil, currentIndex: nil, shuffle: shuffle)
+            #expect(UpNextSections.section(of: item(1, played: true), at: 3, in: none) == .history)
+            #expect(UpNextSections.section(of: item(1, played: false), at: 0, in: none) == .upNext)
+        }
     }
 
-    /// Shuffle and Previous leave played entries after the current one, and unplayed ones before
-    /// it. Sections follow the flags, never the position.
-    @Test func sectionsIgnoreQueuePositionUnderShuffle() {
-        let queue = [item(7, played: false), item(3, played: true), item(5, played: false),
-                     item(9, played: true), item(4, played: false)]
-        let sections = queue.map { UpNextSections.section(of: $0, currentID: 5) }
-        #expect(sections == [.upNext, .history, .nowPlaying, .history, .upNext])
+    @Test func contextComesFromTheSnapshot() throws {
+        let state = try snapshot(currentID: 5, currentIndex: 3, upcoming: 2, shuffle: true)
+        #expect(QueueContext(state) == QueueContext(currentID: 5, currentIndex: 3, shuffle: true))
+        #expect(QueueContext(nil) == QueueContext(currentID: nil, currentIndex: nil, shuffle: false))
     }
 
     @Test func headerStartsWhereTheSectionChanges() {
-        let queue = [item(7, played: false), item(3, played: true), item(5, played: false)]
-        func starts(_ index: Int) -> Bool {
+        let queue = [item(7, played: false), item(2, played: true), item(5, played: true), item(4, played: false)]
+        func starts(_ index: Int, _ context: QueueContext) -> Bool {
             UpNextSections.startsSection(item: queue[index], previous: index > 0 ? queue[index - 1] : nil,
-                                         position: index, currentID: 5)
+                                         position: index, in: context)
         }
-        #expect(starts(0))
-        #expect(starts(1))
-        #expect(starts(2))
-        let same = [item(1, played: true), item(2, played: true)]
-        #expect(!UpNextSections.startsSection(item: same[1], previous: same[0], position: 1, currentID: 9))
+        #expect([0, 1, 2, 3].map { starts($0, off) } == [true, true, true, false])
+        #expect([0, 1, 2, 3].map { starts($0, on) } == [true, true, true, true])
     }
 
     @Test func headerWaitsForAnUnloadedNeighbour() {
-        #expect(!UpNextSections.startsSection(item: item(4, played: false), previous: nil, position: 40, currentID: 2))
-        #expect(UpNextSections.startsSection(item: item(4, played: false), previous: nil, position: 0, currentID: 2))
+        #expect(!UpNextSections.startsSection(item: item(4, played: false), previous: nil, position: 40, in: off))
+        #expect(UpNextSections.startsSection(item: item(4, played: false), previous: nil, position: 0, in: off))
+    }
+
+    /// The drawer lists the UP NEXT section among the loaded rows, in queue order.
+    @Test func upcomingRowsFollowTheSameRule() {
+        let rows = [item(7, played: false), item(2, played: true), item(5, played: true), item(4, played: false)]
+            .enumerated().map { (position: $0, row: $1) }
+        #expect(UpNextSections.upcoming(rows, in: off, limit: 10).map(\.id) == [5, 4])
+        #expect(UpNextSections.upcoming(rows, in: on, limit: 10).map(\.id) == [7, 4])
+        #expect(UpNextSections.upcoming(rows, in: off, limit: 1).map(\.id) == [5])
+        let none = QueueContext(currentID: nil, currentIndex: nil, shuffle: false)
+        #expect(UpNextSections.upcoming(rows, in: none, limit: 10).map(\.id) == [7, 4])
+    }
+
+    /// Shuffle off, the drawer reads the rows after the current entry; otherwise from the start.
+    @Test func drawerWindowStartsAfterTheCurrentEntryWithoutShuffle() {
+        #expect(UpNextSections.drawerRange(in: QueueContext(currentID: 9, currentIndex: 450, shuffle: false),
+                                           limit: 100) == 451..<551)
+        #expect(UpNextSections.drawerRange(in: QueueContext(currentID: 9, currentIndex: 450, shuffle: true),
+                                           limit: 100) == 0..<100)
+        #expect(UpNextSections.drawerRange(in: QueueContext(currentID: nil, currentIndex: nil, shuffle: false),
+                                           limit: 100) == 0..<100)
     }
 
     @Test func sectionTitles() {
@@ -69,12 +123,5 @@ import Testing
         #expect(label(.drag, "Songs") == "Dragged from Songs")
         #expect(label(.direct, "") == "")
         #expect(UpNextSections.addedFrom(nil) == "")
-    }
-
-    @Test func upcomingCountSubtractsPlayedAndCurrent() {
-        #expect(UpNextSections.upcomingCount(total: 10, playedNotCurrent: 3, hasCurrent: true) == 6)
-        #expect(UpNextSections.upcomingCount(total: 10, playedNotCurrent: 3, hasCurrent: false) == 7)
-        #expect(UpNextSections.upcomingCount(total: 1, playedNotCurrent: 0, hasCurrent: true) == 0)
-        #expect(UpNextSections.upcomingCount(total: 0, playedNotCurrent: 0, hasCurrent: false) == 0)
     }
 }

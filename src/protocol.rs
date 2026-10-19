@@ -67,8 +67,11 @@ pub enum Command {
     Clear {
         expected_revision: u64,
     },
-    /// Removes the entries after the current one, which keeps playing. With
-    /// nothing current, removes every unplayed entry.
+    /// Removes the upcoming entries; the current one keeps playing. Upcoming
+    /// means: with shuffle off, the entries after the current one in queue
+    /// order; with shuffle on, every unplayed entry other than the current one;
+    /// with nothing current, every unplayed entry. `ControlState::upcoming_count`
+    /// counts them.
     ClearUpcoming {
         expected_revision: u64,
     },
@@ -77,7 +80,8 @@ pub enum Command {
     ShuffleUpcoming {
         expected_revision: u64,
     },
-    /// Creates a regular playlist of the upcoming entries that have a library track.
+    /// Creates a regular playlist of the upcoming entries (as `ClearUpcoming`
+    /// defines them) that have a library track, in queue order.
     SaveUpcoming {
         expected_revision: u64,
         expected_playlists_revision: u64,
@@ -321,8 +325,8 @@ pub enum Placement {
     Append,
     /// Straight after the current entry, or last when nothing is current.
     Next,
-    /// After removing every entry after the current one. With nothing current,
-    /// every unplayed entry is removed.
+    /// After removing the upcoming entries (as `Command::ClearUpcoming`
+    /// defines them), after the last kept entry.
     ReplaceUpcoming,
 }
 
@@ -435,6 +439,10 @@ pub struct ControlState {
     pub library: LibraryState,
     /// The newest play history ID, or 0. It changes when a play is counted.
     pub history_revision: u64,
+    /// The queue position of `current_id`; `None` with nothing current.
+    pub current_index: Option<usize>,
+    /// The upcoming entries, as `Command::ClearUpcoming` defines them.
+    pub upcoming_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -93,8 +93,7 @@ final class ActivationModel {
                 if let choice {
                     (placement, play) = (choice.placement, true)
                 } else {
-                    let upcoming = job.action == .play
-                        ? try await player.hasUpcoming(atQueueRevision: state.queue_revision) : false
+                    let upcoming = job.action == .play && UpNext.hasUpcoming(state)
                     switch ActivationPlan.make(job.action, policy: Self.policy, hasUpcoming: upcoming) {
                     case .ask:
                         prompt = Prompt(job: job)

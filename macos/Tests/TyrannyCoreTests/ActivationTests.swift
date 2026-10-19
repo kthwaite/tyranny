@@ -2,11 +2,6 @@ import Foundation
 import Testing
 @testable import TyrannyCore
 
-private func entry(_ id: UInt64, played: Bool = false) -> QueueItem {
-    QueueItem(id: id, path: "/m/\(id).flac", track_id: id, source: nil, run_id: nil, played: played,
-              title: "", artist: "", album: "", album_id: nil, duration_ms: nil)
-}
-
 @Suite struct ActivationPlanTests {
     @Test func addToUpNextAppendsAndPlayNextInsertsWithoutPlaying() {
         for policy in [UpNextPolicy.ask, .replace, .keep] {
@@ -69,47 +64,25 @@ private func entry(_ id: UInt64, played: Bool = false) -> QueueItem {
 }
 
 @Suite struct UpNextUpcomingTests {
-    @Test func theSnapshotAnswersEmptyAndLoneCurrentQueues() {
-        #expect(UpNext.quickAnswer(queueLength: 0, currentID: nil) == false)
-        #expect(UpNext.quickAnswer(queueLength: 1, currentID: 5) == false)
-        #expect(UpNext.quickAnswer(queueLength: 1, currentID: nil) == nil)
-        #expect(UpNext.quickAnswer(queueLength: 3, currentID: 5) == nil)
+    /// The server counts upcoming entries with the shuffle-aware rule; the snapshot answers.
+    @Test func theSnapshotCountAnswersForBothShuffleStates() throws {
+        // Shuffle off, the current entry last: a skipped entry before it is not upcoming.
+        #expect(UpNext.hasUpcoming(try snapshot(currentID: 3, currentIndex: 2, upcoming: 0, shuffle: false,
+                                                queueLength: 3)) == false)
+        // Shuffle on, the same queue: the skipped entry is upcoming.
+        #expect(UpNext.hasUpcoming(try snapshot(currentID: 3, currentIndex: 2, upcoming: 1, shuffle: true,
+                                                queueLength: 3)) == true)
+        #expect(UpNext.hasUpcoming(try snapshot(currentID: nil, currentIndex: nil, upcoming: 2, shuffle: false)))
+        #expect(!UpNext.hasUpcoming(try snapshot(currentID: nil, currentIndex: nil, upcoming: 0, shuffle: true,
+                                                 queueLength: 0)))
     }
 
-    @Test func entriesAfterTheCurrentOneAreUpcoming() {
-        let queue = [entry(1, played: true), entry(2), entry(3)]
-        #expect(UpNext.hasUpcoming(total: 3, currentID: 2, loaded: queue) == true)
-        #expect(UpNext.hasUpcoming(total: 3, currentID: 3, loaded: queue) == false)
-    }
-
-    @Test func theCurrentEntryDecidesEvenWithUnplayedEntriesBeforeIt() {
-        // Shuffle can leave unplayed entries before the current one; the server counts only later ones.
-        let queue = [entry(1), entry(2, played: true), entry(3)]
-        #expect(UpNext.hasUpcoming(total: 3, currentID: 3, loaded: queue) == false)
-    }
-
-    @Test func withoutACurrentEntryUnplayedEntriesAreUpcoming() {
-        #expect(UpNext.hasUpcoming(total: 2, currentID: nil, loaded: [entry(1, played: true), entry(2, played: true)]) == false)
-        #expect(UpNext.hasUpcoming(total: 2, currentID: nil, loaded: [entry(1, played: true), entry(2)]) == true)
-        #expect(UpNext.hasUpcoming(total: 0, currentID: nil, loaded: []) == false)
-    }
-
-    @Test func aLongQueueNeedsMoreEntriesUntilItCanTell() {
-        // 600 entries, the current one at 550: the first 500 cannot tell.
-        let first = (1...500).map { entry(UInt64($0), played: true) }
-        #expect(UpNext.hasUpcoming(total: 600, currentID: 550, loaded: first) == nil)
-        #expect(UpNext.hasUpcoming(total: 600, currentID: nil, loaded: first) == nil)
-        let all = first + (501...600).map { entry(UInt64($0), played: $0 < 550) }
-        #expect(UpNext.hasUpcoming(total: 600, currentID: 550, loaded: all) == true)
-        #expect(UpNext.hasUpcoming(total: 600, currentID: 600, loaded: all) == false)
-        // An unplayed entry among the first is enough without a current entry.
-        #expect(UpNext.hasUpcoming(total: 600, currentID: nil, loaded: [entry(1, played: true), entry(2)]) == true)
-    }
-
-    @Test func aCurrentEntryOutsideTheQueueFallsBackToPlayedMarks() {
-        let queue = [entry(1, played: true), entry(2)]
-        #expect(UpNext.hasUpcoming(total: 2, currentID: 99, loaded: queue) == true)
-        #expect(UpNext.hasUpcoming(total: 2, currentID: 99, loaded: [entry(1, played: true), entry(2, played: true)]) == false)
+    @Test func snapshotDecodesTheUpcomingFields() throws {
+        let state = try snapshot(currentID: 4, currentIndex: 7, upcoming: 12, shuffle: true)
+        #expect(state.current_index == 7)
+        #expect(state.upcoming_count == 12)
+        let idle = try snapshot(currentID: nil, currentIndex: nil, upcoming: 0, shuffle: false)
+        #expect(idle.current_index == nil)
     }
 }
 
@@ -167,18 +140,6 @@ private func entry(_ id: UInt64, played: Bool = false) -> QueueItem {
             #expect(ActivationPlan.make(.play, policy: policy, hasUpcoming: true) == .ask)
         }
         #expect(ActivationPlan.make(.play, policy: .keep, hasUpcoming: true) == .enqueue(placement: .next, play: true))
-    }
-
-    @Test func theScanStopsAtTheFirstPageThatDecidesAndKeepsNothing() {
-        var scan = UpNext.Scan(currentID: 3)
-        let first = (1...500).map { entry(UInt64($0), played: $0 < 3) }
-        #expect(scan.feed(first, total: 900) == true)
-        var long = UpNext.Scan(currentID: 700)
-        #expect(long.feed(first, total: 900) == nil)
-        #expect(long.feed((501...900).map { entry(UInt64($0)) }, total: 900) == true)
-        var last = UpNext.Scan(currentID: 900)
-        #expect(last.feed(first, total: 900) == nil)
-        #expect(last.feed((501...900).map { entry(UInt64($0)) }, total: 900) == false)
     }
 }
 

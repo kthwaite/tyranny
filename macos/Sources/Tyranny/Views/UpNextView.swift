@@ -16,7 +16,7 @@ struct UpNextView: View {
             header
             Divider()
             UpNextTable(model: model, player: player, generation: model.cache.generation, epoch: model.epoch,
-                        currentID: player.snapshot?.current_id)
+                        context: model.context)
                 .overlay {
                     if model.cache.revision != nil, model.cache.total == 0 {
                         Text("Nothing in Up Next")
