@@ -123,6 +123,26 @@ public enum DisplayFormat {
     }
 }
 
+extension DisplayFormat {
+    /// An album block's facts lines: title; year · genre; tracks · length; format.
+    /// Empty lines are left out.
+    public static func albumFacts(_ album: AlbumSummary) -> [String] {
+        let when = [album.year.map(String.init), album.genre.isEmpty ? nil : album.genre]
+            .compactMap { $0 }.joined(separator: " · ")
+        let tracks = "\(count(album.track_count)) \(album.track_count == 1 ? "track" : "tracks")"
+        let length = "\(tracks) · \(clock(Double(album.duration_ms) / 1000))"
+        return [album.title, when, length, album.format].enumerated()
+            .filter { $0.offset == 0 || !$0.element.isEmpty }.map(\.element)
+    }
+
+    /// An artist header's counts: "1 album · 5 tracks". Without an album count, the tracks only.
+    public static func artistHeaderCounts(albums: Int?, tracks: Int) -> String {
+        let trackText = "\(count(tracks)) \(tracks == 1 ? "track" : "tracks")"
+        guard let albums else { return trackText }
+        return "\(count(albums)) \(albums == 1 ? "album" : "albums") · \(trackText)"
+    }
+}
+
 extension RepeatMode {
     /// The toolbar toggle order: off → all → one → off.
     public var cycled: RepeatMode {

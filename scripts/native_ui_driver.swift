@@ -299,6 +299,36 @@ do {
             guard text == arguments[4] else {
                 throw DriverFailure(message: "Visible text mismatch for \(arguments[3]): \(String(describing: text))")
             }
+        case "choose":
+            // A pop-up button (SwiftUI menu Picker): open it, then press the item with the title.
+            guard arguments.count >= 5 else { throw DriverFailure(message: "Item title required") }
+            try check(AXUIElementPerformAction(control, kAXPressAction as CFString), "Open \(arguments[3])")
+            func item(_ element: AXUIElement, depth: Int) -> AXUIElement? {
+                guard depth < 8 else { return nil }
+                if attribute(element, kAXRoleAttribute) as? String == kAXMenuItemRole,
+                   attribute(element, kAXTitleAttribute) as? String == arguments[4] { return element }
+                for child in attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
+                    if let found = item(child, depth: depth + 1) { return found }
+                }
+                return nil
+            }
+            let deadline = ProcessInfo.processInfo.systemUptime + 3
+            var found: AXUIElement?
+            repeat {
+                found = item(control, depth: 0)
+                if found == nil { Thread.sleep(forTimeInterval: 0.05) }
+            } while found == nil && ProcessInfo.processInfo.systemUptime < deadline
+            guard let found else { throw DriverFailure(message: "Menu item missing: \(arguments[4])") }
+            try check(AXUIElementPerformAction(found, kAXPressAction as CFString), "Choose \(arguments[4])")
+        case "expect-row-count":
+            guard arguments.count >= 5, let expected = Int(arguments[4]) else {
+                throw DriverFailure(message: "Row count required")
+            }
+            var count: CFIndex = 0
+            try check(AXUIElementGetAttributeValueCount(control, kAXRowsAttribute as CFString, &count), "Count rows")
+            guard count == expected else {
+                throw DriverFailure(message: "Row count mismatch for \(arguments[3]): \(count), expected \(expected)")
+            }
         case "select":
             guard arguments.count >= 5,
                   let rows = attribute(control, kAXRowsAttribute) as? [AXUIElement] else { throw DriverFailure(message: "Selectable rows missing") }

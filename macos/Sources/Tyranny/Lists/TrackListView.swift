@@ -2,7 +2,8 @@ import SwiftUI
 import TyrannyCore
 
 /// A track-list destination: the view header, the optional column browser and the
-/// continuous table. Songs uses it now; the other track lists follow.
+/// continuous table, grouped by the destination's group setting (spec 4.3). Songs uses
+/// it now; the other track lists follow.
 struct TrackListView: View {
     let list: ListModel
     let player: PlayerModel
@@ -18,13 +19,16 @@ struct TrackListView: View {
                 Divider()
             }
             VirtualTrackTable(
-                list: list, player: player, generation: list.cache.generation, total: list.cache.total,
-                epoch: list.epoch, hidden: columns.hidden, playingTrackID: player.snapshot?.now_playing?.track_id)
+                list: list, player: player, generation: list.cache.generation, epoch: list.epoch,
+                layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden,
+                playingTrackID: player.snapshot?.now_playing?.track_id)
                 .overlay { emptyState }
+                .overlay(alignment: .bottom) { reorderHint }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("main-\(list.destination.key)")
         .onChange(of: syncKey, initial: true) { _, _ in list.sync() }
+        .onChange(of: layoutKey, initial: true) { _, _ in list.syncLayout() }
         .onChange(of: list.filterError, initial: true) { _, error in navigation.filterError = error }
         .onDisappear { navigation.filterError = nil }
         #if DEBUG
@@ -37,6 +41,19 @@ struct TrackListView: View {
                 library: player.snapshot?.library.revision, history: player.snapshot?.history_revision,
                 filter: navigation.filter, browser: navigation.columnBrowserVisible,
                 grouping: navigation.grouping(for: list.destination))
+    }
+
+    /// The cache's rows moved on: grouped lists fetch spans for them.
+    private var layoutKey: LayoutKey {
+        LayoutKey(epoch: list.epoch, revision: list.cache.revision, refreshes: list.cache.refreshes,
+                  connected: player.connected)
+    }
+
+    private struct LayoutKey: Equatable {
+        let epoch: UInt64
+        let revision: UInt64?
+        let refreshes: UInt64
+        let connected: Bool
     }
 
     private struct SyncKey: Equatable {
@@ -72,7 +89,6 @@ struct TrackListView: View {
             }
             .pickerStyle(.menu)
             .fixedSize()
-            .disabled(true)  // Grouping arrives in Task 7.
             .help("Group")
             .accessibilityIdentifier("group-control")
             Toggle(isOn: $navigation.columnBrowserVisible) {
@@ -105,6 +121,20 @@ struct TrackListView: View {
         let count = DisplayFormat.songs(list.cache.total)
         guard let total = list.filteredFrom else { return count }
         return "\(DisplayFormat.count(list.cache.total)) of \(DisplayFormat.songs(total))"
+    }
+
+    /// A refused reorder drop in a grouped or sorted regular playlist says how to reorder.
+    @ViewBuilder private var reorderHint: some View {
+        if list.reorderHintShown {
+            Text(PlaylistReorder.hint)
+                .font(.callout)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+                .padding(.bottom, 12)
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("playlist-reorder-hint")
+        }
     }
 
     @ViewBuilder private var emptyState: some View {

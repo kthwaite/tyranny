@@ -1,20 +1,26 @@
 import AppKit
+import Observation
 import SwiftUI
 import TyrannyCore
 
-/// A continuous, virtualized track table over a `ListModel` (spec 4.2, 7).
+/// A continuous, virtualized track table over a `ListModel` (spec 4.2, 4.3, 7).
 ///
-/// The table has `cache.total` rows. A row not loaded yet is a blank placeholder of the
-/// same height; drawing it requests its window. Scrolling reports the visible rows to
-/// the cache. Selection is held by row ID across reloads and revision changes; the
-/// first visible row stays in view after a refresh pass. Drags carry a `TrackSelection`.
+/// The table shows the list's `GroupLayout`: one row per position when ungrouped; artist
+/// headers, album blocks (tracks, fillers, a gap) or both when grouped. Display rows map to
+/// list positions through the layout everywhere: cells, selection, drag, activation and the
+/// visible range reported to the cache. A track row not loaded yet is a blank placeholder of
+/// the same height; drawing it requests its window. Headers, fillers and gaps are never
+/// selected, dragged or activated. Selection is held by row ID across reloads, revision
+/// changes and regrouping; the anchor row stays in view after a refresh pass once the
+/// layout matches the rows. Drags carry a `TrackSelection`.
 struct VirtualTrackTable: NSViewRepresentable {
     let list: ListModel
     let player: PlayerModel
     /// Read in the parent's body so SwiftUI updates the table when they change.
     let generation: UInt64
-    let total: Int
     let epoch: UInt64
+    let layoutToken: ListModel.LayoutToken
+    let factsGeneration: UInt64
     let hidden: Set<String>
     let playingTrackID: UInt64?
 
@@ -31,13 +37,23 @@ struct VirtualTrackTable: NSViewRepresentable {
         let table = NSTableView()
         table.setAccessibilityIdentifier(identifier)
         table.style = .fullWidth
-        table.rowHeight = 20
+        table.rowHeight = Coordinator.rowHeight
         table.intercellSpacing = NSSize(width: 6, height: 0)
         table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = true
         table.allowsEmptySelection = true
         table.allowsColumnReordering = true
+        table.floatsGroupRows = false
         table.columnAutoresizingStyle = .noColumnAutoresizing
+        let gutter = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(AlbumBlockCell.columnID))
+        gutter.title = ""
+        gutter.width = AlbumBlockCell.columnWidth
+        gutter.minWidth = AlbumBlockCell.columnWidth
+        gutter.maxWidth = AlbumBlockCell.columnWidth
+        gutter.resizingMask = []
+        gutter.headerToolTip = "Album"
+        gutter.isHidden = true
+        table.addTableColumn(gutter)
         for column in TrackColumns.all {
             let native = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.id))
             native.title = column.title
@@ -65,6 +81,10 @@ struct VirtualTrackTable: NSViewRepresentable {
         table.doubleAction = #selector(Coordinator.activateClickedRow(_:))
         table.setDraggingSourceOperationMask(.copy, forLocal: true)
         table.setDraggingSourceOperationMask([], forLocal: false)
+        if case .playlist = list.source {
+            // Own-row drops are reorder attempts (spec 4.3).
+            table.registerForDraggedTypes([NSPasteboard.PasteboardType(TrackDrag.type)])
+        }
         scroll.documentView = table
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
@@ -84,20 +104,29 @@ struct VirtualTrackTable: NSViewRepresentable {
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
         NotificationCenter.default.removeObserver(coordinator)
+        coordinator.releaseArtwork()
     }
 
     @MainActor final class Coordinator: NSObject, @MainActor NSTableViewDataSource, NSTableViewDelegate,
         @MainActor NSMenuDelegate {
+        static let rowHeight: CGFloat = 20
         var parent: VirtualTrackTable
         private weak var table: NSTableView?
         private weak var scroll: NSScrollView?
         private var updating = false
-        private var shownTotal = 0
+        /// The layout the table's rows show. Replaced only in `update`, with a reload.
+        private var layout = GroupLayout(grouping: .none, total: 0, spans: [])
+        private var shownLayout: ListModel.LayoutToken?
         private var shownGeneration: UInt64?
         private var shownEpoch: UInt64?
+        private var shownFacts: UInt64?
         private var shownPlaying: UInt64?
         private var shownHidden: Set<String>?
+        private var shownBlocks: Bool?
         private var reported: Range<Int>?
+        /// Album covers retained for the albums in view.
+        private var artwork: [UInt64: ArtworkRequest] = [:]
+        private var artworkObserved = false
         /// A drag in progress. Its pasteboard item is written for the first rows only.
         private var dragToken: String?
         private var dragItems = 0
@@ -111,6 +140,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         }
 
         private var cache: ListWindowCache<ListRow> { parent.list.cache }
+        private var store: ArtworkStore { parent.player.artwork }
 
         // MARK: Updates
 
@@ -119,10 +149,18 @@ struct VirtualTrackTable: NSViewRepresentable {
             guard let table else { return }
             updating = true
             defer { updating = false }
-            if parent.hidden != shownHidden {
+            let blocks = parent.list.showsAlbumBlocks
+            if parent.hidden != shownHidden || blocks != shownBlocks {
                 shownHidden = parent.hidden
+                shownBlocks = blocks
                 for column in table.tableColumns {
-                    column.isHidden = parent.hidden.contains(column.identifier.rawValue)
+                    let id = column.identifier.rawValue
+                    column.isHidden = id == AlbumBlockCell.columnID ? !blocks : parent.hidden.contains(id)
+                }
+                // Autosaved column order may predate the gutter; it is always first.
+                if let gutter = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == AlbumBlockCell.columnID }),
+                   gutter != 0 {
+                    table.moveColumn(gutter, toColumn: 0)
                 }
             }
             let descriptors = parent.list.sortKeys.map {
@@ -136,26 +174,38 @@ struct VirtualTrackTable: NSViewRepresentable {
                 reported = nil
                 table.scrollRowToVisible(0)
             }
-            if parent.total != shownTotal {
-                shownTotal = parent.total
-                table.noteNumberOfRowsChanged()
-            }
-            if parent.generation != shownGeneration || epochChanged {
-                shownGeneration = parent.generation
-                if let anchor = cache.anchorPosition {
-                    cache.anchorPosition = nil
-                    scrollToTop(anchor)
+            let layoutChanged = parent.layoutToken != shownLayout
+            if layoutChanged {
+                let wasGrouped = layout.grouping != .none
+                layout = parent.list.layout
+                shownLayout = parent.layoutToken
+                reported = nil
+                if wasGrouped || layout.grouping != .none {
+                    // Row kinds and heights may all have changed.
+                    table.reloadData()
+                } else {
+                    table.noteNumberOfRowsChanged()
                 }
-                reloadVisible()
-                let positions = parent.list.rowsChanged()
-                if table.selectedRowIndexes != positions { table.selectRowIndexes(positions, byExtendingSelection: false) }
-            } else if parent.playingTrackID != shownPlaying, let status = table.tableColumns.firstIndex(where: {
-                $0.identifier.rawValue == TrackColumns.status
-            }) {
+            }
+            if parent.generation != shownGeneration || epochChanged || layoutChanged {
+                shownGeneration = parent.generation
+                restoreAnchor()
+                if !layoutChanged { reloadVisible() }
+                let rows = layout.displayIndexes(ofPositions: parent.list.rowsChanged())
+                if table.selectedRowIndexes != rows { table.selectRowIndexes(rows, byExtendingSelection: false) }
+            } else if parent.playingTrackID != shownPlaying, let status = columnIndex(TrackColumns.status) {
                 reloadVisible(columns: IndexSet(integer: status))
+            }
+            if parent.factsGeneration != shownFacts {
+                shownFacts = parent.factsGeneration
+                if !layoutChanged { reloadGutter() }
             }
             shownPlaying = parent.playingTrackID
             reportVisible()
+        }
+
+        private func columnIndex(_ id: String) -> Int? {
+            table?.tableColumns.firstIndex { $0.identifier.rawValue == id }
         }
 
         private func reloadVisible(columns: IndexSet? = nil) {
@@ -164,14 +214,39 @@ struct VirtualTrackTable: NSViewRepresentable {
             guard !rows.isEmpty else { return }
             table.reloadData(forRowIndexes: rows,
                              columnIndexes: columns ?? IndexSet(integersIn: 0..<table.numberOfColumns))
+            guard columns == nil else { return }
+            // Full-width header rows have no column; refresh them in place.
+            for row in rows {
+                guard case .artistHeader(let key, let span)? = layout.row(at: row),
+                      let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ArtistHeaderCell else { continue }
+                configure(cell, artistKey: key, span: span)
+            }
         }
 
-        /// Puts `position` at the top of the visible rows.
-        private func scrollToTop(_ position: Int) {
-            guard let table, let scroll, position < table.numberOfRows else { return }
+        private func reloadGutter() {
+            guard layout.grouping == .album || layout.grouping == .artistAlbum,
+                  let gutter = columnIndex(AlbumBlockCell.columnID) else { return }
+            reloadVisible(columns: IndexSet(integer: gutter))
+        }
+
+        /// After a refresh pass, puts the anchor row back where it was in view. Waits while the
+        /// layout is older than the rows, whose positions it would misplace.
+        private func restoreAnchor() {
+            guard let anchor = cache.anchorPosition, parent.list.layoutIsCurrent else { return }
+            cache.anchorPosition = nil
+            guard let display = layout.displayIndex(ofPosition: anchor) else { return }
+            scrollToTop(max(0, display - parent.list.anchorOffset))
+        }
+
+        /// Puts display row `index` at the top of the visible rows.
+        private func scrollToTop(_ index: Int) {
+            guard let table, let scroll, index < table.numberOfRows else { return }
+            // After a reload the frame may still have the old height, and the clip view would
+            // clamp the scroll to it.
+            table.tile()
             let first = table.rows(in: table.visibleRect).location
-            guard first != position else { return }
-            let y = table.rect(ofRow: position).minY - scroll.contentInsets.top
+            guard first != index else { return }
+            let y = table.rect(ofRow: index).minY - scroll.contentInsets.top
             scroll.contentView.scroll(to: NSPoint(x: scroll.contentView.bounds.origin.x, y: y))
             scroll.reflectScrolledClipView(scroll.contentView)
         }
@@ -186,19 +261,77 @@ struct VirtualTrackTable: NSViewRepresentable {
             guard range != reported else { return }
             reported = range
             parent.list.visible(range)
+            updateArtwork(range)
+        }
+
+        // MARK: Artwork
+
+        /// Retains the covers of the albums in `range` and releases the rest.
+        private func updateArtwork(_ range: Range<Int>) {
+            var albums = Set<UInt64>()
+            if layout.grouping == .album || layout.grouping == .artistAlbum {
+                for index in range { if let album = layout.albumKey(atDisplayIndex: index) { albums.insert(album) } }
+            }
+            var next: [UInt64: ArtworkRequest] = [:]
+            for album in albums { if let request = store.albumRequest(album) { next[album] = request } }
+            for (album, request) in artwork where next[album] != request { store.release(request) }
+            for (album, request) in next where artwork[album] != request { store.retain(request) }
+            artwork = next
+            observeArtwork()
+        }
+
+        /// Redraws the gutter when a retained cover arrives or the artwork context changes.
+        private func observeArtwork() {
+            guard !artworkObserved, !artwork.isEmpty else { return }
+            artworkObserved = true
+            let store = self.store
+            let albums = Array(artwork.keys)
+            withObservationTracking {
+                for album in albums { _ = store.value(for: store.albumRequest(album)) }
+            } onChange: { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.artworkObserved = false
+                    if let range = self.reported { self.updateArtwork(range) }
+                    self.reloadGutter()
+                }
+            }
+        }
+
+        func releaseArtwork() {
+            for request in artwork.values { store.release(request) }
+            artwork.removeAll()
         }
 
         // MARK: Data source
 
-        func numberOfRows(in tableView: NSTableView) -> Int { shownTotal }
+        func numberOfRows(in tableView: NSTableView) -> Int { layout.count }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard let tableColumn, let column = TrackColumns.column(tableColumn.identifier.rawValue) else { return nil }
+            let display = layout.row(at: row)
+            if case .artistHeader(let key, let span)? = display {
+                guard tableColumn == nil else { return nil }
+                let cell = tableView.makeView(withIdentifier: ArtistHeaderCell.reuse, owner: nil) as? ArtistHeaderCell
+                    ?? ArtistHeaderCell()
+                configure(cell, artistKey: key, span: span)
+                return cell
+            }
+            guard let tableColumn else { return nil }
+            let id = tableColumn.identifier.rawValue
+            if id == AlbumBlockCell.columnID { return gutterCell(tableView, row: row) }
+            guard let column = TrackColumns.column(id) else { return nil }
             let cell = tableView.makeView(withIdentifier: TrackCellView.reuse, owner: nil) as? TrackCellView
                 ?? TrackCellView()
-            guard let item = cache.row(at: row) else {
+            guard case .track(let position, let blockIndex)? = display else {
+                // Fillers and gaps pad album blocks: nothing to show, nothing to select.
                 cell.show(text: "", font: font(column), alignment: column.alignment, secondary: false,
-                          identifier: "\(parent.identifier)-placeholder-\(row)-\(column.id)")
+                          identifier: nil)
+                cell.toolTip = nil
+                return cell
+            }
+            guard let item = cache.row(at: position) else {
+                cell.show(text: "", font: font(column), alignment: column.alignment, secondary: false,
+                          identifier: "\(parent.identifier)-placeholder-\(position)-\(column.id)")
                 cell.toolTip = nil
                 return cell
             }
@@ -210,10 +343,31 @@ struct VirtualTrackTable: NSViewRepresentable {
                 return cell
             }
             let text = column.value(item.track)
+            // Compilation blocks keep a track Artist column even when the table's is hidden.
+            let artist = column.id == "title" && blockIndex != nil && item.track.compilation
+                && parent.hidden.contains("artist") ? item.track.artist : nil
             cell.show(text: text, font: font(column), alignment: column.alignment, secondary: !item.available,
-                      identifier: identifier)
-            cell.toolTip = item.available ? (text.isEmpty ? nil : text) : "\(text)\nUnavailable: \(item.track.path)"
+                      identifier: identifier, detail: artist)
+            let tip = artist.map { "\(text) — \($0)" } ?? text
+            cell.toolTip = item.available ? (tip.isEmpty ? nil : tip) : "\(tip)\nUnavailable: \(item.track.path)"
             return cell
+        }
+
+        private func gutterCell(_ tableView: NSTableView, row: Int) -> NSView {
+            let cell = tableView.makeView(withIdentifier: AlbumBlockCell.reuse, owner: nil) as? AlbumBlockCell
+                ?? AlbumBlockCell()
+            let album = layout.albumKey(atDisplayIndex: row)
+            let slice = layout.blockIndex(atDisplayIndex: row) ?? AlbumBlockCell.contentRows
+            let needsContent = slice < AlbumBlockCell.contentRows
+            let image = needsContent ? album.map { store.value(for: store.albumRequest($0)) } ?? .missing : .missing
+            let facts = needsContent ? album.flatMap { parent.list.facts.summary($0) }.map(DisplayFormat.albumFacts) ?? [] : []
+            cell.show(albumKey: album, slice: slice, rowHeight: Self.rowHeight, artwork: image, facts: facts)
+            return cell
+        }
+
+        private func configure(_ cell: ArtistHeaderCell, artistKey: UInt64, span: Range<Int>) {
+            let name = cache.row(at: span.lowerBound)?.track.album_artist
+            cell.show(artistKey: artistKey, artist: name, albums: parent.list.albumCounts[artistKey], tracks: span.count)
         }
 
         private func font(_ column: TrackColumn) -> NSFont {
@@ -226,16 +380,50 @@ struct VirtualTrackTable: NSViewRepresentable {
             let reuse = NSUserInterfaceItemIdentifier("track-row")
             let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? NSTableRowView ?? NSTableRowView()
             view.identifier = reuse
-            let id = cache.loadedRow(at: row).map { "\(parent.identifier)-row-\($0.row_id)" }
-            view.setAccessibilityIdentifier(id ?? "\(parent.identifier)-placeholder-\(row)")
+            let id: String
+            switch layout.row(at: row) {
+            case .track(let position, _)?:
+                id = cache.loadedRow(at: position).map { "\(parent.identifier)-row-\($0.row_id)" }
+                    ?? "\(parent.identifier)-placeholder-\(position)"
+            case .artistHeader(let key, _)?:
+                id = "\(parent.identifier)-header-\(key)"
+            case .blockFiller?, .blockGap?, nil:
+                id = "\(parent.identifier)-filler-\(row)"
+            }
+            view.setAccessibilityIdentifier(id)
             return view
+        }
+
+        func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+            if case .artistHeader? = layout.row(at: row) { return true }
+            return false
+        }
+
+        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+            if case .artistHeader? = layout.row(at: row) { return ArtistHeaderCell.height }
+            return Self.rowHeight
         }
 
         // MARK: Delegate
 
+        /// Only track rows are selected. ⌘A and shift-ranges drop headers, fillers and gaps.
+        /// An arrow key onto one moves on to the next track that way; a click on one clears.
+        func tableView(_ tableView: NSTableView, selectionIndexesForProposedSelection proposed: IndexSet) -> IndexSet {
+            guard layout.grouping != .none else { return proposed }
+            let tracks = layout.displayIndexes(ofPositions: layout.positions(ofDisplayIndexes: proposed))
+            guard tracks.isEmpty, proposed.count == 1, let target = proposed.first,
+                  NSApp.currentEvent?.type == .keyDown else { return tracks }
+            let forward = target > (tableView.selectedRowIndexes.last ?? -1)
+            guard let next = layout.nearestTrack(from: target, forward: forward) else {
+                return tableView.selectedRowIndexes
+            }
+            tableView.scrollRowToVisible(next)
+            return IndexSet(integer: next)
+        }
+
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard !updating, let table else { return }
-            parent.list.userSelected(table.selectedRowIndexes)
+            parent.list.userSelected(layout.positions(ofDisplayIndexes: table.selectedRowIndexes))
         }
 
         func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
@@ -247,9 +435,15 @@ struct VirtualTrackTable: NSViewRepresentable {
             parent.list.setSort(Array(keys))
         }
 
+        func tableView(_ tableView: NSTableView, shouldReorderColumn columnIndex: Int, toColumn newColumnIndex: Int) -> Bool {
+            // The album gutter stays first.
+            let gutter = self.columnIndex(AlbumBlockCell.columnID)
+            return columnIndex != gutter && newColumnIndex != gutter
+        }
+
         @objc func activateClickedRow(_ table: NSTableView) {
-            guard table.clickedRow >= 0, table.clickedRow < shownTotal else { return }
-            parent.list.activate(position: table.clickedRow)
+            guard case .track(let position, _)? = layout.row(at: table.clickedRow) else { return }
+            parent.list.activate(position: position)
         }
 
         // MARK: Header menu
@@ -273,10 +467,10 @@ struct VirtualTrackTable: NSViewRepresentable {
         // MARK: Drag
 
         func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
-            guard row >= 0, row < shownTotal else { return nil }
+            guard case .track(let position, _)? = layout.row(at: row) else { return nil }
             if dragToken == nil {
                 let positions = tableView.selectedRowIndexes.contains(row)
-                    ? tableView.selectedRowIndexes : IndexSet(integer: row)
+                    ? layout.positions(ofDisplayIndexes: tableView.selectedRowIndexes) : IndexSet(integer: position)
                 do {
                     let selection = try parent.list.encode(positions)
                     dragToken = parent.player.beginSelectionDrag(selection, count: positions.count,
@@ -307,6 +501,22 @@ struct VirtualTrackTable: NSViewRepresentable {
             dragItems = 0
             dragLifetime = nil
         }
+
+        // MARK: Reorder drops (regular playlists)
+
+        func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
+                       proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+            // Only this table's own rows are reorder drops. Grouped or sorted, the shown order is
+            // not the playlist's, so the drop is refused and the view says how to reorder.
+            guard info.draggingSource as? NSTableView === tableView, !parent.list.allowsReorder else { return [] }
+            parent.list.showReorderHint()
+            return []
+        }
+
+        func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
+                       dropOperation: NSTableView.DropOperation) -> Bool {
+            false
+        }
     }
 }
 
@@ -322,29 +532,42 @@ extension NSTableView {
     }
 }
 
-/// A table cell: one vertically centred text field, or the playing indicator.
+/// A table cell: one vertically centred text field, optionally followed by a secondary
+/// detail field (a compilation track's artist), or the playing indicator.
 final class TrackCellView: NSTableCellView {
     static let reuse = NSUserInterfaceItemIdentifier("track-cell")
     private let field = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
     private let icon = NSImageView()
+    private var fieldToEdge: NSLayoutConstraint!
+    private var fieldToDetail: NSLayoutConstraint!
 
     init() {
         super.init(frame: .zero)
         identifier = Self.reuse
-        field.lineBreakMode = .byTruncatingTail
-        field.translatesAutoresizingMaskIntoConstraints = false
-        field.cell?.usesSingleLineMode = true
+        for text in [field, detail] {
+            text.lineBreakMode = .byTruncatingTail
+            text.translatesAutoresizingMaskIntoConstraints = false
+            text.cell?.usesSingleLineMode = true
+            addSubview(text)
+        }
+        detail.textColor = .secondaryLabelColor
+        detail.isHidden = true
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Playing")
         icon.contentTintColor = .controlAccentColor
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
-        addSubview(field)
         addSubview(icon)
         textField = field
+        fieldToEdge = field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2)
+        fieldToDetail = field.trailingAnchor.constraint(equalTo: detail.leadingAnchor, constant: -8)
         NSLayoutConstraint.activate([
             field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            fieldToEdge,
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
+            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            detail.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.4),
+            detail.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.centerXAnchor.constraint(equalTo: centerXAnchor),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -353,7 +576,8 @@ final class TrackCellView: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    func show(text: String, font: NSFont, alignment: NSTextAlignment, secondary: Bool, identifier: String) {
+    func show(text: String, font: NSFont, alignment: NSTextAlignment, secondary: Bool, identifier: String?,
+              detail detailText: String? = nil) {
         icon.isHidden = true
         field.isHidden = false
         field.stringValue = text
@@ -361,11 +585,25 @@ final class TrackCellView: NSTableCellView {
         field.alignment = alignment
         field.textColor = secondary ? .secondaryLabelColor : .labelColor
         field.setAccessibilityIdentifier(identifier)
+        let showsDetail = detailText != nil
+        detail.isHidden = !showsDetail
+        detail.stringValue = detailText ?? ""
+        detail.font = font
+        detail.setAccessibilityIdentifier(showsDetail ? identifier.map { $0 + "-artist" } : nil)
+        // Deactivate first: both active at once conflict.
+        if showsDetail {
+            fieldToEdge.isActive = false
+            fieldToDetail.isActive = true
+        } else {
+            fieldToDetail.isActive = false
+            fieldToEdge.isActive = true
+        }
     }
 
     func showPlaying(_ playing: Bool, identifier: String) {
         field.isHidden = true
         field.stringValue = ""
+        detail.isHidden = true
         icon.isHidden = !playing
         icon.setAccessibilityIdentifier(identifier)
         field.setAccessibilityIdentifier(nil)

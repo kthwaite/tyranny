@@ -3,10 +3,16 @@ import Observation
 import TyrannyCore
 
 /// One visible track list: its list description, its window cache over `list_tracks`,
-/// its totals and its selection.
+/// its group layout over `list_groups`, its totals and its selection.
 ///
 /// `sync()` follows the connection, the library and history revisions, the filter,
-/// the browser and the grouping. The view calls it when any of them changes.
+/// the browser and the grouping. The view calls it when any of them changes, and
+/// `syncLayout()` when the cache's rows change.
+///
+/// Grouped lists show `layout`: display rows over the cache's positions. The spans are
+/// fetched for the cache's revision after each committed refresh pass, so they follow
+/// the cache's throttle. Until they arrive the previous layout stays, and the anchor row
+/// is restored only once the layout matches the rows again.
 @MainActor @Observable
 final class ListModel {
     let destination: Destination
@@ -24,6 +30,16 @@ final class ListModel {
     private(set) var browserSelection = BrowserSelection()
     let browser = ColumnBrowserModel()
     @ObservationIgnored private(set) var rows = RowSelection()
+    /// Album block facts for the albums in view.
+    let facts: AlbumFactsCache
+    /// The grouped layout from the latest spans. Unused while ungrouped.
+    private(set) var groupedLayout = GroupLayout(grouping: .none, total: 0, spans: [])
+    /// Bumps when `groupedLayout` is replaced.
+    private(set) var layoutVersion: UInt64 = 0
+    /// Albums per artist key, for the artist headers.
+    private(set) var albumCounts: [UInt64: Int] = [:]
+    /// true briefly after a refused reorder drop (`playlist-reorder-hint`).
+    private(set) var reorderHintShown = false
 
     /// Selected row IDs (spec 5.4).
     var selection: Set<UInt64> { rows.ids }
@@ -49,6 +65,25 @@ final class ListModel {
     @ObservationIgnored private var historyRevision: UInt64?
     /// The first visible row, kept in view across revision changes.
     @ObservationIgnored private var anchorRowID: UInt64?
+    /// Display rows from the top of the view to the anchor row, restored with it.
+    @ObservationIgnored private(set) var anchorOffset = 0
+    /// The display rows in view, from the table.
+    @ObservationIgnored private var visibleDisplay: Range<Int>?
+    /// What `groupedLayout` was built for.
+    @ObservationIgnored private var layoutBasis: LayoutBasis?
+    @ObservationIgnored private var groupsRequest: LayoutBasis?
+    @ObservationIgnored private var groupsFailed: LayoutBasis?
+    /// Bumps per `list_groups` request; only the latest reply is applied.
+    @ObservationIgnored private var groupsTicket: UInt64 = 0
+    @ObservationIgnored private var hintTask: Task<Void, Never>?
+
+    /// The rows and refresh a layout belongs to. Spans at another basis may disagree with
+    /// the cache on positions.
+    struct LayoutBasis: Equatable {
+        let epoch: UInt64
+        let revision: UInt64?
+        let refresh: UInt64
+    }
 
     init(destination: Destination, source: ListSource, player: PlayerModel, navigation: NavigationModel) {
         self.destination = destination
@@ -58,6 +93,8 @@ final class ListModel {
         description = ListDescription(source: source, group: navigation.grouping(for: destination))
         // Replaced by `reset` on the first sync.
         cache = ListWindowCache { _, _, _ in throw WindowFetchError.failed("not started") }
+        facts = AlbumFactsCache { _ in throw WindowFetchError.failed("not started") }
+        facts.reset(fetch: makeFactsFetch())
     }
 
     // MARK: Following state
@@ -70,12 +107,16 @@ final class ListModel {
             if self.session != session {
                 self.session = session
                 cache.discard(session: session)
+                discardGroups()
                 browser.disconnected(session: session)
             }
             needsReset = true
             return
         }
-        if self.session != session { cache.discard(session: session) }
+        if self.session != session {
+            cache.discard(session: session)
+            discardGroups()
+        }
         self.session = session
         let filter = navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
         if filter != query {
@@ -102,6 +143,7 @@ final class ListModel {
             libraryRevision = library
             historyRevision = history
             // Play counts change Plays and Last Played without a library revision change.
+            recordAnchor()
             cache.serverRevisionChanged(library, anchor: anchorRowID)
         }
         browser.sync(player: player, session: session, revision: library, query: query,
@@ -131,7 +173,10 @@ final class ListModel {
         description = next
         epoch &+= 1
         anchorRowID = nil
+        anchorOffset = 0
+        visibleDisplay = nil
         cache.reset(fetch: makeFetch())
+        syncLayout()
     }
 
     /// Typing waits 250 ms before the list refetches.
@@ -153,12 +198,136 @@ final class ListModel {
         pendingFilter = nil
     }
 
+    // MARK: Grouping
+
+    var grouping: Grouping { description.group }
+    /// Album blocks show covers and facts in the gutter column.
+    var showsAlbumBlocks: Bool { grouping == .album || grouping == .artistAlbum }
+
+    /// The display rows. Ungrouped, one row per position.
+    var layout: GroupLayout {
+        grouping == .none ? GroupLayout(grouping: .none, total: cache.total, spans: []) : groupedLayout
+    }
+
+    /// Changes whenever `layout` does.
+    var layoutToken: LayoutToken {
+        LayoutToken(epoch: epoch, version: grouping == .none ? 0 : layoutVersion,
+                    total: grouping == .none ? cache.total : -1)
+    }
+
+    struct LayoutToken: Equatable {
+        let epoch: UInt64
+        let version: UInt64
+        let total: Int
+    }
+
+    /// The layout matches the cache's rows.
+    var layoutIsCurrent: Bool {
+        grouping == .none || layoutBasis == LayoutBasis(epoch: epoch, revision: cache.revision, refresh: cache.refreshes)
+    }
+
+    /// Fetches spans when the cache's rows moved on from the layout's. Called when the
+    /// description, the cache's revision or its refresh count changes.
+    func syncLayout() {
+        guard grouping != .none, let player, player.connected else { return }
+        let target = LayoutBasis(epoch: epoch, revision: cache.revision, refresh: cache.refreshes)
+        guard layoutBasis != target, groupsRequest != target, groupsFailed != target else { return }
+        if target.revision == nil {
+            // The first window is on its way. Ask at once, unpinned, after a reset; after a
+            // reconnect, wait for the cache's revision.
+            guard layoutBasis?.epoch != epoch, groupsRequest?.epoch != epoch else { return }
+        }
+        requestGroups(target)
+    }
+
+    private func requestGroups(_ target: LayoutBasis) {
+        groupsTicket &+= 1
+        let ticket = groupsTicket
+        groupsRequest = target
+        let grouping = self.grouping
+        var request = description
+        request.group = GroupSpans.requestGrouping(for: grouping)
+        // A cancelled request would close the shared connection: send it unstructured.
+        Task { @MainActor [weak self] in
+            guard let player = self?.player else { return }
+            let result: Result<ListGroupsResponse, any Error>
+            do {
+                result = .success(try await player.send("list_groups", [
+                    "list": try JSONValue.encoding(request),
+                    "revision": target.revision.map(JSONValue.uint) ?? .null]))
+            } catch {
+                result = .failure(error)
+            }
+            guard let self, ticket == self.groupsTicket else { return }
+            self.groupsRequest = nil
+            switch result {
+            case .success(let reply):
+                let previous = self.layoutBasis?.revision
+                self.groupedLayout = GroupLayout(grouping: grouping, total: Int(reply.total),
+                                                 spans: GroupSpans.layoutSpans(grouping: grouping, reply: reply.groups))
+                self.albumCounts = grouping == .album ? [:] : GroupSpans.albumCounts(reply.groups)
+                self.layoutBasis = LayoutBasis(epoch: target.epoch, revision: reply.revision, refresh: target.refresh)
+                self.layoutVersion &+= 1
+                if previous != nil, previous != reply.revision { self.facts.invalidate() }
+                // The cache may have moved on while the spans were in flight.
+                self.syncLayout()
+            case .failure:
+                // A stale revision is followed by the cache's next pass, which changes the target.
+                self.groupsFailed = target
+            }
+        }
+    }
+
+    private func discardGroups() {
+        groupsTicket &+= 1
+        groupsRequest = nil
+        groupsFailed = nil
+        facts.reset()
+    }
+
     // MARK: Table
 
-    /// The table's visible rows. Prefetches around them and records the anchor row.
-    func visible(_ range: Range<Int>) {
-        cache.visible(range)
-        if let row = cache.loadedRow(at: range.lowerBound) { anchorRowID = row.row_id }
+    /// The table's visible display rows. Prefetches the positions they show, records the
+    /// anchor row and asks for the facts of the albums in view.
+    func visible(_ displayRange: Range<Int>) {
+        let layout = self.layout
+        visibleDisplay = displayRange
+        if let positions = layout.positionRange(forDisplay: displayRange) { cache.visible(positions) }
+        recordAnchor()
+        guard showsAlbumBlocks else { return }
+        var albums = Set<UInt64>()
+        for index in displayRange {
+            if let album = layout.albumKey(atDisplayIndex: index) { albums.insert(album) }
+        }
+        facts.want(albums)
+    }
+
+    /// The first loaded track in view becomes the anchor. Rows may load after the view stops
+    /// scrolling, so this runs again before each revision change. Under a layout older than
+    /// the rows, display rows name the wrong positions: the previous anchor stays.
+    private func recordAnchor() {
+        guard layoutIsCurrent, let range = visibleDisplay else { return }
+        let layout = self.layout
+        for position in layout.positions(ofDisplayIndexes: IndexSet(integersIn: range)) {
+            guard let row = cache.loadedRow(at: position) else { continue }
+            guard let display = layout.displayIndex(ofPosition: position) else { return }
+            anchorRowID = row.row_id
+            anchorOffset = max(0, display - range.lowerBound)
+            return
+        }
+    }
+
+    /// Regular playlists reorder only ungrouped and unsorted (spec 4.3).
+    var allowsReorder: Bool { PlaylistReorder.allowed(source: source, grouping: grouping, sort: sort) }
+
+    /// A reorder drop was refused: shows "Set Group to None and clear sorting to reorder".
+    func showReorderHint() {
+        reorderHintShown = true
+        hintTask?.cancel()
+        hintTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+            self?.reorderHintShown = false
+        }
     }
 
     var selectionBasis: RowSelection.Basis {
@@ -188,6 +357,15 @@ final class ListModel {
     func activate(position: Int) {}
 
     // MARK: Fetching
+
+    private func makeFactsFetch() -> AlbumFactsCache.Fetch {
+        { @MainActor [weak self] ids in
+            guard let player = self?.player else { throw WindowFetchError.failed("The list closed.") }
+            let reply: AlbumSummariesResponse = try await player.send("album_summaries", [
+                "album_ids": .uints(ids), "revision": .null])
+            return reply.entries
+        }
+    }
 
     private func makeFetch() -> ListWindowCache<ListRow>.Fetch {
         let description = self.description

@@ -27,9 +27,10 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
-    parser.add_argument("--scenario", choices=["spike", "shell", "songs"], default="spike",
+    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping"], default="spike",
                         help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell; "
-                             "songs: the continuous Songs table and column browser")
+                             "songs: the continuous Songs table and column browser; "
+                             "grouping: Artist › Album blocks, block selection and a rescan that adds an album")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -80,6 +81,10 @@ def main():
                 return
             if args.scenario == "songs":
                 songs(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "grouping":
+                grouping(report, run, app, port, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             for mode in ["initial", "relaunch"]:
@@ -145,6 +150,15 @@ def shell(report, run, app, port, ready, root, controller, screenshots):
 SONG_GENRES = ["Ambient", "Folk", "Jazz"]
 
 
+def tagged_flac(path, title, artist, album, genre, year, track):
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1", "-c:a", "flac",
+                    "-metadata", f"title={title}", "-metadata", f"artist={artist}",
+                    "-metadata", f"album_artist={artist}", "-metadata", f"album={album}",
+                    "-metadata", f"genre={genre}", "-metadata", f"date={year}",
+                    "-metadata", f"track={track}", str(path)], check=True, timeout=30)
+
+
 def songs_fixture(music, source):
     """1,129 tracks: 105 tagged FLACs (3 genres x 5 albums x 7 tracks, one year per
     album) and 1,024 untagged hard links of one WAV."""
@@ -154,15 +168,8 @@ def songs_fixture(music, source):
         for album in range(5):
             year = 1960 + genre_index * 10 + album
             for track in range(1, 8):
-                path = tagged / f"{genre} {album} {track:02}.flac"
-                subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-                                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1", "-c:a", "flac",
-                                "-metadata", f"title={genre} {album} Song {track}",
-                                "-metadata", f"artist={genre} Artist {album % 3}",
-                                "-metadata", f"album_artist={genre} Artist {album % 3}",
-                                "-metadata", f"album={genre} Album {album}",
-                                "-metadata", f"genre={genre}", "-metadata", f"date={year}",
-                                "-metadata", f"track={track}", str(path)], check=True, timeout=30)
+                tagged_flac(tagged / f"{genre} {album} {track:02}.flac", f"{genre} {album} Song {track}",
+                            f"{genre} Artist {album % 3}", f"{genre} Album {album}", genre, year, track)
     untagged = music / "Untagged"
     untagged.mkdir()
     for index in range(1024):
@@ -198,6 +205,44 @@ def songs(report, run, app, port, ready, source, controller, screenshots):
     for image in sorted(output.glob("songs*.png")):
         shutil.copy2(image, screenshots / image.name)
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("songs*.png"))]
+
+
+def grouping(report, run, app, port, ready, source, controller, screenshots):
+    """Drive grouping: Artist › Album against the server's spans, a block selection, and a
+    rescan that adds an album (staged outside the root; the app moves it in) under the anchor."""
+    report["scenario"] = "grouping"
+    music = run / "Songs fixture"
+    songs_fixture(music, source)
+    staged = run / "Staged"
+    extra = staged / "Extra"
+    extra.mkdir(parents=True)
+    # "Aaa" sorts before every tagged album artist, so the new album lands before the anchor.
+    for track in range(1, 8):
+        tagged_flac(extra / f"Extra {track:02}.flac", f"Extra Song {track}", "Aaa Extra Artist",
+                    "Aaa Extra Album", "Jazz", 1999, track)
+    controller.request("add_root", path=str(music))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 1129, seconds=180)
+    output = run / "grouping"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--songs-smoke-output", str(output), "--songs-smoke-scenario", "grouping",
+               "--songs-smoke-extra", str(extra), "--songs-smoke-root", str(music),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "grouping.stdout").open("w") as stdout, (run / "grouping.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=300)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["grouping"] = native
+    assert native["passed"], native.get("error")
+    # The server, not the app, holds the added album.
+    state = controller.state()
+    assert state["library"]["tracks"] == 1136 and state["library"]["scan"]["phase"] == "complete", state
+    report["cases"].append({"name": "grouping-server-indexed-the-added-album", "tracks": state["library"]["tracks"]})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("grouped*.png")):
+        shutil.copy2(image, screenshots / image.name)
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("grouped*.png"))]
 
 
 if __name__ == "__main__":

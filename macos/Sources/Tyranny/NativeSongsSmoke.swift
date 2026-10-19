@@ -6,6 +6,10 @@ import TyrannyCore
 /// Opt-in acceptance driver for the Songs view (`--songs-smoke-output`). The gate
 /// prepares a 1,129-track library on the server. Every control is driven through the
 /// external Accessibility driver; server queries here only read the expected values.
+///
+/// `--songs-smoke-scenario grouping` drives grouping instead: Artist › Album against the
+/// server's spans, a selection inside an album block, and a rescan that adds an album
+/// (`--songs-smoke-extra`, moved into `--songs-smoke-root`) while the anchor stays in view.
 @MainActor
 enum NativeSongsSmoke {
     private struct Failure: Error, LocalizedError {
@@ -17,12 +21,14 @@ enum NativeSongsSmoke {
     private static var cases: [String] = []
     private static var observations: [String: Any] = [:]
     private static let table = "track-table-songs"
+    private static var scenario = "songs"
 
     static func startIfRequested(_ model: PlayerModel, navigation: NavigationModel) {
         let args = CommandLine.arguments
         guard !started, let index = args.firstIndex(of: "--songs-smoke-output"), index + 1 < args.count else { return }
         started = true
         output = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+        scenario = argument("--songs-smoke-scenario") ?? "songs"
         Task {
             do {
                 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -32,10 +38,16 @@ enum NativeSongsSmoke {
                 }
                 try await NativeSmoke.drive("activate")
                 try await Task.sleep(for: .milliseconds(300))
-                try await exercise(model, navigation)
+                // Group settings persist per destination; both scenarios start ungrouped.
+                navigation.setGrouping(.none, for: .songs)
+                if scenario == "grouping" {
+                    try await exerciseGrouping(model, navigation)
+                } else {
+                    try await exercise(model, navigation)
+                }
                 try finish(model, error: nil)
             } catch {
-                try? capture("songs-failure")
+                try? capture("\(scenario == "grouping" ? "grouped" : "songs")-failure")
                 try? finish(model, error: error.localizedDescription)
             }
             NSApp.terminate(nil)
@@ -48,7 +60,7 @@ enum NativeSongsSmoke {
         try await drive("exists", "main-songs")
         try await drive("exists", table)
         try await drive("exists", "group-control")
-        try await drive("expect-enabled", "group-control", "false")
+        try await drive("expect-enabled", "group-control", "true")
         try await wait("songs list", model) { songsList != nil }
         guard let list = songsList else { throw Failure(message: "Songs list missing") }
         try await wait("first window", model) { list.cache.total == 1129 && list.cache.loadedRow(at: 0) != nil }
@@ -129,6 +141,139 @@ enum NativeSongsSmoke {
         cases.append("native-songs-drag-range-appends-to-up-next")
     }
 
+    // MARK: Grouping
+
+    private static func exerciseGrouping(_ model: PlayerModel, _ navigation: NavigationModel) async throws {
+        try check(navigation.destination == .songs, "Songs is not the first destination")
+        try await wait("songs list", model) { songsList != nil }
+        guard let list = songsList else { throw Failure(message: "Songs list missing") }
+        try await wait("first window", model) { list.cache.total == 1129 && list.cache.loadedRow(at: 0) != nil }
+        try await drive("expect-enabled", "group-control", "true")
+
+        // Artist › Album: headers and album blocks match a layout of the server's spans.
+        try await drive("choose", "group-control", "Artist › Album")
+        try await wait("artist › album layout", model) {
+            list.description.group == .artistAlbum && list.layoutIsCurrent && list.layout.count > 0
+                && list.cache.loadedRow(at: 0) != nil
+        }
+        guard let revision = list.cache.revision else { throw Failure(message: "No revision") }
+        let groups: ListGroupsResponse = try await model.send("list_groups", [
+            "list": try JSONValue.encoding(list.description), "revision": .uint(revision)])
+        let expected = GroupLayout(grouping: .artistAlbum, total: Int(groups.total), spans: groups.groups)
+        let shown = kinds(list.layout), server = kinds(expected)
+        observations["grouped_rows"] = ["headers": server.headers, "block_tracks": server.blockTracks,
+                                        "fillers": server.fillers, "gaps": server.gaps, "count": expected.count,
+                                        "spans": groups.groups.count]
+        try check(shown == server, "Layout rows \(shown) differ from the server spans' \(server)")
+        try check(server.headers == Set(groups.groups.map(\.artist_key)).count, "One header per artist expected")
+        try check(server.gaps == groups.groups.count, "One block per album span expected")
+        try await drive("expect-row-count", table, String(expected.count))
+        guard let first = groups.groups.first, let album = first.album_key else { throw Failure(message: "No spans") }
+        try await drive("exists", "artist-header-\(first.artist_key)")
+        try await drive("exists", "album-cover-\(album)")
+        try await wait("album facts", model) { list.facts.summary(album) != nil }
+        let summaries: AlbumSummariesResponse = try await model.send("album_summaries", [
+            "album_ids": .uints([album]), "revision": .null])
+        guard let summary = summaries.entries.first else { throw Failure(message: "No album summary") }
+        try await drive("expect-text", "album-facts-\(album)", DisplayFormat.albumFacts(summary).joined(separator: "\n"))
+        cases.append("native-grouping-artist-album-rows-match-server-spans")
+        try await Task.sleep(for: .milliseconds(400))
+        try capture("grouped")
+
+        // One track inside a block: the selection is that row's ID.
+        let position = Int(first.start) + min(1, Int(first.count) - 1)
+        guard let display = list.layout.displayIndex(ofPosition: position),
+              let row = list.cache.loadedRow(at: position) else { throw Failure(message: "Block track not loaded") }
+        try await drive("select", table, String(display))
+        try await wait("block track selected", model) { list.selection == [row.row_id] }
+        try check(list.selectedPositions == IndexSet(integer: position), "Selected position differs")
+        observations["block_selection"] = ["row_id": row.row_id, "display": display, "position": position]
+        cases.append("native-grouping-selects-one-block-track-by-row-id")
+
+        // A rescan adds an album before the anchor: the anchor track stays in view.
+        guard let extra = argument("--songs-smoke-extra"), let root = argument("--songs-smoke-root") else {
+            throw Failure(message: "Grouping scenario needs --songs-smoke-extra and --songs-smoke-root")
+        }
+        try await drive("scroll-fraction", table, "1")
+        try await wait("end in view", model) { (visibleRowIDs(list)?.count ?? 0) > 0 }
+        try await Task.sleep(for: .milliseconds(600))
+        guard let tableView = findTable(), let anchor = firstVisibleTrack(list, tableView) else {
+            throw Failure(message: "No visible track to anchor")
+        }
+        let roots: Page<Root> = try await model.send("library_roots", [
+            "revision": .null, "offset": .int(0), "limit": .int(10), "query": .string("")])
+        guard let rootID = roots.entries.first(where: { $0.path == root })?.id ?? roots.entries.first?.id else {
+            throw Failure(message: "No library root")
+        }
+        let destination = URL(fileURLWithPath: root).appendingPathComponent(URL(fileURLWithPath: extra).lastPathComponent)
+        try FileManager.default.moveItem(at: URL(fileURLWithPath: extra), to: destination)
+        let _: ScanAccepted = try await model.send("rescan", ["root_id": .uint(rootID)])
+        try await wait("rescan adds the album", model, seconds: 120) {
+            model.snapshot?.library.tracks == 1136 && model.snapshot?.library.scan.phase == "complete"
+                && list.cache.total == 1136 && list.layoutIsCurrent && list.cache.anchorPosition == nil
+        }
+        try await Task.sleep(for: .milliseconds(600))
+        let visible = visibleRowIDs(list) ?? []
+        let moved = list.cache.position(of: anchor.rowID)
+        observations["anchor"] = ["row_id": anchor.rowID, "position_before": anchor.position,
+                                  "position_after": moved as Any, "visible_rows": visible.count]
+        try check(visible.contains(anchor.rowID), "The anchor track left the view after the rescan")
+        try check(moved.map { $0 > anchor.position } ?? false, "The added album did not move the anchor")
+        try await drive("exists", "\(table)-cell-\(anchor.rowID)-title")
+        cases.append("native-grouping-rescan-keeps-anchor-track-in-view")
+        navigation.setGrouping(.none, for: .songs)
+    }
+
+    private struct RowKinds: Equatable, CustomStringConvertible {
+        var headers = 0, blockTracks = 0, fillers = 0, gaps = 0, plainTracks = 0
+        var description: String { "h\(headers) t\(blockTracks) f\(fillers) g\(gaps) p\(plainTracks)" }
+    }
+
+    private static func kinds(_ layout: GroupLayout) -> RowKinds {
+        var kinds = RowKinds()
+        for index in 0..<layout.count {
+            switch layout.row(at: index) {
+            case .artistHeader?: kinds.headers += 1
+            case .track(_, nil)?: kinds.plainTracks += 1
+            case .track?: kinds.blockTracks += 1
+            case .blockFiller?: kinds.fillers += 1
+            case .blockGap?: kinds.gaps += 1
+            case nil: break
+            }
+        }
+        return kinds
+    }
+
+    private static func findTable() -> NSTableView? {
+        func visit(_ view: NSView) -> NSTableView? {
+            if let table = view as? NSTableView, table.accessibilityIdentifier() == Self.table { return table }
+            for child in view.subviews { if let found = visit(child) { return found } }
+            return nil
+        }
+        return NSApp.windows.lazy.compactMap { $0.contentView.flatMap(visit) }.first
+    }
+
+    /// Row IDs of the track rows the table shows now.
+    private static func visibleRowIDs(_ list: ListModel) -> [UInt64]? {
+        guard let table = findTable() else { return nil }
+        let rows = table.rows(in: table.visibleRect)
+        let positions = list.layout.positions(ofDisplayIndexes: IndexSet(integersIn: rows.location..<rows.location + rows.length))
+        return positions.compactMap { list.cache.loadedRow(at: $0)?.row_id }
+    }
+
+    private static func firstVisibleTrack(_ list: ListModel, _ table: NSTableView) -> (rowID: UInt64, position: Int)? {
+        let rows = table.rows(in: table.visibleRect)
+        let positions = list.layout.positions(ofDisplayIndexes: IndexSet(integersIn: rows.location..<rows.location + rows.length))
+        guard let position = positions.first, let row = list.cache.loadedRow(at: position) else { return nil }
+        return (row.row_id, position)
+    }
+
+    private static func argument(_ name: String) -> String? {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: name), index + 1 < args.count else { return nil }
+        return args[index + 1]
+    }
+
     /// The shown Songs list, set by its view for observation.
     static weak var songsList: ListModel?
 
@@ -188,14 +333,17 @@ enum NativeSongsSmoke {
     }
     private static func finish(_ model: PlayerModel, error: String?) throws {
         var report: [String: Any] = ["passed": error == nil, "cases": cases, "observations": observations,
-            "automation": "External Accessibility scroll, header clicks, browser and table selection, and a CGEvent drag onto the Up Next source row; server reads only for expected values."]
+            "automation": scenario == "grouping"
+                ? "External Accessibility group pop-up choice, row count, table selection and scroll; the smoke moves a staged album into the root and requests a rescan; server reads otherwise only for expected values."
+                : "External Accessibility scroll, header clicks, browser and table selection, and a CGEvent drag onto the Up Next source row; server reads only for expected values.",
+            "scenario": scenario]
         if let error { report["error"] = error }
         if let state = model.snapshot {
             report["snapshot"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state))
         }
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("report.json"))
-        print("SONGS_SMOKE \(error == nil ? "PASS" : "FAIL") \(output.path)")
+        print("SONGS_SMOKE \(scenario) \(error == nil ? "PASS" : "FAIL") \(output.path)")
     }
 }
 #endif

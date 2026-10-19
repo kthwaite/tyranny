@@ -49,6 +49,12 @@ enum Destination: Hashable {
         }
     }
 
-    /// Grouping used until the user picks one for this destination.
-    var defaultGrouping: Grouping { .none }
+    /// Grouping used until the user picks one for this destination (spec 4.3, 4.5, 4.6):
+    /// Recently Added and the Artists/Genres detail group by Album; Songs and playlists none.
+    var defaultGrouping: Grouping {
+        switch self {
+        case .recent, .artists, .genres: .album
+        case .songs, .albums, .upNext, .history, .playlist: .none
+        }
+    }
 }

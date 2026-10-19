@@ -1,3 +1,5 @@
+import Foundation
+
 /// One row of a grouped track table, in display order.
 public enum DisplayRow: Equatable, Sendable {
     /// `span` = list positions in this artist group.
@@ -31,6 +33,7 @@ public struct GroupLayout: Sendable {
         let kind: Kind
     }
 
+    public let grouping: Grouping
     private var blocks: [Block] = []
     /// Indices into `blocks` of blocks holding tracks, ascending by `positionStart`.
     private var trackBlocks: [Int] = []
@@ -55,6 +58,7 @@ public struct GroupLayout: Sendable {
     }
 
     public init(grouping: Grouping, total: Int, spans rawSpans: [GroupSpan]) {
+        self.grouping = grouping
         let spans = grouping == .none ? [] : Self.sanitized(rawSpans, total: total)
         var display = 0
         func append(_ position: Int, _ tracks: Int, _ rows: Int, _ kind: Kind) {
@@ -138,6 +142,115 @@ public struct GroupLayout: Sendable {
         }
     }
 
+    /// The row's offset within its album block: tracks, fillers and the gap. nil outside
+    /// album blocks.
+    public func blockIndex(atDisplayIndex displayIndex: Int) -> Int? {
+        guard displayIndex >= 0, displayIndex < count else { return nil }
+        let block = blocks[blockIndex(containingDisplay: displayIndex)]
+        guard case .album = block.kind else { return nil }
+        return displayIndex - block.displayStart
+    }
+
+    /// The list positions of the track rows among `displayIndexes`. O(ranges · log n + blocks hit).
+    public func positions(ofDisplayIndexes displayIndexes: IndexSet) -> IndexSet {
+        var result = IndexSet()
+        for range in displayIndexes.rangeView {
+            let lower = max(range.lowerBound, 0), upper = min(range.upperBound, count)
+            guard lower < upper else { continue }
+            var b = blockIndex(containingDisplay: lower)
+            while b < blocks.count, blocks[b].displayStart < upper {
+                let block = blocks[b]
+                let start = max(lower, block.displayStart)
+                let end = min(upper, block.displayStart + block.trackCount)
+                if start < end {
+                    let shift = block.positionStart - block.displayStart
+                    result.insert(integersIn: (start + shift)..<(end + shift))
+                }
+                b += 1
+            }
+        }
+        return result
+    }
+
+    /// The display indices of the track rows at `positions`. Positions without a row are left out.
+    public func displayIndexes(ofPositions positions: IndexSet) -> IndexSet {
+        var result = IndexSet()
+        for range in positions.rangeView {
+            guard range.upperBound > 0 else { continue }
+            var t = trackBlockIndex(containingPosition: max(range.lowerBound, 0))
+            while t < trackBlocks.count, blocks[trackBlocks[t]].positionStart < range.upperBound {
+                let block = blocks[trackBlocks[t]]
+                let start = max(range.lowerBound, block.positionStart)
+                let end = min(range.upperBound, block.positionStart + block.trackCount)
+                if start < end {
+                    let shift = block.displayStart - block.positionStart
+                    result.insert(integersIn: (start + shift)..<(end + shift))
+                }
+                t += 1
+            }
+        }
+        return result
+    }
+
+    /// The list positions that rows in `range` show: their tracks, and the first track of
+    /// each artist header (the header names its artist from it). nil when there are none.
+    public func positionRange(forDisplay range: Range<Int>) -> Range<Int>? {
+        let lower = max(range.lowerBound, 0), upper = min(range.upperBound, count)
+        guard lower < upper else { return nil }
+        var low = Int.max, high = Int.min
+        var b = blockIndex(containingDisplay: lower)
+        while b < blocks.count, blocks[b].displayStart < upper {
+            let block = blocks[b]
+            if case .header(_, let span) = block.kind, !span.isEmpty {
+                low = min(low, span.lowerBound)
+                high = max(high, span.lowerBound + 1)
+            }
+            let start = max(lower, block.displayStart)
+            let end = min(upper, block.displayStart + block.trackCount)
+            if start < end {
+                let shift = block.positionStart - block.displayStart
+                low = min(low, start + shift)
+                high = max(high, end + shift)
+            }
+            b += 1
+        }
+        return low < high ? low..<high : nil
+    }
+
+    /// The nearest track row at or after (`forward`) or at or before `displayIndex`.
+    public func nearestTrack(from displayIndex: Int, forward: Bool) -> Int? {
+        guard displayIndex >= 0, displayIndex < count else { return nil }
+        let b = blockIndex(containingDisplay: displayIndex)
+        let block = blocks[b]
+        let offset = displayIndex - block.displayStart
+        if offset < block.trackCount { return displayIndex }
+        if !forward, block.trackCount > 0 { return block.displayStart + block.trackCount - 1 }
+        // trackBlocks ascend in display order too: the first one after (or the last one before) b.
+        var lo = 0, hi = trackBlocks.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if trackBlocks[mid] <= b { lo = mid + 1 } else { hi = mid }
+        }
+        if forward {
+            return lo < trackBlocks.count ? blocks[trackBlocks[lo]].displayStart : nil
+        }
+        // lo is the first track block after b; b itself has no tracks here.
+        guard lo > 0 else { return nil }
+        let previous = blocks[trackBlocks[lo - 1]]
+        return previous.displayStart + previous.trackCount - 1
+    }
+
+    /// The index into `trackBlocks` of the last block starting at or before `position`, or 0.
+    private func trackBlockIndex(containingPosition position: Int) -> Int {
+        var lo = 0, hi = trackBlocks.count - 1
+        guard hi > 0 else { return 0 }
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if blocks[trackBlocks[mid]].positionStart <= position { lo = mid } else { hi = mid - 1 }
+        }
+        return lo
+    }
+
     private func blockIndex(containingDisplay displayIndex: Int) -> Int {
         var lo = 0, hi = blocks.count - 1
         while lo < hi {
@@ -145,5 +258,44 @@ public struct GroupLayout: Sendable {
             if blocks[mid].displayStart <= displayIndex { lo = mid } else { hi = mid - 1 }
         }
         return lo
+    }
+}
+
+/// Turns `list_groups` replies into layout spans.
+///
+/// Artist grouping asks the server for artist › album spans. Both groupings order artists by
+/// their first row, so one artist's rows take the same positions in both, and merging an
+/// artist's consecutive album spans gives the artist span. The album spans also give each
+/// artist header its album count.
+public enum GroupSpans {
+    /// The grouping to send in `list_groups` for a list shown with `grouping`.
+    public static func requestGrouping(for grouping: Grouping) -> Grouping {
+        grouping == .artist ? .artistAlbum : grouping
+    }
+
+    /// The spans `GroupLayout` takes for `grouping`, from a reply to `requestGrouping(for:)`.
+    public static func layoutSpans(grouping: Grouping, reply: [GroupSpan]) -> [GroupSpan] {
+        grouping == .artist ? artistSpans(fromArtistAlbum: reply) : reply
+    }
+
+    /// Consecutive spans of one artist merged into one span with no album key.
+    public static func artistSpans(fromArtistAlbum spans: [GroupSpan]) -> [GroupSpan] {
+        var merged: [GroupSpan] = []
+        for span in spans {
+            if let last = merged.last, last.artist_key == span.artist_key, last.start + last.count == span.start {
+                merged[merged.count - 1] = GroupSpan(artist_key: last.artist_key, album_key: nil,
+                                                     start: last.start, count: last.count + span.count)
+            } else {
+                merged.append(GroupSpan(artist_key: span.artist_key, album_key: nil, start: span.start, count: span.count))
+            }
+        }
+        return merged
+    }
+
+    /// Albums per artist key, from artist › album spans.
+    public static func albumCounts(_ spans: [GroupSpan]) -> [UInt64: Int] {
+        var counts: [UInt64: Int] = [:]
+        for span in spans where span.album_key != nil { counts[span.artist_key, default: 0] += 1 }
+        return counts
     }
 }
