@@ -136,11 +136,11 @@ enum NativeShellSmoke {
 
         // Filter syntax error: red border and popover.
         try await drive("value", "library-filter", "artist:[")
-        try await wait("filter syntax error", model) { model.libraryFilterError != nil }
+        try await wait("filter syntax error", model) { navigation.filterError != nil }
         try await drive("exists", "library-filter-error")
         try capture("shell-filter-error")
         try await drive("value", "library-filter", "")
-        try await wait("filter cleared", model) { model.libraryFilterError == nil && navigation.filter.isEmpty }
+        try await wait("filter cleared", model) { navigation.filterError == nil && navigation.filter.isEmpty }
         cases.append("native-filter-syntax-error-popover")
 
         // Resume playback for the window screenshot.

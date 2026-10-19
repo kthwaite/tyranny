@@ -27,8 +27,9 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
-    parser.add_argument("--scenario", choices=["spike", "shell"], default="spike",
-                        help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell")
+    parser.add_argument("--scenario", choices=["spike", "shell", "songs"], default="spike",
+                        help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell; "
+                             "songs: the continuous Songs table and column browser")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -75,6 +76,10 @@ def main():
             app = str(Path(args.app).resolve())
             if args.scenario == "shell":
                 shell(report, run, app, port, ready, root, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "songs":
+                songs(report, run, app, port, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             for mode in ["initial", "relaunch"]:
@@ -135,6 +140,64 @@ def shell(report, run, app, port, ready, root, controller, screenshots):
     for image in sorted(output.glob("shell*.png")):
         shutil.copy2(image, screenshots / image.name)
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("shell*.png"))]
+
+
+SONG_GENRES = ["Ambient", "Folk", "Jazz"]
+
+
+def songs_fixture(music, source):
+    """1,129 tracks: 105 tagged FLACs (3 genres x 5 albums x 7 tracks, one year per
+    album) and 1,024 untagged hard links of one WAV."""
+    tagged = music / "Tagged"
+    tagged.mkdir(parents=True)
+    for genre_index, genre in enumerate(SONG_GENRES):
+        for album in range(5):
+            year = 1960 + genre_index * 10 + album
+            for track in range(1, 8):
+                path = tagged / f"{genre} {album} {track:02}.flac"
+                subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1", "-c:a", "flac",
+                                "-metadata", f"title={genre} {album} Song {track}",
+                                "-metadata", f"artist={genre} Artist {album % 3}",
+                                "-metadata", f"album_artist={genre} Artist {album % 3}",
+                                "-metadata", f"album={genre} Album {album}",
+                                "-metadata", f"genre={genre}", "-metadata", f"date={year}",
+                                "-metadata", f"track={track}", str(path)], check=True, timeout=30)
+    untagged = music / "Untagged"
+    untagged.mkdir()
+    for index in range(1024):
+        os.link(source, untagged / f"Untagged {index:04}.wav")
+
+
+def songs(report, run, app, port, ready, source, controller, screenshots):
+    """Drive the Songs table: scroll to the end, sort, narrow by genre, drag to Up Next."""
+    report["scenario"] = "songs"
+    music = run / "Songs fixture"
+    songs_fixture(music, source)
+    controller.request("add_root", path=str(music))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 1129, seconds=180)
+    output = run / "songs"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--songs-smoke-output", str(output),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "songs.stdout").open("w") as stdout, (run / "songs.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=240)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["songs"] = native
+    assert native["passed"], native.get("error")
+    # The server, not the app, holds the dragged entries.
+    page = controller.request("queue_page", revision=None, offset=0, limit=500)
+    sources = [entry["source"] for entry in page["entries"]]
+    assert page["total"] == 5 and all(source == {"kind": "drag", "name": "Songs"} for source in sources), page
+    assert [entry["track_id"] for entry in page["entries"]] == native["observations"]["dragged_track_ids"], page
+    report["cases"].append({"name": "songs-server-holds-dragged-entries", "total": page["total"]})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("songs*.png")):
+        shutil.copy2(image, screenshots / image.name)
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("songs*.png"))]
 
 
 if __name__ == "__main__":

@@ -55,6 +55,12 @@ struct TyrannyApp: App {
                 Button("Filter") { navigation.focusFilter() }
                     .keyboardShortcut("f")
             }
+            CommandGroup(after: .sidebar) {
+                Button(navigation.columnBrowserVisible ? "Hide Column Browser" : "Show Column Browser") {
+                    navigation.columnBrowserVisible.toggle()
+                }
+                .keyboardShortcut("b")
+            }
         }
         Settings {
             SettingsView(model: model, navigation: navigation)
@@ -87,6 +93,7 @@ private struct MainWindow: View {
                 NativeSmartPlaylistSmoke.startIfRequested(model)
                 NativeArtworkSmoke.startIfRequested(model)
                 NativeShellSmoke.startIfRequested(model, navigation: navigation)
+                NativeSongsSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }

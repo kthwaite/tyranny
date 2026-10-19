@@ -9,11 +9,21 @@ struct MainWindowView: View {
     @Environment(\.openSettings) private var openSettings
     @FocusState private var filterFocused: Bool
     @State private var dismissedFilterError: String?
+    @State private var lists = TrackLists()
 
     private var transport: TransportModel { model.transport }
-    /// Until the list views (Task 6) validate the filter, the spike's library
-    /// query reports its syntax errors.
-    private var filterError: String? { navigation.filterError ?? model.libraryFilterError }
+    /// Set by the shown track list from `list_tracks` `invalid_filter` replies.
+    private var filterError: String? { navigation.filterError }
+
+    /// The shown destination's track list, if it is one.
+    private var currentList: ListModel? {
+        switch navigation.destination {
+        case .songs:
+            lists.list(for: .songs, source: .library, player: model, navigation: navigation)
+        default:
+            nil
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,11 +34,12 @@ struct MainWindowView: View {
                 mainArea
             }
             Divider()
-            StatusBar(model: model) { showSettings(.connection) }
+            StatusBar(model: model, totals: currentList?.totals, filteredFrom: currentList?.filteredFrom) {
+                showSettings(.connection)
+            }
         }
         .frame(minWidth: 940, minHeight: 560)
         .toolbar { toolbar }
-        .onChange(of: navigation.filter) { _, filter in model.filter = filter }
         .onChange(of: navigation.filterFocusRequest) { _, _ in filterFocused = true }
         .onChange(of: filterError) { _, error in if error == nil { dismissedFilterError = nil } }
     }
@@ -144,6 +155,8 @@ struct MainWindowView: View {
                     .disabled(!model.canMutate || model.scanActive)
                     .accessibilityIdentifier("choose-folder")
             }
+        } else if let list = currentList {
+            TrackListView(list: list, player: model, navigation: navigation)
         } else {
             DestinationPlaceholder(destination: navigation.destination)
         }

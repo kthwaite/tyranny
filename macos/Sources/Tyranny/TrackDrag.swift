@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TyrannyCore
 
 enum TrackDragSource: Equatable {
     case library
@@ -16,6 +17,11 @@ struct TrackDrag {
     let positions: [Int]
     let revision: UInt64
     let libraryRevision: UInt64
+    /// A track-list drag: the rows as a selection the server resolves. `ids` is then empty.
+    var selection: TrackSelection?
+    /// The selection's row count and the list it came from, for the drop's source label.
+    var count = 0
+    var label = ""
 }
 
 /// Owns a public AppKit table, not SwiftUI's implementation or its delegates.

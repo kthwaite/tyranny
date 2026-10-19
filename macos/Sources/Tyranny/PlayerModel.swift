@@ -1100,6 +1100,83 @@ extension PlayerModel {
         return drag.token
     }
 
+    /// Starts a track-list drag. The rows travel as a selection: IDs for a small loaded
+    /// selection, otherwise the list description with ranges (spec 5.2).
+    func beginSelectionDrag(_ selection: TrackSelection, count: Int, label: String) -> String? {
+        guard canMutate, count > 0, snapshot != nil else { return nil }
+        let revision: UInt64
+        switch selection {
+        case .ids(let libraryRevision, _): revision = libraryRevision
+        case .list(_, let libraryRevision, _, _, _): revision = libraryRevision
+        }
+        let drag = TrackDrag(token: UUID().uuidString, connection: playlistSession, source: .library,
+            ids: [], positions: [], revision: revision, libraryRevision: revision,
+            selection: selection, count: count, label: label)
+        activeDrag = drag
+        return drag.token
+    }
+
+    /// Up Next appends; a regular playlist adds at its end. The server checks the
+    /// selection's library revision. A queue edit that races another is retried once.
+    private func dropSelection(_ selection: TrackSelection, of drag: TrackDrag, on destination: TrackDragSource) -> Bool {
+        let count = drag.count
+        let noun = count == 1 ? "track" : "tracks"
+        switch destination {
+        case .library:
+            return false
+        case .queue:
+            mutate {
+                do {
+                    try await self.appendSelection(selection, label: drag.label, connection: drag.connection)
+                    self.message = "Added \(DisplayFormat.count(count)) \(noun) to Up Next."
+                } catch {
+                    self.message = "\(error.localizedDescription) Drop was not replayed; review refreshed state before trying again."
+                }
+            }
+        case .playlist(let id):
+            guard let playlist = playlists?.entries.first(where: { $0.id == id }), !playlist.isSmart else {
+                message = "Wait for the playlist catalog to finish loading before dropping."
+                return false
+            }
+            mutate {
+                do {
+                    guard self.connected, self.playlistSession == drag.connection else {
+                        throw ServerFailure(code: "connection_changed", message: "The drag connection changed. Nothing was replayed.")
+                    }
+                    let _: PlaylistApplied = try await self.request("playlist_add_selection", [
+                        "playlist_id": .uint(id), "expected_revision": .uint(playlist.revision),
+                        "selection": try JSONValue.encoding(selection), "before": .null])
+                    self.message = "Added \(DisplayFormat.count(count)) \(noun) to \(playlist.name)."
+                } catch {
+                    self.message = "\(error.localizedDescription) Drop was not replayed; review refreshed state before trying again."
+                }
+                self.requestPlaylists(); self.requestPlaylistEntries()
+            }
+        }
+        activeDrag = nil
+        return true
+    }
+
+    private func appendSelection(_ selection: TrackSelection, label: String, connection: UInt64) async throws {
+        var retried = false
+        while true {
+            guard connected, playlistSession == connection, let state = snapshot else {
+                throw ServerFailure(code: "connection_changed", message: "The drag connection changed. Nothing was replayed.")
+            }
+            do {
+                let _: Applied = try await request("enqueue_tracks", [
+                    "selection": try JSONValue.encoding(selection), "expected_revision": .uint(state.queue_revision),
+                    "placement": .string(Placement.append.rawValue), "play": .bool(false),
+                    "source": try JSONValue.encoding(QueueSource(kind: .drag, name: label))])
+                return
+            } catch let failure as ServerFailure where failure.code == "stale_revision" && !retried {
+                // Appending does not depend on the queue's contents: refresh the revision and retry once.
+                retried = true
+                let _: SnapshotReply = try await request("snapshot")
+            }
+        }
+    }
+
     func validateTrackHover(destination: TrackDragSource?) -> Bool {
         guard let drag = activeDrag else { return false }
         return validateTrackDrop(token: drag.token, destination: destination)
@@ -1114,7 +1191,7 @@ extension PlayerModel {
             problem = "The connection changed during this drag. Start a new drag; nothing was replayed."
         } else if !canMutate {
             problem = "Wait for the current command to finish, then start a new drag."
-        } else if drag.source == .library && drag.libraryRevision != snapshot?.library.revision {
+        } else if drag.source == .library && drag.selection == nil && drag.libraryRevision != snapshot?.library.revision {
             problem = "The library changed during this drag. Start a new drag from the refreshed tracks."
         } else if drag.source == .queue && drag.revision != snapshot?.queue_revision {
             problem = "The queue changed during this drag. Start a new drag from the refreshed queue."
@@ -1140,6 +1217,7 @@ extension PlayerModel {
     func dropTracks(token: String, destination: TrackDragSource, row: Int? = nil) -> Bool {
         guard validateTrackDrop(token: token, destination: destination), let drag = activeDrag,
               let state = snapshot else { return false }
+        if let selection = drag.selection { return dropSelection(selection, of: drag, on: destination) }
         let revision: UInt64
         let libraryRevision: UInt64
         let before: UInt64?

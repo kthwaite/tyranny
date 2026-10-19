@@ -33,6 +33,10 @@ struct SourceList: View {
     private func row(_ destination: Destination) -> some View {
         Label(destination.title, systemImage: destination.systemImage)
             .badge(count(destination).map { Text(DisplayFormat.count($0)) })
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Tracks dropped on Up Next are appended to the queue.
+            .trackDragHover(model: model, enabled: destination == .upNext, destination: .queue, hover: {},
+                            drop: destination == .upNext ? { model.dropTracks(token: $0, destination: .queue) } : nil)
             .tag(destination)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier(destination.identifier)

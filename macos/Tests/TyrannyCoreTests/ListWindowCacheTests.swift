@@ -524,4 +524,28 @@ struct ListWindowCacheTests {
         #expect(fake.log.count == logged, "rows past the end were requested")
         #expect(cache.row(at: 100)?.id == 101)
     }
+
+    @Test func loadedRowsPeekWithoutRequesting() async {
+        let fake = FakeList(count: 1000, autoComplete: true)
+        let cache = ListWindowCache(fetch: fake.fetch)
+        #expect(cache.loadedRow(at: 0) == nil)
+        #expect(cache.loadedRows().isEmpty)
+        await drain()
+        #expect(fake.log.isEmpty, "peeking requested a window")
+
+        cache.visible(400..<450)
+        await until("visible windows") { cache.loadedWindowIndices == [1, 2, 3] }
+        await drain()
+        let logged = fake.log.count
+        #expect(cache.loadedRow(at: 450)?.id == 451)
+        #expect(cache.loadedRow(at: 0) == nil)
+        #expect(cache.loadedRow(at: 999) == nil)
+        #expect(cache.loadedRow(at: -1) == nil)
+        let rows = cache.loadedRows()
+        #expect(rows.count == 600)
+        #expect(rows.first?.position == 200 && rows.first?.row.id == 201)
+        #expect(rows.last?.position == 799 && rows.last?.row.id == 800)
+        await drain()
+        #expect(fake.log.count == logged, "peeking requested a window")
+    }
 }

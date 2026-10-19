@@ -98,6 +98,29 @@ public enum DisplayFormat {
         let prefix = home.hasSuffix("/") ? home : home + "/"
         return path.hasPrefix(prefix) ? "~/" + path.dropFirst(prefix.count) : path
     }
+
+    /// A column browser's first row: "All (12 Genres)".
+    public static func browserAll(_ value: UInt64, singular: String, plural: String) -> String {
+        "All (\(count(value)) \(value == 1 ? singular : plural))"
+    }
+
+    /// "1 song", "1,129 songs".
+    public static func songs<N: BinaryInteger>(_ value: N) -> String {
+        "\(count(value)) \(value == 1 ? "song" : "songs")"
+    }
+
+    /// "1,411 kbps", or empty when unknown.
+    public static func kilobits(_ value: UInt32?) -> String {
+        value.map { "\(count($0)) kbps" } ?? ""
+    }
+
+    /// "44.1 kHz", "48 kHz", or empty when unknown.
+    public static func sampleRate(_ hertz: UInt32) -> String {
+        guard hertz > 0 else { return "" }
+        let kilohertz = Double(hertz) / 1000
+        return kilohertz == kilohertz.rounded()
+            ? "\(Int(kilohertz)) kHz" : String(format: "%.1f kHz", kilohertz)
+    }
 }
 
 extension RepeatMode {

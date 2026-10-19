@@ -147,6 +147,31 @@ public enum WindowFetchError: Error {
         return nil
     }
 
+    /// The loaded row at `position`, or nil. Never requests a window.
+    public func loadedRow(at position: Int) -> Row? {
+        _ = generation
+        guard position >= 0, !hasTotal || position < total else { return nil }
+        let index = position / windowSize
+        guard let window = windows[index] else { return nil }
+        let offset = position - index * windowSize
+        return offset < window.rows.count ? window.rows[offset] : nil
+    }
+
+    /// Every loaded row with its position, ascending. Never requests a window.
+    public func loadedRows() -> [(position: Int, row: Row)] {
+        _ = generation
+        var result: [(position: Int, row: Row)] = []
+        for index in windows.keys.sorted() {
+            guard let window = windows[index] else { continue }
+            for (offset, row) in window.rows.enumerated() {
+                let position = index * windowSize + offset
+                if hasTotal, position >= total { break }
+                result.append((position, row))
+            }
+        }
+        return result
+    }
+
     /// Prefetches the windows covering `range` ± 1 window and marks them most recently visible.
     public func visible(_ range: Range<Int>) {
         lastVisible = range
