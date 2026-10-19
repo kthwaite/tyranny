@@ -1,0 +1,124 @@
+import Testing
+@testable import TyrannyCore
+
+private func span(_ artist: UInt64, _ album: UInt64?, _ start: UInt64, _ count: UInt64) -> GroupSpan {
+    GroupSpan(artist_key: artist, album_key: album, start: start, count: count)
+}
+
+@Suite struct GroupLayoutTests {
+    @Test func noneIsIdentity() {
+        let layout = GroupLayout(grouping: .none, total: 5, spans: [])
+        #expect(layout.count == 5)
+        for i in 0..<5 {
+            #expect(layout.row(at: i) == .track(position: i, blockIndex: nil))
+            #expect(layout.displayIndex(ofPosition: i) == i)
+            #expect(layout.albumKey(atDisplayIndex: i) == nil)
+        }
+    }
+
+    @Test func artistGivesHeaderThenTracks() {
+        let layout = GroupLayout(grouping: .artist, total: 5,
+                                 spans: [span(1, nil, 0, 2), span(0, nil, 2, 3)])
+        #expect(layout.count == 7)
+        #expect(layout.row(at: 0) == .artistHeader(artistKey: 1, span: 0..<2))
+        #expect(layout.row(at: 2) == .track(position: 1, blockIndex: nil))
+        #expect(layout.row(at: 3) == .artistHeader(artistKey: 0, span: 2..<5))
+        #expect(layout.displayIndex(ofPosition: 2) == 4)
+    }
+
+    @Test func albumBlocksPadToSevenRowsAndEndWithGap() {
+        let layout = GroupLayout(grouping: .album, total: 10,
+                                 spans: [span(1, 10, 0, 2), span(1, 11, 2, 8)])
+        // 7 + gap, then 8 + gap
+        #expect(layout.count == 8 + 9)
+        #expect(layout.row(at: 1) == .track(position: 1, blockIndex: 1))
+        #expect(layout.row(at: 2) == .blockFiller(albumKey: 10, blockIndex: 2))
+        #expect(layout.row(at: 6) == .blockFiller(albumKey: 10, blockIndex: 6))
+        #expect(layout.row(at: 7) == .blockGap)
+        #expect(layout.row(at: 8) == .track(position: 2, blockIndex: 0))
+        #expect(layout.row(at: 15) == .track(position: 9, blockIndex: 7))
+        #expect(layout.row(at: 16) == .blockGap)
+        #expect(layout.albumKey(atDisplayIndex: 5) == 10)
+        #expect(layout.albumKey(atDisplayIndex: 12) == 11)
+    }
+
+    @Test func artistAlbumEmitsOneHeaderPerArtistRun() {
+        let layout = GroupLayout(grouping: .artistAlbum, total: 9,
+                                 spans: [span(1, 10, 0, 3), span(1, 11, 3, 4), span(0, 12, 7, 2)])
+        #expect(layout.row(at: 0) == .artistHeader(artistKey: 1, span: 0..<7))
+        #expect(layout.row(at: 1) == .track(position: 0, blockIndex: 0))
+        // header + 8 + 8 = 17
+        #expect(layout.row(at: 17) == .artistHeader(artistKey: 0, span: 7..<9))
+        #expect(layout.count == 17 + 1 + 8)
+        #expect(layout.albumKey(atDisplayIndex: 0) == nil)
+        #expect(layout.albumKey(atDisplayIndex: 9) == 11)
+        var headers = 0
+        for i in 0..<layout.count { if case .artistHeader = layout.row(at: i) { headers += 1 } }
+        #expect(headers == 2)
+    }
+
+    @Test(arguments: [Grouping.artist, .album, .artistAlbum])
+    func displayIndexRoundTripsForEveryPosition(grouping: Grouping) {
+        var rng = SplitMix(seed: 0x5EED)
+        var spans: [GroupSpan] = []
+        var start: UInt64 = 0
+        var artist: UInt64 = 0
+        var album: UInt64 = 100
+        while start < 1_000 {
+            let n = min(UInt64.random(in: 1...12, using: &rng), 1_000 - start)
+            if UInt64.random(in: 0..<3, using: &rng) == 0 { artist += 1 }
+            album += 1
+            spans.append(span(artist, grouping == .artist ? nil : album, start, n))
+            start += n
+        }
+        if grouping == .artist {
+            // artist grouping: one span per artist
+            var merged: [GroupSpan] = []
+            for s in spans {
+                if let last = merged.last, last.artist_key == s.artist_key {
+                    merged[merged.count - 1] = span(last.artist_key, nil, last.start, last.count + s.count)
+                } else { merged.append(s) }
+            }
+            spans = merged
+        }
+        let layout = GroupLayout(grouping: grouping, total: 1_000, spans: spans)
+        var last = -1
+        for p in 0..<1_000 {
+            let d = layout.displayIndex(ofPosition: p)
+            #expect(d > last)
+            last = d
+            guard case .track(let back, _) = layout.row(at: d) else {
+                Issue.record("not a track at \(d)"); return
+            }
+            #expect(back == p)
+        }
+    }
+
+    @Test func layout_rebuild_keeps_anchor_track_position() {
+        let before = GroupLayout(grouping: .artistAlbum, total: 6,
+                                 spans: [span(1, 10, 0, 3), span(2, 20, 3, 3)])
+        let anchorPosition = 4
+        let oldDisplay = before.displayIndex(ofPosition: anchorPosition)
+        // New album (artist 1, 2 tracks) inserted before the anchor's album.
+        let after = GroupLayout(grouping: .artistAlbum, total: 8,
+                                spans: [span(1, 10, 0, 3), span(1, 15, 3, 2), span(2, 20, 5, 3)])
+        let newPosition = anchorPosition + 2
+        // header + 8 + 8 + header(artist 2) + offset 1 in album
+        let expected = 1 + 8 + 8 + 1 + 1
+        #expect(after.displayIndex(ofPosition: newPosition) == expected)
+        #expect(after.displayIndex(ofPosition: newPosition) > oldDisplay)
+        #expect(after.row(at: expected) == .track(position: newPosition, blockIndex: 1))
+    }
+}
+
+private struct SplitMix: RandomNumberGenerator {
+    var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+}
