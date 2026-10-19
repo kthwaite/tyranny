@@ -30,6 +30,23 @@
 - Selection and the playing indicator use the system accent colour (`Color.accentColor` / `NSColor.controlAccentColor`). The UI follows system light/dark mode, with native controls and the system font.
 - Same branch as the server plan (`feature/library-redesign`). Commit messages carry no attribution lines.
 
+## Carried From Server Execution
+
+The server plan was executed first. See `docs/superpowers/plans/2026-10-18-library-server-execution.md` for the rulings. These wire behaviours bind the client. Each one names the task that implements it.
+
+- **Explicit `first_row_id` (Task 1, Task 4).** `TrackSelection.list.first_row_id` must be encoded as an explicit key, `null` when absent. Default `Codable` omits nil keys, so it needs custom encoding. Test it in `trackSelectionListEncodesHalfOpenRanges`.
+- **Start row (Task 4, Task 13).** `first_row_id: null` with shuffle on means "play this source": the server starts at a shuffle pick within the new run. The album Shuffle button sends this. Every activation of a clicked row, and Play on a selection, sets `first_row_id` to the first selected row, so playback starts there.
+- **Stale queue revision (Task 11, Task 13).** The played-prefix trim bumps the queue revision about once per track once 100 entries have played. Queue edits and run enqueues that get `stale_revision` refetch the snapshot and retry once.
+- **Stale library revision (Task 13).** The library revision changes on every indexing batch, including the automatic upgrade rescan. A run enqueue or playlist add that gets `stale_library_revision` must do three things: refetch the clicked row's window, relocate the row by `row_id`, and re-encode. Then retry once. If the row is gone, show "The list changed; try again" in the status bar.
+- **Refetch on `current_id` change (Task 11).** Played marks and Repeat All wrap clears do not bump the queue revision. When `current_id` changes, refetch the visible Up Next and drawer windows so HISTORY and NOW PLAYING stay correct.
+- **Refetch on `history_revision` change (Task 2, Task 6, Task 10).** Play counts change the Plays and Last Played columns and sorts without a library revision change. When `history_revision` changes, refetch the visible windows and group spans of track lists. Task 2's `serverRevisionChanged` throttle applies.
+- **Refresh queue pages on library revision change (Task 11).** Queue display fields come from the library.
+- **Artwork invalidation (Task 5, Task 8).** Rescans that change only a cover file do not bump the library revision. Invalidate visible album artwork when a scan reaches `complete`, or by the `Artwork.cache_key` change, not only on revision change.
+- **Repeat All Previous (Task 5).** Under Repeat All, `can_previous` is true at a run's first entry, because Previous wraps within the context. Do not disable the Previous button there.
+- **Repeat One Next (Task 5).** Under Repeat One, Next moves to the following entry. Only the natural end of the entry replays it.
+- **Play All for playlists (Task 12).** Enqueue or Play All may keep using `enqueue_playlist`, which now resolves off the playback owner.
+- **Up Next sections (Task 11).** Build the sections from `QueueItem.played` plus `current_id`, not from queue position. They must stay correct under shuffle.
+
 ## Review Focus
 
 1. **Scrolling Songs during a scan.** Revisions change every indexing batch. Expected: no row jumps, the selection is kept by ID, placeholders show for at most a refetch, and there is no request storm. The test, `revision_storm_refetches_visible_window_at_most_twice_per_second`, goes in Task 2.
