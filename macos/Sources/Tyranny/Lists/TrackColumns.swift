@@ -76,20 +76,38 @@ final class ColumnPreferences {
     static let shared = ColumnPreferences()
 
     private(set) var hidden: Set<String>
+    /// Columns the user has shown or hidden themselves. They never follow the sort.
+    private(set) var explicit: Set<String>
     @ObservationIgnored private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         hidden = (defaults.stringArray(forKey: "hiddenColumns")).map(Set.init) ?? TrackColumns.defaultHidden
+        explicit = Set(defaults.stringArray(forKey: "explicitColumns") ?? [])
     }
 
     func isHidden(_ id: String) -> Bool { hidden.contains(id) }
 
+    /// What the table and the menus show: `sortFields` force-show an unchosen hidden column.
+    func isShown(_ id: String, sortFields: [SortField]) -> Bool {
+        let sort = TrackColumns.column(id)?.sort
+        return ColumnVisibility.isShown(id, hidden: hidden, explicit: explicit,
+                                        sortedBy: sort.map(sortFields.contains) ?? false)
+    }
+
+    /// A user choice. It is remembered even when the hidden set does not change.
     func setHidden(_ id: String, _ isHidden: Bool) {
-        guard TrackColumns.column(id)?.hideable == true, hidden.contains(id) != isHidden else { return }
+        guard TrackColumns.column(id)?.hideable == true else { return }
+        if !explicit.contains(id) {
+            explicit.insert(id)
+            defaults.set(explicit.sorted(), forKey: "explicitColumns")
+        }
+        guard hidden.contains(id) != isHidden else { return }
         if isHidden { hidden.insert(id) } else { hidden.remove(id) }
         defaults.set(hidden.sorted(), forKey: "hiddenColumns")
     }
 
-    func toggle(_ id: String) { setHidden(id, !isHidden(id)) }
+    func toggle(_ id: String, sortFields: [SortField]) {
+        setHidden(id, isShown(id, sortFields: sortFields))
+    }
 }

@@ -22,6 +22,7 @@ struct VirtualTrackTable: NSViewRepresentable {
     let layoutToken: ListModel.LayoutToken
     let factsGeneration: UInt64
     let hidden: Set<String>
+    let explicit: Set<String>
     let playingTrackID: UInt64?
 
     var identifier: String { "track-table-\(list.key)" }
@@ -116,6 +117,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var updating = false
         /// The layout the table's rows show. Replaced only in `update`, with a reload.
         private var layout = GroupLayout(grouping: .none, total: 0, spans: [])
+        private var shownExplicit: Set<String> = []
         private var shownSort: [SortKey] = []
         private var shownLayout: ListModel.LayoutToken?
         private var shownGeneration: UInt64?
@@ -153,9 +155,10 @@ struct VirtualTrackTable: NSViewRepresentable {
             updating = true
             defer { updating = false }
             let blocks = parent.list.showsAlbumBlocks
-            if parent.hidden != shownHidden || blocks != shownBlocks || parent.list.sortKeys != shownSort {
+            if parent.hidden != shownHidden || parent.explicit != shownExplicit || blocks != shownBlocks || parent.list.sortKeys != shownSort {
                 shownSort = parent.list.sortKeys
                 shownHidden = parent.hidden
+                shownExplicit = parent.explicit
                 shownBlocks = blocks
                 for column in table.tableColumns {
                     let id = column.identifier.rawValue
@@ -450,12 +453,8 @@ struct VirtualTrackTable: NSViewRepresentable {
             return columnIndex != gutter && newColumnIndex != gutter
         }
 
-        /// A hidden column stays visible while the list sorts by it, so the arrow shows
-        /// (Recently Added's default Date Added).
         private func isHidden(_ id: String) -> Bool {
-            guard parent.hidden.contains(id) else { return false }
-            let field = TrackColumns.column(id)?.sort
-            return !(field != nil && parent.list.sortKeys.contains { $0.field == field })
+            !ColumnPreferences.shared.isShown(id, sortFields: parent.list.sortKeys.map(\.field))
         }
 
         @objc func activateClickedRow(_ table: NSTableView) {
@@ -471,14 +470,14 @@ struct VirtualTrackTable: NSViewRepresentable {
                 let item = NSMenuItem(title: column.title, action: #selector(toggleColumn(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = column.id
-                item.state = ColumnPreferences.shared.isHidden(column.id) ? .off : .on
+                item.state = isHidden(column.id) ? .off : .on
                 menu.addItem(item)
             }
         }
 
         @objc func toggleColumn(_ item: NSMenuItem) {
             guard let id = item.representedObject as? String else { return }
-            ColumnPreferences.shared.toggle(id)
+            ColumnPreferences.shared.toggle(id, sortFields: parent.list.sortKeys.map(\.field))
         }
 
         // MARK: Drag

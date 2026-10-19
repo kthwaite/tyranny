@@ -31,7 +31,7 @@ struct TrackListView: View {
             }
             VirtualTrackTable(
                 list: list, player: player, generation: list.cache.generation, epoch: list.epoch,
-                layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden,
+                layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden, explicit: columns.explicit,
                 playingTrackID: player.snapshot?.now_playing?.track_id)
                 .overlay { emptyState }
                 .overlay(alignment: .bottom) { reorderHint }
@@ -123,7 +123,7 @@ struct TrackListView: View {
             Menu {
                 ForEach(TrackColumns.all.filter(\.hideable)) { column in
                     Toggle(column.title, isOn: Binding(
-                        get: { !columns.isHidden(column.id) },
+                        get: { columns.isShown(column.id, sortFields: list.sortKeys.map(\.field)) },
                         set: { columns.setHidden(column.id, !$0) }))
                 }
             } label: {
