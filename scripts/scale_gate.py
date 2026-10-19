@@ -466,9 +466,82 @@ def main():
         report["v9_enqueue_run_50k"] = enqueue
         report["v9_underrun_counters"] = underruns
         report["v9_list_targets_met"] = all(family["target_met"] for family in families.values())
-
         # Longer than the output prebuffer, so a stall the enqueues caused is counted.
         time.sleep(1)
+        underruns["after_enqueues_settled"] = control.state()["underruns"]
+
+        # 50k queue and playlist edits while playing. Each family runs three
+        # times; its underrun delta includes a settle longer than the prebuffer.
+        whole_library = dict(kind="list", list=described(), library_revision=library_revision,
+                             ranges=[[0, 18446744073709551615]], excluded=[], first_row_id=None)
+        upcoming = TRACKS
+        queue_families = {}
+        def timed(command, **fields):
+            started = time.perf_counter_ns()
+            result = control.request(command, **fields)
+            return result, (time.perf_counter_ns() - started) / 1_000_000
+        def family(name, step):
+            before = control.state()["underruns"]
+            samples = [step(iteration) for iteration in range(3)]
+            time.sleep(1)
+            after = control.state()
+            assert after["transport"] == "playing", (name, after["transport"])
+            summary = distribution(samples)
+            summary.update(samples_ms=samples, underrun_delta=after["underruns"] - before)
+            queue_families[name] = summary
+            print(f"{name}: {', '.join(f'{sample:.1f}' for sample in samples)} ms, "
+                  f"underruns {summary['underrun_delta']}", flush=True)
+        def shuffle_upcoming(iteration):
+            snapshot = control.state()
+            _, elapsed = timed("shuffle_upcoming", expected_revision=snapshot["queue_revision"])
+            assert control.state()["queue_length"] == 1 + upcoming
+            return elapsed
+        saved = []
+        def save_upcoming(iteration):
+            snapshot = control.state()
+            result, elapsed = timed("save_upcoming", expected_revision=snapshot["queue_revision"],
+                                    expected_playlists_revision=snapshot["playlists_revision"],
+                                    name=f"Saved upcoming {iteration}")
+            assert result["playlist"]["entry_count"] == upcoming, result["playlist"]
+            saved.append(result["playlist"])
+            return elapsed
+        def playlist_add_selection(iteration):
+            playlist = control.request("create_playlist", expected_revision=control.state()["playlists_revision"],
+                                       name=f"Selection {iteration}")["playlist"]
+            result, elapsed = timed("playlist_add_selection", playlist_id=playlist["id"],
+                                    expected_revision=playlist["revision"], selection=whole_library, before=None)
+            assert result["playlist"]["entry_count"] == TRACKS, result["playlist"]
+            return elapsed
+        def clear_upcoming(iteration):
+            snapshot = control.state()
+            assert snapshot["queue_length"] == 1 + upcoming
+            _, elapsed = timed("clear_upcoming", expected_revision=snapshot["queue_revision"])
+            assert control.state()["queue_length"] == 1
+            # Refill outside the measurement for the next sample.
+            if iteration < 2:
+                snapshot = control.state()
+                control.request("enqueue_playlist", playlist_id=saved[0]["id"],
+                                playlist_revision=saved[0]["revision"], library_revision=library_revision,
+                                expected_revision=snapshot["queue_revision"], play=False)
+            return elapsed
+        def enqueue_playlist(iteration):
+            snapshot = control.state()
+            _, elapsed = timed("enqueue_playlist", playlist_id=saved[0]["id"],
+                               playlist_revision=saved[0]["revision"], library_revision=library_revision,
+                               expected_revision=snapshot["queue_revision"], play=False)
+            assert control.state()["queue_length"] == 1 + upcoming
+            # Empty the upcoming entries outside the measurement for the next sample.
+            if iteration < 2:
+                control.request("clear_upcoming", expected_revision=control.state()["queue_revision"])
+            return elapsed
+        family("shuffle_upcoming_50k", shuffle_upcoming)
+        family("save_upcoming_50k", save_upcoming)
+        family("playlist_add_selection_50k", playlist_add_selection)
+        family("clear_upcoming_50k", clear_upcoming)
+        family("enqueue_playlist_50k", enqueue_playlist)
+        report["v9_queue_families_50k"] = queue_families
+        underruns["after_queue_families"] = control.state()["underruns"]
+
         final = control.state()
         report["final_snapshot"] = final
         report["playback_observation"] = dict(before=before_queries, after=final,
@@ -478,11 +551,14 @@ def main():
         # Neither queries nor 50k run enqueues may disturb playback: run
         # selections resolve off the playback owner.
         query_underruns = underruns["after_list_families"] - before_queries["underruns"]
-        enqueue_underruns = final["underruns"] - underruns["after_list_families"]
+        enqueue_underruns = underruns["after_enqueues_settled"] - underruns["after_list_families"]
         report["playback_observation"]["query_phase_underrun_delta"] = query_underruns
         report["playback_observation"]["enqueue_phase_underrun_delta"] = enqueue_underruns
         assert query_underruns == 0, "playback underruns during query measurements"
         assert enqueue_underruns == 0, f"{enqueue_underruns} playback underruns during 50k run enqueues"
+        stalled = {name: summary["underrun_delta"] for name, summary in queue_families.items()
+                   if summary["underrun_delta"] != 0}
+        assert not stalled, f"playback underruns during 50k queue edits: {stalled}"
         if not args.queries_only:
             for index in range(1, args.native_runs):
                 native_run(index, ready, scan=index == args.native_runs - 1)
@@ -534,14 +610,17 @@ def main():
         if args.record and "v9_list_distributions" in report:
             record = Path(args.record)
             merged = json.loads(record.read_text()) if record.exists() else {}
-            merged["library_server_v9_scale"] = dict(
+            # Hand-written keys (baselines, findings) survive a rerun.
+            merged["library_server_v9_scale"] = merged.get("library_server_v9_scale", {})
+            merged["library_server_v9_scale"].update(
                 run_report=str(run / "report.json"), passed=report["passed"], error=report.get("error"),
                 native_coverage="ABSENT: --queries-only; native UI, Accessibility and Screen Recording runs not exercised" if args.queries_only else "present",
                 fixture=report["fixture"], binaries=report["binaries"], environment=report["environment"],
                 server_profile=args.server_profile, samples_per_family=args.samples, library_revision=report["v9_library_revision"],
                 list_distributions=report["v9_list_distributions"], list_targets_met=report["v9_list_targets_met"],
                 enqueue_run_50k=report["v9_enqueue_run_50k"], underrun_counters=report["v9_underrun_counters"],
-                playback_observation={k: v for k, v in report["playback_observation"].items() if k not in ("before", "after")},
+                playback_observation={k: v for k, v in report.get("playback_observation", {}).items() if k not in ("before", "after")},
+                queue_edit_families_50k=report.get("v9_queue_families_50k"),
                 note="Latency is end-to-end authenticated WebSocket round trip on this machine; seeding time (hard links and SQL) is reported in fixture.persisted_counts and excluded from enqueue timing")
             record.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
         print(json.dumps(dict(report=str(run / "report.json"), passed=report["passed"], targets_met=report["targets_met"])))
