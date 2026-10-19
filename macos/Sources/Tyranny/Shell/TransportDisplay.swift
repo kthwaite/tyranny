@@ -58,7 +58,7 @@ struct TransportDisplay: View {
             }
         }
         .padding(.horizontal, 5).padding(.vertical, 3)
-        .frame(minWidth: 360, idealWidth: 500, maxWidth: 560)
+        .frame(minWidth: 320, idealWidth: 380, maxWidth: 560)
         .frame(height: 46)
         .background(RoundedRectangle(cornerRadius: 6).fill(.background.opacity(0.6)))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
