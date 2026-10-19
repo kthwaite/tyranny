@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import TyrannyCore
 
 /// Opt-in measurements of real bounded pages and external Accessibility actions.
 /// Timing targets are reported separately from functional correctness.

@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import TyrannyCore
 
 /// Public AX controls and real mouse activation; model state is observation only.
 @MainActor

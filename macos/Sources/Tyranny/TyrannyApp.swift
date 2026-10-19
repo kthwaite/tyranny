@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TyrannyCore
 
 @MainActor
 final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {

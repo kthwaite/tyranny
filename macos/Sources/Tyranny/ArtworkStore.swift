@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import Observation
 import UniformTypeIdentifiers
+import TyrannyCore
 
 enum ArtworkSize: String, Hashable, Sendable {
     case thumbnail, display

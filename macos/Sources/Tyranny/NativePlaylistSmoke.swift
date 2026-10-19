@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import TyrannyCore
 
 /// Opt-in observer: interaction uses external Accessibility actions and real mouse events.
 @MainActor

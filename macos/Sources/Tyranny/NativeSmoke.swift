@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import TyrannyCore
 
 /// Opt-in development acceptance driver. Exercises the displayed controls and
 /// native picker through an external accessibility driver (no Apple Events).

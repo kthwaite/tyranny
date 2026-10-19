@@ -1,4 +1,5 @@
 import SwiftUI
+import TyrannyCore
 
 struct PlaylistView: View {
     @Bindable var model: PlayerModel

@@ -1,4 +1,5 @@
 import SwiftUI
+import TyrannyCore
 
 struct ArtworkView: View {
     let store: ArtworkStore

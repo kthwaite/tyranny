@@ -1,5 +1,6 @@
 import Foundation
 import MediaPlayer
+import TyrannyCore
 
 @MainActor
 final class SystemMediaControls {

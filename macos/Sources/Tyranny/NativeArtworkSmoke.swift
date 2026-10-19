@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import TyrannyCore
 
 /// Mutations use actual AX controls; model/image access is observation only.
 @MainActor

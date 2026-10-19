@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TyrannyCore
 
 /// A connection owns its waiters. Losing it never authorizes replaying a command.
 @MainActor

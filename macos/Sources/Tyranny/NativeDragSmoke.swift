@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import TyrannyCore
 
 /// Exercises real native dragging; model state is observed, never used to issue mutations.
 @MainActor

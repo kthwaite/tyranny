@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TyrannyCore
 
 struct ContentView: View {
     @Bindable var model: PlayerModel

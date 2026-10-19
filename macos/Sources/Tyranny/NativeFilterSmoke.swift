@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import TyrannyCore
 
 /// Real text input, mouse activation and dragging; model state is observation only.
 @MainActor
