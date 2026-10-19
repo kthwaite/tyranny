@@ -129,17 +129,6 @@ struct MusicFoldersPane: View {
                 }
             }
             HStack {
-                Button { model.pageRoots(-1) } label: { Image(systemName: "chevron.left") }
-                    .accessibilityLabel("Previous roots page").accessibilityIdentifier("roots-previous")
-                    .disabled(!model.connected || model.loading || (model.roots?.offset ?? 0) == 0)
-                if let page = model.roots, page.total > page.entries.count {
-                    Text("\(page.offset + 1)–\(page.offset + page.entries.count) of \(page.total)")
-                        .font(.caption).monospacedDigit()
-                }
-                Button { model.pageRoots(1) } label: { Image(systemName: "chevron.right") }
-                    .accessibilityLabel("Next roots page").accessibilityIdentifier("roots-next")
-                    .disabled(!model.connected || model.loading
-                              || (model.roots.map { $0.offset + $0.entries.count >= $0.total } ?? true))
                 Spacer()
                 Button("Choose Music Folder…", action: model.chooseFolder)
                     .disabled(!model.canMutate || model.scanActive)

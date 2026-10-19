@@ -24,7 +24,7 @@ enum NativeSmoke {
         panel.directoryURL = URL(fileURLWithPath: args[index + 1], isDirectory: true)
     }
 
-    static func startIfRequested(_ model: PlayerModel) {
+    static func startIfRequested(_ model: PlayerModel, navigation: NavigationModel) {
         let args = CommandLine.arguments
         guard let index = args.firstIndex(of: "--ui-smoke-output"), index + 1 < args.count, !started else { return }
         started = true
@@ -32,7 +32,7 @@ enum NativeSmoke {
         Task {
             do {
                 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-                try await wait("connection") { model.connected && model.tracks != nil }
+                try await wait("connection") { model.connected && model.snapshot != nil }
                 try await drive("activate")
                 try await Task.sleep(for: .milliseconds(250))
                 if args.contains("--ui-smoke-relaunch") {
@@ -44,7 +44,7 @@ enum NativeSmoke {
                     guard let folderIndex = args.firstIndex(of: "--ui-smoke-folder"), folderIndex + 1 < args.count else {
                         throw Failure(message: "--ui-smoke-folder required")
                     }
-                    try await exercise(model, folder: URL(fileURLWithPath: args[folderIndex + 1], isDirectory: true))
+                    try await exercise(model, navigation, folder: URL(fileURLWithPath: args[folderIndex + 1], isDirectory: true))
                 }
                 if let state = model.snapshot { snapshots.append(state) }
                 try finish(passed: true, error: nil)
@@ -56,9 +56,13 @@ enum NativeSmoke {
         }
     }
 
-    private static func exercise(_ model: PlayerModel, folder: URL) async throws {
+    /// The core acceptance scenario on the library window: onboarding import, a double-click run,
+    /// the seek slider, Next and Previous, the live filter beside the playing track, a rescan
+    /// during playback, and disconnect and reconnect. The gate then relaunches the app against
+    /// the same daemon (`--ui-smoke-relaunch`).
+    private static func exercise(_ model: PlayerModel, _ navigation: NavigationModel, folder: URL) async throws {
         try capture("empty")
-        try await press("onboarding-choose-folder")
+        try await press("choose-folder")
         try await wait("native directory picker") { NSApp.windows.contains { $0 is NSOpenPanel } }
         guard let panel = NSApp.windows.compactMap({ $0 as? NSOpenPanel }).first else {
             throw Failure(message: "native open panel missing")
@@ -67,46 +71,37 @@ enum NativeSmoke {
         try check(panel.directoryURL?.standardizedFileURL == folder.standardizedFileURL, "Picker did not navigate to the isolated fixture")
         try await drive("press-title", "Add Music Folder")
         try await wait("native folder import", seconds: 30) {
-            model.snapshot?.library.scan.phase == "complete" && (model.tracks?.total ?? 0) > 100
+            model.snapshot?.library.scan.phase == "complete" && model.snapshot?.library.tracks == 105
         }
-        try check(model.roots?.entries.first?.path == folder.path, "picker imported the wrong folder")
-        try check(model.tracks?.entries.count == 100, "first page is not bounded to 100")
-        try capture("library")
-        cases.append("native-folder-picker-import-and-three-pane-library")
-        try await press("tracks-next")
-        try await wait("next track page") { model.tracks?.offset == 100 }
-        try check((model.tracks?.entries.count ?? 101) <= 100, "next page exceeded bound")
-        try await press("tracks-previous")
-        try await wait("previous track page") { model.tracks?.offset == 0 }
-        cases.append("bounded-native-page-navigation")
+        try await wait("imported root") { model.roots?.entries.first?.path == folder.path }
+        cases.append("native-folder-picker-import")
 
-        try await select("artist-list", indexes: [0])
-        try await wait("artist selection") { model.selectedArtist != nil && model.tracks == nil }
-        try await select("album-list", indexes: [0])
-        try await wait("album selection") { model.selectedAlbum != nil && (model.tracks?.entries.count ?? 0) >= 2 }
-        try await select("track-table", indexes: [0, 1])
-        try await wait("multi-selection") { model.selectedTracks.count == 2 }
-        try await press("play-selection")
-        try await wait("play selected tracks") { !model.busy && model.snapshot?.queue_length == 2 && model.snapshot?.transport == "playing" }
-        cases.append("native-selection-enqueue-and-play")
+        // Songs: a double-click plays the whole list from that row (Up Next is empty).
+        try await wait("songs list") { NativeSongsSmoke.songsList != nil }
+        guard let songs = NativeSongsSmoke.songsList else { throw Failure(message: "Songs list missing") }
+        try await wait("songs rows") { songs.cache.total == 105 && songs.cache.loadedRow(at: 0) != nil }
+        try capture("library")
+        try await drive("double-click-row", songsTable, "0,0.5")
+        try await wait("double-click run") { !model.busy && model.snapshot?.queue_length == 105 && model.snapshot?.transport == "playing" }
+        cases.append("native-double-click-plays-the-songs-run")
         try capture("playing")
-        try await press("transport-play")
+        try await press("transport-play-pause")
         try await wait("pause") { !model.busy && model.snapshot?.transport == "paused" }
         guard let firstEntry = model.snapshot?.current_id, let duration = model.durationSeconds, duration > 10,
               let playingMetadata = model.snapshot?.now_playing else {
             throw Failure(message: "Authoritative current metadata/duration missing")
         }
-        try await drive("slider-value", "seek-slider", "3")
+        try await drive("slider-value", scrubber, "3")
         try await wait("AX slider seek") { !model.busy && model.positionSeconds >= 2.99 && model.positionSeconds < 3.1 }
-        try await drive("increment", "seek-slider")
+        try await drive("increment", scrubber)
         try await wait("AX slider increment") { !model.busy && model.positionSeconds >= 7.99 && model.positionSeconds < 8.1 }
-        try await drive("decrement", "seek-slider")
+        try await drive("decrement", scrubber)
         try await wait("AX slider decrement") { !model.busy && model.positionSeconds >= 2.99 && model.positionSeconds < 3.1 }
-        try await drive("key", "seek-slider", "right")
+        try await drive("key", scrubber, "right")
         try await wait("keyboard slider adjustment") { !model.busy && model.positionSeconds > 3.01 }
-        try await drive("slider-value", "seek-slider", "3")
+        try await drive("slider-value", scrubber, "3")
         try await wait("drag starting position") { !model.busy && abs(model.positionSeconds - 3) < 0.01 }
-        async let drag: Void = drive("drag", "seek-slider", "\(3 / duration),0.25")
+        async let drag: Void = drive("drag", scrubber, "\(3 / duration),0.25")
         try await Task.sleep(for: .milliseconds(250))
         try check(abs(model.positionSeconds - 3) < 0.01, "Slider committed before mouse release")
         try await drag
@@ -121,40 +116,37 @@ enum NativeSmoke {
         try await wait("next paused occurrence") {
             !model.busy && model.snapshot?.current_id != firstEntry && model.snapshot?.transport == "paused"
         }
-        try check(model.snapshot?.can_next == false, "Last occurrence advertised a next track")
         try await press("transport-previous")
         try await wait("previous paused occurrence") {
             !model.busy && model.snapshot?.current_id == firstEntry && model.snapshot?.transport == "paused"
         }
         try check(model.snapshot?.now_playing == playingMetadata, "Previous restored incorrect metadata")
-        try await drive("slider-value", "seek-slider", String(duration))
+        try await drive("slider-value", scrubber, String(duration))
         try await wait("seek duration boundary") {
             !model.busy && model.snapshot?.position_frames == playingMetadata.duration_frames.map { $0 - 1 }
         }
-        try await drive("slider-value", "seek-slider", "3")
+        try await drive("slider-value", scrubber, "3")
         try await wait("seek reset") { !model.busy && abs(model.positionSeconds - 3) < 0.01 }
         cases.append("native-slider-AX-keyboard-drag-release-duration-boundary-and-next-previous")
-        try await press("transport-play")
+        try await press("transport-play-pause")
         try await wait("resume") { !model.busy && model.snapshot?.transport == "playing" }
         cases.append("native-pause-seek-resume")
 
         try await value("library-filter", "no-such-track-ui-smoke")
-        try await wait("live filter") { model.tracks?.total == 0 && model.filter == "no-such-track-ui-smoke" }
-        try check(model.snapshot?.now_playing == playingMetadata && model.currentName.contains(playingMetadata.title),
-                  "Filtering away the current track lost Now Playing metadata")
-        try await drive("expect-text", "now-playing-title", model.currentName)
+        try await wait("live filter") { songs.cache.total == 0 && navigation.filter == "no-such-track-ui-smoke" }
+        try check(model.snapshot?.now_playing == playingMetadata, "Filtering away the current track lost Now Playing metadata")
+        try await drive("expect-text", "now-playing-title", playingMetadata.title)
         try capture("filtered-empty")
         try await value("library-filter", "")
-        try await wait("filter reset") { (model.tracks?.total ?? 0) > 100 }
-        try await press("tracks-next")
-        try await wait("page away from playing track") { model.tracks?.offset == 100 }
+        try await wait("filter reset") { songs.cache.total == 105 && songs.cache.loadedRow(at: 0) != nil }
+        try await drive("scroll-fraction", songsTable, "1")
+        try await wait("scroll away from the playing track") { songs.cache.loadedRow(at: 104) != nil }
         try check(model.snapshot?.now_playing == playingMetadata && model.durationSeconds == duration,
-                  "Paging away from the current track lost Now Playing metadata")
-        try await drive("expect-text", "now-playing-title", model.currentName)
-        try await press("tracks-previous")
-        try await wait("restore first page") { model.tracks?.offset == 0 }
-        cases.append("native-now-playing-survives-filter-and-page-changes")
+                  "Scrolling away from the current track lost Now Playing metadata")
+        try await drive("expect-text", "now-playing-title", playingMetadata.title)
+        cases.append("native-now-playing-survives-filter-and-scroll")
         cases.append("native-live-filter-and-empty-state")
+
         // Add actual files, then exercise filtering against an active real scan.
         try await Task.detached {
             let additions = folder.appendingPathComponent("Added during playback", isDirectory: true)
@@ -164,14 +156,15 @@ enum NativeSmoke {
                     to: additions.appendingPathComponent("Added \(index).wav"))
             }
         }.value
-        try await press("show-roots")
+        try await press("status-connection")
+        try await drive("press-title", "Library")
         guard let root = model.roots?.entries.first else { throw Failure(message: "Imported root missing") }
         try await press("rescan-root-\(root.id)")
         try await wait("active rescan") { model.scanActive }
-        try await drive("press-title", "Done")
+        frontMainWindow()
         let filterStarted = Date()
         try await value("library-filter", "Track 000")
-        try await wait("filter during rescan") { model.filter == "Track 000" && model.tracks?.total == 1 }
+        try await wait("filter during rescan") { navigation.filter == "Track 000" && songs.cache.total == 1 }
         try check(model.scanActive, "Scan finished before concurrent filtering was exercised")
         try check(Date().timeIntervalSince(filterStarted) < 2, "Filter stalled during scan")
         try check(model.snapshot?.transport == "playing", "Rescan interrupted playback")
@@ -179,33 +172,40 @@ enum NativeSmoke {
         if let state = model.snapshot { snapshots.append(state) }
         try await wait("completed rescan", seconds: 60) { model.snapshot?.library.scan.phase == "complete" }
         try await value("library-filter", "")
-        try await wait("expanded library") { model.tracks?.total == 1129 }
+        try await wait("expanded library") { songs.cache.total == 1129 }
         cases.append("native-rescan-and-responsive-filter-during-playback")
 
+        try await drive("press-title", "Playback")
         try await press("resume-on-start")
         try await wait("resume setting") { !model.busy && model.snapshot?.settings.resume_on_start == true }
         cases.append("native-persisted-resume-setting")
 
-        try await press("connection-settings")
+        try await press("status-connection")
         try await press("connection-disconnect")
         try await wait("disconnected presentation") { model.connection == "disconnected" && model.snapshot == nil }
-        try await drive("press-title", "Done")
-        try await wait("connection sheet dismissal") {
-            NSApp.windows.allSatisfy { !$0.isSheet || !$0.isVisible }
-        }
+        frontMainWindow()
         try capture("disconnected")
         try await press("disconnected-retry")
         try await wait("restored connection") { model.connected && model.snapshot?.transport == "playing" }
         cases.append("native-disconnected-presentation-and-recovery")
 
         let before = model.snapshot!.position_frames
-        try await press("reconnect")
-        try await wait("reconnect snapshot") { model.connected && (model.snapshot?.position_frames ?? 0) > before && model.snapshot?.queue_length == 1 }
+        try await press("status-connection")
+        try await press("connection-connect")
+        try await wait("reconnect snapshot") { model.connected && (model.snapshot?.position_frames ?? 0) > before && model.snapshot?.queue_length == 105 }
         try check(model.snapshot?.transport == "playing", "reconnect interrupted playback")
         try check(model.snapshot?.now_playing == playingMetadata, "Reconnect lost authoritative metadata")
-        try await drive("expect-text", "now-playing-title", model.currentName)
+        try await drive("expect-text", "now-playing-title", playingMetadata.title)
         cases.append("native-reconnect-without-replayed-mutations")
+        frontMainWindow()
         try capture("reconnected")
+    }
+
+    private static let songsTable = "track-table-songs"
+    private static let scrubber = "now-playing-scrubber"
+
+    private static func frontMainWindow() {
+        NSApp.windows.first(where: { $0.title == "Tyranny" })?.makeKeyAndOrderFront(nil)
     }
 
     private static func wait(_ label: String, seconds: Double = 15, until condition: () -> Bool) async throws {
@@ -267,9 +267,6 @@ enum NativeSmoke {
     }
     private static func value(_ identifier: String, _ text: String) async throws {
         try await drive("value", identifier, text)
-    }
-    private static func select(_ identifier: String, indexes: [Int]) async throws {
-        try await drive("select", identifier, indexes.map(String.init).joined(separator: ","))
     }
     private static func capture(_ name: String) throws {
         guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) else {

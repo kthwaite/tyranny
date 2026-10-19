@@ -26,9 +26,10 @@ def main():
     parser.add_argument("--server", default="target/debug/tyranny-server")
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
-    parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
-    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs"], default="spike",
-                        help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell; "
+    parser.add_argument("--model-only", action="store_true",
+                        help="Run the app's headless model gate (NativeModelGate, no Accessibility driver) without claiming visual verification")
+    parser.add_argument("--scenario", choices=["core", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs"], default="core",
+                        help="core: folder import, a double-click run, the seek slider, filter, rescan, disconnect and a relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
                              "albums: the album grid, its inline panel and album Play; "
@@ -67,19 +68,18 @@ def main():
             port = int(ready["address"].rsplit(":", 1)[1])
             token = Path(ready["token_path"]).read_text().strip()
             controller = WebSocket(ready["address"], token)
+            app = str(Path(args.app).resolve())
             if args.model_only:
-                command = [str(Path("target/native-model-gate").resolve()), "--url", f"ws://127.0.0.1:{port}/ws",
-                           "--token-file", ready["token_path"], "--folder", str(root), "--server-pid", str(server.pid),
-                           "--output", str(run / "native-model.json")]
-                result = subprocess.run(command, capture_output=True, text=True, timeout=100)
+                command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+                           "--model-gate-output", str(run / "native-model.json"), "--model-gate-folder", str(root),
+                           "--model-gate-server-pid", str(server.pid)]
+                with (run / "model-gate.stdout").open("w") as stdout, (run / "model-gate.stderr").open("w") as stderr:
+                    result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=150)
                 report["native_model"] = json.loads((run / "native-model.json").read_text())
-                report["stdout"] = result.stdout
-                report["stderr"] = result.stderr
                 report["visual_verification"] = False
                 assert result.returncode == 0 and report["native_model"]["passed"], report["native_model"]
                 report["passed"] = True
                 return
-            app = str(Path(args.app).resolve())
             if args.scenario == "shell":
                 shell(report, run, app, port, ready, root, controller, Path(args.screenshots))
                 report["passed"] = True
@@ -124,7 +124,8 @@ def main():
                 report[mode] = native
                 assert native["passed"], native.get("error")
                 state = controller.state()
-                assert state["transport"] == "playing" and state["queue_length"] == 1, state
+                # The double-click played the Songs run: all 105 tracks, queued before the rescan added files.
+                assert state["transport"] == "playing" and state["queue_length"] == 105, state
                 before = state["position_frames"]
                 time.sleep(0.3)
                 state = controller.state()

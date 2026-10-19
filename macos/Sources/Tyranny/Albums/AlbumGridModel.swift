@@ -281,8 +281,8 @@ final class AlbumGridModel {
         }
     }
 
-    /// Regular playlists from the loaded catalog page.
-    var regularPlaylists: [Playlist] { player?.playlists?.entries.filter { !$0.isSmart } ?? [] }
+    /// Regular playlists from the loaded catalog.
+    var regularPlaylists: [Playlist] { player?.savedPlaylists.rows.filter { !$0.isSmart } ?? [] }
 
     // MARK: Fetching
 

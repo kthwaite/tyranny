@@ -27,7 +27,8 @@ from server_gate import WebSocket, fixture
 
 TRACKS = 50_000
 QUEUE = 10_000
-PAGE = 100
+PAGE = 100  # the legacy library_* page cases below
+WINDOW = 200  # the client's list and Up Next window size
 
 
 class MeasuredWebSocket(WebSocket):
@@ -285,7 +286,7 @@ def main():
         result = control.request(command, **fields)
         elapsed = (time.perf_counter_ns() - started) / 1_000_000
         entries = result["entries"]
-        assert len(entries) <= fields["limit"] == PAGE
+        assert len(entries) <= fields["limit"] and fields["limit"] in (PAGE, WINDOW)
         assert result["offset"] == fields["offset"]
         assert len({entry["id"] for entry in entries}) == len(entries)
         report["query_samples"].append(dict(name=name, iteration=iteration, command=command,
@@ -359,8 +360,9 @@ def main():
             ("artists-structured-track-projection", "library_artists", dict(
                 query='artist:"Scale Artist 0001" & (title:"Scale Track 00001" | title:"Scale Track 00011")',
                 offset=0)),
-            ("queue-first", "queue_page", dict(offset=0)),
-            ("queue-deep", "queue_page", dict(offset=9900)),
+            # Up Next reads the queue in client-sized windows.
+            ("queue-first", "queue_page", dict(offset=0, limit=WINDOW)),
+            ("queue-deep", "queue_page", dict(offset=QUEUE - WINDOW, limit=WINDOW)),
             ("smart-first", "playlist_entries", dict(playlist_id=smart_all["id"],
                 revision=smart_all["revision"], library_revision=before_queries["library"]["revision"], query="", offset=0)),
             ("smart-deep", "playlist_entries", dict(playlist_id=smart_all["id"],
@@ -397,7 +399,7 @@ def main():
                     assert [row["id"] for row in result["entries"]] == [smart_all["id"], smart_selected["id"]]
                     assert all(row["kind"] == "smart" and row["entry_count"] is None for row in result["entries"])
                 if command == "queue_page":
-                    assert result["total"] == QUEUE and len(result["entries"]) == PAGE
+                    assert result["total"] == QUEUE and len(result["entries"]) == WINDOW
         for name, _, _ in cases:
             summary = distribution([sample["elapsed_ms"] for sample in report["query_samples"] if sample["name"] == name])
             summary["target_p95_ms"] = 100

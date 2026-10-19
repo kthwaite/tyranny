@@ -125,11 +125,12 @@ private struct MainWindow: View {
                 appDelegate.model = model
                 model.start()
                 #if DEBUG
-                NativeSmoke.startIfRequested(model)
+                NativeModelGate.startIfRequested(model)
+                NativeSmoke.startIfRequested(model, navigation: navigation)
                 NativeLifecycle.startIfRequested(model)
-                NativeScale.startIfRequested(model)
-                                NativeFilterSmoke.startIfRequested(model)
-                                NativeArtworkSmoke.startIfRequested(model)
+                NativeScale.startIfRequested(model, navigation: navigation)
+                NativeFilterSmoke.startIfRequested(model, navigation: navigation)
+                NativeArtworkSmoke.startIfRequested(model, navigation: navigation)
                 NativeShellSmoke.startIfRequested(model, navigation: navigation)
                 NativeSongsSmoke.startIfRequested(model, navigation: navigation)
                 NativeAlbumsSmoke.startIfRequested(model, navigation: navigation)

@@ -366,7 +366,7 @@ final class WireClient {
     private static func resultKind(for command: String) -> String? {
         switch command {
         case "snapshot": return "snapshot"
-        case "queue_page", "library_roots", "library_artists", "library_albums", "library_tracks", "saved_playlists", "playlist_entries", "artwork": return command
+        case "queue_page", "library_roots", "saved_playlists", "playlist_entries", "artwork": return command
         case "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history": return command
         case "enqueue_tracks", "insert_tracks", "clear_upcoming", "shuffle_upcoming": return "applied"
         case "save_upcoming": return "playlist_applied"
@@ -488,7 +488,7 @@ private struct ResultHeader: Decodable {
         switch kind {
         case "snapshot", "applied", "playlist_applied":
             snapshot = try container.decode(ControlState.self, forKey: .snapshot)
-        case "queue_page", "root_added", "scan_accepted", "library_roots", "library_artists", "library_albums", "library_tracks", "saved_playlists", "playlist_entries", "artwork",
+        case "queue_page", "root_added", "scan_accepted", "library_roots", "saved_playlists", "playlist_entries", "artwork",
              "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history":
             snapshot = nil
         default:

@@ -25,7 +25,7 @@ enum NativeLifecycle {
             var failure: String?
             do {
                 try await wait("initial server state") {
-                    model.startupFailed || (model.connected && model.tracks != nil && !model.loading)
+                    model.startupFailed || (model.connected && model.snapshot != nil)
                 }
                 if action != "observe" {
                     guard model.connected else { throw Failure(message: model.connectionDetail) }
@@ -33,14 +33,14 @@ enum NativeLifecycle {
                         throw Failure(message: "Unsupported lifecycle action")
                     }
                     try await drive("activate", output: path)
-                    try await drive("press", "connection-settings", output: path)
+                    try await drive("press", "status-connection", output: path)
                     try await Task.sleep(for: .milliseconds(300))
                     try await drive("press", action == "restart" ? "managed-restart" : "managed-stop", output: path)
                     try await Task.sleep(for: .milliseconds(300))
                     try await drive("press-title", action == "restart" ? "Restart Server" : "Stop Server", output: path)
                     if action == "restart" {
                         try await wait("managed restart") {
-                            !model.serverManagementBusy && ((model.connected && model.tracks != nil) || model.message != nil)
+                            !model.serverManagementBusy && ((model.connected && model.snapshot != nil) || model.message != nil)
                         }
                     } else {
                         try await wait("managed stop") { !model.serverManagementBusy && !model.managedEnabled && !model.connected }
@@ -48,12 +48,6 @@ enum NativeLifecycle {
                 }
                 try await Task.sleep(for: .milliseconds(350))
                 try await capture(output: path)
-                if action != "observe" {
-                    try await drive("press-title", "Done", output: path)
-                    try await wait("connection sheet dismissal") {
-                        NSApp.windows.allSatisfy { !$0.isSheet || !$0.isVisible }
-                    }
-                }
             } catch {
                 failure = error.localizedDescription
             }

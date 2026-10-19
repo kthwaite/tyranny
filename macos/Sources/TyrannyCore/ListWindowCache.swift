@@ -128,8 +128,8 @@ public enum WindowFetchError: Error {
         self.fetch = fetch
     }
 
-    /// Loaded window indices, ascending.
-    var loadedWindowIndices: [Int] { windows.keys.sorted() }
+    /// Loaded window indices, ascending. The 50,000-row scale gate reads it to check the cache bound.
+    public var loadedWindowIndices: [Int] { windows.keys.sorted() }
 
     /// true when every visible window agrees on the adopted revision; new windows then pin it.
     var isSettled: Bool { !unsettled }

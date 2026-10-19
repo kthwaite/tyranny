@@ -173,58 +173,6 @@ public struct Root: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct AlbumArtist: Codable, Sendable, Equatable, Identifiable {
-    public let id: UInt64
-    public let name: String
-    public let album_count: Int
-
-    public init(id: UInt64, name: String, album_count: Int) {
-        self.id = id
-        self.name = name
-        self.album_count = album_count
-    }
-}
-
-public struct Album: Codable, Sendable, Equatable, Identifiable {
-    public let id: UInt64
-    public let artist_id: UInt64
-    public let title: String
-    public let album_artist: String
-    public let musicbrainz_release_id: String?
-    public let compilation: Bool
-    public let disc_count: Int
-    public let track_count: Int
-
-    public init(id: UInt64, artist_id: UInt64, title: String, album_artist: String, musicbrainz_release_id: String?, compilation: Bool, disc_count: Int, track_count: Int) {
-        self.id = id
-        self.artist_id = artist_id
-        self.title = title
-        self.album_artist = album_artist
-        self.musicbrainz_release_id = musicbrainz_release_id
-        self.compilation = compilation
-        self.disc_count = disc_count
-        self.track_count = track_count
-    }
-}
-
-public struct Track: Codable, Sendable, Equatable, Identifiable {
-    public let id: UInt64
-    public let asset_id: UInt64
-    public let album_id: UInt64
-    public let path: String
-    public let metadata: TrackMetadata
-    public let error: String?
-
-    public init(id: UInt64, asset_id: UInt64, album_id: UInt64, path: String, metadata: TrackMetadata, error: String?) {
-        self.id = id
-        self.asset_id = asset_id
-        self.album_id = album_id
-        self.path = path
-        self.metadata = metadata
-        self.error = error
-    }
-}
-
 public struct TrackMetadata: Codable, Sendable, Equatable {
     public let title: String
     public let artist: String

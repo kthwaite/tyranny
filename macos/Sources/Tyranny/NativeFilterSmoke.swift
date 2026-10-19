@@ -3,199 +3,199 @@ import AppKit
 import Foundation
 import TyrannyCore
 
-/// Real text input, mouse activation and dragging; model state is observation only.
+/// Opt-in acceptance driver for the toolbar filter (`--filter-smoke-output`). The gate prepares 112
+/// indexed tracks (7 tagged, 105 `Page` tracks), an empty queue and one 113-entry saved playlist,
+/// "Filter Fixture", that holds one track twice. Text goes in through the external Accessibility
+/// driver, rows are double-clicked and dragged with real mouse events, and expected rows come from
+/// the server. Model state is observation only.
+///
+/// One filter field narrows whichever list is shown, so the saved-playlist cases filter the
+/// playlist's own table; a drop is anchored by the entry under the pointer, so rows the filter
+/// hides keep their places.
 @MainActor
 enum NativeFilterSmoke {
-    private struct Failure: Error, LocalizedError {
-        let message: String
-        var errorDescription: String? { message }
-    }
     private static var started = false
-    private static var output = URL(fileURLWithPath: "/tmp/tyranny-filter-smoke")
-    private static var cases: [String] = []
+    private static let songsTable = "track-table-songs"
+    private static let defaultsKey = "upNextOnPlay"
 
-    static func startIfRequested(_ model: PlayerModel) {
+    static func startIfRequested(_ model: PlayerModel, navigation: NavigationModel) {
         let args = CommandLine.arguments
         guard !started, let index = args.firstIndex(of: "--filter-smoke-output"), index + 1 < args.count else { return }
         started = true
-        output = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+        let kit = NativePlaylistKit(model: model, navigation: navigation,
+                                    output: URL(fileURLWithPath: args[index + 1], isDirectory: true), tag: "FILTER_SMOKE")
         Task {
+            var failure: String?
             do {
-                try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-                try await wait("indexed fixture", model) { model.connected && model.libraryReady && model.tracks?.total == 112 && model.playlists?.total == 1 }
+                try FileManager.default.createDirectory(at: kit.output, withIntermediateDirectories: true)
+                try await kit.wait("indexed fixture and catalog") {
+                    model.connected && model.snapshot?.library.tracks == 112
+                        && model.snapshot?.library.scan.phase == "complete" && model.savedPlaylists.isLoaded
+                        && model.savedPlaylists.cache.total == 1
+                }
                 try await NativeSmoke.drive("activate")
-                try await exercise(model)
-                try finish(model, error: nil)
+                try await Task.sleep(for: .milliseconds(300))
+                UserDefaults.standard.set(UpNextPolicy.replace.rawValue, forKey: defaultsKey)
+                try await exercise(kit)
             } catch {
-                try? capture("failure")
-                try? finish(model, error: error.localizedDescription)
+                try? kit.capture("filter-failure")
+                failure = error.localizedDescription
             }
+            UserDefaults.standard.removeObject(forKey: defaultsKey)
+            try? kit.finish(automation: "Real AX text inputs, row double-clicks and CGEvent drags on the displayed views; server reads for expected rows; model observation only; isolated real tagged FLACs and clock-paced capture.",
+                            error: failure)
+            NativePlaylistKit.endSheets()
             NSApp.terminate(nil)
         }
     }
 
-    private static func exercise(_ model: PlayerModel) async throws {
-        try check(model.snapshot?.queue_length == 0, "Filter fixture requires an empty queue")
-        try await value("library-filter", "artist:\"Miles Davis\" & !album:\"Kind of Blue\"")
-        try await wait("symbolic library filter", model) { model.libraryReady && model.tracks?.total == 107 }
-        try check(model.tracks!.entries.count == 100 && model.tracks!.entries.prefix(2).map(\.metadata.title) == ["Companion", "Freedom"], "Library query lost bounded order")
-        try check(Set(model.artists!.entries.map(\.name)) == ["Miles Davis", "Various Artists"], "Artist pane disagrees with matching tracks")
-        try await press("tracks-next")
-        try await wait("matching library tail", model) { model.libraryReady && model.tracks?.offset == 100 }
-        try check(model.tracks!.entries.map(\.metadata.title) == (98...104).map { String(format: "Page %03d", $0) }, "Filtered library page skipped or repeated matches")
-        cases.append("native-symbolic-library-filter-and-bounded-matching-pages")
+    // MARK: Scenario
 
+    private static func exercise(_ kit: NativePlaylistKit) async throws {
+        let model = kit.model, navigation = kit.navigation
+        try kit.check(model.snapshot?.queue_length == 0, "Filter fixture requires an empty queue")
+        try await kit.open(.songs)
+        try await kit.wait("songs list") { NativeSongsSmoke.songsList != nil }
+        guard let songs = NativeSongsSmoke.songsList else { throw NativePlaylistKit.Failure(message: "Songs list missing") }
+        try await kit.wait("all songs") { songs.cache.total == 112 && songs.cache.loadedRow(at: 0) != nil }
+
+        // Symbolic filter: the rows are the server's rows for the same list description.
+        try await query(kit, songs, "artist:\"Miles Davis\" & !album:\"Kind of Blue\"", total: 107)
+        let expected = try await page(kit, songs.description, offset: 0, limit: 5)
+        try kit.check(expected.total == 107, "The server counts \(expected.total) matches, not 107")
+        try kit.check((0..<5).allSatisfy { songs.cache.loadedRow(at: $0)?.row_id == expected.entries[$0].row_id },
+                      "Filtered rows differ from the server's first rows")
+        try await kit.drive("scroll-fraction", songsTable, "1")
+        try await kit.wait("filtered tail") { songs.cache.loadedRow(at: 106) != nil }
+        let tail = try await page(kit, songs.description, offset: 106, limit: 1)
+        try kit.check(songs.cache.loadedRow(at: 106)?.row_id == tail.entries.first?.row_id, "Filtered tail differs from the server's")
+        try kit.check(songs.cache.loadedRows().count <= 2000, "The filtered cache is not bounded")
+        kit.passed("native-symbolic-library-filter-and-matching-rows-come-from-the-server")
+
+        // Field lists, negation and parentheses give the same three tracks.
         let alternatives = "artist:[\"Miles Davis\", \"Ornette Coleman\"] & !album:[\"Sessions\", \"Kind of Blue\"]"
-        let three = ["Companion", "Freedom", "Lonely Woman"]
-        try await library(alternatives, titles: three, model)
-        try capture("library-list-filter")
-        try await library("(artist:\"Miles Davis\" | artist:\"Ornette Coleman\") & !album:[\"Sessions\", \"Kind of Blue\"]", titles: three, model)
-        cases.append("native-field-lists-negation-and-parenthesized-or")
-        try await select("track-table", [0, 2])
-        try await wait("selection before invalid query", model) { model.selectedTracks.count == 2 }
-        try await value("library-filter", "artist:[\"Miles Davis\",")
-        try await wait("visible library syntax failure", model) { model.libraryFilterError != nil && !model.libraryReady }
-        try await NativeSmoke.drive("exists", "library-filter-error")
-        try check(model.tracks == nil && model.selectedTracks.isEmpty && model.snapshot?.queue_length == 0, "Invalid filter retained actionable old rows or changed queue")
-        try capture("library-filter-error")
-        let changes = try JSONSerialization.data(withJSONObject: ["album:Sessions", "artist:[", "artist:\"BJÖRK\""])
-        try await NativeSmoke.drive("values", "library-filter", String(decoding: changes, as: UTF8.self))
-        try await wait("latest rapid query wins", model) { model.libraryReady && model.libraryFilterError == nil && model.tracks?.entries.map(\.metadata.title) == ["Jóga"] }
-        cases.append("native-syntax-error-clears-stale-selection-and-latest-query-recovers")
+        let three: Set<String> = ["Companion", "Freedom", "Lonely Woman"]
+        try await query(kit, songs, alternatives, total: 3)
+        try kit.check(Set(songs.cache.loadedRows().map(\.row.track.title)) == three, "Field lists matched the wrong tracks")
+        try kit.capture("library-list-filter")
+        try await query(kit, songs, "(artist:\"Miles Davis\" | artist:\"Ornette Coleman\") & !album:[\"Sessions\", \"Kind of Blue\"]", total: 3)
+        try kit.check(Set(songs.cache.loadedRows().map(\.row.track.title)) == three, "Parenthesized OR matched the wrong tracks")
+        kit.passed("native-field-lists-negation-and-parenthesized-or")
 
-        try await library(alternatives, titles: three, model)
-        let copiedTrackIDs = model.tracks!.entries.map(\.id)
-        try await select("track-table", [0, 2])
-        try await NativeSmoke.drive("double-click-row", "track-table", "1,0.35")
-        try await wait("clicked filtered track plays", model) { !model.busy && model.snapshot?.queue_length == 1 && model.snapshot?.transport == "playing" && model.snapshot?.now_playing?.title == "Freedom" }
+        // A syntax error shows no rows and leaves the queue alone; the latest of several quick queries wins.
+        try await kit.select(songsTable, [0, 2])
+        try await kit.value("library-filter", "artist:[\"Miles Davis\",")
+        try await kit.wait("visible syntax failure") { songs.filterError != nil && navigation.filterError != nil }
+        try await kit.drive("exists", "library-filter-error")
+        try kit.check(songs.cache.loadedRows().isEmpty && model.snapshot?.queue_length == 0,
+                      "An invalid filter kept actionable old rows or changed the queue")
+        try kit.capture("library-filter-error")
+        let changes = try JSONSerialization.data(withJSONObject: ["album:Sessions", "artist:[", "artist:\"BJÖRK\""])
+        try await kit.drive("values", "library-filter", String(decoding: changes, as: UTF8.self))
+        try await kit.wait("latest rapid query wins") {
+            songs.filterError == nil && songs.cache.total == 1 && songs.cache.loadedRow(at: 0)?.track.title == "Jóga"
+        }
+        kit.passed("native-syntax-error-shows-no-rows-and-latest-query-recovers")
+
+        // Double-click on the filtered list plays the run from the clicked row, not the hidden rows.
+        try await query(kit, songs, alternatives, total: 3)
+        let titles = (0..<3).compactMap { songs.cache.loadedRow(at: $0)?.track.title }
+        try kit.check(titles.count == 3, "The filtered rows are not loaded")
+        try await kit.drive("double-click-row", songsTable, "1,0.35")
+        try await kit.wait("clicked filtered row plays its run") {
+            !model.busy && model.snapshot?.queue_length == 2 && model.snapshot?.transport == "playing"
+                && model.snapshot?.now_playing?.title == titles[1]
+        }
         let current = model.snapshot!.current_id
         let queueRevision = model.snapshot!.queue_revision
-        cases.append("native-filtered-multiselection-plays-only-double-clicked-track")
+        kit.passed("native-filtered-double-click-plays-the-run-from-the-clicked-row")
 
-        try await press("toggle-playlists")
-        try await select("playlist-list", [0])
-        try await wait("saved fixture", model) { model.playlistReady && model.currentPlaylist?.name == "Filter Fixture" }
-        var expected = try await allPlaylist(model, total: 113)
-        let anchor = expected.first { $0.metadata.title == "Page 101" }!.id
-        try await entryFilter("album:Sessions", total: 105, model)
-        let moving = [model.playlistEntries!.entries[1].id, model.playlistEntries!.entries[3].id]
-        let revision = model.playlistEntries!.revision
-        try await select("playlist-entry-table", [1, 3])
-        try await wait("filtered drag selection", model) { model.selectedPlaylistEntries == Set(moving) }
-        try await drag("playlist-entry-table", row: 1, steps: [
-            ["id": "playlist-entries-next", "hold": 1.1],
-            ["id": "playlist-entry-table", "row": 1, "edge": "before"]], capture: "filtered-reorder-indicator")
-        try await wait("filtered cross-page reorder", model) { !model.busy && model.playlistReady && model.playlistEntries?.revision == revision + 1 }
-        let selectedRows = expected.filter { moving.contains($0.id) }
-        expected.removeAll { moving.contains($0.id) }
-        expected.insert(contentsOf: selectedRows, at: expected.firstIndex { $0.id == anchor }!)
-        try check(try await allPlaylist(model, total: 113) == expected, "Filtered move changed hidden-row order or used an unfiltered page index")
-        try check(model.snapshot?.queue_revision == queueRevision && model.snapshot?.current_id == current && model.snapshot?.transport == "playing", "Filtering or saved reordering changed playback")
-        cases.append("native-filtered-cross-page-drag-keeps-hidden-occurrences-and-playback")
-
-        try await entryFilter("album:Sessions", total: 105, model)
-        let insertionAnchor = model.playlistEntries!.entries[1].id
-        let insertRevision = model.playlistEntries!.revision
-        try await press("toggle-playlists")
-        try await wait("library source restored", model) { !model.showPlaylists && model.libraryReady && model.tracks?.entries.map(\.id) == copiedTrackIDs }
-        try await select("track-table", [0, 1, 2])
-        try await wait("copy selection", model) { model.selectedTracks.count == 3 }
-        try await drag("track-table", row: 0, steps: [
-            ["id": "toggle-playlists", "hold": 1.1],
-            ["id": "playlist-entry-table", "row": 1, "edge": "before"]])
-        try await wait("hidden inserted tracks acknowledged", model) { !model.busy && model.playlistReady && model.playlistEntries?.revision == insertRevision + 1 && model.currentPlaylist?.entry_count == 116 }
-        try check(model.playlistEntryFilter == "album:Sessions" && model.playlistEntries?.total == 105, "Copy changed the filter or exposed nonmatching rows")
-        let insertedFull = try await allPlaylist(model, total: 116)
-        let existingIDs = Set(expected.map(\.id))
-        let additions = insertedFull.filter { !existingIDs.contains($0.id) }
-        try check(additions.map(\.track_id) == copiedTrackIDs, "Filtered insert changed copy order or duplicated extra tracks")
-        expected.insert(contentsOf: additions, at: expected.firstIndex { $0.id == insertionAnchor }!)
-        try check(insertedFull == expected, "Filtered insert used the wrong full-playlist occurrence anchor")
-        cases.append("native-library-copy-into-filtered-playlist-preserves-hidden-insertion-order")
-
-        try await entryFilter("album:Sessions", total: 105, model)
-        let removed = Set([model.playlistEntries!.entries[0].id, model.playlistEntries!.entries[2].id])
-        try await select("playlist-entry-table", [0, 2])
-        try await wait("filtered remove selection", model) { model.selectedPlaylistEntries == removed }
-        try await press("playlist-remove")
-        try await wait("filtered removal", model) { !model.busy && model.playlistReady && model.playlistEntries?.total == 103 }
-        expected.removeAll { removed.contains($0.id) }
-        try check(try await allPlaylist(model, total: 114) == expected, "Filtered removal touched unselected or hidden occurrences")
-        cases.append("native-filtered-removal-removes-only-selected-visible-occurrences")
-        try await value("playlist-entry-filter", "artist:[\"Miles Davis\",]")
-        try await wait("saved syntax error", model) { !model.playlistEntriesLoading && model.playlistEntryFilterError != nil && !model.playlistReady }
-        try await NativeSmoke.drive("exists", "playlist-entry-filter-error")
-        try check(model.playlistEntries == nil && model.selectedPlaylistEntries.isEmpty, "Saved syntax error left stale actionable rows")
-        try capture("playlist-filter-error")
-        try await entryFilter("album:Sessions", total: 103, model)
-        try capture("filtered-playlist")
-        try check(model.snapshot?.queue_revision == queueRevision && model.snapshot?.queue_length == 1 && model.snapshot?.current_id == current && model.snapshot?.transport == "playing" && model.snapshot?.underruns == 0, "Filter editing interrupted the independent playback queue")
-        cases.append("native-saved-filter-syntax-recovery-without-playback-mutation")
-    }
-
-    private static func library(_ query: String, titles: [String], _ model: PlayerModel) async throws {
-        try await value("library-filter", query)
-        try await wait("library result: \(query)", model) { model.libraryReady && model.filter == query && model.tracks?.entries.map(\.metadata.title) == titles }
-    }
-    private static func entryFilter(_ query: String, total: Int, _ model: PlayerModel) async throws {
-        try await value("playlist-entry-filter", query)
-        try await wait("saved result: \(query)", model) { model.playlistReady && model.playlistEntryFilter == query && model.playlistEntries?.total == total && model.playlistEntries?.offset == 0 }
-    }
-    private static func allPlaylist(_ model: PlayerModel, total: Int) async throws -> [PlaylistEntry] {
-        if !model.playlistEntryFilter.isEmpty { try await entryFilter("", total: total, model) }
-        if model.playlistEntries?.offset != 0 {
-            try await press("playlist-entries-previous")
-            try await wait("first saved page", model) { model.playlistReady && model.playlistEntries?.offset == 0 }
+        // The saved playlist, narrowed to album:Sessions, reorders by entry: hidden rows keep their places.
+        try await kit.value("library-filter", "")
+        guard let playlist = kit.playlist(named: "Filter Fixture") else { throw NativePlaylistKit.Failure(message: "Fixture playlist missing") }
+        let tableID = "track-table-playlist-\(playlist.id)"
+        try await kit.open(.playlist(playlist.id))
+        try await kit.wait("playlist list") { NativePlaylistKit.shown?.destination == .playlist(playlist.id) }
+        guard let list = NativePlaylistKit.shown else { throw NativePlaylistKit.Failure(message: "Playlist list missing") }
+        try await kit.wait("playlist rows") { list.cache.total == 113 && list.cache.loadedRow(at: 0) != nil }
+        var full = try await kit.entries(playlist)
+        try kit.check(full.count == 113, "The saved fixture has \(full.count) entries")
+        try await query(kit, list, "album:Sessions", total: 105)
+        let moving = [1, 3].compactMap { list.cache.loadedRow(at: $0)?.row_id }
+        guard moving.count == 2, let anchor = list.cache.loadedRow(at: 50)?.row_id else {
+            throw NativePlaylistKit.Failure(message: "Filtered playlist rows are not loaded")
         }
-        var entries = model.playlistEntries!.entries
-        try await press("playlist-entries-next")
-        try await wait("last saved page", model) { model.playlistReady && model.playlistEntries?.offset == 100 }
-        entries += model.playlistEntries!.entries
-        try check(entries.count == total, "Saved fixture collection was incomplete")
-        try await press("playlist-entries-previous")
-        try await wait("restore saved page", model) { model.playlistReady && model.playlistEntries?.offset == 0 }
-        return entries
-    }
-    private static func drag(_ id: String, row: Int, steps: [[String: Any]], capture name: String? = nil) async throws {
-        var plan: [String: Any] = ["row": row, "steps": steps]
-        if let name, let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) {
-            plan["capture_window"] = window.windowNumber
-            plan["capture_path"] = output.appendingPathComponent(name + ".png").path
+        try await kit.select(tableID, [1, 3])
+        try await kit.wait("filtered drag selection") { list.selectedPositions == IndexSet([1, 3]) }
+        let revision = model.savedPlaylists.playlist(id: playlist.id)?.revision ?? 0
+        try await kit.drag(tableID, row: 1, steps: [NativePlaylistKit.target(tableID, row: 50, edge: "before")],
+                           capture: "filtered-reorder-indicator")
+        try await kit.wait("filtered reorder") {
+            !model.busy && (model.savedPlaylists.playlist(id: playlist.id)?.revision ?? 0) > revision
         }
-        let data = try JSONSerialization.data(withJSONObject: plan)
-        try await NativeSmoke.drive("drag-rows", id, String(decoding: data, as: UTF8.self))
+        let movingRows = full.filter { moving.contains($0.id) }
+        full.removeAll { moving.contains($0.id) }
+        full.insert(contentsOf: movingRows, at: full.firstIndex { $0.id == anchor }!)
+        try kit.check(try await kit.entries(playlist).map(\.id) == full.map(\.id),
+                      "The filtered move changed hidden rows or used a filtered position as the anchor")
+        try kit.check(model.snapshot?.queue_revision == queueRevision && model.snapshot?.current_id == current
+                        && model.snapshot?.transport == "playing", "Filtering or reordering a saved playlist changed playback")
+        kit.passed("native-filtered-drag-keeps-hidden-entries-in-place-and-playback")
+
+        // Tracks dropped from Songs at an insertion point are anchored by the entry under the pointer.
+        try await kit.open(.songs)
+        try await query(kit, songs, alternatives, total: 3)
+        let copied = (0..<3).compactMap { songs.cache.loadedRow(at: $0)?.track.id }
+        try kit.check(copied.count == 3, "The rows to copy are not loaded")
+        let visible = full.filter { copied.contains($0.track_id) }
+        guard visible.count >= 2 else { throw NativePlaylistKit.Failure(message: "The filtered playlist has too few rows to insert before") }
+        let insertionAnchor = visible[1].id
+        let beforeIDs = Set(full.map(\.id))
+        let insertRevision = model.savedPlaylists.playlist(id: playlist.id)?.revision ?? 0
+        try await kit.select(songsTable, [0, 1, 2])
+        try await kit.wait("copy selection") { songs.selectedPositions.count == 3 }
+        try await kit.drag(songsTable, row: 0, steps: [
+            NativePlaylistKit.hover(Destination.playlist(playlist.id).identifier),
+            NativePlaylistKit.target(tableID, row: 1, edge: "before")])
+        _ = try await kit.waitForPlaylist("Filter Fixture", entries: 116)
+        try kit.check((model.savedPlaylists.playlist(id: playlist.id)?.revision ?? 0) > insertRevision, "The playlist revision did not move")
+        let inserted = try await kit.entries(playlist)
+        let additions = inserted.filter { !beforeIDs.contains($0.id) }
+        try kit.check(additions.map(\.track_id) == copied, "The insert changed the copied order")
+        full.insert(contentsOf: additions, at: full.firstIndex { $0.id == insertionAnchor }!)
+        try kit.check(inserted.map(\.id) == full.map(\.id), "The filtered insert used the wrong full-playlist anchor")
+        kit.passed("native-drop-into-a-filtered-playlist-anchors-on-the-entry-under-the-pointer")
+
+        // A saved-list syntax error shows no rows; fixing it brings them back; playback never changed.
+        guard let shown = NativePlaylistKit.shown else { throw NativePlaylistKit.Failure(message: "Playlist list missing") }
+        try await kit.open(.playlist(playlist.id))
+        try await kit.value("library-filter", "artist:[\"Miles Davis\",]")
+        try await kit.wait("saved syntax error") { shown.filterError != nil && shown.cache.loadedRows().isEmpty }
+        try await kit.drive("exists", "library-filter-error")
+        try kit.capture("playlist-filter-error")
+        try await query(kit, shown, "album:Sessions", total: 105)
+        try kit.capture("filtered-playlist")
+        try kit.check(model.snapshot?.queue_revision == queueRevision && model.snapshot?.queue_length == 2
+                        && model.snapshot?.current_id == current && model.snapshot?.transport == "playing"
+                        && model.snapshot?.underruns == 0, "Filter editing interrupted the independent playback queue")
+        kit.passed("native-saved-filter-syntax-recovery-without-playback-mutation")
     }
-    private static func value(_ id: String, _ text: String) async throws { try await NativeSmoke.drive("value", id, text) }
-    private static func press(_ id: String) async throws { try await NativeSmoke.drive("press", id) }
-    private static func select(_ id: String, _ rows: [Int]) async throws { try await NativeSmoke.drive("select", id, rows.map(String.init).joined(separator: ",")) }
-    private static func wait(_ label: String, _ model: PlayerModel, until predicate: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(20)
-        while !predicate() {
-            if Date() >= deadline { throw Failure(message: "Timed out: \(label); model=\(model.message ?? "none"); library=\(model.libraryFilterError ?? "none"); playlist=\(model.playlistEntryFilterError ?? model.playlistError ?? "none")") }
-            try await Task.sleep(for: .milliseconds(40))
+
+    // MARK: Helpers
+
+    /// Types `text` in the filter and waits for `list` to show `total` rows, the first of them loaded.
+    private static func query(_ kit: NativePlaylistKit, _ list: ListModel, _ text: String, total: Int) async throws {
+        try await kit.value("library-filter", text)
+        try await kit.wait("result of \(text)") {
+            kit.navigation.filter == text && list.filterError == nil && list.cache.total == total
+                && (total == 0 || list.cache.loadedRow(at: 0) != nil)
         }
-        try await Task.sleep(for: .milliseconds(150))
     }
-    private static func check(_ condition: Bool, _ message: String) throws { if !condition { throw Failure(message: message) } }
-    private static func capture(_ name: String) throws {
-        guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) else { throw Failure(message: "Native window unavailable") }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-x", "-o", "-l", String(window.windowNumber), output.appendingPathComponent(name + ".png").path]
-        try process.run()
-        process.waitUntilExit()
-        try check(process.terminationStatus == 0, "Native screenshot failed")
-    }
-    private static func finish(_ model: PlayerModel, error: String?) throws {
-        var report: [String: Any] = ["passed": error == nil, "cases": cases,
-            "automation": "Real AX text inputs and CGEvent clicks/drags; model observation only; isolated real tagged FLACs and clock-paced capture."]
-        report["library_filter"] = model.filter
-        report["library_ready"] = model.libraryReady
-        report["library_total"] = model.tracks?.total
-        if let error { report["error"] = error }
-        if let state = model.snapshot { report["snapshot"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) }
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("report.json"))
-        print("FILTER_SMOKE \(error == nil ? "PASS" : "FAIL") \(output.path)")
+
+    private static func page(_ kit: NativePlaylistKit, _ description: ListDescription, offset: Int,
+                             limit: Int) async throws -> ListTracksResponse {
+        try await kit.model.send("list_tracks", [
+            "list": try JSONValue.encoding(description), "revision": .null, "offset": .int(offset), "limit": .int(limit)])
     }
 }
 #endif
