@@ -430,9 +430,18 @@ final class ListModel {
 
 /// The track lists the window keeps, one per destination, so a list keeps its
 /// scroll position, sort and browser selection while another destination shows.
+/// The Albums grid is kept the same way.
 @MainActor
 final class TrackLists {
     private var lists: [Destination: ListModel] = [:]
+    private var albums: AlbumGridModel?
+
+    func albumGrid(player: PlayerModel, navigation: NavigationModel) -> AlbumGridModel {
+        if let albums { return albums }
+        let grid = AlbumGridModel(player: player, navigation: navigation)
+        albums = grid
+        return grid
+    }
 
     func list(for destination: Destination, source: ListSource, player: PlayerModel,
               navigation: NavigationModel) -> ListModel {

@@ -135,6 +135,22 @@ extension DisplayFormat {
             .filter { $0.offset == 0 || !$0.element.isEmpty }.map(\.element)
     }
 
+    /// An album grid cell's second line: "Talk Talk · 1988".
+    public static func albumSubtitle(_ album: AlbumSummary) -> String {
+        let artist = album.album_artist.isEmpty ? "Unknown Artist" : album.album_artist
+        return [artist, album.year.map(String.init)].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// The album panel's facts line: year · genre · tracks · length · format · album ReplayGain.
+    /// Unknown facts are left out.
+    public static func albumExpansionFacts(_ album: AlbumSummary) -> String {
+        let tracks = "\(count(album.track_count)) \(album.track_count == 1 ? "track" : "tracks")"
+        return [album.year.map(String.init), album.genre.isEmpty ? nil : album.genre, tracks,
+                clock(Double(album.duration_ms) / 1000), album.format.isEmpty ? nil : album.format,
+                gainLabel(mode: "album", gainDB: album.album_gain_db)]
+            .compactMap { $0 }.joined(separator: " · ")
+    }
+
     /// An artist header's counts: "1 album · 5 tracks". Without an album count, the tracks only.
     public static func artistHeaderCounts(albums: Int?, tracks: Int) -> String {
         let trackText = "\(count(tracks)) \(tracks == 1 ? "track" : "tracks")"

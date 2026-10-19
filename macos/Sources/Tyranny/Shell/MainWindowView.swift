@@ -155,6 +155,9 @@ struct MainWindowView: View {
                     .disabled(!model.canMutate || model.scanActive)
                     .accessibilityIdentifier("choose-folder")
             }
+        } else if navigation.destination == .albums {
+            AlbumGridView(grid: lists.albumGrid(player: model, navigation: navigation), player: model,
+                          navigation: navigation)
         } else if let list = currentList {
             TrackListView(list: list, player: model, navigation: navigation)
         } else {

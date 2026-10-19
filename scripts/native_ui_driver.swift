@@ -101,8 +101,9 @@ do {
                 (action == "increment" ? kAXIncrementAction : kAXDecrementAction) as CFString), "Adjust slider")
         case "key":
             guard arguments.count >= 5,
-                  let key: CGKeyCode = ["left": 123, "right": 124, "down": 125, "up": 126][arguments[4]] else {
-                throw DriverFailure(message: "Arrow key required")
+                  let key: CGKeyCode = ["left": 123, "right": 124, "down": 125, "up": 126,
+                                        "return": 36, "escape": 53][arguments[4]] else {
+                throw DriverFailure(message: "Arrow, return or escape key required")
             }
             try check(AXUIElementSetAttributeValue(control, kAXFocusedAttribute as CFString, kCFBooleanTrue), "Focus control")
             // AX focus changes are asynchronous to AppKit's key-window update.

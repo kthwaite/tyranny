@@ -357,6 +357,17 @@ final class PlayerModel {
     func send<T: Decodable>(_ command: String, _ fields: [String: JSONValue] = [:]) async throws -> T {
         try await request(command, fields)
     }
+    /// Refetches the snapshot after a `stale_revision` reply, so a retry uses the current revisions.
+    func refreshSnapshot() async throws {
+        let fresh: SnapshotReply = try await request("snapshot")
+        accept(fresh.snapshot, newInstance: false)
+    }
+    /// Up Next has entries after the current one (spec 5.1). True when the loaded queue page cannot tell.
+    var hasUpcoming: Bool {
+        guard let state = snapshot else { return false }
+        return UpNext.hasUpcoming(queueLength: state.queue_length, currentID: state.current_id,
+                                  queueRevision: state.queue_revision, page: queue)
+    }
     private func pageFields(offset: Int, revision: UInt64?, query: String) -> [String: JSONValue] {
         ["offset": .int(offset), "limit": .int(Self.pageSize),
          "revision": revision.map(JSONValue.uint) ?? .null, "query": .string(query)]

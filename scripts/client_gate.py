@@ -27,10 +27,11 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
-    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping"], default="spike",
+    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums"], default="spike",
                         help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
-                             "grouping: Artist › Album blocks, block selection and a rescan that adds an album")
+                             "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
+                             "albums: the album grid, its inline panel and album Play")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -85,6 +86,10 @@ def main():
                 return
             if args.scenario == "grouping":
                 grouping(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "albums":
+                albums(report, run, app, port, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             for mode in ["initial", "relaunch"]:
@@ -243,6 +248,41 @@ def grouping(report, run, app, port, ready, source, controller, screenshots):
     for image in sorted(output.glob("grouped*.png")):
         shutil.copy2(image, screenshots / image.name)
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("grouped*.png"))]
+
+
+def albums(report, run, app, port, ready, source, controller, screenshots):
+    """Drive the album grid: scroll to the end, open the last album, check its tracks against
+    `album_summaries`, press Play, and close the panel with Escape."""
+    report["scenario"] = "albums"
+    music = run / "Songs fixture"
+    songs_fixture(music, source)
+    controller.request("add_root", path=str(music))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 1129, seconds=180)
+    output = run / "albums"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--albums-smoke-output", str(output),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "albums.stdout").open("w") as stdout, (run / "albums.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=240)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["albums"] = native
+    assert native["passed"], native.get("error")
+    # The server, not the app, holds the album run.
+    expanded = native["observations"]["expanded"]
+    summary = controller.request("album_summaries", album_ids=[expanded["id"]], revision=None)["entries"][0]
+    page = controller.request("queue_page", revision=None, offset=0, limit=500)
+    assert page["total"] == summary["track_count"] == expanded["tracks"], (page["total"], summary, expanded)
+    assert all(entry["source"] == {"kind": "album", "name": summary["title"]} for entry in page["entries"]), page
+    assert len({entry["run_id"] for entry in page["entries"]}) == 1, page
+    assert controller.state()["transport"] == "playing"
+    report["cases"].append({"name": "albums-server-holds-album-run", "total": page["total"]})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("albums*.png")):
+        shutil.copy2(image, screenshots / image.name)
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("albums*.png"))]
 
 
 if __name__ == "__main__":

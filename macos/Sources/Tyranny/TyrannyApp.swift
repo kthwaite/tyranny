@@ -94,6 +94,7 @@ private struct MainWindow: View {
                 NativeArtworkSmoke.startIfRequested(model)
                 NativeShellSmoke.startIfRequested(model, navigation: navigation)
                 NativeSongsSmoke.startIfRequested(model, navigation: navigation)
+                NativeAlbumsSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }

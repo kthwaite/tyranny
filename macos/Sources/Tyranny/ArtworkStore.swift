@@ -73,8 +73,9 @@ final class ArtworkStore {
     @ObservationIgnored private var cacheBytes = 0
     @ObservationIgnored private let thumbnails = Lane()
     @ObservationIgnored private let display = Lane()
-    private static let maximumEntries = 128
-    private static let maximumBytes = 16 * 1024 * 1024
+    /// The album grid at its smallest covers shows well over 128 covers on a large display.
+    private static let maximumEntries = 256
+    private static let maximumBytes = 24 * 1024 * 1024
 
     func synchronize(endpoint: String, tokenPath: String, instance: String?, revision: UInt64?, entryID: UInt64?, invalidate: Bool = false) {
         let next: Context?
