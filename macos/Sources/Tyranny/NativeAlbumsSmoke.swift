@@ -82,11 +82,17 @@ enum NativeAlbumsSmoke {
         let summaries: AlbumSummariesResponse = try await model.send("album_summaries", [
             "album_ids": .uints([last.id]), "revision": .null])
         guard let summary = summaries.entries.first else { throw Failure(message: "No album summary") }
+        let panelTotal = grid.expansion?.total ?? -1
         let shown = grid.expansion?.tracks.count ?? -1
-        try check(UInt64(shown) == summary.track_count, "Panel shows \(shown) tracks; album_summaries says \(summary.track_count)")
+        try check(UInt64(panelTotal) == summary.track_count, "Panel counts \(panelTotal) tracks; album_summaries says \(summary.track_count)")
+        try check(shown == min(Int(summary.track_count), AlbumPanel.trackLimit), "Panel lists \(shown) tracks")
+        if summary.track_count > UInt64(AlbumPanel.trackLimit) {
+            try await drive("expect-text", "album-expansion-more",
+                            AlbumPanel.moreText(total: Int(summary.track_count), shown: shown) ?? "")
+        }
         try await drive("expect-text", "album-expansion-tracks", String(summary.track_count))
         try await drive("expect-text", "album-expansion-facts", DisplayFormat.albumExpansionFacts(summary))
-        observations["expanded"] = ["id": last.id, "tracks": shown, "facts": DisplayFormat.albumExpansionFacts(summary)]
+        observations["expanded"] = ["id": last.id, "tracks": panelTotal, "listed": shown, "facts": DisplayFormat.albumExpansionFacts(summary)]
         cases.append("native-albums-panel-lists-album-summary-track-count")
         try await Task.sleep(for: .milliseconds(400))
         try capture("albums")
@@ -102,10 +108,11 @@ enum NativeAlbumsSmoke {
         let expected = QueueSource(kind: .album, name: summary.title)
         try check(queue.entries.allSatisfy { $0.source == expected }, "Queued entries lack the album source")
         try check(Set(queue.entries.compactMap(\.run_id)).count == 1, "Album entries are not one run")
-        // The last album may be longer than one queue page: compare the page against its prefix.
+        // The album may be longer than one queue page and the panel's list: compare the common prefix.
         let tracks = grid.expansion?.tracks.map(\.track.id) ?? []
         try check(queue.total == Int(summary.track_count), "Queue holds \(queue.total) entries")
-        try check(queue.entries.map(\.track_id) == Array(tracks.prefix(queue.entries.count)),
+        let compared = min(queue.entries.count, tracks.count)
+        try check(queue.entries.prefix(compared).map(\.track_id) == Array(tracks.prefix(compared)),
                   "Queue order differs from the album's tracks")
         observations["queued"] = ["total": queue.total, "source": ["kind": "album", "name": summary.title]]
         cases.append("native-albums-play-queues-album-run")

@@ -284,12 +284,28 @@ public struct QueueItem: Codable, Sendable, Equatable, Identifiable {
 }
 
 public struct QueueSource: Codable, Sendable, Equatable {
+    /// The server's `MAX_SOURCE_NAME_BYTES`.
+    public static let maximumNameBytes = 256
+
     public let kind: SourceKind
     public let name: String
 
+    /// A name longer than `maximumNameBytes` UTF-8 bytes is cut on a Unicode scalar boundary,
+    /// as the server's `QueueSource::stamped` cuts on a `char` boundary. Decoded names are kept.
     public init(kind: SourceKind, name: String) {
         self.kind = kind
-        self.name = name
+        guard name.utf8.count > Self.maximumNameBytes else {
+            self.name = name
+            return
+        }
+        var bytes = 0
+        var scalars = String.UnicodeScalarView()
+        for scalar in name.unicodeScalars {
+            bytes += UTF8.width(scalar)
+            if bytes > Self.maximumNameBytes { break }
+            scalars.append(scalar)
+        }
+        self.name = String(scalars)
     }
 }
 

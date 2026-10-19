@@ -34,8 +34,6 @@ final class AlbumGridModel {
     /// The first album in view, kept in view across revision changes.
     @ObservationIgnored private var anchorID: UInt64?
     @ObservationIgnored private var visibleRange: Range<Int>?
-    /// Bumps per track fetch; only the latest reply is applied.
-    @ObservationIgnored private var tracksTicket: UInt64 = 0
 
     init(player: PlayerModel, navigation: NavigationModel) {
         self.player = player
@@ -53,14 +51,12 @@ final class AlbumGridModel {
             if self.session != session {
                 self.session = session
                 cache.discard(session: session)
-                tracksTicket &+= 1
             }
             needsReset = true
             return
         }
         if self.session != session {
             cache.discard(session: session)
-            tracksTicket &+= 1
         }
         self.session = session
         let filter = navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -99,7 +95,6 @@ final class AlbumGridModel {
     private func reset() {
         filterError = nil
         expansion = nil
-        tracksTicket &+= 1
         epoch &+= 1
         anchorID = nil
         visibleRange = nil
@@ -126,12 +121,15 @@ final class AlbumGridModel {
         pendingFilter = nil
     }
 
-    /// The cache committed a refresh pass: the panel's album may have changed or gone.
+    /// The cache committed a refresh pass, or a scan started or ended: the panel's album may
+    /// have changed. Its tracks are fetched again only when `AlbumPanel.needsReload` says so.
     func refreshed() {
-        guard let expansion else { return }
+        guard let expansion, let player, let revision = player.snapshot?.library.revision else { return }
         if let position = cache.position(of: expansion.albumID), let album = cache.loadedRow(at: position) {
             expansion.album = album
         }
+        guard AlbumPanel.needsReload(loaded: expansion.basis, current: expansion.album, revision: revision,
+                                     scanning: player.scanActive) else { return }
         loadTracks(expansion)
     }
 
@@ -172,35 +170,40 @@ final class AlbumGridModel {
 
     // MARK: Tracks
 
-    /// Fetches the album's tracks, all pages at one revision.
+    /// Fetches the album's first `AlbumPanel.trackLimit` tracks in one request. One fetch per
+    /// panel is in flight; a reload asked for meanwhile runs after it. A reply for a panel that
+    /// has closed or moved is dropped.
     private func loadTracks(_ expansion: AlbumExpansion) {
-        tracksTicket &+= 1
-        let ticket = tracksTicket
+        guard !expansion.fetching else {
+            expansion.refetch = true
+            return
+        }
+        guard let player, let revision = player.snapshot?.library.revision else { return }
+        expansion.fetching = true
+        let basis = AlbumPanel.Loaded(album: expansion.album, revision: revision)
         let list = AlbumPlayback.list(albumID: expansion.albumID)
         // A cancelled request would close the shared connection: send it unstructured.
         Task { @MainActor [weak self] in
-            guard let player = self?.player else { return }
-            var rows: [ListRow] = []
-            var revision: UInt64?
-            var failure: String?
+            let result: Result<ListTracksResponse, any Error>
             do {
-                while true {
-                    let page: ListTracksResponse = try await player.send("list_tracks", [
-                        "list": try JSONValue.encoding(list), "revision": revision.map(JSONValue.uint) ?? .null,
-                        "offset": .int(rows.count), "limit": .int(500)])
-                    revision = page.revision
-                    rows += page.entries
-                    if page.entries.isEmpty || UInt64(rows.count) >= page.total { break }
-                }
+                result = .success(try await player.send("list_tracks", [
+                    "list": try JSONValue.encoding(list), "revision": .null,
+                    "offset": .int(0), "limit": .int(AlbumPanel.trackLimit)]))
             } catch {
-                failure = error.localizedDescription
+                result = .failure(error)
             }
-            guard let self, ticket == self.tracksTicket, self.expansion === expansion else { return }
-            if let failure {
-                // A stale revision means the library moved on; the next refresh pass reloads.
-                expansion.failed(failure)
-            } else {
-                expansion.loaded(rows)
+            expansion.fetching = false
+            guard let self, self.expansion === expansion else { return }
+            switch result {
+            case .success(let page):
+                expansion.loaded(page.entries, total: Int(page.total), basis: basis)
+            case .failure(let error):
+                // The next refresh pass, or the end of the scan, fetches again.
+                expansion.failed(error.localizedDescription)
+            }
+            if expansion.refetch {
+                expansion.refetch = false
+                self.refreshed()
             }
         }
     }
@@ -326,23 +329,32 @@ final class AlbumGridModel {
     }
 }
 
-/// The open album panel: the album and its tracks in album order.
+/// The open album panel: the album and its first tracks in album order.
 @MainActor @Observable
 final class AlbumExpansion {
     let albumID: UInt64
     var album: AlbumSummary
+    /// At most `AlbumPanel.trackLimit` tracks.
     private(set) var tracks: [ListRow] = []
+    /// The album's track count from the same reply as `tracks`.
+    private(set) var total = 0
     /// The tracks match the current album; false while the first fetch is in flight.
     private(set) var isLoaded = false
     private(set) var failure: String?
+    /// What `tracks` were fetched for.
+    @ObservationIgnored private(set) var basis: AlbumPanel.Loaded?
+    @ObservationIgnored var fetching = false
+    @ObservationIgnored var refetch = false
 
     init(album: AlbumSummary) {
         albumID = album.id
         self.album = album
     }
 
-    func loaded(_ rows: [ListRow]) {
+    func loaded(_ rows: [ListRow], total: Int, basis: AlbumPanel.Loaded) {
         tracks = rows
+        self.total = total
+        self.basis = basis
         isLoaded = true
         failure = nil
     }
@@ -351,4 +363,7 @@ final class AlbumExpansion {
         // Keep the tracks shown; a later refresh replaces them.
         if !isLoaded { failure = message }
     }
+
+    /// "and N more…" under a tracklist cut at `AlbumPanel.trackLimit`.
+    var moreText: String? { AlbumPanel.moreText(total: total, shown: tracks.count) }
 }

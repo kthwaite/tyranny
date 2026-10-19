@@ -110,6 +110,13 @@ public struct AlbumGridLayout: Equatable, Sendable {
             : Location(section: 2, item: position - split)
     }
 
+    /// Every item keeps its index path: a re-layout suffices, without reloading items (which
+    /// would release and re-request their covers).
+    public func hasSameItems(as other: AlbumGridLayout) -> Bool {
+        count == other.count && expanded == other.expanded
+            && (0..<Self.sections).allSatisfy { numberOfItems(inSection: $0) == other.numberOfItems(inSection: $0) }
+    }
+
     /// The album positions spanned by `locations`; nil when they hold no album.
     public func albumRange(of locations: some Sequence<Location>) -> Range<Int>? {
         var lower = Int.max, upper = Int.min
@@ -183,5 +190,34 @@ public enum UpNext {
         }
         if page.entries.contains(where: { !$0.played }) { return true }
         return !complete
+    }
+}
+
+/// The album panel's tracklist: at most `trackLimit` tracks in one request, and when to
+/// fetch them again.
+public enum AlbumPanel {
+    /// Longer albums show their first tracks and "and N more…".
+    public static let trackLimit = 200
+
+    /// What the shown tracks were fetched for.
+    public struct Loaded: Equatable, Sendable {
+        public let album: AlbumSummary
+        public let revision: UInt64
+        public init(album: AlbumSummary, revision: UInt64) {
+            self.album = album
+            self.revision = revision
+        }
+    }
+
+    /// Fetch when nothing is loaded or the album's summary changed. A bare library revision
+    /// change refetches only once no scan is running, so scan batches do not refetch.
+    public static func needsReload(loaded: Loaded?, current: AlbumSummary, revision: UInt64, scanning: Bool) -> Bool {
+        guard let loaded else { return true }
+        if loaded.album != current { return true }
+        return !scanning && loaded.revision != revision
+    }
+
+    public static func moreText(total: Int, shown: Int) -> String? {
+        total > shown ? "and \(DisplayFormat.count(total - shown)) more…" : nil
     }
 }

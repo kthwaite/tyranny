@@ -24,6 +24,7 @@ struct AlbumGridView: View {
         .accessibilityIdentifier("main-albums")
         .onChange(of: syncKey, initial: true) { _, _ in grid.sync() }
         .onChange(of: grid.cache.refreshes) { _, _ in grid.refreshed() }
+        .onChange(of: player.scanActive) { _, _ in grid.refreshed() }
         .onChange(of: grid.filterError, initial: true) { _, error in navigation.filterError = error }
         .onDisappear { navigation.filterError = nil }
         #if DEBUG
@@ -264,8 +265,15 @@ struct AlbumCollection: NSViewRepresentable {
             let panelMoved = nextLayout.expanded != layout.expanded
             geometry = next
             guard geometryChanged || layoutChanged else { return false }
+            let sameItems = nextLayout.hasSameItems(as: layout)
             layout = nextLayout
             collection.collectionViewLayout?.invalidateLayout()
+            if sameItems {
+                // A cover size or width change: re-layout and resize the items in place. They keep
+                // their artwork requests, so in-flight covers are not cancelled.
+                reconfigureVisible()
+                return false
+            }
             collection.reloadData()
             if panelMoved, let expanded = nextLayout.expanded { revealPanel(below: expanded) }
             return true

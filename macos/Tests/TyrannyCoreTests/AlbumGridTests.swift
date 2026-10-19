@@ -185,3 +185,65 @@ private func item(_ id: UInt64, played: Bool) -> QueueItem {
         #expect(!UpNext.hasUpcoming(queueLength: 1, currentID: 1, queueRevision: 4, page: nil))
     }
 }
+
+@Suite struct QueueSourceNameTests {
+    @Test func longNamesAreCutToTheServerLimit() {
+        let name = String(repeating: "a", count: 300)
+        #expect(QueueSource(kind: .album, name: name).name == String(repeating: "a", count: 256))
+        #expect(QueueSource(kind: .album, name: "Spirit of Eden").name == "Spirit of Eden")
+    }
+
+    @Test func aMultiByteCharacterStraddlingTheLimitIsDropped() {
+        // 255 bytes of ASCII, then "é" (2 bytes) would end at byte 257: it is dropped whole.
+        let name = String(repeating: "a", count: 255) + "é" + "z"
+        let cut = QueueSource(kind: .album, name: name).name
+        #expect(cut == String(repeating: "a", count: 255))
+        #expect(cut.utf8.count <= QueueSource.maximumNameBytes)
+        // A character that fits exactly is kept.
+        let exact = String(repeating: "a", count: 254) + "é" + "z"
+        #expect(QueueSource(kind: .album, name: exact).name == String(repeating: "a", count: 254) + "é")
+    }
+
+    @Test func decodedNamesAreNotRewritten() throws {
+        let json = Data(#"{"kind":"album","name":"Spirit of Eden"}"#.utf8)
+        #expect(try JSONDecoder().decode(QueueSource.self, from: json).name == "Spirit of Eden")
+    }
+}
+
+@Suite struct AlbumPanelTests {
+    @Test func panelLoadsOnceAndAgainOnlyWhenTheAlbumChanged() {
+        let shown = album()
+        #expect(AlbumPanel.needsReload(loaded: nil, current: shown, revision: 4, scanning: true))
+        let loaded = AlbumPanel.Loaded(album: shown, revision: 4)
+        // A scan batch bumps the revision without touching this album: no refetch.
+        #expect(!AlbumPanel.needsReload(loaded: loaded, current: shown, revision: 5, scanning: true))
+        // The album's summary changed: refetch, even mid-scan.
+        #expect(AlbumPanel.needsReload(loaded: loaded, current: album(tracks: 7), revision: 5, scanning: true))
+        // Once the scan settles, one refetch picks up retags that keep the summary.
+        #expect(AlbumPanel.needsReload(loaded: loaded, current: shown, revision: 5, scanning: false))
+        #expect(!AlbumPanel.needsReload(loaded: loaded, current: shown, revision: 4, scanning: false))
+    }
+
+    @Test func longAlbumsShowTheFirstTracksAndACount() {
+        #expect(AlbumPanel.trackLimit == 200)
+        #expect(AlbumPanel.moreText(total: 1024, shown: 200) == "and 824 more…")
+        #expect(AlbumPanel.moreText(total: 1201, shown: 200) == "and 1,001 more…")
+        #expect(AlbumPanel.moreText(total: 7, shown: 7) == nil)
+    }
+}
+
+@Suite struct AlbumGridReloadTests {
+    @Test func coverSizeAloneKeepsTheItems() {
+        // Without a panel, a column change moves cells but keeps every item: re-layout only.
+        let before = AlbumGridLayout(count: 10, columns: 4, expanded: nil)
+        #expect(before.hasSameItems(as: AlbumGridLayout(count: 10, columns: 6, expanded: nil)))
+        // With a panel, the row end moves and items change sections: reload.
+        let open = AlbumGridLayout(count: 10, columns: 4, expanded: 5)
+        #expect(!open.hasSameItems(as: AlbumGridLayout(count: 10, columns: 3, expanded: 5)))
+        // The same row end at another width (8 = 2·4 = 1·8) keeps the items; only the caret moves.
+        #expect(open.hasSameItems(as: AlbumGridLayout(count: 10, columns: 8, expanded: 5)))
+        #expect(open.hasSameItems(as: AlbumGridLayout(count: 10, columns: 4, expanded: 6)) == false)
+        #expect(open.hasSameItems(as: AlbumGridLayout(count: 10, columns: 4, expanded: 5)))
+        #expect(!before.hasSameItems(as: AlbumGridLayout(count: 11, columns: 4, expanded: nil)))
+    }
+}

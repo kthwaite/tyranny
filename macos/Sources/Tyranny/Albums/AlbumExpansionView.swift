@@ -17,7 +17,8 @@ enum AlbumExpansionMetrics {
     static func trackRows(_ count: Int) -> Int { max(1, (count + 1) / 2) }
 
     static func height(trackCount: UInt64) -> CGFloat {
-        let rows = min(trackRows(Int(clamping: trackCount)), maximumTrackRows)
+        let shown = min(Int(clamping: trackCount), AlbumPanel.trackLimit)
+        let rows = min(trackRows(shown), maximumTrackRows)
         let text = fixedTextHeight + CGFloat(rows) * trackRowHeight
         return caretHeight + 2 * padding + max(cover, text)
     }
@@ -183,11 +184,19 @@ struct AlbumExpansionContent: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 let split = (rows.count + 1) / 2
-                let columns = HStack(alignment: .top, spacing: 24) {
-                    column(rows[0..<split])
-                    column(rows[split...])
+                let columns = VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .top, spacing: 24) {
+                        column(rows[0..<split])
+                        column(rows[split...])
+                    }
+                    if let more = expansion.moreText {
+                        Text(more).font(.system(size: 12)).foregroundStyle(.secondary)
+                            .padding(.leading, 36)
+                            .accessibilityIdentifier("album-expansion-more")
+                    }
                 }
-                if AlbumExpansionMetrics.trackRows(rows.count) > AlbumExpansionMetrics.maximumTrackRows {
+                if AlbumExpansionMetrics.trackRows(rows.count) > AlbumExpansionMetrics.maximumTrackRows
+                    || expansion.moreText != nil {
                     ScrollView(.vertical) { columns }
                 } else {
                     columns.frame(maxHeight: .infinity, alignment: .top)
@@ -197,12 +206,12 @@ struct AlbumExpansionContent: View {
         .frame(height: height)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Tracks")
-        .accessibilityValue(expansion.isLoaded ? String(rows.count) : "loading")
+        .accessibilityValue(expansion.isLoaded ? String(expansion.total) : "loading")
         .accessibilityIdentifier("album-expansion-tracks")
     }
 
     private func column(_ rows: ArraySlice<ListRow>) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
                 HStack(spacing: 6) {
                     Text(number(row.track)).monospacedDigit().foregroundStyle(.secondary)
