@@ -724,18 +724,19 @@ Unmet targets are accepted and recorded: **`sorted_year_desc` (about 105 ms) and
 
 ## Library redesign — client
 
-Verified on branch `feature/library-redesign` (HEAD c5fcbb5 plus the render harness).
+Verified on branch `feature/library-redesign` after the final-review fix wave (base f89a89e).
 
 ### Gates
 
 | Gate | Result |
 | --- | --- |
 | `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings` | pass |
-| `cargo test --locked --all-targets` | pass: 165 unit, 15 (1 ignored), 41 integration; 0 failed |
-| `library_gate.py` / `playlist_gate.py` / `smart_playlist_gate.py` / `filter_gate.py` / `artwork_gate.py` (server only) | all pass (library: 13 cases) |
+| `cargo test --locked --all-targets` | pass: 166 unit, 15 (1 ignored), 42 integration; 0 failed |
+| `server_gate.py`, `playlist_gate.py` (server only) | pass (server: 12 cases) |
+| `library_gate.py` / `smart_playlist_gate.py` / `filter_gate.py` / `artwork_gate.py` (server only) | passed before the fix wave; not rerun (their paths did not change) |
 | Swift debug and release builds, `-warnings-as-errors` | pass |
-| `swift test` | pass: 181 tests in 31 suites |
-| `client_gate.py --model-only` | pass |
+| `swift test` | pass: 181 tests in 32 suites |
+| `client_gate.py --model-only` | pass (16 cases) |
 | `client_gate.py --app` scenarios core, shell, songs, grouping, albums, artists, history, upnext, runs | not run (permissions): every scenario fails at "Native UI driver requires a PID/action and Accessibility permission for its launching terminal." |
 | `filter_gate.py`, `artwork_gate.py`, `playlist_gate.py`, `smart_playlist_gate.py`, `scale_gate.py` with `--app` | same Accessibility error (server-side steps passed first) |
 | `lifecycle_gate.py --app` | not run (permissions): native window capture missing (Screen Recording) |
@@ -746,16 +747,24 @@ Native scale (first Songs window within 1 s of warm launch, native scroll, memor
 
 ### Self-rendered views
 
-`--render-views <dir>` (DEBUG only, `NativeRenderViews.swift`, driven by `scripts/render_views.py`) renders each destination with `cacheDisplay`. No Screen Recording or Accessibility is needed. The images are self-rendered, not composited screenshots: the window looks inactive, and Settings is rendered off-screen without the tab bar. Fixture: the 1,129-track songs library, a regular playlist "Road Mix" (12 tracks), a queue of 11 entries with one playing.
+`--render-views <dir>` (DEBUG only, `NativeRenderViews.swift`, driven by `scripts/render_views.py`) renders each destination with `cacheDisplay`. No Screen Recording or Accessibility is needed. The images are self-rendered, not composited screenshots: Settings is rendered off-screen without the tab bar. While rendering, track tables skip column autosave, so the images show the default column widths. Fixture: the 1,129-track songs library, a regular playlist "Road Mix" (12 tracks), a queue of 11 entries with the second one current (paused), so Up Next shows all three sections.
 
 Screenshots in `spike-results/library-redesign-ui/`: 01-songs-ungrouped, 02-songs-grouped-by-album, 03-songs-with-up-next-drawer, 03b-songs-column-browser, 04-albums-grid, 05-albums-grid-expanded, 06-artists, 07-genres, 08-recently-added, 09-history, 10-up-next, 11-playlist-regular, 12/13/14-settings (connection, library, playback).
 
-Visible defects (none hand-walked; the native workflow in spec section 8 was not run):
+Fixed in the final-review fix wave (seen in the re-render):
 
-- Up Next (10) shows no HISTORY / NOW PLAYING / UP NEXT section labels (spec 4.7). The drawer has none either.
+- Up Next (10) shows HISTORY, NOW PLAYING and UP NEXT beside the numbers; other columns have no indent.
+- "Upcoming" is one shuffle-aware rule on the server and the client (`ControlState.upcoming_count`, `current_index`): sidebar 9, header "9 upcoming", and the drawer (03) lists the 9 entries after the current one.
+- The toolbar filter field shows at 1180 pt (transport display ideal width 380 pt).
+- Songs at 1180 pt shows every default column through Plays, with no horizontal scroller (01, 03b, 11).
+- The grouped lists' album gutter has the header "Album" (02, 08).
+- No NSCollectionViewFlowLayout warning on Albums (04, 05).
+- Loading and missing art use the same note placeholder (04: Unknown Album).
+
+Still visible (none hand-walked; the native workflow in spec section 8 was not run):
+
+- Grouped lists (02, 08) add the 120 pt album gutter, so Format and Plays sit behind the horizontal scroller at 1180 pt.
+- The status column left of "#" has an empty header (tooltip "Playing").
 - Artists and Genres have no view header (title, count, group) and no Compilations entry (the fixture has no compilation album, so that may be correct).
-- Songs at the default 1180 pt width clips the Format column and hides Plays behind the horizontal scroller.
-- The toolbar filter field does not appear in the render, and the format text has no RG value. Possibly a self-render limitation.
-- Grouped lists show two empty narrow columns left of "#".
-- Console: NSCollectionViewFlowLayout "item width must be less than the width of the collection view" once on first Albums layout.
-- The Unknown Album tile uses the photo placeholder; other albums use the note placeholder.
+- The format text has no RG value (the fixture has no ReplayGain tags).
+- Settings 12 (connection) renders nearly blank and 13 (library) half light, half dark: the off-screen window does not follow the dark appearance. A self-render limitation, unchanged by this wave.
