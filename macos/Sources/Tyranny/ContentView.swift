@@ -9,7 +9,6 @@ struct ContentView: View {
     @State private var showingPlaylistPicker = false
     @State private var showingSmartEditor = false
     @State private var seekPreview: Double?
-    @State private var serverAction: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -338,19 +337,19 @@ struct ContentView: View {
                     store: model.artwork, request: model.artwork.nowPlayingRequest,
                     identifier: "now-playing-art", dimension: 128
                 )
-                Button("Previous", systemImage: "backward.end.fill", action: model.previous)
+                Button("Previous", systemImage: "backward.end.fill", action: model.transport.previous)
                     .disabled(!model.canMutate || model.snapshot?.can_previous != true)
                     .accessibilityIdentifier("transport-previous")
-                Button(action: model.playPause) {
+                Button(action: model.transport.playPause) {
                     Label(["playing", "buffering"].contains(model.snapshot?.transport ?? "") ? "Pause" : "Play",
                           systemImage: ["playing", "buffering"].contains(model.snapshot?.transport ?? "") ? "pause.fill" : "play.fill")
                 }
                 .disabled(!model.canMutate || (model.snapshot?.queue_length ?? 0) == 0)
                 .accessibilityIdentifier("transport-play")
-                Button("Next", systemImage: "forward.end.fill", action: model.next)
+                Button("Next", systemImage: "forward.end.fill", action: model.transport.next)
                     .disabled(!model.canMutate || model.snapshot?.can_next != true)
                     .accessibilityIdentifier("transport-next")
-                Button("Stop", systemImage: "stop.fill", action: model.stop)
+                Button("Stop", systemImage: "stop.fill", action: model.transport.stop)
                     .disabled(!model.canMutate)
                     .accessibilityIdentifier("transport-stop")
                 VStack(alignment: .leading) {
@@ -362,12 +361,12 @@ struct ContentView: View {
                 Text(time(seekPreview ?? model.positionSeconds) + (model.durationSeconds.map { " / " + time($0) } ?? " / —"))
                     .monospacedDigit().accessibilityIdentifier("transport-position")
             }
-            NativeSeekSlider(model: model, preview: $seekPreview)
+            NativeSeekSlider(transport: model.transport, preview: $seekPreview)
                 .frame(height: 20)
             HStack {
                 Picker("ReplayGain", selection: Binding(
                     get: { model.snapshot?.settings.gain_mode ?? "off" },
-                    set: { model.setGain($0) }
+                    set: { model.transport.setGain($0) }
                 )) {
                     Text("Off").tag("off")
                     Text("Track").tag("track")
@@ -376,7 +375,7 @@ struct ContentView: View {
                 .frame(width: 210).accessibilityIdentifier("gain-mode")
                 Toggle("Resume when server starts", isOn: Binding(
                     get: { model.snapshot?.settings.resume_on_start ?? false },
-                    set: { model.setResume($0) }
+                    set: { model.transport.setResume($0) }
                 )).accessibilityIdentifier("resume-on-start")
                 Spacer()
                 if let underruns = model.snapshot?.underruns, underruns > 0 {
@@ -389,96 +388,11 @@ struct ContentView: View {
 
 
     private var connectionSettings: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Server Connection").font(.title2)
-            Text("Connect to a local Tyranny server. The token file is read when connecting; its contents are never displayed.")
-                .foregroundStyle(.secondary)
-            Form {
-                TextField("WebSocket URL", text: $model.endpoint)
-                    .accessibilityIdentifier("connection-url")
-                TextField("Token file", text: $model.tokenPath)
-                    .accessibilityIdentifier("connection-token-path")
-            }.disabled(model.serverManagementBusy)
-            Text("Use a literal loopback address, for example ws://127.0.0.1:9865/ws.")
-                .font(.caption).foregroundStyle(.secondary)
-            Text(model.connectionDetail).textSelection(.enabled)
-            if model.managesServer {
-                Divider()
-                Text("Local Background Server").font(.headline)
-                Text("Runs independently of this window and at login. Stop removes its login job; opening the app again starts it.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let path = model.managedLogPath {
-                    Text("Log: \(path)").font(.caption).textSelection(.enabled)
-                }
-                HStack {
-                    Button("Start", action: model.startManagedServer)
-                        .accessibilityIdentifier("managed-start")
-                    Button("Restart…") { serverAction = "restart" }
-                        .accessibilityIdentifier("managed-restart")
-                    Button("Stop…") { serverAction = "stop" }
-                        .accessibilityIdentifier("managed-stop")
-                    if model.serverManagementBusy { ProgressView().controlSize(.small) }
-                }.disabled(model.serverManagementBusy || model.busy || model.connection == "connecting")
-            }
-            HStack {
-                Button("Disconnect", action: model.disconnect)
-                    .disabled(model.connection == "disconnected" || model.serverManagementBusy)
-                    .accessibilityIdentifier("connection-disconnect")
-                Spacer()
-                Button("Done") { showingConnection = false }
-                    .keyboardShortcut(.cancelAction)
-                Button("Connect / Retry", action: model.reconnect)
-                    .disabled(model.connection == "connecting" || model.busy || model.serverManagementBusy)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("connection-connect")
-            }
-        }.padding(24).frame(width: 550)
-        .confirmationDialog(
-            serverAction == "restart" ? "Restart the background server?" : "Stop the background server?",
-            isPresented: Binding(get: { serverAction != nil }, set: { if !$0 { serverAction = nil } })
-        ) {
-            if serverAction == "restart" {
-                Button("Restart Server", role: .destructive, action: model.restartManagedServer)
-            } else {
-                Button("Stop Server", role: .destructive, action: model.stopManagedServer)
-            }
-        } message: {
-            Text("Playback will stop. Your library, queue, and settings are retained.")
-        }
+        ConnectionSettingsPane(model: model) { showingConnection = false }
     }
 
     private var rootsSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Music Folders").font(.title2)
-            Text("Folders must be readable by the server. Rescan to import changes or retry failed and interrupted scans.")
-                .foregroundStyle(.secondary)
-            List(model.roots?.entries ?? []) { root in
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(root.path).textSelection(.enabled)
-                        if let scan = root.last_scan {
-                            Text("\(scan.phase.capitalized) · \(scan.processed) processed · \(scan.failures) failed")
-                                .font(.caption).foregroundStyle(.secondary)
-                            if let error = scan.last_error {
-                                Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
-                            }
-                        }
-                    }
-                    Spacer()
-                    Button("Rescan") { model.rescan(root.id) }
-                        .disabled(!model.canMutate || model.scanActive)
-                        .accessibilityIdentifier("rescan-root-\(root.id)")
-                }.padding(.vertical, 4)
-            }.accessibilityIdentifier("roots-list")
-            pageControls(model.roots, prefix: "roots", action: model.pageRoots)
-            HStack {
-                Button("Choose Music Folder…", action: model.chooseFolder)
-                    .disabled(!model.canMutate || model.scanActive)
-                    .accessibilityIdentifier("roots-choose-folder")
-                Spacer()
-                Button("Done") { showingRoots = false }.keyboardShortcut(.cancelAction)
-            }
-        }.padding(20).frame(width: 650, height: 430)
+        MusicFoldersPane(model: model) { showingRoots = false }
     }
 
     private func paneTitle(_ title: String) -> some View {
@@ -550,114 +464,5 @@ struct TrackFilterHelp: View {
                 }
                 .textSelection(.enabled).padding(18).frame(width: 480)
             }
-    }
-}
-
-/// AppKit owns native mouse tracking, keyboard focus and accessibility. Continuous
-/// mouse actions only preview; the tracking loop's return commits one occurrence-bound seek.
-private struct NativeSeekSlider: NSViewRepresentable {
-    var model: PlayerModel
-    @Binding var preview: Double?
-
-    func makeCoordinator() -> Coordinator { Coordinator(model: model, preview: $preview) }
-
-    func makeNSView(context: Context) -> SeekSlider {
-        let slider = SeekSlider()
-        slider.minValue = 0
-        slider.isContinuous = true
-        slider.target = context.coordinator
-        slider.action = #selector(Coordinator.changed(_:))
-        slider.setAccessibilityIdentifier("seek-slider")
-        slider.setAccessibilityLabel("Playback position in seconds")
-        slider.beginTracking = { [weak coordinator = context.coordinator] in coordinator?.begin() }
-        slider.endTracking = { [weak coordinator = context.coordinator] in coordinator?.end(slider: $0) }
-        return slider
-    }
-
-    func updateNSView(_ slider: SeekSlider, context: Context) {
-        context.coordinator.preview = $preview
-        let duration = model.durationSeconds ?? 0
-        slider.maxValue = max(duration, 1 / 48_000)
-        slider.isEnabled = model.canMutate && model.snapshot?.current_id != nil && duration > 0
-        context.coordinator.invalidateIfNeeded()
-        if !context.coordinator.tracking || context.coordinator.occurrence == nil {
-            slider.doubleValue = min(max(model.positionSeconds, 0), slider.maxValue)
-        }
-    }
-
-    @MainActor final class Coordinator: NSObject {
-        weak var model: PlayerModel?
-        var preview: Binding<Double?>
-        var tracking = false
-        var occurrence: (entry: UInt64, session: UInt64)?
-
-        init(model: PlayerModel, preview: Binding<Double?>) {
-            self.model = model
-            self.preview = preview
-        }
-
-        func begin() {
-            tracking = true
-            guard let model, model.canMutate, let entry = model.snapshot?.current_id,
-                  (model.durationSeconds ?? 0) > 0 else { occurrence = nil; return }
-            occurrence = (entry, model.playbackSession)
-        }
-
-        func invalidateIfNeeded() {
-            guard let occurrence, let model else { return }
-            if occurrence.entry != model.snapshot?.current_id
-                || occurrence.session != model.playbackSession || !model.canMutate
-                || (model.durationSeconds ?? 0) <= 0 {
-                self.occurrence = nil
-            }
-        }
-
-        @objc func changed(_ slider: NSSlider) {
-            if tracking {
-                invalidateIfNeeded()
-                if occurrence != nil { preview.wrappedValue = slider.doubleValue }
-            } else if let model, let entry = model.snapshot?.current_id {
-                model.seek(seconds: slider.doubleValue, entryID: entry)
-            }
-        }
-
-        func end(slider: NSSlider) {
-            invalidateIfNeeded()
-            let destination = occurrence
-            occurrence = nil
-            tracking = false
-            preview.wrappedValue = nil
-            if let destination {
-                model?.seek(seconds: slider.doubleValue, entryID: destination.entry)
-            }
-        }
-    }
-}
-
-private final class SeekSlider: NSSlider {
-    var beginTracking: (() -> Void)?
-    var endTracking: ((NSSlider) -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        guard isEnabled else { return }
-        beginTracking?()
-        super.mouseDown(with: event)
-        endTracking?(self)
-    }
-
-    override func setAccessibilityValue(_ value: Any?) {
-        guard isEnabled, let number = value as? NSNumber, number.doubleValue.isFinite else { return }
-        doubleValue = min(max(number.doubleValue, minValue), maxValue)
-        sendAction(action, to: target)
-    }
-
-    override func accessibilityPerformIncrement() -> Bool { adjust(by: 5) }
-    override func accessibilityPerformDecrement() -> Bool { adjust(by: -5) }
-
-    private func adjust(by seconds: Double) -> Bool {
-        guard isEnabled else { return false }
-        doubleValue = min(max(doubleValue + seconds, minValue), maxValue)
-        sendAction(action, to: target)
-        return true
     }
 }

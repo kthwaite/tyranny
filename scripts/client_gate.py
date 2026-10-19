@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,7 +27,13 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
+    parser.add_argument("--scenario", choices=["spike", "shell"], default="spike",
+                        help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell")
+    parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
+                        help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
+    if args.app.endswith(".app") or args.app.endswith(".app/"):
+        args.app = str(Path(args.app) / "Contents" / "MacOS" / "Tyranny")
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="run-", dir=work))
@@ -66,6 +73,10 @@ def main():
                 report["passed"] = True
                 return
             app = str(Path(args.app).resolve())
+            if args.scenario == "shell":
+                shell(report, run, app, port, ready, root, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
             for mode in ["initial", "relaunch"]:
                 output = run / mode
                 command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"], "--ui-smoke-output", str(output)]
@@ -98,6 +109,32 @@ def main():
             server.wait(timeout=15)
         (run / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps({"report": str(run / "report.json"), "passed": report.get("passed", False)}))
+
+
+def shell(report, run, app, port, ready, root, controller, screenshots):
+    """Drive the library window shell: source list, toolbar transport, status bar, Settings."""
+    report["scenario"] = "shell"
+    output = run / "shell"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--shell-smoke-output", str(output), "--ui-smoke-folder", str(root),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "shell.stdout").open("w") as stdout, (run / "shell.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=240)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["shell"] = native
+    assert native["passed"], native.get("error")
+    state = controller.state()
+    settings = state["settings"]
+    # The server, not the app, must hold the modes the toolbar set.
+    assert settings["volume"] == 45 and settings["repeat"] == "off" and settings["shuffle"] is False, settings
+    assert state["library"]["tracks"] == 1129 and state["transport"] == "playing", state
+    report["cases"].append({"name": "shell-server-holds-toolbar-settings", "settings": settings})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("shell*.png")):
+        shutil.copy2(image, screenshots / image.name)
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("shell*.png"))]
 
 
 if __name__ == "__main__":

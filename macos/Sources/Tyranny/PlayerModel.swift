@@ -17,6 +17,8 @@ final class PlayerModel {
     }
     private(set) var playbackSession: UInt64 = 0
     let artwork = ArtworkStore()
+    /// Transport commands and the toolbar display. Owns the system media controls.
+    let transport = TransportModel()
     private(set) var artists: Page<AlbumArtist>?
     private(set) var albums: Page<Album>?
     private(set) var tracks: Page<Track>?
@@ -97,7 +99,6 @@ final class PlayerModel {
     @ObservationIgnored private var queueOffset = 0
     @ObservationIgnored private var previousArtist: UInt64?
     @ObservationIgnored private var previousAlbum: UInt64?
-    @ObservationIgnored private var mediaControls: SystemMediaControls?
     @ObservationIgnored private var lastLibraryRefresh = Date.distantPast
     static let pageSize = 100
     @ObservationIgnored private var activeDrag: TrackDrag?
@@ -121,18 +122,7 @@ final class PlayerModel {
         }
         wire.onSnapshot = { [weak self] state, instance in self?.accept(state, newInstance: instance != nil) }
         wire.onDisconnect = { [weak self] reason in self?.lostConnection(reason) }
-        mediaControls = SystemMediaControls { [weak self] action in
-            guard let self else { return }
-            switch action {
-            case .play: play()
-            case .pause: pause()
-            case .togglePlayPause: playPause()
-            case .next: next()
-            case .previous: previous()
-            case .stop: stop()
-            case .seek(let entryID, let seconds): seek(seconds: seconds, entryID: entryID)
-            }
-        }
+        transport.attach(self)
         updateMediaControls()
     }
 
@@ -171,7 +161,7 @@ final class PlayerModel {
     }
 
     private func updateMediaControls() {
-        mediaControls?.update(snapshot: connected ? snapshot : nil, canMutate: canMutate)
+        transport.stateChanged()
     }
 
     private func updateArtwork(invalidate: Bool = false) {
@@ -185,8 +175,7 @@ final class PlayerModel {
     }
 
     func shutdown() {
-        mediaControls?.shutdown()
-        mediaControls = nil
+        transport.shutdown()
         disconnect()
     }
 
@@ -335,9 +324,12 @@ final class PlayerModel {
         let previous = snapshot
         snapshot = state
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
-        if let previous, ["discovering", "indexing"].contains(previous.library.scan.phase),
-           !["discovering", "indexing"].contains(state.library.scan.phase),
-           previous.library.revision == state.library.revision {
+        // A rescan that changes only cover files keeps the library revision, so
+        // invalidate artwork when a scan finishes, not only on revision change.
+        if let previous, previous.library.revision == state.library.revision,
+           (["discovering", "indexing"].contains(previous.library.scan.phase)
+                && !["discovering", "indexing"].contains(state.library.scan.phase))
+            || (previous.library.scan.phase != "complete" && state.library.scan.phase == "complete") {
             updateArtwork(invalidate: true)
         }
         guard connected else { return }
@@ -360,6 +352,10 @@ final class PlayerModel {
 
     private func request<T: Decodable>(_ command: String, _ fields: [String: JSONValue] = [:], as type: T.Type = T.self) async throws -> T {
         try decoder.decode(type, from: await wire.request(command, fields: fields))
+    }
+    /// Sends one command on the shared connection and decodes its reply.
+    func send<T: Decodable>(_ command: String, _ fields: [String: JSONValue] = [:]) async throws -> T {
+        try await request(command, fields)
     }
     private func pageFields(offset: Int, revision: UInt64?, query: String) -> [String: JSONValue] {
         ["offset": .int(offset), "limit": .int(Self.pageSize),
@@ -527,7 +523,9 @@ final class PlayerModel {
             message = nil; refresh()
         } catch { message = error.localizedDescription }
     }
-    private func mutate(_ action: @escaping @MainActor () async throws -> Void) {
+    /// Runs one user mutation: marks the model busy, reports failure in `message`,
+    /// and refreshes the queue afterwards.
+    func mutate(_ action: @escaping @MainActor () async throws -> Void) {
         guard canMutate else { return }
         busy = true; message = nil
         Task {
@@ -596,33 +594,6 @@ final class PlayerModel {
         guard queue?.entries.contains(where: { $0.id == id }) == true else { return }
         mutate { let _: Applied = try await self.request("play", ["entry_id": .uint(id)]) }
     }
-    func play() { mutate { let _: Applied = try await self.request("play", ["entry_id": .null]) } }
-    func pause() { mutate { let _: Applied = try await self.request("pause") } }
-    func playPause() { mutate { let _: Applied = try await self.request("toggle_play_pause") } }
-    func next() {
-        guard snapshot?.can_next == true else { return }
-        mutate { let _: Applied = try await self.request("next") }
-    }
-    func previous() {
-        guard snapshot?.can_previous == true else { return }
-        mutate { let _: Applied = try await self.request("previous") }
-    }
-    func stop() { mutate { let _: Applied = try await self.request("stop") } }
-    func seek(seconds: Double, entryID: UInt64) {
-        guard seconds.isFinite, seconds >= 0, let state = snapshot,
-              state.current_id == entryID, state.now_playing?.entry_id == entryID,
-              state.sample_rate > 0, let duration = state.now_playing?.duration_frames,
-              duration > 0 else { return }
-        let frames = seconds * Double(state.sample_rate)
-        guard frames.isFinite, frames < Double(UInt64.max) else { return }
-        let position = min(UInt64(frames), duration - 1)
-        mutate {
-            let _: Applied = try await self.request("seek", [
-                "entry_id": .uint(entryID), "position_frames": .uint(position)])
-        }
-    }
-    func setGain(_ mode: String) { mutate { let _: Applied = try await self.request("set_gain", ["mode": .string(mode)]) } }
-    func setResume(_ enabled: Bool) { mutate { let _: Applied = try await self.request("set_resume", ["enabled": .bool(enabled)]) } }
     func playQueueSelection() {
         guard let item = queue?.entries.first(where: { selectedQueue.contains($0.id) }) else { return }
         mutate { let _: Applied = try await self.request("play", ["entry_id": .uint(item.id)]) }

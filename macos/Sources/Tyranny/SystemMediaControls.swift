@@ -7,6 +7,8 @@ final class SystemMediaControls {
     enum Action: Sendable {
         case play, pause, togglePlayPause, next, previous, stop
         case seek(entryID: UInt64, seconds: Double)
+        case setRepeat(RepeatMode)
+        case setShuffle(Bool)
     }
 
     private static weak var owner: SystemMediaControls?
@@ -40,6 +42,7 @@ final class SystemMediaControls {
         register(commands.previousTrackCommand, action: .previous)
         register(commands.stopCommand, action: .stop)
         registerSeek()
+        registerModes()
     }
 
     func update(snapshot: ControlState?, canMutate: Bool) {
@@ -47,6 +50,14 @@ final class SystemMediaControls {
         let availability = MediaCommandAvailability(snapshot: snapshot, canMutate: canMutate)
         gate.update(availability)
         setEnabled(availability)
+        if let settings = snapshot?.settings {
+            commands.changeRepeatModeCommand.currentRepeatType = switch settings.repeat {
+            case .off: .off
+            case .all: .all
+            case .one: .one
+            }
+            commands.changeShuffleModeCommand.currentShuffleType = settings.shuffle ? .items : .off
+        }
         guard let snapshot, let item = snapshot.now_playing, item.entry_id == snapshot.current_id else {
             clearPublication()
             return
@@ -145,6 +156,34 @@ final class SystemMediaControls {
         registrations.append((command, command.addTarget(handler: callback)))
     }
 
+    /// Shuffle and repeat go to the server's play-order modes, as the toolbar toggles do.
+    private func registerModes() {
+        let gate = gate
+        let repeatCallback: @Sendable (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self, gate] event in
+            guard let self, let event = event as? MPChangeRepeatModeCommandEvent else { return .commandFailed }
+            let mode: RepeatMode
+            switch event.repeatType {
+            case .off: mode = .off
+            case .one: mode = .one
+            case .all: mode = .all
+            @unknown default: return .commandFailed
+            }
+            guard let receipt = gate.receive(.setRepeat(mode)) else { return .commandFailed }
+            Task { @MainActor [weak self] in self?.dispatch(receipt) }
+            return .success
+        }
+        let shuffleCallback: @Sendable (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self, gate] event in
+            guard let self, let event = event as? MPChangeShuffleModeCommandEvent,
+                  let receipt = gate.receive(.setShuffle(event.shuffleType != .off)) else { return .commandFailed }
+            Task { @MainActor [weak self] in self?.dispatch(receipt) }
+            return .success
+        }
+        let repeatCommand = commands.changeRepeatModeCommand
+        registrations.append((repeatCommand, repeatCommand.addTarget(handler: repeatCallback)))
+        let shuffleCommand = commands.changeShuffleModeCommand
+        registrations.append((shuffleCommand, shuffleCommand.addTarget(handler: shuffleCallback)))
+    }
+
     private func dispatch(_ receipt: MediaCommandReceipt) {
         guard !isShutdown, Self.ownerID == id, gate.isCurrent(receipt) else { return }
         handle(receipt.action)
@@ -158,6 +197,8 @@ final class SystemMediaControls {
         commands.previousTrackCommand.isEnabled = availability.allows(.previous)
         commands.stopCommand.isEnabled = availability.allows(.stop)
         commands.changePlaybackPositionCommand.isEnabled = availability.canMutate && availability.seekLimit != nil
+        commands.changeRepeatModeCommand.isEnabled = availability.allows(.setRepeat(.off))
+        commands.changeShuffleModeCommand.isEnabled = availability.allows(.setShuffle(false))
     }
 
     private func disableUnsupportedCommands() {
@@ -166,8 +207,6 @@ final class SystemMediaControls {
         commands.skipForwardCommand.isEnabled = false
         commands.skipBackwardCommand.isEnabled = false
         commands.changePlaybackRateCommand.isEnabled = false
-        commands.changeRepeatModeCommand.isEnabled = false
-        commands.changeShuffleModeCommand.isEnabled = false
         commands.enableLanguageOptionCommand.isEnabled = false
         commands.disableLanguageOptionCommand.isEnabled = false
         commands.ratingCommand.isEnabled = false
@@ -238,6 +277,7 @@ private struct MediaCommandAvailability: Sendable {
         case .previous: return entryID != nil && canPrevious
         case .seek(let requestedID, let seconds):
             return requestedID == entryID && seekLimit != nil && seconds.isFinite && seconds >= 0
+        case .setRepeat, .setShuffle: return true
         }
     }
 }

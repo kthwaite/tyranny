@@ -19,7 +19,7 @@ enum NativeSmoke {
 
     static func prepareFolderPanel(_ panel: NSOpenPanel) {
         let args = CommandLine.arguments
-        guard args.contains("--ui-smoke-output"),
+        guard args.contains("--ui-smoke-output") || args.contains("--shell-smoke-output"),
               let index = args.firstIndex(of: "--ui-smoke-folder"), index + 1 < args.count else { return }
         panel.directoryURL = URL(fileURLWithPath: args[index + 1], isDirectory: true)
     }

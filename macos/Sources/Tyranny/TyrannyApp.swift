@@ -33,6 +33,7 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
 struct TyrannyApp: App {
     @NSApplicationDelegateAdaptor(TyrannyAppDelegate.self) private var appDelegate
     @State private var model = PlayerModel()
+    @State private var navigation = NavigationModel()
     @State private var started = false
 
     init() {
@@ -43,21 +44,33 @@ struct TyrannyApp: App {
 
     var body: some Scene {
         Window("Tyranny", id: "main") {
-            MainWindow(model: model, appDelegate: appDelegate, started: $started)
+            MainWindow(model: model, navigation: navigation, appDelegate: appDelegate, started: $started)
         }
-        .defaultSize(width: 1100, height: 720)
+        .defaultSize(width: 1180, height: 740)
         .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .commands {
+            // ⌘F focuses the toolbar filter; the window has no text find.
+            CommandGroup(replacing: .textEditing) {
+                Button("Filter") { navigation.focusFilter() }
+                    .keyboardShortcut("f")
+            }
+        }
+        Settings {
+            SettingsView(model: model, navigation: navigation)
+        }
     }
 }
 
 private struct MainWindow: View {
     let model: PlayerModel
+    let navigation: NavigationModel
     let appDelegate: TyrannyAppDelegate
     @Binding var started: Bool
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        ContentView(model: model)
+        MainWindowView(model: model, navigation: navigation)
             .task {
                 appDelegate.reopenWindow = { [openWindow] in openWindow(id: "main") }
                 guard !started else { return }
@@ -73,6 +86,7 @@ private struct MainWindow: View {
                 NativeFilterSmoke.startIfRequested(model)
                 NativeSmartPlaylistSmoke.startIfRequested(model)
                 NativeArtworkSmoke.startIfRequested(model)
+                NativeShellSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }
