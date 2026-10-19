@@ -18,13 +18,16 @@ public enum RowRelocation: Equatable, Sendable {
 
 public enum SelectionRetarget {
     /// The selection again under a fresh library revision, with its ranges moved by `delta`
-    /// (where the first row went). Ranges that run to the end of the list keep their end.
+    /// (where the first row went). `list` replaces the embedded list description, so the selection
+    /// names the list the rows were fetched for. Ranges that run to the end of the list keep their end.
     /// nil when the move cannot be applied: several ranges moved by different amounts.
-    public static func apply(_ selection: TrackSelection, libraryRevision: UInt64, delta: Int) -> TrackSelection? {
+    public static func apply(_ selection: TrackSelection, libraryRevision: UInt64, delta: Int,
+                             list newList: ListDescription? = nil) -> TrackSelection? {
         switch selection {
         case .ids(_, let trackIDs):
             return .ids(libraryRevision: libraryRevision, trackIDs: trackIDs)
-        case .list(let list, _, let ranges, let excluded, let firstRowID):
+        case .list(let oldList, _, let ranges, let excluded, let firstRowID):
+            let list = newList ?? oldList
             if delta != 0, ranges.count > 1 { return nil }
             let moved = ranges.map { range -> [UInt64] in
                 range.enumerated().map { index, value in

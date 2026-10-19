@@ -34,7 +34,7 @@ final class ActivatingTableView: NSTableView {
 
 extension VirtualTrackTable.Coordinator {
     func configureInput(_ table: ActivatingTableView) {
-        table.onActivate = { [weak self] action in self?.parent.list.activateSelected(action) }
+        table.onActivate = { [weak self] action in self?.parent.list.activateSelected(action, asRun: true) }
         table.onPlayPause = { [weak self] in self?.parent.player.transport.playPause() }
         table.contextMenu = { [weak self] row in self?.menu(forRow: row) }
     }
@@ -80,7 +80,8 @@ extension VirtualTrackTable.Coordinator {
         menu.addItem(item)
     }
 
-    @objc private func menuPlay() { parent.list.activateSelected(.play) }
+    // The menu plays the selected rows only, not a run to the end of the list.
+    @objc private func menuPlay() { parent.list.activateSelected(.play, asRun: false) }
     @objc private func menuPlayNext() { parent.list.activateSelected(.playNext) }
     @objc private func menuAddToUpNext() { parent.list.activateSelected(.addToUpNext) }
     @objc private func menuAddToPlaylist() { parent.list.requestPlaylistPicker() }

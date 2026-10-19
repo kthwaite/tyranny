@@ -17,11 +17,15 @@ struct UpNextPrompt: View {
                 .accessibilityIdentifier("up-next-prompt-remember")
             HStack {
                 Spacer()
-                Button("Keep") { activation.answer(.keep, remember: remember) }
-                    .accessibilityIdentifier("up-next-prompt-keep")
+                Button("Cancel") { activation.cancelPrompt() }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("up-next-prompt-cancel")
                 Button("Clear") { activation.answer(.clear, remember: remember) }
-                    .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("up-next-prompt-clear")
+                // Return keeps Up Next; clearing is never the default.
+                Button("Keep") { activation.answer(.keep, remember: remember) }
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("up-next-prompt-keep")
             }
         }
         .padding(20)

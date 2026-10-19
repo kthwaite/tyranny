@@ -6,10 +6,27 @@ import TyrannyCore
 final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
     var model: PlayerModel?
     var reopenWindow: (() -> Void)?
+    private var keyGuard: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        installTextFieldKeyGuard()
+    }
+
+    /// Menu key equivalents beat text fields. ⌘← and ⌘→ (Previous and Next) must still move the
+    /// cursor while a field editor has focus, so the editor gets those keys first. Space and
+    /// Return are not menu shortcuts: only the focused track table sees them.
+    private func installTextFieldKeyGuard() {
+        keyGuard = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                .subtracting([.numericPad, .function, .capsLock])
+            guard flags == .command, event.keyCode == 123 || event.keyCode == 124,
+                  let editor = (event.window ?? NSApp.keyWindow)?.firstResponder as? NSTextView,
+                  editor.isFieldEditor || editor.isEditable else { return event }
+            editor.keyDown(with: event)
+            return nil
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

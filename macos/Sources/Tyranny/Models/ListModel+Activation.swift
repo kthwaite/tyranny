@@ -15,15 +15,15 @@ extension ListModel {
     }
 
     /// Return, ⌥Return and the context menu on the selected rows.
-    func activateSelected(_ action: ActivationAction) {
-        start(action, positions: rows.positions)
+    func activateSelected(_ action: ActivationAction, asRun: Bool = false) {
+        start(action, positions: rows.positions, asRun: asRun)
     }
 
-    private func start(_ action: ActivationAction, positions: IndexSet) {
+    private func start(_ action: ActivationAction, positions: IndexSet, asRun: Bool = true) {
         guard let player, !positions.isEmpty else { return }
         do {
-            // One row played starts a run to the end of the list; several rows play as chosen.
-            let request = try selectionRequest(positions: positions, asRun: action == .play)
+            // A double-click and Return play a run to the end of the list; the rest send the rows chosen.
+            let request = try selectionRequest(positions: positions, asRun: asRun && action == .play)
             player.activation.start(EnqueueJob(action: action, source: queueSource, request: request,
                                                status: status(action, count: positions.count)))
         } catch {
@@ -45,9 +45,13 @@ extension ListModel {
     func selectionRequest(positions: IndexSet, asRun: Bool) throws -> SelectionRequest {
         guard let revision = cache.revision, let first = positions.first,
               let firstRow = cache.loadedRow(at: first) else { throw EmptySelection() }
-        let selection = asRun && positions.count == 1
-            ? SelectionEncoder.run(list: description, revision: revision, from: first, rowID: firstRow.row_id)
-            : try encode(positions)
+        let selection = try SelectionEncoder.activation(
+            list: description, revision: revision, positions: positions, asRun: asRun,
+            rowID: { cache.loadedRow(at: $0)?.row_id }, trackID: { cache.loadedRow(at: $0)?.track.id })
+        if case .ids = selection, let player {
+            // Track IDs do not move with the list: only the revision needs renewing.
+            return .source(selection, player: player)
+        }
         let rowID = firstRow.row_id
         return SelectionRequest(selection: selection) { [weak self] in
             guard let self else { throw ListChangedError() }
@@ -56,7 +60,7 @@ extension ListModel {
     }
 
     /// Fetches the window around the clicked row, finds the row by ID and re-encodes the
-    /// selection under the library revision of that window.
+    /// selection for the list description of that fetch, under the revision of that window.
     private func relocated(_ selection: TrackSelection, rowID: UInt64, at position: Int) async throws -> TrackSelection {
         guard let player else { throw ListChangedError() }
         let window = RowRelocation.window(around: position, size: 200)
@@ -67,7 +71,8 @@ extension ListModel {
             "offset": .int(window.offset), "limit": .int(window.limit)])
         guard case .found(let now) = RowRelocation.locate(rowID: rowID, rowIDs: reply.entries.map(\.row_id),
                                                           offset: reply.offset),
-              let fresh = SelectionRetarget.apply(selection, libraryRevision: reply.revision, delta: now - position)
+              let fresh = SelectionRetarget.apply(selection, libraryRevision: reply.revision, delta: now - position,
+                                                  list: request)
         else { throw ListChangedError() }
         return fresh
     }

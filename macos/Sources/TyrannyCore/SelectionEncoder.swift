@@ -67,6 +67,20 @@ public enum SelectionEncoder {
                      excluded: excluded, firstRowID: firstRowID)
     }
 
+    /// The rows an activation sends. Double-click and Return (`asRun`) on one row play from that
+    /// row to the end of the list. The context menu's Play and every other action send exactly the
+    /// rows chosen.
+    public static func activation(
+        list: ListDescription, revision: UInt64, positions: IndexSet, asRun: Bool,
+        rowID: (Int) -> UInt64?, trackID: (Int) -> UInt64?
+    ) throws -> TrackSelection {
+        guard let first = positions.first, let id = rowID(first) else { throw EmptySelection() }
+        if asRun, positions.count == 1 {
+            return run(list: list, revision: revision, from: first, rowID: id)
+        }
+        return try selection(list: list, revision: revision, positions: positions, rowID: rowID, trackID: trackID)
+    }
+
     public static func decide(policy: UpNextPolicy, hasUpcoming: Bool) -> RunDecision {
         guard hasUpcoming else { return .enqueue(.replaceUpcoming) }
         switch policy {

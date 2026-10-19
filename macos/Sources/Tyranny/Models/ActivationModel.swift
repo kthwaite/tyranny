@@ -58,16 +58,11 @@ final class ActivationModel {
     func start(_ job: EnqueueJob) {
         guard let player else { return }
         player.mutate { [weak self] in
-            guard let self else { return }
-            let upcoming = job.action == .play ? await player.hasUpcoming() : false
-            switch ActivationPlan.make(job.action, policy: Self.policy, hasUpcoming: upcoming) {
-            case .ask:
-                self.prompt = Prompt(job: job)
-            case .enqueue(let placement, let play):
-                try await self.send(job, placement: placement, play: play)
-            }
+            try await self?.send(job, choice: nil)
         }
     }
+
+    func cancelPrompt() { prompt = nil }
 
     /// The sheet's answer. `remember` stores it as the policy ("Don't ask again").
     func answer(_ choice: UpNextChoice, remember: Bool) {
@@ -75,25 +70,45 @@ final class ActivationModel {
         prompt = nil
         if remember { UserDefaults.standard.set(choice.remembered.rawValue, forKey: "upNextOnPlay") }
         player.mutate { [weak self] in
-            try await self?.send(job, placement: choice.placement, play: true)
+            try await self?.send(job, choice: choice)
         }
     }
 
-    /// `stale_revision`: the queue moved; refetch the snapshot. `stale_library_revision`: the
-    /// library moved; refetch the snapshot, then relocate the rows. One retry for each.
-    private func send(_ job: EnqueueJob, placement: Placement, play: Bool) async throws {
+    /// Decides, then sends. Without a `choice` the Up Next policy decides from the queue as the
+    /// snapshot's revision saw it, so `expected_revision` matches what the decision read.
+    /// `stale_revision`: the queue moved; refetch the snapshot and decide again (entries may
+    /// have arrived: the new decision may ask). `stale_library_revision`: the library moved;
+    /// refetch the snapshot, then relocate the rows. One retry for each.
+    private func send(_ job: EnqueueJob, choice: UpNextChoice?) async throws {
         guard let player else { return }
-        if job.shuffleFirst {
-            let _: Applied = try await player.send("set_shuffle", ["enabled": .bool(true)])
-        }
         var selection = job.request.selection
         var retriedQueue = false, retriedLibrary = false
+        var shuffled = false
         while true {
             guard player.connected, let state = player.snapshot else {
                 throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was queued.")
             }
-            let request = EnqueueRequest(selection: selection, placement: placement, play: play, source: job.source)
             do {
+                let placement: Placement, play: Bool
+                if let choice {
+                    (placement, play) = (choice.placement, true)
+                } else {
+                    let upcoming = job.action == .play
+                        ? try await player.hasUpcoming(atQueueRevision: state.queue_revision) : false
+                    switch ActivationPlan.make(job.action, policy: Self.policy, hasUpcoming: upcoming) {
+                    case .ask:
+                        prompt = Prompt(job: job)
+                        return
+                    case .enqueue(let decided, let decidedPlay):
+                        (placement, play) = (decided, decidedPlay)
+                    }
+                }
+                if job.shuffleFirst, !shuffled {
+                    shuffled = true
+                    let _: Applied = try await player.send("set_shuffle", ["enabled": .bool(true)])
+                }
+                let request = EnqueueRequest(selection: selection, placement: placement, play: play,
+                                             source: job.source)
                 let _: Applied = try await player.send("enqueue_tracks",
                                                        try request.fields(expectedRevision: state.queue_revision))
                 if let status = job.status { player.message = status }

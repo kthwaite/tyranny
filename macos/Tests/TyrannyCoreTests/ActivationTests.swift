@@ -157,3 +157,54 @@ private func entry(_ id: UInt64, played: Bool = false) -> QueueItem {
                 == .list(list: list, libraryRevision: 2, ranges: [[1, 2], [5, 6]], excluded: [], firstRowID: 1))
     }
 }
+
+@Suite struct StaleRunTests {
+    @Test func aRetryDecidesAgainAndAsksWhenEntriesArrivedMeanwhile() {
+        // The snapshot lagged: Up Next looked empty, so Play replaced. After the refetch entries are upcoming.
+        for policy in [UpNextPolicy.ask] {
+            #expect(ActivationPlan.make(.play, policy: policy, hasUpcoming: false)
+                    == .enqueue(placement: .replaceUpcoming, play: true))
+            #expect(ActivationPlan.make(.play, policy: policy, hasUpcoming: true) == .ask)
+        }
+        #expect(ActivationPlan.make(.play, policy: .keep, hasUpcoming: true) == .enqueue(placement: .next, play: true))
+    }
+
+    @Test func theScanStopsAtTheFirstPageThatDecidesAndKeepsNothing() {
+        var scan = UpNext.Scan(currentID: 3)
+        let first = (1...500).map { entry(UInt64($0), played: $0 < 3) }
+        #expect(scan.feed(first, total: 900) == true)
+        var long = UpNext.Scan(currentID: 700)
+        #expect(long.feed(first, total: 900) == nil)
+        #expect(long.feed((501...900).map { entry(UInt64($0)) }, total: 900) == true)
+        var last = UpNext.Scan(currentID: 900)
+        #expect(last.feed(first, total: 900) == nil)
+        #expect(last.feed((501...900).map { entry(UInt64($0)) }, total: 900) == false)
+    }
+}
+
+@Suite struct ActivationSelectionTests {
+    private let list = ListDescription(source: .library)
+    private func encode(_ positions: IndexSet, asRun: Bool) throws -> TrackSelection {
+        try SelectionEncoder.activation(list: list, revision: 5, positions: positions, asRun: asRun,
+                                        rowID: { UInt64($0) + 100 }, trackID: { UInt64($0) + 1000 })
+    }
+
+    @Test func doubleClickAndReturnRunToTheEndOfTheList() throws {
+        #expect(try encode(IndexSet(integer: 3), asRun: true)
+                == .list(list: list, libraryRevision: 5, ranges: [[3, UInt64.max]], excluded: [], firstRowID: 103))
+    }
+
+    @Test func theMenuPlaysOnlyTheSelectedRows() throws {
+        #expect(try encode(IndexSet(integer: 3), asRun: false) == .ids(libraryRevision: 5, trackIDs: [1003]))
+        #expect(try encode(IndexSet([3, 4]), asRun: false) == .ids(libraryRevision: 5, trackIDs: [1003, 1004]))
+        // Several rows are never a run, even for Return.
+        #expect(try encode(IndexSet([3, 4]), asRun: true) == .ids(libraryRevision: 5, trackIDs: [1003, 1004]))
+    }
+
+    @Test func aRetargetNamesTheListTheRowsWereFetchedFor() {
+        let run = SelectionEncoder.run(list: list, revision: 1, from: 2, rowID: 9)
+        let fetched = ListDescription(source: .playlist(id: 4, revision: 8), query: "x")
+        #expect(SelectionRetarget.apply(run, libraryRevision: 2, delta: 1, list: fetched)
+                == .list(list: fetched, libraryRevision: 2, ranges: [[3, UInt64.max]], excluded: [], firstRowID: 9))
+    }
+}
