@@ -216,7 +216,6 @@ struct UpNextTable: NSViewRepresentable {
             view.identifier = reuse
             let item = cache.loadedRow(at: row)
             view.setAccessibilityIdentifier(item.map { "up-next-row-\($0.id)" } ?? "up-next-placeholder-\(row)")
-            view.show(section: startsSection(row))
             return view
         }
 
@@ -254,6 +253,7 @@ struct UpNextTable: NSViewRepresentable {
             let shown = weight == .semibold ? NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: weight) : font
             cell.show(text: text, font: shown, alignment: column.alignment, dimmed: section == .history,
                       identifier: identifier)
+            cell.show(section: id == "number" ? startsSection(row) : nil)
             cell.toolTip = text.isEmpty ? nil : text
             return cell
         }
@@ -360,38 +360,16 @@ final class QueueNSTableView: NSTableView {
     }
 }
 
-/// A queue row. A row that starts a section shows its label over the left of the # column.
-final class QueueRowView: NSTableRowView {
-    private let label = NSTextField(labelWithString: "")
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        label.font = .systemFont(ofSize: 9, weight: .bold)
-        label.textColor = .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.isHidden = true
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 34),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-
-    func show(section: QueueSection?) {
-        label.isHidden = section == nil
-        label.stringValue = section?.title ?? ""
-        label.setAccessibilityIdentifier(section.map { "up-next-section-\($0.key)" })
-    }
-}
+/// A queue row. Its section label lives in the # cell, which knows its live width.
+final class QueueRowView: NSTableRowView {}
 
 /// A queue table cell: one text field, or the playing indicator.
 final class QueueCellView: NSTableCellView {
     static let reuse = NSUserInterfaceItemIdentifier("up-next-cell")
     private let field = NSTextField(labelWithString: "")
     private let icon = NSImageView()
+    /// Only in the # column: the section name, truncated so it stays clear of the number.
+    private let sectionLabel = NSTextField(labelWithString: "")
 
     init() {
         super.init(frame: .zero)
@@ -406,8 +384,22 @@ final class QueueCellView: NSTableCellView {
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
         addSubview(icon)
         textField = field
+        sectionLabel.font = .systemFont(ofSize: 9, weight: .bold)
+        sectionLabel.textColor = .secondaryLabelColor
+        sectionLabel.lineBreakMode = .byTruncatingTail
+        sectionLabel.cell?.usesSingleLineMode = true
+        sectionLabel.translatesAutoresizingMaskIntoConstraints = false
+        sectionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sectionLabel.isHidden = true
+        addSubview(sectionLabel)
+        field.setContentCompressionResistancePriority(.defaultHigh + 50, for: .horizontal)
+        let fieldLeading = field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2)
+        fieldLeading.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            fieldLeading,
+            field.leadingAnchor.constraint(greaterThanOrEqualTo: sectionLabel.trailingAnchor, constant: 4),
+            sectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            sectionLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -420,6 +412,7 @@ final class QueueCellView: NSTableCellView {
 
     func show(text: String, font: NSFont, alignment: NSTextAlignment, dimmed: Bool, identifier: String?) {
         icon.isHidden = true
+        sectionLabel.isHidden = true
         field.isHidden = false
         field.stringValue = text
         field.font = font
@@ -428,8 +421,17 @@ final class QueueCellView: NSTableCellView {
         field.setAccessibilityIdentifier(identifier)
     }
 
+    func show(section: QueueSection?) {
+        sectionLabel.isHidden = section == nil
+        sectionLabel.stringValue = section?.title ?? ""
+        sectionLabel.toolTip = section?.title
+        sectionLabel.setAccessibilityLabel(section?.title)
+        sectionLabel.setAccessibilityIdentifier(section.map { "up-next-section-\($0.key)" })
+    }
+
     func showPlaying(_ playing: Bool, identifier: String) {
         field.isHidden = true
+        sectionLabel.isHidden = true
         field.stringValue = ""
         icon.isHidden = !playing
         icon.setAccessibilityIdentifier(identifier)
