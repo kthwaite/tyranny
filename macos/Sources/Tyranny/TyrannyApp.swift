@@ -140,6 +140,7 @@ private struct MainWindow: View {
                 NativePlaylistSmoke.startIfRequested(model, navigation: navigation)
                 NativeSmartPlaylistSmoke.startIfRequested(model, navigation: navigation)
                 NativeRunsSmoke.startIfRequested(model, navigation: navigation)
+                NativeRenderViews.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }

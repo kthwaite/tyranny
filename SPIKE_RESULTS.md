@@ -721,3 +721,41 @@ Unmet targets are accepted and recorded: **`sorted_year_desc` (about 105 ms) and
 - The client UI is not rebuilt for the new library window; that is a separate plan. The existing client only speaks v9 and passes its model gate.
 - A run enqueue is checked for a stale queue revision after off-thread resolution (about 0.9 s at 50k), and a trim bumps the queue revision. Clients must retry a run enqueue once on `stale_revision`.
 - CoreAudio-output gate variants were not re-run for this slice.
+
+## Library redesign — client
+
+Verified on branch `feature/library-redesign` (HEAD c5fcbb5 plus the render harness).
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings` | pass |
+| `cargo test --locked --all-targets` | pass: 165 unit, 15 (1 ignored), 41 integration; 0 failed |
+| `library_gate.py` / `playlist_gate.py` / `smart_playlist_gate.py` / `filter_gate.py` / `artwork_gate.py` (server only) | all pass (library: 13 cases) |
+| Swift debug and release builds, `-warnings-as-errors` | pass |
+| `swift test` | pass: 181 tests in 31 suites |
+| `client_gate.py --model-only` | pass |
+| `client_gate.py --app` scenarios core, shell, songs, grouping, albums, artists, history, upnext, runs | not run (permissions): every scenario fails at "Native UI driver requires a PID/action and Accessibility permission for its launching terminal." |
+| `filter_gate.py`, `artwork_gate.py`, `playlist_gate.py`, `smart_playlist_gate.py`, `scale_gate.py` with `--app` | same Accessibility error (server-side steps passed first) |
+| `lifecycle_gate.py --app` | not run (permissions): native window capture missing (Screen Recording) |
+
+### Scale
+
+Native scale (first Songs window within 1 s of warm launch, native scroll, memory): **not run (permissions)**. `scale_gate.py --app` stopped at the Accessibility error. Server list-window and run-enqueue numbers are in the server section above.
+
+### Self-rendered views
+
+`--render-views <dir>` (DEBUG only, `NativeRenderViews.swift`, driven by `scripts/render_views.py`) renders each destination with `cacheDisplay`. No Screen Recording or Accessibility is needed. The images are self-rendered, not composited screenshots: the window looks inactive, and Settings is rendered off-screen without the tab bar. Fixture: the 1,129-track songs library, a regular playlist "Road Mix" (12 tracks), a queue of 11 entries with one playing.
+
+Screenshots in `spike-results/library-redesign-ui/`: 01-songs-ungrouped, 02-songs-grouped-by-album, 03-songs-with-up-next-drawer, 03b-songs-column-browser, 04-albums-grid, 05-albums-grid-expanded, 06-artists, 07-genres, 08-recently-added, 09-history, 10-up-next, 11-playlist-regular, 12/13/14-settings (connection, library, playback).
+
+Visible defects (none hand-walked; the native workflow in spec section 8 was not run):
+
+- Up Next (10) shows no HISTORY / NOW PLAYING / UP NEXT section labels (spec 4.7). The drawer has none either.
+- Artists and Genres have no view header (title, count, group) and no Compilations entry (the fixture has no compilation album, so that may be correct).
+- Songs at the default 1180 pt width clips the Format column and hides Plays behind the horizontal scroller.
+- The toolbar filter field does not appear in the render, and the format text has no RG value. Possibly a self-render limitation.
+- Grouped lists show two empty narrow columns left of "#".
+- Console: NSCollectionViewFlowLayout "item width must be less than the width of the collection view" once on first Albums layout.
+- The Unknown Album tile uses the photo placeholder; other albums use the note placeholder.
