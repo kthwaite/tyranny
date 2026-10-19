@@ -57,4 +57,9 @@ enum Destination: Hashable {
         case .songs, .albums, .upNext, .history, .playlist: .none
         }
     }
+
+    /// Sort used until the user picks a column (spec 4.6): Recently Added shows the newest first.
+    var defaultSort: [SortKey] {
+        self == .recent ? [SortKey(field: .dateAdded, descending: true)] : []
+    }
 }

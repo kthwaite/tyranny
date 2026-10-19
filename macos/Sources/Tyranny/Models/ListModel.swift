@@ -175,7 +175,8 @@ final class ListModel {
     private func currentDescription() -> ListDescription {
         ListDescription(source: source,
                         browser: usesBrowser && navigation.columnBrowserVisible ? browserSelection.browser : Browser(),
-                        query: query, sort: sort, group: navigation.grouping(for: destination))
+                        query: query, sort: sort.isEmpty ? destination.defaultSort : sort,
+                        group: navigation.grouping(for: destination))
     }
 
     private func apply(_ next: ListDescription) {
@@ -446,6 +447,14 @@ final class TrackLists {
     private var lists: [Destination: ListModel] = [:]
     private var albums: AlbumGridModel?
     private var browsers: [Destination: NamedBrowseModel] = [:]
+    private var historyModel: HistoryModel?
+
+    func history(player: PlayerModel) -> HistoryModel {
+        if let historyModel { return historyModel }
+        let model = HistoryModel(player: player)
+        historyModel = model
+        return model
+    }
 
     /// The Artists or Genres view's model, kept so a choice survives another destination.
     func browse(_ destination: Destination, player: PlayerModel, navigation: NavigationModel) -> NamedBrowseModel {

@@ -43,7 +43,10 @@ struct TrackListView: View {
         .onChange(of: list.filterError, initial: true) { _, error in navigation.filterError = error }
         .onDisappear { navigation.filterError = nil }
         #if DEBUG
-        .onAppear { if list.destination == .songs { NativeSongsSmoke.songsList = list } }
+        .onAppear {
+            if list.destination == .songs { NativeSongsSmoke.songsList = list }
+            if list.destination == .recent { NativeHistorySmoke.recent = list }
+        }
         #endif
     }
 
@@ -180,10 +183,18 @@ struct TrackListView: View {
 
     @ViewBuilder private var emptyState: some View {
         if list.cache.revision != nil, list.cache.total == 0 {
-            Text(list.isNarrowed ? "No matching songs" : "No songs")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .allowsHitTesting(false)
+            if list.destination == .recent, !list.isNarrowed {
+                Text("Nothing added in the last 30 days")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("recent-empty")
+            } else {
+                Text(list.isNarrowed ? "No matching songs" : "No songs")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
+            }
         }
     }
 }

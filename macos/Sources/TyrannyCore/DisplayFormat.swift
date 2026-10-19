@@ -169,3 +169,22 @@ extension RepeatMode {
         }
     }
 }
+
+extension DisplayFormat {
+    private static let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    /// A History row's Played At: "Today, 14:32", "Yesterday, 09:10", else "16 Oct 2026, 23:59".
+    /// Days and clock time follow `calendar`'s time zone; `played` is UTC seconds.
+    public static func playedAt(_ played: Int64, now: Date, calendar: Calendar) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(played))
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let time = String(format: "%02d:%02d", parts.hour ?? 0, parts.minute ?? 0)
+        if calendar.isDate(date, inSameDayAs: now) { return "Today, \(time)" }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(date, inSameDayAs: yesterday) {
+            return "Yesterday, \(time)"
+        }
+        let month = months[max(0, min(11, (parts.month ?? 1) - 1))]
+        return "\(parts.day ?? 1) \(month) \(parts.year ?? 1970), \(time)"
+    }
+}

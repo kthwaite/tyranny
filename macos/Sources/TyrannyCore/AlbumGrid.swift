@@ -221,3 +221,18 @@ public enum AlbumPanel {
         total > shown ? "and \(DisplayFormat.count(total - shown)) more…" : nil
     }
 }
+
+public enum HistoryPlayback {
+    /// Double-click on a History row: appends the one track to Up Next without playing it.
+    /// The server has no history source kind; `songs` repeats over the queue scope, which is
+    /// right for a single track.
+    public static func enqueue(trackID: UInt64, libraryRevision: UInt64) -> AlbumEnqueue {
+        AlbumEnqueue(selection: .ids(libraryRevision: libraryRevision, trackIDs: [trackID]), placement: .append,
+                     play: false, source: QueueSource(kind: .songs, name: "History"))
+    }
+
+    /// Nil when the played track has left the library (`track_id` is absent).
+    public static func enqueue(entry: HistoryEntry, libraryRevision: UInt64) -> AlbumEnqueue? {
+        entry.track_id.map { enqueue(trackID: $0, libraryRevision: libraryRevision) }
+    }
+}

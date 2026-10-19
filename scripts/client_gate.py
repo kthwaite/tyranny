@@ -27,12 +27,13 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
-    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums", "artists"], default="spike",
+    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums", "artists", "history"], default="spike",
                         help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
                              "albums: the album grid, its inline panel and album Play; "
-                             "artists: Artists with Compilations and Appears On, and Genres")
+                             "artists: Artists with Compilations and Appears On, and Genres; "
+                             "history: Recently Added, a played track in History and its Plays count")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -95,6 +96,10 @@ def main():
                 return
             if args.scenario == "artists":
                 artists(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "history":
+                history(report, run, app, port, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             for mode in ["initial", "relaunch"]:
@@ -344,6 +349,42 @@ def artists(report, run, app, port, ready, source, controller, screenshots):
     for image in sorted(output.glob("*.png")):
         shutil.copy2(image, screenshots / ("artists-" + image.name if not image.name.startswith("artists") else image.name))
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
+
+
+def history(report, run, app, port, ready, source, controller, screenshots):
+    """Drive Recently Added and History: the new library lists newest first, one short track
+    plays to its end on the clocked capture output, its History row appears, a double-click
+    appends it to Up Next, and Songs shows Plays 1."""
+    report["scenario"] = "history"
+    music = run / "Songs fixture"
+    songs_fixture(music, source)
+    controller.request("add_root", path=str(music))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 1129, seconds=180)
+    output = run / "history"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--history-smoke-output", str(output),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "history.stdout").open("w") as stdout, (run / "history.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=240)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["history"] = native
+    assert native["passed"], native.get("error")
+    # The server, not the app, holds the play and the appended entry.
+    played = controller.request("history", revision=None, offset=0, limit=10)
+    assert played["total"] == 1 and played["entries"][0]["title"] == "Ambient 0 Song 1", played
+    entry = native["observations"]["history_entry"]
+    assert played["entries"][0]["track_id"] == entry["track_id"], (played, entry)
+    page = controller.request("queue_page", revision=None, offset=0, limit=500)
+    appended = page["entries"][-1]
+    assert appended["track_id"] == entry["track_id"] and appended["source"] == {"kind": "songs", "name": "History"}, page
+    report["cases"].append({"name": "history-server-holds-play-and-appended-entry", "history_total": played["total"]})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("history*.png")):
+        shutil.copy2(image, screenshots / image.name)
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("history*.png"))]
 
 
 if __name__ == "__main__":
