@@ -85,6 +85,20 @@ private final class FakeList {
         resume(pending.remove(at: index))
     }
 
+    /// Fails the oldest pending request for `offset`.
+    func fail(offset: Int) {
+        guard let index = pending.firstIndex(where: { $0.request.offset == offset }) else {
+            Issue.record("no pending request at offset \(offset)")
+            return
+        }
+        pending.remove(at: index).continuation.resume(throwing: WindowFetchError.failed("test"))
+    }
+
+    func truncate(to count: Int) {
+        revision += 1
+        rows.removeLast(rows.count - count)
+    }
+
     /// Changes every row's content without moving rows, and bumps the revision.
     func touch() {
         revision += 1
@@ -255,9 +269,11 @@ struct ListWindowCacheTests {
 
     @Test func anchorPositionFollowsInsertionAboveIt() async {
         let clock = ManualClock()
-        let fake = FakeList(count: 1000, autoComplete: true)
+        let fake = FakeList(count: 1000)
         let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
         cache.visible(400..<450)
+        await until("visible requests") { fake.pendingCount == 3 }
+        fake.completeAll()
         await until("visible windows") { Set(cache.loadedWindowIndices) == [1, 2, 3] }
         guard let anchor = cache.row(at: 420)?.id else {
             Issue.record("anchor row missing")
@@ -266,27 +282,94 @@ struct ListWindowCacheTests {
 
         fake.insert(5, at: 10)
         cache.serverRevisionChanged(fake.revision, anchor: anchor)
-        await drain()
-        // Old rows stay on screen until the refetch lands: no placeholders, no jump.
-        #expect(cache.row(at: 420)?.id == anchor)
-        #expect(cache.anchorPosition == nil)
+        await until("refresh pass") { fake.pendingCount == 3 }
+        #expect(fake.log.suffix(3).allSatisfy { $0.revision == nil })
+        let generation = cache.generation
 
-        clock.advance(to: .milliseconds(500))
+        // Part of the pass has landed. Nothing shifts until the whole pass commits.
+        fake.complete(offset: 200)
+        fake.complete(offset: 400)
+        await drain()
+        #expect(cache.generation == generation)
+        #expect(cache.row(at: 420)?.id == anchor)
+        #expect(cache.row(at: 425)?.id == anchor + 5)
+        #expect(cache.anchorPosition == nil)
+        #expect(cache.revision == 1)
+
+        fake.complete(offset: 600)
         await until("anchor restored") { cache.anchorPosition != nil }
+        #expect(cache.generation == generation + 1, "the pass commits with one generation bump")
         #expect(cache.anchorPosition == 425)
         #expect(cache.position(of: anchor) == 425)
         #expect(cache.revision == 2)
         #expect(cache.row(at: 425)?.id == anchor)
+        #expect(cache.isSettled)
 
-        // When the anchor row is gone, the refetch reports nil.
+        // When the anchor row is gone, the refetch reports nil. This change falls inside the
+        // throttle's cooldown, so its pass runs on the trailing edge.
         fake.remove(id: anchor)
         cache.serverRevisionChanged(fake.revision, anchor: anchor)
         await drain()
-        clock.advance(to: .milliseconds(1000))
+        #expect(fake.pendingCount == 0)
+        clock.advance(to: .milliseconds(500))
+        await until("trailing pass") { fake.pendingCount == 3 }
+        fake.completeAll()
         await until("revision 3") { cache.revision == 3 }
-        await drain()
         #expect(cache.anchorPosition == nil)
         #expect(cache.position(of: anchor) == nil)
+    }
+
+    @Test func refreshPassWithAFailingWindowStillSettlesAndReportsTheAnchor() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(400..<450)
+        await until("visible requests") { fake.pendingCount == 3 }
+        fake.completeAll()
+        await until("visible windows") { Set(cache.loadedWindowIndices) == [1, 2, 3] }
+        let anchor: UInt64 = 421
+
+        fake.insert(5, at: 10)
+        cache.serverRevisionChanged(fake.revision, anchor: anchor)
+        await until("refresh pass") { fake.pendingCount == 3 }
+        fake.complete(offset: 200)
+        fake.complete(offset: 400)
+        fake.fail(offset: 600)
+        await until("anchor restored") { cache.anchorPosition != nil }
+        #expect(cache.anchorPosition == 425)
+        #expect(cache.revision == 2)
+        #expect(cache.isSettled)
+        // The failed window keeps its old rows.
+        #expect(cache.row(at: 600)?.id == 601)
+
+        // No retry loop for the failed window.
+        let logged = fake.log.count
+        await drain()
+        clock.advance(to: .milliseconds(500))
+        await drain()
+        #expect(fake.log.count == logged)
+
+        // Settled: new windows pin the adopted revision.
+        cache.visible(3000..<3050)
+        await until("pinned requests") { fake.pendingCount == 3 }
+        #expect(fake.log.suffix(3).allSatisfy { $0.revision == 2 })
+    }
+
+    @Test func singleChangeRefetchesWithoutWaitingForTheThrottle() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 1000, autoComplete: true)
+        fake.clock = clock
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("visible windows") { Set(cache.loadedWindowIndices) == [0, 1] }
+        let initial = fake.log.count
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("refetched rows") { cache.row(at: 10)?.label == "11@2" }
+        #expect(clock.now == .zero)
+        #expect(Set(fake.log.dropFirst(initial).map(\.offset)) == [0, 200])
+        #expect(fake.log.dropFirst(initial).allSatisfy { $0.at == .zero })
     }
 
     @Test func revision_storm_refetches_visible_window_at_most_twice_per_second() async {
@@ -314,7 +397,12 @@ struct ListWindowCacheTests {
         let refetches = fake.log.dropFirst(initial)
         for offset in [0, 200] {
             let times = refetches.filter { $0.offset == offset }.map(\.at)
-            #expect(times.count <= 2, "window at \(offset) refetched \(times.count) times")
+            #expect(!times.isEmpty)
+            #expect(times.first == .zero, "the first change refetches on the leading edge")
+            for start in times {
+                let inWindow = times.filter { $0 >= start && $0 < start + .seconds(1) }
+                #expect(inWindow.count <= 2, "window at \(offset): \(inWindow.count) refetches in 1 s from \(start)")
+            }
             #expect(zip(times, times.dropFirst()).allSatisfy { $1 - $0 >= .milliseconds(500) })
         }
         #expect(refetches.allSatisfy { $0.offset == 0 || $0.offset == 200 })
@@ -399,5 +487,41 @@ struct ListWindowCacheTests {
         await drain()
         #expect(!cache.loadedWindowIndices.contains(10))
         #expect(cache.row(at: 0)?.label == "1@1", "visible rows stay until the throttled refetch")
+    }
+
+    @Test func storedWindowIsNotEvictedBeforeItIsRead() async {
+        let fake = FakeList(count: 5000, autoComplete: true)
+        let cache = ListWindowCache(fetch: fake.fetch)
+        // visible() is never called. Ten windows are loaded by direct reads.
+        for index in 1...10 { _ = cache.row(at: index * 200) }
+        await until("ten windows") { cache.loadedWindowIndices.count == 10 }
+
+        for _ in 0..<5 {
+            _ = cache.row(at: 0)
+            await drain()
+        }
+        #expect(fake.requests(offset: 0).count == 1, "window 0 was evicted as it was stored and refetched")
+        #expect(cache.row(at: 0)?.id == 1)
+        #expect(cache.loadedWindowIndices.count == 10)
+    }
+
+    @Test func shrinkingTotalLoadsTheNewlyVisibleWindowsAndSettles() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 1000, autoComplete: true)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(800..<850)
+        await until("visible windows") { cache.row(at: 800) != nil && cache.isSettled }
+
+        fake.truncate(to: 150)
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("settled after shrink") { cache.total == 150 && cache.isSettled }
+        await drain()
+        let logged = fake.log.count
+        for _ in 0..<5 {
+            #expect(cache.row(at: 900) == nil)
+            await drain()
+        }
+        #expect(fake.log.count == logged, "rows past the end were requested")
+        #expect(cache.row(at: 100)?.id == 101)
     }
 }
