@@ -17,6 +17,12 @@ import TyrannyCore
 final class ListModel {
     let destination: Destination
     let source: ListSource
+    /// Names the list in identifiers and saved table layouts. A destination's own list uses
+    /// the destination's key; the lists inside Artists and Genres add a suffix.
+    let key: String
+    /// Whether the column browser narrows this list. Artist and genre details are narrowed
+    /// by their left list instead.
+    let usesBrowser: Bool
     /// The description the cache's rows belong to.
     private(set) var description: ListDescription
     /// Bumps when `description` changes; positions from an older epoch mean nothing.
@@ -85,9 +91,12 @@ final class ListModel {
         let refresh: UInt64
     }
 
-    init(destination: Destination, source: ListSource, player: PlayerModel, navigation: NavigationModel) {
+    init(destination: Destination, source: ListSource, player: PlayerModel, navigation: NavigationModel,
+         key: String? = nil, usesBrowser: Bool = true) {
         self.destination = destination
         self.source = source
+        self.key = key ?? destination.key
+        self.usesBrowser = usesBrowser
         self.player = player
         self.navigation = navigation
         description = ListDescription(source: source, group: navigation.grouping(for: destination))
@@ -147,7 +156,8 @@ final class ListModel {
             cache.serverRevisionChanged(library, anchor: anchorRowID)
         }
         browser.sync(player: player, session: session, revision: library, query: query,
-                     narrowing: browserSelection.albumColumnBrowser, visible: navigation.columnBrowserVisible)
+                     narrowing: browserSelection.albumColumnBrowser,
+                     visible: usesBrowser && navigation.columnBrowserVisible)
     }
 
     func setSort(_ keys: [SortKey]) {
@@ -164,7 +174,7 @@ final class ListModel {
 
     private func currentDescription() -> ListDescription {
         ListDescription(source: source,
-                        browser: navigation.columnBrowserVisible ? browserSelection.browser : Browser(),
+                        browser: usesBrowser && navigation.columnBrowserVisible ? browserSelection.browser : Browser(),
                         query: query, sort: sort, group: navigation.grouping(for: destination))
     }
 
@@ -435,6 +445,16 @@ final class ListModel {
 final class TrackLists {
     private var lists: [Destination: ListModel] = [:]
     private var albums: AlbumGridModel?
+    private var browsers: [Destination: NamedBrowseModel] = [:]
+
+    /// The Artists or Genres view's model, kept so a choice survives another destination.
+    func browse(_ destination: Destination, player: PlayerModel, navigation: NavigationModel) -> NamedBrowseModel {
+        if let model = browsers[destination] { return model }
+        let model = NamedBrowseModel(kind: destination == .artists ? .artists : .genres, player: player,
+                                     navigation: navigation)
+        browsers[destination] = model
+        return model
+    }
 
     func albumGrid(player: PlayerModel, navigation: NavigationModel) -> AlbumGridModel {
         if let albums { return albums }

@@ -24,7 +24,7 @@ struct VirtualTrackTable: NSViewRepresentable {
     let hidden: Set<String>
     let playingTrackID: UInt64?
 
-    var identifier: String { "track-table-\(list.destination.key)" }
+    var identifier: String { "track-table-\(list.key)" }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 

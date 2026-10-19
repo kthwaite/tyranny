@@ -27,11 +27,12 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true", help="Exercise native transport/model without claiming visual verification")
-    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums"], default="spike",
+    parser.add_argument("--scenario", choices=["spike", "shell", "songs", "grouping", "albums", "artists"], default="spike",
                         help="spike: the original three-pane smoke and relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
-                             "albums: the album grid, its inline panel and album Play")
+                             "albums: the album grid, its inline panel and album Play; "
+                             "artists: Artists with Compilations and Appears On, and Genres")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -90,6 +91,10 @@ def main():
                 return
             if args.scenario == "albums":
                 albums(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "artists":
+                artists(report, run, app, port, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             for mode in ["initial", "relaunch"]:
@@ -283,6 +288,62 @@ def albums(report, run, app, port, ready, source, controller, screenshots):
     for image in sorted(output.glob("albums*.png")):
         shutil.copy2(image, screenshots / image.name)
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("albums*.png"))]
+
+
+def compilation_track(path, title, artist, album, track):
+    """A compilation track: album artist "Various Artists", the compilation flag set."""
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1", "-c:a", "flac",
+                    "-metadata", f"title={title}", "-metadata", f"artist={artist}",
+                    "-metadata", "album_artist=Various Artists", "-metadata", f"album={album}",
+                    "-metadata", "genre=Folk", "-metadata", "date=2001", "-metadata", "compilation=1",
+                    "-metadata", f"track={track}", str(path)], check=True, timeout=30)
+
+
+def artists(report, run, app, port, ready, source, controller, screenshots):
+    """Drive Artists and Genres: the Compilations row lists the compilation album, a track
+    artist on it shows the tracks under Appears On, and a genre narrows to its albums.
+    The fixture is the songs library plus one four-track compilation album."""
+    report["scenario"] = "artists"
+    music = run / "Songs fixture"
+    songs_fixture(music, source)
+    compilation = music / "Compilation"
+    compilation.mkdir()
+    # Two tracks by a Folk album artist (Appears On) and two by an artist with no albums of their own.
+    for track, artist in enumerate(["Folk Artist 1", "Comp Only Artist", "Folk Artist 1", "Comp Only Artist"], start=1):
+        compilation_track(compilation / f"Compilation {track:02}.flac", f"Compilation Song {track}", artist,
+                          "Smoke Compilation", track)
+    controller.request("add_root", path=str(music))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 1133, seconds=180)
+    output = run / "artists"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--artists-smoke-output", str(output),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "artists.stdout").open("w") as stdout, (run / "artists.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=240)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["artists"] = native
+    assert native["passed"], native.get("error")
+    # The server, not the app, holds the expected lists.
+    artists_reply = controller.request("list_artists", query="", list=None, revision=None, offset=0, limit=500)
+    comp = artists_reply["compilations"]
+    assert comp["album_count"] == 1 and comp["track_count"] == 4, comp
+    assert "Various Artists" not in [entry["name"] for entry in artists_reply["entries"]], artists_reply
+    folk = next(entry for entry in artists_reply["entries"] if entry["name"] == "Folk Artist 1")
+    appears = controller.request(
+        "list_tracks", list=dict(source=dict(kind="appears_on", artist_id=folk["id"]),
+                                 browser=dict(genre_ids=[], artist_ids=[], compilations=False, album_ids=[]),
+                                 query="", sort=[], group="none"),
+        revision=None, offset=0, limit=500)
+    assert appears["total"] == 2, appears
+    report["cases"].append({"name": "artists-server-compilations-and-album-artists", "compilations": comp})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("*.png")):
+        shutil.copy2(image, screenshots / ("artists-" + image.name if not image.name.startswith("artists") else image.name))
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
 
 
 if __name__ == "__main__":

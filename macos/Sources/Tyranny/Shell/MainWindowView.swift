@@ -20,6 +20,8 @@ struct MainWindowView: View {
         switch navigation.destination {
         case .songs:
             lists.list(for: .songs, source: .library, player: model, navigation: navigation)
+        case .artists, .genres:
+            lists.browse(navigation.destination, player: model, navigation: navigation).detail
         default:
             nil
         }
@@ -158,6 +160,12 @@ struct MainWindowView: View {
         } else if navigation.destination == .albums {
             AlbumGridView(grid: lists.albumGrid(player: model, navigation: navigation), player: model,
                           navigation: navigation)
+        } else if navigation.destination == .artists {
+            ArtistsView(model: lists.browse(.artists, player: model, navigation: navigation), player: model,
+                        navigation: navigation)
+        } else if navigation.destination == .genres {
+            GenresView(model: lists.browse(.genres, player: model, navigation: navigation), player: model,
+                       navigation: navigation)
         } else if let list = currentList {
             TrackListView(list: list, player: model, navigation: navigation)
         } else {

@@ -17,7 +17,7 @@ final class BrowserColumnModel<Row: Sendable & Identifiable> where Row.ID == UIn
         cache = ListWindowCache { _, _, _ in throw WindowFetchError.failed("not started") }
     }
 
-    fileprivate func reset(_ fetch: @escaping (_ epoch: UInt64) -> ListWindowCache<Row>.Fetch) {
+    func reset(_ fetch: @escaping (_ epoch: UInt64) -> ListWindowCache<Row>.Fetch) {
         epoch &+= 1
         compilations = nil
         cache.reset(fetch: fetch(epoch))
@@ -86,31 +86,8 @@ final class ColumnBrowserModel {
     /// `narrowing` restricts the Artist column to a list; no genre selected sends `null`.
     private func namedFetch(_ command: String, column: BrowserColumnModel<NamedCount>, query: String,
                             narrowing: Browser?, epoch: UInt64) -> ListWindowCache<NamedCount>.Fetch {
-        { @MainActor [weak self, weak column] offset, limit, revision in
-            guard let player = self?.player else { throw WindowFetchError.failed("The browser closed.") }
-            var fields: [String: JSONValue] = [
-                "query": .string(query), "revision": revision.map(JSONValue.uint) ?? .null,
-                "offset": .int(offset), "limit": .int(limit)]
-            do {
-                if command == "list_artists" {
-                    if let narrowing, !narrowing.genre_ids.isEmpty {
-                        fields["list"] = try JSONValue.encoding(ListDescription(source: .library, browser: narrowing))
-                    } else {
-                        fields["list"] = .null
-                    }
-                    let reply: ListArtistsResponse = try await player.send(command, fields)
-                    if let column, column.epoch == epoch, offset == 0 { column.compilations = reply.compilations }
-                    return WindowPage(revision: reply.revision, total: Int(reply.total), offset: reply.offset,
-                                      rows: reply.entries)
-                }
-                let reply: ListGenresResponse = try await player.send(command, fields)
-                return WindowPage(revision: reply.revision, total: Int(reply.total), offset: reply.offset,
-                                  rows: reply.entries)
-            } catch let failure as ServerFailure {
-                throw failure.code == "stale_library_revision"
-                    ? WindowFetchError.stale : WindowFetchError.failed(failure.message)
-            }
-        }
+        namedCountFetch(player: { [weak self] in self?.player }, command: command, column: column,
+                        query: query, narrowing: narrowing, epoch: epoch)
     }
 
     private func albumFetch(query: String, narrowing: Browser) -> ListWindowCache<AlbumSummary>.Fetch {
@@ -128,6 +105,39 @@ final class ColumnBrowserModel {
                 throw failure.code == "stale_library_revision"
                     ? WindowFetchError.stale : WindowFetchError.failed(failure.message)
             }
+        }
+    }
+}
+
+/// A fetch over `list_artists` or `list_genres`. For `list_artists`, `narrowing` restricts the
+/// list to a genre selection; none sends `null`. The Compilations row comes from offset 0.
+@MainActor
+func namedCountFetch(player: @escaping @MainActor () -> PlayerModel?, command: String,
+                     column: BrowserColumnModel<NamedCount>, query: String, narrowing: Browser?,
+                     epoch: UInt64) -> ListWindowCache<NamedCount>.Fetch {
+    { @MainActor [weak column] offset, limit, revision in
+        guard let player = player() else { throw WindowFetchError.failed("The browser closed.") }
+        var fields: [String: JSONValue] = [
+            "query": .string(query), "revision": revision.map(JSONValue.uint) ?? .null,
+            "offset": .int(offset), "limit": .int(limit)]
+        do {
+            if command == "list_artists" {
+                if let narrowing, !narrowing.genre_ids.isEmpty {
+                    fields["list"] = try JSONValue.encoding(ListDescription(source: .library, browser: narrowing))
+                } else {
+                    fields["list"] = .null
+                }
+                let reply: ListArtistsResponse = try await player.send(command, fields)
+                if let column, column.epoch == epoch, offset == 0 { column.compilations = reply.compilations }
+                return WindowPage(revision: reply.revision, total: Int(reply.total), offset: reply.offset,
+                                  rows: reply.entries)
+            }
+            let reply: ListGenresResponse = try await player.send(command, fields)
+            return WindowPage(revision: reply.revision, total: Int(reply.total), offset: reply.offset,
+                              rows: reply.entries)
+        } catch let failure as ServerFailure {
+            throw failure.code == "stale_library_revision"
+                ? WindowFetchError.stale : WindowFetchError.failed(failure.message)
         }
     }
 }
@@ -176,7 +186,7 @@ struct ColumnBrowser: View {
 
 /// A virtualized single-column list. Row 0 is "All (n …)"; the Artist column's
 /// Compilations row follows it when the library has compilations.
-private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresentable where Row.ID == UInt64 {
+struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresentable where Row.ID == UInt64 {
     let column: BrowserColumnModel<Row>
     let identifier: String
     let title: String
@@ -189,6 +199,9 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
     let label: (Row) -> String
     let help: (Row) -> String
     let select: (Set<UInt64>) -> Void
+    /// Row 0 is "All"; choosing it clears the selection.
+    var showsAll = true
+    var allowsMultiple = true
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -202,7 +215,7 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
         table.style = .fullWidth
         table.rowHeight = 20
         table.intercellSpacing = NSSize(width: 0, height: 0)
-        table.allowsMultipleSelection = true
+        table.allowsMultipleSelection = allowsMultiple
         table.allowsEmptySelection = true
         table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
@@ -241,7 +254,9 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
 
         init(_ parent: BrowserColumnTable) { self.parent = parent }
 
-        private var leading: Int { parent.compilations == nil ? 1 : 2 }
+        /// Rows before the list's own: "All" and the Compilations row.
+        private var leading: Int { (parent.showsAll ? 1 : 0) + (parent.compilations == nil ? 0 : 1) }
+        private var compilationsRow: Int { parent.showsAll ? 1 : 0 }
         private var count: Int { leading + parent.total }
 
         func update(_ parent: BrowserColumnTable) {
@@ -270,9 +285,11 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
         }
 
         private func selectedIndexes() -> IndexSet {
-            guard !parent.selected.isEmpty else { return IndexSet(integer: 0) }
+            guard !parent.selected.isEmpty else { return parent.showsAll ? IndexSet(integer: 0) : IndexSet() }
             var indexes = IndexSet()
-            if parent.compilations != nil, parent.selected.contains(BrowserSelection.compilationsID) { indexes.insert(1) }
+            if parent.compilations != nil, parent.selected.contains(BrowserSelection.compilationsID) {
+                indexes.insert(compilationsRow)
+            }
             for row in parent.column.cache.loadedRows() where parent.selected.contains(row.row.id) {
                 indexes.insert(leading + row.position)
             }
@@ -280,7 +297,8 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
         }
 
         private func id(at row: Int) -> UInt64? {
-            if row == 1, parent.compilations != nil { return BrowserSelection.compilationsID }
+            if row == compilationsRow, parent.compilations != nil { return BrowserSelection.compilationsID }
+            guard row >= leading else { return nil }
             return parent.column.cache.loadedRow(at: row - leading)?.id
         }
 
@@ -302,10 +320,10 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
             let text: String
             var help = ""
             var cellID = "\(parent.identifier)-placeholder-\(row)"
-            if row == 0 {
+            if row == 0, parent.showsAll {
                 text = DisplayFormat.browserAll(UInt64(parent.total), singular: parent.singular, plural: parent.plural)
                 cellID = "\(parent.identifier)-all"
-            } else if row == 1, let compilations = parent.compilations {
+            } else if row == compilationsRow, let compilations = parent.compilations {
                 text = "Compilations"
                 help = "\(DisplayFormat.count(compilations.album_count)) albums · \(DisplayFormat.songs(compilations.track_count))"
                 cellID = "\(parent.identifier)-compilations"
@@ -326,6 +344,12 @@ private struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresent
             guard !updating, let table else { return }
             let indexes = table.selectedRowIndexes
             let ids: Set<UInt64>
+            if !parent.showsAll {
+                ids = Set(indexes.compactMap(id(at:)))
+                shownSelection = ids
+                parent.select(ids)
+                return
+            }
             if indexes.contains(0) {
                 // Adding a row to "All" starts a selection of that row; choosing "All" clears.
                 ids = indexes.count > 1 && parent.selected.isEmpty

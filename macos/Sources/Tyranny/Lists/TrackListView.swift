@@ -8,13 +8,24 @@ struct TrackListView: View {
     let list: ListModel
     let player: PlayerModel
     @Bindable var navigation: NavigationModel
+    var chrome: Chrome = .page(title: nil)
     private let columns = ColumnPreferences.shared
+
+    /// A page fills the main area. A section sits under another list with a small heading
+    /// (Appears On) and the identifier the section is known by.
+    enum Chrome {
+        case page(title: String?)
+        case section(title: String, identifier: String)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            switch chrome {
+            case .page: header
+            case .section(let title, _): sectionHeader(title)
+            }
             Divider()
-            if navigation.columnBrowserVisible {
+            if navigation.columnBrowserVisible, list.usesBrowser, case .page = chrome {
                 ColumnBrowser(list: list)
                 Divider()
             }
@@ -26,7 +37,7 @@ struct TrackListView: View {
                 .overlay(alignment: .bottom) { reorderHint }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("main-\(list.destination.key)")
+        .accessibilityIdentifier(containerIdentifier)
         .onChange(of: syncKey, initial: true) { _, _ in list.sync() }
         .onChange(of: layoutKey, initial: true) { _, _ in list.syncLayout() }
         .onChange(of: list.filterError, initial: true) { _, error in navigation.filterError = error }
@@ -36,10 +47,15 @@ struct TrackListView: View {
         #endif
     }
 
+    private var containerIdentifier: String {
+        if case .section(_, let identifier) = chrome { return identifier }
+        return "main-\(list.key)"
+    }
+
     private var syncKey: SyncKey {
         SyncKey(connected: player.connected, session: player.playlistConnectionGeneration,
                 library: player.snapshot?.library.revision, history: player.snapshot?.history_revision,
-                filter: navigation.filter, browser: navigation.columnBrowserVisible,
+                filter: navigation.filter, browser: list.usesBrowser && navigation.columnBrowserVisible,
                 grouping: navigation.grouping(for: list.destination))
     }
 
@@ -70,8 +86,10 @@ struct TrackListView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text(list.destination.title)
+            Text(pageTitle)
                 .font(.title2.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
                 .accessibilityAddTraits(.isHeader)
             Text(countText)
                 .foregroundStyle(.secondary)
@@ -91,12 +109,14 @@ struct TrackListView: View {
             .fixedSize()
             .help("Group")
             .accessibilityIdentifier("group-control")
-            Toggle(isOn: $navigation.columnBrowserVisible) {
-                Label("Browser", systemImage: "rectangle.split.3x1")
+            if list.usesBrowser {
+                Toggle(isOn: $navigation.columnBrowserVisible) {
+                    Label("Browser", systemImage: "rectangle.split.3x1")
+                }
+                .toggleStyle(.button)
+                .help(navigation.columnBrowserVisible ? "Hide Column Browser (⌘B)" : "Show Column Browser (⌘B)")
+                .accessibilityIdentifier("browser-toggle")
             }
-            .toggleStyle(.button)
-            .help(navigation.columnBrowserVisible ? "Hide Column Browser (⌘B)" : "Show Column Browser (⌘B)")
-            .accessibilityIdentifier("browser-toggle")
             Menu {
                 ForEach(TrackColumns.all.filter(\.hideable)) { column in
                     Toggle(column.title, isOn: Binding(
@@ -114,6 +134,27 @@ struct TrackListView: View {
         .controlSize(.small)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    private var pageTitle: String {
+        if case .page(let title?) = chrome { return title }
+        return list.destination.title
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+            Text(countText)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .accessibilityIdentifier("\(containerIdentifier)-count")
+            Spacer(minLength: 0)
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
     }
 
     private var countText: String {
