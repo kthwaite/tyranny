@@ -127,6 +127,8 @@ struct VirtualTrackTable: NSViewRepresentable {
         /// Album covers retained for the albums in view.
         private var artwork: [UInt64: ArtworkRequest] = [:]
         private var artworkObserved = false
+        /// Set when the view is dismantled: no more artwork demand.
+        private var dismantled = false
         /// A drag in progress. Its pasteboard item is written for the first rows only.
         private var dragToken: String?
         private var dragItems = 0
@@ -175,6 +177,8 @@ struct VirtualTrackTable: NSViewRepresentable {
                 table.scrollRowToVisible(0)
             }
             let layoutChanged = parent.layoutToken != shownLayout
+            /// A full `reloadData` already refreshed every row view.
+            var reloadedAll = false
             if layoutChanged {
                 let wasGrouped = layout.grouping != .none
                 layout = parent.list.layout
@@ -183,14 +187,16 @@ struct VirtualTrackTable: NSViewRepresentable {
                 if wasGrouped || layout.grouping != .none {
                     // Row kinds and heights may all have changed.
                     table.reloadData()
+                    reloadedAll = true
                 } else {
+                    // Ungrouped, a refresh pass changes the total and the rows together.
                     table.noteNumberOfRowsChanged()
                 }
             }
             if parent.generation != shownGeneration || epochChanged || layoutChanged {
                 shownGeneration = parent.generation
                 restoreAnchor()
-                if !layoutChanged { reloadVisible() }
+                if !reloadedAll { reloadVisible() }
                 let rows = layout.displayIndexes(ofPositions: parent.list.rowsChanged())
                 if table.selectedRowIndexes != rows { table.selectRowIndexes(rows, byExtendingSelection: false) }
             } else if parent.playingTrackID != shownPlaying, let status = columnIndex(TrackColumns.status) {
@@ -198,7 +204,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             }
             if parent.factsGeneration != shownFacts {
                 shownFacts = parent.factsGeneration
-                if !layoutChanged { reloadGutter() }
+                if !reloadedAll { reloadGutter() }
             }
             shownPlaying = parent.playingTrackID
             reportVisible()
@@ -254,7 +260,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         @objc func scrolled(_ notification: Notification) { reportVisible() }
 
         private func reportVisible() {
-            guard let table else { return }
+            guard !dismantled, let table else { return }
             let rows = table.rows(in: table.visibleRect)
             guard rows.length > 0 else { return }
             let range = rows.location..<rows.location + rows.length
@@ -268,6 +274,7 @@ struct VirtualTrackTable: NSViewRepresentable {
 
         /// Retains the covers of the albums in `range` and releases the rest.
         private func updateArtwork(_ range: Range<Int>) {
+            guard !dismantled else { return }
             var albums = Set<UInt64>()
             if layout.grouping == .album || layout.grouping == .artistAlbum {
                 for index in range { if let album = layout.albumKey(atDisplayIndex: index) { albums.insert(album) } }
@@ -290,7 +297,7 @@ struct VirtualTrackTable: NSViewRepresentable {
                 for album in albums { _ = store.value(for: store.albumRequest(album)) }
             } onChange: { [weak self] in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, !self.dismantled else { return }
                     self.artworkObserved = false
                     if let range = self.reported { self.updateArtwork(range) }
                     self.reloadGutter()
@@ -299,6 +306,8 @@ struct VirtualTrackTable: NSViewRepresentable {
         }
 
         func releaseArtwork() {
+            dismantled = true
+            reported = nil
             for request in artwork.values { store.release(request) }
             artwork.removeAll()
         }
@@ -406,19 +415,17 @@ struct VirtualTrackTable: NSViewRepresentable {
 
         // MARK: Delegate
 
-        /// Only track rows are selected. ⌘A and shift-ranges drop headers, fillers and gaps.
-        /// An arrow key onto one moves on to the next track that way; a click on one clears.
+        /// Only track rows are selected (`GroupLayout.selection`). ⌘A, shift-ranges and clicks drop
+        /// headers, fillers and gaps; an arrow or shift-arrow onto one goes on to the next track.
         func tableView(_ tableView: NSTableView, selectionIndexesForProposedSelection proposed: IndexSet) -> IndexSet {
             guard layout.grouping != .none else { return proposed }
-            let tracks = layout.displayIndexes(ofPositions: layout.positions(ofDisplayIndexes: proposed))
-            guard tracks.isEmpty, proposed.count == 1, let target = proposed.first,
-                  NSApp.currentEvent?.type == .keyDown else { return tracks }
-            let forward = target > (tableView.selectedRowIndexes.last ?? -1)
-            guard let next = layout.nearestTrack(from: target, forward: forward) else {
-                return tableView.selectedRowIndexes
+            let current = tableView.selectedRowIndexes
+            let result = layout.selection(proposed: proposed, current: current,
+                                          keyboard: NSApp.currentEvent?.type == .keyDown)
+            if let added = result.subtracting(current).last ?? result.subtracting(current).first {
+                tableView.scrollRowToVisible(added)
             }
-            tableView.scrollRowToVisible(next)
-            return IndexSet(integer: next)
+            return result
         }
 
         func tableViewSelectionDidChange(_ notification: Notification) {

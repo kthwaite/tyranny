@@ -7,24 +7,32 @@ private func span(_ artist: UInt64, _ album: UInt64?, _ start: UInt64, _ count: 
 }
 
 /// artist 1: album 10 (2 tracks), album 11 (8 tracks); artist 0: album 12 (1 track).
-/// Display: 0 header | 1–2 tracks 0–1 | 3–7 fillers | 8 gap | 9–16 tracks 2–9 | 17 gap
-/// | 18 header | 19 track 10 | 20–25 fillers | 26 gap.
+/// Display: 0 header | 1–2 tracks 0–1 | 3–8 fillers | 9 gap | 10–17 tracks 2–9 | 18 gap
+/// | 19 header | 20 track 10 | 21–27 fillers | 28 gap.
 private let mixed = GroupLayout(grouping: .artistAlbum, total: 11,
                                 spans: [span(1, 10, 0, 2), span(1, 11, 2, 8), span(0, 12, 10, 1)])
 
 @Suite struct GroupLayoutSetTests {
+    @Test func albumBlocksLeaveTheGapRowBelowTheGutterContent() {
+        // Cover 104 pt plus four facts lines need eight 20 pt rows; the gap is never drawn on.
+        #expect(GroupLayout.minimumBlockRows == 8)
+        #expect(mixed.count == 29)
+        #expect(mixed.row(at: 9) == .blockGap)
+        #expect(mixed.blockIndex(atDisplayIndex: 9) == 8)
+    }
+
     @Test func positionsOfDisplayIndexesSkipHeadersFillersAndGaps() {
         #expect(mixed.positions(ofDisplayIndexes: IndexSet(0..<mixed.count)) == IndexSet(0..<11))
-        #expect(mixed.positions(ofDisplayIndexes: IndexSet([0, 3, 8, 17, 18, 20, 26])) == IndexSet())
-        #expect(mixed.positions(ofDisplayIndexes: IndexSet([2, 9, 19])) == IndexSet([1, 2, 10]))
-        #expect(mixed.positions(ofDisplayIndexes: IndexSet(5..<12)) == IndexSet(2..<5))
+        #expect(mixed.positions(ofDisplayIndexes: IndexSet([0, 3, 9, 18, 19, 21, 28])) == IndexSet())
+        #expect(mixed.positions(ofDisplayIndexes: IndexSet([2, 10, 20])) == IndexSet([1, 2, 10]))
+        #expect(mixed.positions(ofDisplayIndexes: IndexSet(5..<13)) == IndexSet(2..<5))
         #expect(mixed.positions(ofDisplayIndexes: IndexSet([-1, 400])) == IndexSet())
     }
 
     @Test func displayIndexesOfPositionsRoundTrip() {
-        #expect(mixed.displayIndexes(ofPositions: IndexSet([0, 1, 2, 10])) == IndexSet([1, 2, 9, 19]))
+        #expect(mixed.displayIndexes(ofPositions: IndexSet([0, 1, 2, 10])) == IndexSet([1, 2, 10, 20]))
         #expect(mixed.displayIndexes(ofPositions: IndexSet(0..<11))
-            == IndexSet(integersIn: 1...2).union(IndexSet(integersIn: 9...16)).union(IndexSet([19])))
+            == IndexSet(integersIn: 1...2).union(IndexSet(integersIn: 10...17)).union(IndexSet([20])))
         #expect(mixed.displayIndexes(ofPositions: IndexSet([11, 50])) == IndexSet())
         let none = GroupLayout(grouping: .none, total: 50_000, spans: [])
         #expect(none.displayIndexes(ofPositions: IndexSet(0..<50_000)) == IndexSet(0..<50_000))
@@ -33,11 +41,11 @@ private let mixed = GroupLayout(grouping: .artistAlbum, total: 11,
 
     @Test func positionRangeCoversTracksAndHeaderFirstRows() {
         #expect(mixed.positionRange(forDisplay: 0..<1) == 0..<1)
-        #expect(mixed.positionRange(forDisplay: 3..<8) == nil)
-        #expect(mixed.positionRange(forDisplay: 5..<12) == 2..<5)
-        #expect(mixed.positionRange(forDisplay: 17..<19) == 10..<11)
+        #expect(mixed.positionRange(forDisplay: 3..<9) == nil)
+        #expect(mixed.positionRange(forDisplay: 5..<13) == 2..<5)
+        #expect(mixed.positionRange(forDisplay: 18..<20) == 10..<11)
         #expect(mixed.positionRange(forDisplay: 0..<mixed.count) == 0..<11)
-        #expect(mixed.positionRange(forDisplay: 20..<26) == nil)
+        #expect(mixed.positionRange(forDisplay: 21..<28) == nil)
         #expect(mixed.positionRange(forDisplay: 30..<40) == nil)
     }
 
@@ -45,22 +53,60 @@ private let mixed = GroupLayout(grouping: .artistAlbum, total: 11,
         #expect(mixed.blockIndex(atDisplayIndex: 0) == nil)
         #expect(mixed.blockIndex(atDisplayIndex: 1) == 0)
         #expect(mixed.blockIndex(atDisplayIndex: 7) == 6)
-        #expect(mixed.blockIndex(atDisplayIndex: 8) == 7)
-        #expect(mixed.blockIndex(atDisplayIndex: 17) == 8)
-        #expect(mixed.blockIndex(atDisplayIndex: 26) == 7)
-        #expect(mixed.blockIndex(atDisplayIndex: 27) == nil)
+        #expect(mixed.blockIndex(atDisplayIndex: 18) == 8)
+        #expect(mixed.blockIndex(atDisplayIndex: 28) == 8)
+        #expect(mixed.blockIndex(atDisplayIndex: 29) == nil)
         let artist = GroupLayout(grouping: .artist, total: 2, spans: [span(1, nil, 0, 2)])
         #expect(artist.blockIndex(atDisplayIndex: 1) == nil)
     }
 
     @Test func nearestTrackSkipsRowsWithoutTracks() {
-        #expect(mixed.nearestTrack(from: 3, forward: true) == 9)
+        #expect(mixed.nearestTrack(from: 3, forward: true) == 10)
         #expect(mixed.nearestTrack(from: 3, forward: false) == 2)
         #expect(mixed.nearestTrack(from: 0, forward: true) == 1)
         #expect(mixed.nearestTrack(from: 0, forward: false) == nil)
-        #expect(mixed.nearestTrack(from: 18, forward: false) == 16)
-        #expect(mixed.nearestTrack(from: 20, forward: true) == nil)
-        #expect(mixed.nearestTrack(from: 9, forward: true) == 9)
+        #expect(mixed.nearestTrack(from: 19, forward: false) == 17)
+        #expect(mixed.nearestTrack(from: 21, forward: true) == nil)
+        #expect(mixed.nearestTrack(from: 10, forward: true) == 10)
+    }
+
+    @Test func clicksOnRowsWithoutTracksSelectNothing() {
+        #expect(mixed.selection(proposed: IndexSet([3]), current: IndexSet([1]), keyboard: false) == IndexSet())
+        #expect(mixed.selection(proposed: IndexSet(0..<29), current: IndexSet(), keyboard: false)
+            == mixed.displayIndexes(ofPositions: IndexSet(0..<11)))
+        #expect(mixed.selection(proposed: IndexSet(1...12), current: IndexSet([1]), keyboard: false)
+            == IndexSet([1, 2, 10, 11, 12]))
+    }
+
+    @Test func arrowKeysMoveOnToTheNextTrack() {
+        #expect(mixed.selection(proposed: IndexSet([3]), current: IndexSet([2]), keyboard: true) == IndexSet([10]))
+        #expect(mixed.selection(proposed: IndexSet([9]), current: IndexSet([10]), keyboard: true) == IndexSet([2]))
+        #expect(mixed.selection(proposed: IndexSet([18]), current: IndexSet([17]), keyboard: true) == IndexSet([20]))
+        #expect(mixed.selection(proposed: IndexSet([0]), current: IndexSet([1]), keyboard: true) == IndexSet([1]))
+        #expect(mixed.selection(proposed: IndexSet([21]), current: IndexSet([20]), keyboard: true) == IndexSet([20]))
+    }
+
+    @Test func shiftArrowExtendsAcrossFillersGapsAndHeaders() {
+        // Down from the end of a block: past fillers and the gap into the next block.
+        #expect(mixed.selection(proposed: IndexSet([1, 2, 3]), current: IndexSet([1, 2]), keyboard: true)
+            == IndexSet([1, 2, 10]))
+        // Down past a gap and an artist header.
+        #expect(mixed.selection(proposed: IndexSet([16, 17, 18]), current: IndexSet([16, 17]), keyboard: true)
+            == IndexSet([16, 17, 20]))
+        // Up past the gap and fillers of the previous block.
+        #expect(mixed.selection(proposed: IndexSet([9, 10, 11]), current: IndexSet([10, 11]), keyboard: true)
+            == IndexSet([2, 10, 11]))
+        // Nothing further that way: the selection stays.
+        #expect(mixed.selection(proposed: IndexSet([20, 21]), current: IndexSet([20]), keyboard: true)
+            == IndexSet([20]))
+        // Shrinking drops rows as proposed.
+        #expect(mixed.selection(proposed: IndexSet([1, 2]), current: IndexSet([1, 2, 10]), keyboard: true)
+            == IndexSet([1, 2]))
+        // Select All by keyboard keeps the tracks only.
+        #expect(mixed.selection(proposed: IndexSet(0..<29), current: IndexSet(), keyboard: true)
+            == mixed.displayIndexes(ofPositions: IndexSet(0..<11)))
+        let none = GroupLayout(grouping: .none, total: 5, spans: [])
+        #expect(none.selection(proposed: IndexSet([1, 2]), current: IndexSet([1]), keyboard: true) == IndexSet([1, 2]))
     }
 }
 

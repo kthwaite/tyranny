@@ -14,8 +14,9 @@ public enum DisplayRow: Equatable, Sendable {
 /// Maps list positions to display rows and back, from server group spans.
 /// Memory is O(groups). Lookups are O(log n) binary searches over prefix sums.
 public struct GroupLayout: Sendable {
-    /// 104 pt cover + facts at 20 pt rows.
-    public static let minimumBlockRows = 7
+    /// The gutter's 104 pt cover and its four facts lines end within eight 20 pt rows, so the
+    /// gap row after a block stays clear.
+    public static let minimumBlockRows = 8
 
     private enum Kind: Sendable {
         case header(artistKey: UInt64, span: Range<Int>)
@@ -238,6 +239,26 @@ public struct GroupLayout: Sendable {
         guard lo > 0 else { return nil }
         let previous = blocks[trackBlocks[lo - 1]]
         return previous.displayStart + previous.trackCount - 1
+    }
+
+    /// The rows to select for a proposed selection: track rows only. A keyboard proposal that
+    /// adds only rows without tracks (an arrow or shift-arrow onto a header, filler or gap)
+    /// goes on to the nearest track that way: an arrow moves there, a shift-arrow extends to it.
+    /// With no track that way the selection stays. Clicks keep the track rows only.
+    public func selection(proposed: IndexSet, current: IndexSet, keyboard: Bool) -> IndexSet {
+        let tracks = displayIndexes(ofPositions: positions(ofDisplayIndexes: proposed))
+        guard grouping != .none, keyboard else { return tracks }
+        let added = proposed.subtracting(current)
+        guard let first = added.first, let last = added.last,
+              positions(ofDisplayIndexes: added).isEmpty else { return tracks }
+        let forward = first > (current.last ?? -1)
+        guard let target = nearestTrack(from: forward ? last : first, forward: forward) else {
+            return proposed.count == 1 ? displayIndexes(ofPositions: positions(ofDisplayIndexes: current)) : tracks
+        }
+        if proposed.count == 1 { return IndexSet(integer: target) }
+        var extended = tracks
+        extended.insert(target)
+        return extended
     }
 
     /// The index into `trackBlocks` of the last block starting at or before `position`, or 0.

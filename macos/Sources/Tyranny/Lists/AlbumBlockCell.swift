@@ -4,7 +4,9 @@ import TyrannyCore
 /// One row's slice of an album block's gutter column (spec 4.3).
 ///
 /// The gutter shows the cover (104 pt) from block row 0, overflowing downward, and the
-/// facts lines from block row 5 (title; year · genre; tracks · length; format). Sibling row
+/// facts lines from block row 5 (title; year · genre; tracks · length; format). The four lines
+/// need about 50 pt below the cover, so they end at block row 7; blocks pad to
+/// `GroupLayout.minimumBlockRows` (8), which keeps the gap row after a block clear. Sibling row
 /// views do not keep a reliable drawing order, so content drawn by row 0 past its bottom could
 /// be painted over by the next row's background. Instead every block row's gutter cell draws
 /// the whole gutter shifted up by its block offset and clipped to its own 20 pt. The slices
@@ -15,8 +17,8 @@ final class AlbumBlockCell: NSTableCellView {
     static let columnID = "album-gutter"
     static let columnWidth: CGFloat = 120
     static let coverSize: CGFloat = 104
-    /// Block rows with gutter content: the cover and the facts end within 8 rows.
-    static let contentRows = 8
+    /// Block rows with gutter content: the cover and the facts end within these rows.
+    static let contentRows = GroupLayout.minimumBlockRows
     private static let coverTop: CGFloat = 2
     private static let factsTop: CGFloat = 110
     private static let inset: CGFloat = 8

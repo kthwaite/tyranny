@@ -26,18 +26,18 @@ private func span(_ artist: UInt64, _ album: UInt64?, _ start: UInt64, _ count: 
         #expect(layout.displayIndex(ofPosition: 2) == 4)
     }
 
-    @Test func albumBlocksPadToSevenRowsAndEndWithGap() {
-        let layout = GroupLayout(grouping: .album, total: 10,
-                                 spans: [span(1, 10, 0, 2), span(1, 11, 2, 8)])
-        // 7 + gap, then 8 + gap
-        #expect(layout.count == 8 + 9)
+    @Test func albumBlocksPadToEightRowsAndEndWithGap() {
+        let layout = GroupLayout(grouping: .album, total: 11,
+                                 spans: [span(1, 10, 0, 2), span(1, 11, 2, 9)])
+        // 8 + gap, then 9 + gap
+        #expect(layout.count == 9 + 10)
         #expect(layout.row(at: 1) == .track(position: 1, blockIndex: 1))
         #expect(layout.row(at: 2) == .blockFiller(albumKey: UInt64?.some(10), blockIndex: 2))
-        #expect(layout.row(at: 6) == .blockFiller(albumKey: UInt64?.some(10), blockIndex: 6))
-        #expect(layout.row(at: 7) == .blockGap)
-        #expect(layout.row(at: 8) == .track(position: 2, blockIndex: 0))
-        #expect(layout.row(at: 15) == .track(position: 9, blockIndex: 7))
-        #expect(layout.row(at: 16) == .blockGap)
+        #expect(layout.row(at: 7) == .blockFiller(albumKey: UInt64?.some(10), blockIndex: 7))
+        #expect(layout.row(at: 8) == .blockGap)
+        #expect(layout.row(at: 9) == .track(position: 2, blockIndex: 0))
+        #expect(layout.row(at: 17) == .track(position: 10, blockIndex: 8))
+        #expect(layout.row(at: 18) == .blockGap)
         #expect(layout.albumKey(atDisplayIndex: 5) == 10)
         #expect(layout.albumKey(atDisplayIndex: 12) == 11)
     }
@@ -47,11 +47,12 @@ private func span(_ artist: UInt64, _ album: UInt64?, _ start: UInt64, _ count: 
                                  spans: [span(1, 10, 0, 3), span(1, 11, 3, 4), span(0, 12, 7, 2)])
         #expect(layout.row(at: 0) == .artistHeader(artistKey: 1, span: 0..<7))
         #expect(layout.row(at: 1) == .track(position: 0, blockIndex: 0))
-        // header + 8 + 8 = 17
-        #expect(layout.row(at: 17) == .artistHeader(artistKey: 0, span: 7..<9))
-        #expect(layout.count == 17 + 1 + 8)
+        // header + 9 + 9 = 19
+        #expect(layout.row(at: 19) == .artistHeader(artistKey: 0, span: 7..<9))
+        #expect(layout.count == 19 + 1 + 9)
         #expect(layout.albumKey(atDisplayIndex: 0) == nil)
-        #expect(layout.albumKey(atDisplayIndex: 9) == 11)
+        #expect(layout.albumKey(atDisplayIndex: 9) == 10)
+        #expect(layout.albumKey(atDisplayIndex: 10) == 11)
         var headers = 0
         for i in 0..<layout.count { if case .artistHeader? = layout.row(at: i) { headers += 1 } }
         #expect(headers == 2)
@@ -134,7 +135,7 @@ private func span(_ artist: UInt64, _ album: UInt64?, _ start: UInt64, _ count: 
         #expect(layout.displayIndex(ofPosition: 4) == 6)
         #expect(layout.displayIndex(ofPosition: 5) == nil)
         let album = GroupLayout(grouping: .album, total: 2, spans: [span(1, 10, 0, 50)])
-        #expect(album.count == 8)
+        #expect(album.count == 9)
         #expect(album.row(at: 1) == .track(position: 1, blockIndex: 1))
     }
 
@@ -145,18 +146,18 @@ private func span(_ artist: UInt64, _ album: UInt64?, _ start: UInt64, _ count: 
     }
 
     @Test func mixedLayoutWalk() {
-        // artist 1: album 10 (2 tracks), album 11 (8 tracks); artist 0: album 12 (1 track)
-        let layout = GroupLayout(grouping: .artistAlbum, total: 11,
-                                 spans: [span(1, 10, 0, 2), span(1, 11, 2, 8), span(0, 12, 10, 1)])
-        var expected: [DisplayRow] = [.artistHeader(artistKey: 1, span: 0..<10)]
+        // artist 1: album 10 (2 tracks), album 11 (9 tracks); artist 0: album 12 (1 track)
+        let layout = GroupLayout(grouping: .artistAlbum, total: 12,
+                                 spans: [span(1, 10, 0, 2), span(1, 11, 2, 9), span(0, 12, 11, 1)])
+        var expected: [DisplayRow] = [.artistHeader(artistKey: 1, span: 0..<11)]
         for i in 0..<2 { expected.append(.track(position: i, blockIndex: i)) }
-        for i in 2..<7 { expected.append(.blockFiller(albumKey: 10, blockIndex: i)) }
+        for i in 2..<8 { expected.append(.blockFiller(albumKey: 10, blockIndex: i)) }
         expected.append(.blockGap)
-        for i in 0..<8 { expected.append(.track(position: 2 + i, blockIndex: i)) }
+        for i in 0..<9 { expected.append(.track(position: 2 + i, blockIndex: i)) }
         expected.append(.blockGap)
-        expected.append(.artistHeader(artistKey: 0, span: 10..<11))
-        expected.append(.track(position: 10, blockIndex: 0))
-        for i in 1..<7 { expected.append(.blockFiller(albumKey: 12, blockIndex: i)) }
+        expected.append(.artistHeader(artistKey: 0, span: 11..<12))
+        expected.append(.track(position: 11, blockIndex: 0))
+        for i in 1..<8 { expected.append(.blockFiller(albumKey: 12, blockIndex: i)) }
         expected.append(.blockGap)
         #expect(layout.count == expected.count)
         for (i, row) in expected.enumerated() { #expect(layout.row(at: i) == row, "row \(i)") }
@@ -171,8 +172,8 @@ private func span(_ artist: UInt64, _ album: UInt64?, _ start: UInt64, _ count: 
         let after = GroupLayout(grouping: .artistAlbum, total: 8,
                                 spans: [span(1, 10, 0, 3), span(1, 15, 3, 2), span(2, 20, 5, 3)])
         let newPosition = anchorPosition + 2
-        // header + 8 + 8 + header(artist 2) + offset 1 in album
-        let expected = 1 + 8 + 8 + 1 + 1
+        // header + 9 + 9 + header(artist 2) + offset 1 in album
+        let expected = 1 + 9 + 9 + 1 + 1
         #expect(after.displayIndex(ofPosition: newPosition) == expected)
         #expect(after.displayIndex(ofPosition: newPosition)! > oldDisplay)
         #expect(after.row(at: expected) == .track(position: newPosition, blockIndex: 1))
