@@ -490,7 +490,8 @@ struct VirtualTrackTable: NSViewRepresentable {
                 do {
                     let selection = try parent.list.encode(positions)
                     dragToken = parent.player.beginSelectionDrag(selection, count: positions.count,
-                                                                 label: parent.list.displayName ?? parent.list.destination.title)
+                                                                 label: parent.list.displayName ?? parent.list.destination.title,
+                                                                 trackIDs: parent.list.loadedTrackIDs(positions))
                     if dragToken != nil { parent.list.dragBegan(positions: positions) }
                 } catch {
                     parent.player.message = (error as? LocalizedError)?.errorDescription

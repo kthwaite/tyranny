@@ -32,12 +32,29 @@ public enum PlaylistDrop {
         case append
     }
 
-    /// A drop at an insertion point. Only a selection of loaded IDs can be placed.
-    public static func atInsertion(_ selection: TrackSelection) -> InsertionAction {
-        if case .ids(let revision, let ids) = selection, ids.count <= maximumInsertedIDs {
-            return .insert(libraryRevision: revision, trackIDs: ids)
+    /// A drop at an insertion point. Only a selection of loaded IDs can be placed. A list
+    /// selection (rows of a playlist, which the encoder never sends as IDs) is placed with
+    /// `loadedTrackIDs`, the track IDs of its rows when the drag started with all of them loaded.
+    public static func atInsertion(_ selection: TrackSelection, loadedTrackIDs: [UInt64]? = nil) -> InsertionAction {
+        switch selection {
+        case .ids(let revision, let ids):
+            if ids.count <= maximumInsertedIDs { return .insert(libraryRevision: revision, trackIDs: ids) }
+        case .list(_, let revision, _, _, _):
+            if let ids = loadedTrackIDs, !ids.isEmpty, ids.count <= maximumInsertedIDs {
+                return .insert(libraryRevision: revision, trackIDs: ids)
+            }
         }
         return .append
+    }
+
+    /// A selection that names a playlist or smart playlist source. If that playlist changes
+    /// before the drop, the server rejects it as stale and a refetch cannot fix it.
+    public static func embedsPlaylistSource(_ selection: TrackSelection) -> Bool {
+        guard case .list(let list, _, _, _, _) = selection else { return false }
+        switch list.source {
+        case .playlist, .smart: return true
+        default: return false
+        }
     }
 
     public enum Reorder: Equatable, Sendable {

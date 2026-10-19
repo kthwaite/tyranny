@@ -41,6 +41,19 @@ import Testing
         #expect(PlaylistDrop.atInsertion(selection) == .append)
     }
 
+    @Test func playlistRowsWithLoadedTrackIDsInsert() {
+        let selection = TrackSelection.list(
+            list: ListDescription(source: .playlist(id: 1, revision: 2)), libraryRevision: 4,
+            ranges: [[0, 3]], excluded: [], firstRowID: 9)
+        #expect(PlaylistDrop.atInsertion(selection, loadedTrackIDs: [5, 6, 7])
+                == .insert(libraryRevision: 4, trackIDs: [5, 6, 7]))
+        #expect(PlaylistDrop.atInsertion(selection, loadedTrackIDs: nil) == .append)
+        let many = (1...501).map { UInt64($0) }
+        #expect(PlaylistDrop.atInsertion(selection, loadedTrackIDs: many) == .append)
+        #expect(PlaylistDrop.embedsPlaylistSource(selection))
+        #expect(!PlaylistDrop.embedsPlaylistSource(.ids(libraryRevision: 1, trackIDs: [1])))
+    }
+
     @Test func appendedStatusText() {
         #expect(PlaylistDrop.appendedStatus == "Added at the end")
     }

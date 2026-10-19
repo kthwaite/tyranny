@@ -23,6 +23,13 @@ extension ListModel {
 
     func dragEnded() { ownDrag = nil }
 
+    /// The rows' track IDs in order, when there are at most 500 and all are loaded.
+    func loadedTrackIDs(_ positions: IndexSet) -> [UInt64]? {
+        guard positions.count <= PlaylistDrop.maximumInsertedIDs else { return nil }
+        let ids = positions.compactMap { cache.loadedRow(at: $0)?.track.id }
+        return ids.count == positions.count ? ids : nil
+    }
+
     private var playlist: Playlist? {
         guard case .playlist(let id, _) = source else { return nil }
         return player?.savedPlaylists.playlist(id: id)
@@ -45,7 +52,8 @@ extension ListModel {
               let drag = player.activeDrag, drag.token == token, let selection = drag.selection else { return false }
         let at = min(max(row, 0), cache.total)
         return own ? reorder(playlist, at: at, player: player)
-                   : insert(playlist, selection: selection, count: drag.count, at: allowsReorder ? at : nil, player: player)
+                   : insert(playlist, selection: selection, trackIDs: drag.trackIDs, count: drag.count,
+                         at: allowsReorder ? at : nil, player: player)
     }
 
     private func reorder(_ playlist: Playlist, at row: Int, player: PlayerModel) -> Bool {
@@ -83,7 +91,7 @@ extension ListModel {
         }
     }
 
-    private func insert(_ playlist: Playlist, selection: TrackSelection, count: Int, at row: Int?,
+    private func insert(_ playlist: Playlist, selection: TrackSelection, trackIDs: [UInt64]?, count: Int, at row: Int?,
                         player: PlayerModel) -> Bool {
         var before: UInt64?
         if let row, row < cache.total {
@@ -95,7 +103,8 @@ extension ListModel {
         }
         player.activeDrag = nil
         player.mutate { [player, before] in
-            try await player.savedPlaylists.addAtInsertion(to: playlist, selection: selection, count: count, before: before)
+            try await player.savedPlaylists.addAtInsertion(
+                to: playlist, selection: selection, trackIDs: trackIDs, count: count, before: before, atEnd: row == nil)
         }
         return true
     }

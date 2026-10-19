@@ -11,6 +11,11 @@ import TyrannyCore
 ///
 /// Edits name the playlist's revision. One that gets `stale_revision` or
 /// `stale_playlist_revision` refetches the snapshot and the playlists and retries once.
+/// A drop the server rejected because the rows it names moved on. Nothing was added.
+struct ListChangedError: LocalizedError {
+    var errorDescription: String? { "The list changed; try again" }
+}
+
 @MainActor @Observable
 final class PlaylistsModel {
     /// The most playlists the sidebar loads (ten windows).
@@ -56,10 +61,13 @@ final class PlaylistsModel {
         if needsReset {
             needsReset = false
             catalogRevision = revision
+            fetched = [:]
             cache.reset(fetch: makeFetch())
             cache.visible(0..<1)
         } else if revision != catalogRevision {
             catalogRevision = revision
+            // A retry's fetch is older than this revision: a playlist may be gone since.
+            fetched = [:]
             cache.serverRevisionChanged(revision, anchor: nil)
         }
     }
@@ -142,6 +150,7 @@ final class PlaylistsModel {
     /// (the fields then read the library revision again).
     private func edit<T: Decodable>(
         _ command: String, playlist id: UInt64? = nil, seed: Playlist? = nil, retryLibrary: Bool = false,
+        embedsPlaylistSource: Bool = false,
         fields: (Playlist?, ControlState) throws -> [String: JSONValue]
     ) async throws -> T {
         guard let player else { throw CancellationError() }
@@ -162,6 +171,10 @@ final class PlaylistsModel {
             }
             do {
                 return try await player.send(command, try fields(current, state))
+            } catch let failure as ServerFailure
+                where embedsPlaylistSource && failure.code == "stale_playlist_revision" {
+                // The selection names a playlist's revision; a refetch cannot update it.
+                throw ListChangedError()
             } catch let failure as ServerFailure
                 where !retried && (PlaylistDrop.isStale(failure.code)
                                    || (retryLibrary && failure.code == "stale_library_revision")) {
@@ -197,24 +210,30 @@ final class PlaylistsModel {
         }
     }
 
-    /// Adds a selection after the playlist's last entry (`playlist_add_selection`).
+    /// Adds a selection after the playlist's last entry (`playlist_add_selection`). Throws
+    /// `ListChangedError` when the rows moved on; the success status is set only on success.
     func addSelection(to playlist: Playlist, selection: TrackSelection, count: Int, seed: Playlist? = nil) async throws {
         let encoded = try JSONValue.encoding(selection)
         do {
-            let _: PlaylistApplied = try await edit("playlist_add_selection", playlist: playlist.id, seed: seed) { current, _ in
+            let _: PlaylistApplied = try await edit(
+                "playlist_add_selection", playlist: playlist.id, seed: seed,
+                embedsPlaylistSource: PlaylistDrop.embedsPlaylistSource(selection)
+            ) { current, _ in
                 ["playlist_id": .uint(playlist.id), "expected_revision": .uint(current?.revision ?? playlist.revision),
                  "selection": encoded, "before": .null]
             }
-            player?.message = "Added \(DisplayFormat.count(count)) \(count == 1 ? "track" : "tracks") to \(playlist.name)."
         } catch let failure as ServerFailure where failure.code == "stale_library_revision" {
-            player?.message = "The list changed; try again"
+            throw ListChangedError()
         }
+        player?.message = "Added \(DisplayFormat.count(count)) \(count == 1 ? "track" : "tracks") to \(playlist.name)."
     }
 
     /// Drops a selection at an insertion point: loaded IDs go before `before`, anything else is
-    /// appended and the status bar says so.
-    func addAtInsertion(to playlist: Playlist, selection: TrackSelection, count: Int, before: UInt64?) async throws {
-        switch PlaylistDrop.atInsertion(selection) {
+    /// appended. An append, or a drop on a list with no insertion points (`atEnd`), says so in
+    /// the status bar. Throws `ListChangedError` when the rows moved on.
+    func addAtInsertion(to playlist: Playlist, selection: TrackSelection, trackIDs: [UInt64]?, count: Int,
+                        before: UInt64?, atEnd: Bool = false) async throws {
+        switch PlaylistDrop.atInsertion(selection, loadedTrackIDs: trackIDs) {
         case .append:
             try await addSelection(to: playlist, selection: selection, count: count)
             player?.message = PlaylistDrop.appendedStatus
@@ -225,10 +244,11 @@ final class PlaylistsModel {
                      "library_revision": .uint(libraryRevision), "track_ids": .uints(trackIDs),
                      "before": before.map(JSONValue.uint) ?? .null]
                 }
-                player?.message = "Added \(DisplayFormat.count(count)) \(count == 1 ? "track" : "tracks") to \(playlist.name)."
             } catch let failure as ServerFailure where failure.code == "stale_library_revision" {
-                player?.message = "The list changed; try again"
+                throw ListChangedError()
             }
+            player?.message = atEnd ? PlaylistDrop.appendedStatus
+                : "Added \(DisplayFormat.count(count)) \(count == 1 ? "track" : "tracks") to \(playlist.name)."
         }
     }
 

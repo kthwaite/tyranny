@@ -998,7 +998,7 @@ extension PlayerModel {
 
     /// Starts a track-list drag. The rows travel as a selection: IDs for a small loaded
     /// selection, otherwise the list description with ranges (spec 5.2).
-    func beginSelectionDrag(_ selection: TrackSelection, count: Int, label: String) -> String? {
+    func beginSelectionDrag(_ selection: TrackSelection, count: Int, label: String, trackIDs: [UInt64]? = nil) -> String? {
         guard canMutate, count > 0, snapshot != nil else { return nil }
         let revision: UInt64
         switch selection {
@@ -1007,7 +1007,7 @@ extension PlayerModel {
         }
         let drag = TrackDrag(token: UUID().uuidString, connection: playlistSession, source: .library,
             ids: [], positions: [], revision: revision, libraryRevision: revision,
-            selection: selection, count: count, label: label)
+            selection: selection, count: count, label: label, trackIDs: trackIDs)
         activeDrag = drag
         return drag.token
     }

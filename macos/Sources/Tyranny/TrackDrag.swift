@@ -22,6 +22,8 @@ struct TrackDrag {
     /// The selection's row count and the list it came from, for the drop's source label.
     var count = 0
     var label = ""
+    /// The track IDs of the dragged rows, when all were loaded and there are at most 500.
+    var trackIDs: [UInt64]?
 }
 
 /// Public native destinations also work in toolbar items and during AppKit tracking.
