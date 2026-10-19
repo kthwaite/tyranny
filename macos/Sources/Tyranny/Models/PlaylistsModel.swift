@@ -29,6 +29,8 @@ final class PlaylistsModel {
     @ObservationIgnored private var catalogRevision: UInt64?
     /// Playlists fetched by a retry, newer than the cache's rows until it refreshes.
     @ObservationIgnored private var fetched: [UInt64: Playlist] = [:]
+    /// Playlists just created, with the playlists revision of the create reply.
+    @ObservationIgnored private var seeded: [UInt64: (playlist: Playlist, revision: UInt64)] = [:]
     @ObservationIgnored private var memo: (generation: UInt64, byID: [UInt64: Playlist], rows: [Playlist])?
 
     init() {
@@ -47,6 +49,7 @@ final class PlaylistsModel {
                 session = generation
                 cache.discard(session: generation)
                 fetched = [:]
+                seeded = [:]
                 catalogRevision = nil
             }
             needsReset = true
@@ -55,6 +58,7 @@ final class PlaylistsModel {
         if session != generation {
             cache.discard(session: generation)
             fetched = [:]
+            seeded = [:]
         }
         session = generation
         let revision = snapshot.playlists_revision
@@ -115,6 +119,10 @@ final class PlaylistsModel {
     /// The playlist's latest known state: the loaded row, or a newer one a retry fetched.
     func playlist(id: UInt64) -> Playlist? {
         let loaded = table.byID[id]
+        if loaded == nil, fetched[id] == nil, let seed = seeded[id],
+           PlaylistSeed.isActive(seedRevision: seed.revision, loadedRevision: cache.revision) {
+            return seed.playlist
+        }
         guard let newer = fetched[id] else { return loaded }
         guard let loaded else { return newer }
         return newer.revision > loaded.revision ? newer : loaded
@@ -185,6 +193,12 @@ final class PlaylistsModel {
         }
     }
 
+    /// Keeps a just-created playlist findable until the cache catches up with the reply.
+    private func seed(_ reply: PlaylistApplied) {
+        guard let playlist = reply.playlist else { return }
+        seeded[playlist.id] = (playlist, reply.snapshot.playlists_revision)
+    }
+
     /// Creates a regular playlist. Returns it.
     func create(name: String) async throws -> Playlist {
         let reply: PlaylistApplied = try await edit("create_playlist") { _, state in
@@ -193,6 +207,7 @@ final class PlaylistsModel {
         guard let playlist = reply.playlist else {
             throw ServerFailure(code: "invalid_reply", message: "Creation reply omitted the playlist.")
         }
+        seed(reply)
         player?.message = "Saved playlist “\(playlist.name)”."
         return playlist
     }
@@ -286,6 +301,7 @@ final class PlaylistsModel {
                 ["expected_revision": .uint(state.playlists_revision), "name": .string(name), "query": .string(rule)]
             }
         }
+        if playlist == nil { seed(reply) }
         return reply.playlist
     }
 
@@ -298,6 +314,7 @@ final class PlaylistsModel {
              "library_revision": .uint(state.library.revision), "expected_revision": .uint(state.playlists_revision),
              "name": .string(name)]
         }
+        seed(reply)
         return reply.playlist
     }
 
