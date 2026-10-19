@@ -18,6 +18,16 @@ final class NavigationModel {
     /// Incremented by ⌘F; the filter field takes focus when it changes.
     private(set) var filterFocusRequest = 0
 
+    /// An album or artist to show and select: Show in Album and Show in Artist set it, and the
+    /// window moves to the destination and clears it.
+    enum RevealTarget: Equatable {
+        case album(UInt64)
+        case artist(UInt64)
+    }
+    var reveal: RevealTarget?
+    /// Incremented by ⌘L; the shown track list reveals the playing row when it changes.
+    private(set) var revealPlayingRequest = 0
+
     var columnBrowserVisible: Bool {
         didSet { defaults.set(columnBrowserVisible, forKey: "columnBrowserVisible") }
     }
@@ -47,6 +57,7 @@ final class NavigationModel {
     }
 
     func focusFilter() { filterFocusRequest &+= 1 }
+    func revealPlaying() { revealPlayingRequest &+= 1 }
 
     static func groupingKey(_ destination: Destination) -> String { "group.\(destination.key)" }
 }

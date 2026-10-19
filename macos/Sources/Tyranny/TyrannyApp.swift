@@ -65,6 +65,26 @@ struct TyrannyApp: App {
                 }
                 .keyboardShortcut("u", modifiers: [.command, .option])
             }
+            // Space plays and pauses inside the track tables, where typing is not at stake.
+            CommandMenu("Playback") {
+                Button("Play/Pause") { model.transport.playPause() }
+                    .disabled(!model.transport.canPlayPause)
+                Button("Next") { model.transport.next() }
+                    .keyboardShortcut(.rightArrow, modifiers: .command)
+                    .disabled(!model.transport.canNext)
+                Button("Previous") { model.transport.previous() }
+                    .keyboardShortcut(.leftArrow, modifiers: .command)
+                    .disabled(!model.transport.canPrevious)
+                Divider()
+                Button("Show Playing Track") { navigation.revealPlaying() }
+                    .keyboardShortcut("l")
+            }
+            CommandMenu("Go") {
+                ForEach(Array((Destination.library + Destination.playing).enumerated()), id: \.offset) { index, destination in
+                    Button(destination.title) { navigation.destination = destination }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                }
+            }
         }
         Settings {
             SettingsView(model: model, navigation: navigation)
@@ -101,6 +121,7 @@ private struct MainWindow: View {
                 NativeUpNextSmoke.startIfRequested(model, navigation: navigation)
                 NativePlaylistSmoke.startIfRequested(model, navigation: navigation)
                 NativeSmartPlaylistSmoke.startIfRequested(model, navigation: navigation)
+                NativeRunsSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }

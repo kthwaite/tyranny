@@ -213,47 +213,36 @@ final class AlbumGridModel {
     /// Play: the whole album, placed by the Up Next policy. Shuffle turns shuffle on first, so
     /// the server starts at a shuffle pick.
     func play(_ album: AlbumSummary, shuffle: Bool = false) {
-        guard let player else { return }
-        player.mutate { [weak self] in
-            if shuffle {
-                let _: Applied = try await player.send("set_shuffle", ["enabled": .bool(true)])
-            }
-            try await self?.enqueue(.play, album)
-        }
+        start(.play, album, shuffle: shuffle)
     }
 
     /// ⌥Return and Add to Up Next: appends the album.
     func addToUpNext(_ album: AlbumSummary) {
-        guard let player else { return }
-        player.mutate { [weak self] in
-            try await self?.enqueue(.addToUpNext, album)
-            let noun = album.track_count == 1 ? "track" : "tracks"
-            player.message = "Added \(DisplayFormat.count(album.track_count)) \(noun) to Up Next."
-        }
+        start(.addToUpNext, album)
     }
 
-    /// The decision and revisions are read again for the retry. `stale_revision`: the queue
-    /// moved; refetch the snapshot. `stale_library_revision`: the library moved; refetch the
-    /// snapshot for its revision. A source selection has no row to relocate. One retry each.
-    private func enqueue(_ action: AlbumAction, _ album: AlbumSummary) async throws {
+    /// The album is a source selection, so it has no row to relocate: a stale library revision
+    /// only needs the fresh revision.
+    private func start(_ action: ActivationAction, _ album: AlbumSummary, shuffle: Bool = false) {
+        guard let player, let revision = player.snapshot?.library.revision else { return }
+        let selection = AlbumPlayback.selection(albumID: album.id, libraryRevision: revision)
+        let noun = album.track_count == 1 ? "track" : "tracks"
+        player.activation.start(EnqueueJob(
+            action: action, source: AlbumPlayback.source(title: album.title),
+            request: .source(selection, player: player), shuffleFirst: shuffle,
+            status: action == .addToUpNext ? "Added \(DisplayFormat.count(album.track_count)) \(noun) to Up Next." : nil))
+    }
+
+    /// Show in Album: selects the album and opens its panel.
+    func reveal(albumID: UInt64) {
         guard let player else { return }
-        var retried = false
-        while true {
-            guard player.connected, let state = player.snapshot else {
-                throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was queued.")
-            }
-            let request = AlbumPlayback.enqueue(
-                action, albumID: album.id, title: album.title, libraryRevision: state.library.revision,
-                policy: Self.policy, hasUpcoming: player.hasUpcoming)
-            do {
-                let _: Applied = try await player.send("enqueue_tracks",
-                                                       try request.fields(expectedRevision: state.queue_revision))
-                return
-            } catch let failure as ServerFailure
-                where ["stale_revision", "stale_library_revision"].contains(failure.code) && !retried {
-                retried = true
-                try await player.refreshSnapshot()
-            }
+        selectedID = albumID
+        Task { @MainActor [weak self] in
+            let reply: AlbumSummariesResponse? = try? await player.send("album_summaries", [
+                "album_ids": .uints([albumID]), "revision": .null])
+            guard let self, selectedID == albumID, expansion?.albumID != albumID,
+                  let album = reply?.entries.first else { return }
+            toggleExpansion(album)
         }
     }
 
@@ -294,10 +283,6 @@ final class AlbumGridModel {
 
     /// Regular playlists from the loaded catalog page.
     var regularPlaylists: [Playlist] { player?.playlists?.entries.filter { !$0.isSmart } ?? [] }
-
-    private static var policy: UpNextPolicy {
-        UserDefaults.standard.string(forKey: "upNextOnPlay").flatMap(UpNextPolicy.init(rawValue:)) ?? .ask
-    }
 
     // MARK: Fetching
 

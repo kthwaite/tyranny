@@ -119,70 +119,11 @@ private func item(_ id: UInt64, played: Bool) -> QueueItem {
 @Suite struct AlbumPlaybackTests {
     private let list = ListDescription(source: .album(id: 7))
 
-    @Test func playSendsTheWholeAlbumWithoutAStartRow() {
-        let request = AlbumPlayback.enqueue(.play, albumID: 7, title: "Spirit of Eden", libraryRevision: 12,
-                                            policy: .ask, hasUpcoming: false)
-        #expect(request.selection == .list(list: list, libraryRevision: 12, ranges: [[0, UInt64.max]],
-                                           excluded: [], firstRowID: nil))
-        #expect(request.placement == .replaceUpcoming)
-        #expect(request.play)
-        #expect(request.source == QueueSource(kind: .album, name: "Spirit of Eden"))
-    }
-
-    @Test func playFollowsTheUpNextPolicy() {
-        func placement(_ policy: UpNextPolicy) -> Placement {
-            AlbumPlayback.enqueue(.play, albumID: 7, title: "", libraryRevision: 1, policy: policy,
-                                  hasUpcoming: true).placement
-        }
-        #expect(placement(.replace) == .replaceUpcoming)
-        #expect(placement(.keep) == .next)
-        // Ask has no sheet yet (Task 13): it keeps Up Next.
-        #expect(placement(.ask) == .next)
-    }
-
-    @Test func addToUpNextAppendsWithoutPlaying() {
-        let request = AlbumPlayback.enqueue(.addToUpNext, albumID: 7, title: "Spirit of Eden", libraryRevision: 3,
-                                            policy: .replace, hasUpcoming: true)
-        #expect(request.placement == .append)
-        #expect(!request.play)
-        #expect(request.selection == SelectionEncoder.source(list: list, revision: 3))
-    }
-
-    @Test func requestFieldsCarryTheQueueRevision() throws {
-        let request = AlbumPlayback.enqueue(.play, albumID: 7, title: "T", libraryRevision: 3, policy: .ask,
-                                            hasUpcoming: false)
-        let fields = try request.fields(expectedRevision: 41)
-        #expect(fields["expected_revision"] == .uint(41))
-        #expect(fields["placement"] == .string("replace_upcoming"))
-        #expect(fields["play"] == .bool(true))
-        #expect(fields["source"] == .object(["kind": .string("album"), "name": .string("T")]))
-    }
-}
-
-@Suite struct UpNextTests {
-    @Test func entriesAfterTheCurrentOneAreUpcoming() {
-        let page = Page(revision: 4, total: 3, offset: 0, entries: [item(1, played: true), item(2, played: false),
-                                                                    item(3, played: false)])
-        #expect(UpNext.hasUpcoming(queueLength: 3, currentID: 2, queueRevision: 4, page: page))
-        #expect(!UpNext.hasUpcoming(queueLength: 3, currentID: 3, queueRevision: 4, page: page))
-    }
-
-    @Test func withoutACurrentEntryUnplayedEntriesAreUpcoming() {
-        let played = Page(revision: 4, total: 2, offset: 0, entries: [item(1, played: true), item(2, played: true)])
-        #expect(!UpNext.hasUpcoming(queueLength: 2, currentID: nil, queueRevision: 4, page: played))
-        let fresh = Page(revision: 4, total: 2, offset: 0, entries: [item(1, played: true), item(2, played: false)])
-        #expect(UpNext.hasUpcoming(queueLength: 2, currentID: nil, queueRevision: 4, page: fresh))
-        #expect(!UpNext.hasUpcoming(queueLength: 0, currentID: nil, queueRevision: 4, page: nil))
-    }
-
-    @Test func unknownQueueContentsCountAsUpcoming() {
-        // A stale page, or a current entry outside the loaded page, cannot rule upcoming entries out.
-        let stale = Page(revision: 3, total: 2, offset: 0, entries: [item(1, played: true), item(2, played: false)])
-        #expect(UpNext.hasUpcoming(queueLength: 2, currentID: 2, queueRevision: 4, page: stale))
-        let partial = Page(revision: 4, total: 300, offset: 0, entries: [item(1, played: true)])
-        #expect(UpNext.hasUpcoming(queueLength: 300, currentID: 250, queueRevision: 4, page: partial))
-        #expect(UpNext.hasUpcoming(queueLength: 300, currentID: nil, queueRevision: 4, page: partial))
-        #expect(!UpNext.hasUpcoming(queueLength: 1, currentID: 1, queueRevision: 4, page: nil))
+    @Test func theWholeAlbumIsASourceSelectionWithoutAStartRow() {
+        let selection = AlbumPlayback.selection(albumID: 7, libraryRevision: 12)
+        #expect(selection == .list(list: list, libraryRevision: 12, ranges: [[0, UInt64.max]],
+                                   excluded: [], firstRowID: nil))
+        #expect(AlbumPlayback.source(title: "Spirit of Eden") == QueueSource(kind: .album, name: "Spirit of Eden"))
     }
 }
 

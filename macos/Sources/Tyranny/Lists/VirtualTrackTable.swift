@@ -24,6 +24,8 @@ struct VirtualTrackTable: NSViewRepresentable {
     let hidden: Set<String>
     let explicit: Set<String>
     let playingTrackID: UInt64?
+    /// Read in the parent's body so a ⌘L reveal reaches the table.
+    let revealToken: UInt64?
 
     var identifier: String { "track-table-\(list.key)" }
 
@@ -35,7 +37,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
-        let table = NSTableView()
+        let table = ActivatingTableView()
         table.setAccessibilityIdentifier(identifier)
         table.style = .fullWidth
         table.rowHeight = Coordinator.rowHeight
@@ -112,11 +114,11 @@ struct VirtualTrackTable: NSViewRepresentable {
         @MainActor NSMenuDelegate {
         static let rowHeight: CGFloat = 20
         var parent: VirtualTrackTable
-        private weak var table: NSTableView?
+        weak var table: NSTableView?
         private weak var scroll: NSScrollView?
         private var updating = false
         /// The layout the table's rows show. Replaced only in `update`, with a reload.
-        private var layout = GroupLayout(grouping: .none, total: 0, spans: [])
+        private(set) var layout = GroupLayout(grouping: .none, total: 0, spans: [])
         private var shownExplicit: Set<String> = []
         private var shownSort: [SortKey] = []
         private var shownLayout: ListModel.LayoutToken?
@@ -127,6 +129,8 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var shownHidden: Set<String>?
         private var shownBlocks: Bool?
         private var reported: Range<Int>?
+        /// The reveal request last handled. The outer nil: none seen yet.
+        var shownReveal: UInt64??
         /// Album covers retained for the albums in view.
         private var artwork: [UInt64: ArtworkRequest] = [:]
         private var artworkObserved = false
@@ -142,6 +146,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         func attach(table: NSTableView, scroll: NSScrollView) {
             self.table = table
             self.scroll = scroll
+            if let table = table as? ActivatingTableView { configureInput(table) }
         }
 
         private var cache: ListWindowCache<ListRow> { parent.list.cache }
@@ -212,6 +217,7 @@ struct VirtualTrackTable: NSViewRepresentable {
                 if !reloadedAll { reloadGutter() }
             }
             shownPlaying = parent.playingTrackID
+            applyReveal(parent.revealToken)
             reportVisible()
         }
 

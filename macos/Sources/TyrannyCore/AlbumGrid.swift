@@ -129,67 +129,20 @@ public struct AlbumGridLayout: Equatable, Sendable {
     }
 }
 
-public enum AlbumAction: Sendable {
-    case play
-    case addToUpNext
-}
-
-/// One album enqueue: the whole album as a source selection, so the server picks the start
-/// (the first track, or a shuffle pick under shuffle).
-public struct AlbumEnqueue: Equatable, Sendable {
-    public let selection: TrackSelection
-    public let placement: Placement
-    public let play: Bool
-    public let source: QueueSource
-
-    public func fields(expectedRevision: UInt64) throws -> [String: JSONValue] {
-        ["selection": try JSONValue.encoding(selection), "expected_revision": .uint(expectedRevision),
-         "placement": .string(placement.rawValue), "play": .bool(play), "source": try JSONValue.encoding(source)]
-    }
-}
-
 public enum AlbumPlayback {
     /// The album's tracks in album order.
     public static func list(albumID: UInt64) -> ListDescription {
         ListDescription(source: .album(id: albumID))
     }
 
-    /// Play follows the Up Next policy; Add to Up Next appends.
-    public static func enqueue(_ action: AlbumAction, albumID: UInt64, title: String, libraryRevision: UInt64,
-                               policy: UpNextPolicy, hasUpcoming: Bool) -> AlbumEnqueue {
-        let selection = SelectionEncoder.source(list: list(albumID: albumID), revision: libraryRevision)
-        let source = QueueSource(kind: .album, name: title)
-        switch action {
-        case .addToUpNext:
-            return AlbumEnqueue(selection: selection, placement: .append, play: false, source: source)
-        case .play:
-            let placement: Placement
-            switch SelectionEncoder.decide(policy: policy, hasUpcoming: hasUpcoming) {
-            case .enqueue(let decided): placement = decided
-            // TODO(Task 13): show the "Clear Up Next?" sheet. Until then Ask keeps Up Next.
-            case .ask: placement = .next
-            }
-            return AlbumEnqueue(selection: selection, placement: placement, play: true, source: source)
-        }
+    /// The whole album as a source selection, so the server picks the start (the first track,
+    /// or a shuffle pick under shuffle).
+    public static func selection(albumID: UInt64, libraryRevision: UInt64) -> TrackSelection {
+        SelectionEncoder.source(list: list(albumID: albumID), revision: libraryRevision)
     }
-}
 
-public enum UpNext {
-    /// Whether the queue has entries the server treats as upcoming: after the current entry,
-    /// or, with none current, unplayed. When the loaded page cannot tell, the answer is true,
-    /// so a play never replaces entries it could not see.
-    public static func hasUpcoming(queueLength: Int, currentID: UInt64?, queueRevision: UInt64,
-                                   page: Page<QueueItem>?) -> Bool {
-        guard queueLength > 0 else { return false }
-        if currentID != nil, queueLength <= 1 { return false }
-        guard let page, page.revision == queueRevision else { return true }
-        let complete = page.offset == 0 && page.entries.count == page.total
-        if let currentID {
-            guard let index = page.entries.firstIndex(where: { $0.id == currentID }) else { return true }
-            return page.offset + index < page.total - 1
-        }
-        if page.entries.contains(where: { !$0.played }) { return true }
-        return !complete
+    public static func source(title: String) -> QueueSource {
+        QueueSource(kind: .album, name: title)
     }
 }
 
@@ -219,20 +172,5 @@ public enum AlbumPanel {
 
     public static func moreText(total: Int, shown: Int) -> String? {
         total > shown ? "and \(DisplayFormat.count(total - shown)) more…" : nil
-    }
-}
-
-public enum HistoryPlayback {
-    /// Double-click on a History row: appends the one track to Up Next without playing it.
-    /// The server has no history source kind; `songs` repeats over the queue scope, which is
-    /// right for a single track.
-    public static func enqueue(trackID: UInt64, libraryRevision: UInt64) -> AlbumEnqueue {
-        AlbumEnqueue(selection: .ids(libraryRevision: libraryRevision, trackIDs: [trackID]), placement: .append,
-                     play: false, source: QueueSource(kind: .songs, name: "History"))
-    }
-
-    /// Nil when the played track has left the library (`track_id` is absent).
-    public static func enqueue(entry: HistoryEntry, libraryRevision: UInt64) -> AlbumEnqueue? {
-        entry.track_id.map { enqueue(trackID: $0, libraryRevision: libraryRevision) }
     }
 }

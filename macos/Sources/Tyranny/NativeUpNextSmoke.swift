@@ -90,8 +90,9 @@ enum NativeUpNextSmoke {
         }
         for album in [first, second] {
             try await apply(model) { state in
-                try AlbumPlayback.enqueue(.addToUpNext, albumID: album.id, title: album.title,
-                                          libraryRevision: state.library.revision, policy: .keep, hasUpcoming: true)
+                try EnqueueRequest(
+                    selection: AlbumPlayback.selection(albumID: album.id, libraryRevision: state.library.revision),
+                    placement: .append, play: false, source: AlbumPlayback.source(title: album.title))
                     .fields(expectedRevision: state.queue_revision)
             }
         }

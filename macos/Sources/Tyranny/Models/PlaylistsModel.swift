@@ -225,9 +225,12 @@ final class PlaylistsModel {
         }
     }
 
-    /// Adds a selection after the playlist's last entry (`playlist_add_selection`). Throws
-    /// `ListChangedError` when the rows moved on; the success status is set only on success.
-    func addSelection(to playlist: Playlist, selection: TrackSelection, count: Int, seed: Playlist? = nil) async throws {
+    /// Adds a selection after the playlist's last entry (`playlist_add_selection`). On
+    /// `stale_library_revision`, `retarget` (when given) relocates the rows under the fresh
+    /// library revision and the add is sent once more. Throws `ListChangedError` when the rows
+    /// moved on; the success status is set only on success.
+    func addSelection(to playlist: Playlist, selection: TrackSelection, count: Int, seed: Playlist? = nil,
+                      retarget: (@MainActor () async throws -> TrackSelection)? = nil) async throws {
         let encoded = try JSONValue.encoding(selection)
         do {
             let _: PlaylistApplied = try await edit(
@@ -238,7 +241,11 @@ final class PlaylistsModel {
                  "selection": encoded, "before": .null]
             }
         } catch let failure as ServerFailure where failure.code == "stale_library_revision" {
-            throw ListChangedError()
+            guard let retarget else { throw ListChangedError() }
+            try await player?.refreshSnapshot()
+            let fresh = try await retarget()
+            try await addSelection(to: playlist, selection: fresh, count: count, seed: seed)
+            return
         }
         player?.message = "Added \(DisplayFormat.count(count)) \(count == 1 ? "track" : "tracks") to \(playlist.name)."
     }
@@ -277,10 +284,11 @@ final class PlaylistsModel {
 
     /// Creates a regular playlist and adds a selection to it. If the add fails the playlist
     /// exists and the error says so.
-    func createAdding(name: String, selection: TrackSelection, count: Int) async throws -> Playlist {
+    func createAdding(name: String, selection: TrackSelection, count: Int,
+                      retarget: (@MainActor () async throws -> TrackSelection)? = nil) async throws -> Playlist {
         let playlist = try await create(name: name)
         do {
-            try await addSelection(to: playlist, selection: selection, count: count, seed: playlist)
+            try await addSelection(to: playlist, selection: selection, count: count, seed: playlist, retarget: retarget)
         } catch {
             throw ServerFailure(code: "partial", message:
                 "Playlist “\(playlist.name)” was created, but adding tracks failed: \(error.localizedDescription)")

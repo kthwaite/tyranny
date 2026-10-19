@@ -23,6 +23,8 @@ final class PlayerModel {
     let upNext = UpNextModel()
     /// The saved playlists in the source list, and the edits made to them.
     let savedPlaylists = PlaylistsModel()
+    /// Plays and adds runs from every list, grid and table, and asks "Clear Up Next?".
+    let activation = ActivationModel()
     private(set) var artists: Page<AlbumArtist>?
     private(set) var albums: Page<Album>?
     private(set) var tracks: Page<Track>?
@@ -122,6 +124,7 @@ final class PlayerModel {
         transport.attach(self)
         upNext.attach(self)
         savedPlaylists.attach(self)
+        activation.attach(self)
         updateMediaControls()
     }
 
@@ -361,12 +364,6 @@ final class PlayerModel {
     func refreshSnapshot() async throws {
         let fresh: SnapshotReply = try await request("snapshot")
         accept(fresh.snapshot, newInstance: false)
-    }
-    /// Up Next has entries after the current one (spec 5.1). True when the loaded queue page cannot tell.
-    var hasUpcoming: Bool {
-        guard let state = snapshot else { return false }
-        return UpNext.hasUpcoming(queueLength: state.queue_length, currentID: state.current_id,
-                                  queueRevision: state.queue_revision, page: upNext.loadedPage)
     }
     private func pageFields(offset: Int, revision: UInt64?, query: String) -> [String: JSONValue] {
         ["offset": .int(offset), "limit": .int(Self.pageSize),

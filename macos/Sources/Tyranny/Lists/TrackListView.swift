@@ -15,7 +15,7 @@ struct TrackListView: View {
     @State private var sheet: Sheet?
 
     private enum Sheet: Identifiable {
-        case snapshot(Playlist), rule(Playlist), addToPlaylist(TrackSelection, Int)
+        case snapshot(Playlist), rule(Playlist), addToPlaylist(SelectionRequest, Int)
 
         var id: String {
             switch self {
@@ -47,7 +47,8 @@ struct TrackListView: View {
             VirtualTrackTable(
                 list: list, player: player, generation: list.cache.generation, epoch: list.epoch,
                 layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden, explicit: columns.explicit,
-                playingTrackID: player.snapshot?.now_playing?.track_id)
+                playingTrackID: player.snapshot?.now_playing?.track_id,
+                revealToken: list.revealRequest?.token)
                 .overlay { emptyState }
                 .overlay(alignment: .bottom) { reorderHint }
         }
@@ -55,6 +56,7 @@ struct TrackListView: View {
         .accessibilityIdentifier(containerIdentifier)
         .onChange(of: syncKey, initial: true) { _, _ in list.sync() }
         .onChange(of: layoutKey, initial: true) { _, _ in list.syncLayout() }
+        .onChange(of: list.playlistPickerRequests) { _, _ in addToPlaylist() }
         .onChange(of: list.filterError, initial: true) { _, error in navigation.filterError = error }
         .onDisappear { navigation.filterError = nil }
         .sheet(item: $sheet) { sheet in
@@ -65,8 +67,9 @@ struct TrackListView: View {
                 }
             case .rule(let playlist):
                 SmartPlaylistEditor(playlists: player.savedPlaylists, player: player, playlist: playlist)
-            case .addToPlaylist(let selection, let count):
-                AddToPlaylistSheet(playlists: player.savedPlaylists, selection: selection, count: count)
+            case .addToPlaylist(let request, let count):
+                AddToPlaylistSheet(playlists: player.savedPlaylists, selection: request.selection, count: count,
+                                   retarget: request.retarget)
             }
         }
         #if DEBUG
@@ -210,7 +213,7 @@ struct TrackListView: View {
     private func addToPlaylist() {
         let positions = list.selectedPositions
         do {
-            sheet = .addToPlaylist(try list.encode(positions), positions.count)
+            sheet = .addToPlaylist(try list.selectionRequest(positions: positions, asRun: false), positions.count)
         } catch {
             player.message = (error as? LocalizedError)?.errorDescription ?? "Wait for the list to load, then try again."
         }

@@ -55,8 +55,17 @@ final class ListModel {
     /// The list's current source, followed through `sourceProvider`. Reading it in a view body
     /// makes the view update when the playlist's revision moves.
     var liveSource: ListSource { sourceProvider?() ?? source }
+    /// ⌘L: the table selects and scrolls to this list position. The token tells requests apart.
+    private(set) var revealRequest: RevealRequest?
+    /// Bumps when the context menu asks for the playlist picker.
+    private(set) var playlistPickerRequests = 0
     /// The positions of this table's own drag, with the basis they were read at.
     @ObservationIgnored var ownDrag: (positions: IndexSet, basis: RowSelection.Basis)?
+
+    struct RevealRequest: Equatable {
+        let token: UInt64
+        let position: Int
+    }
 
     /// Selected row IDs (spec 5.4).
     var selection: Set<UInt64> { rows.ids }
@@ -69,7 +78,7 @@ final class ListModel {
     var isNarrowed: Bool { !description.query.isEmpty || description.browser != Browser() }
 
     @ObservationIgnored private(set) weak var player: PlayerModel?
-    @ObservationIgnored private let navigation: NavigationModel
+    @ObservationIgnored let navigation: NavigationModel
     @ObservationIgnored private var sort: [SortKey] = []
     @ObservationIgnored private var query = ""
     @ObservationIgnored private var filterTask: Task<Void, Never>?
@@ -378,6 +387,24 @@ final class ListModel {
         return rows.positions
     }
 
+    /// ⌘L: selects the playing track in this list and scrolls to it. Only rows already loaded
+    /// can be found; the status bar says so otherwise.
+    func revealPlaying() {
+        guard let player else { return }
+        guard let trackID = player.snapshot?.now_playing?.track_id else {
+            player.message = "Nothing is playing."
+            return
+        }
+        guard let found = cache.loadedRows().first(where: { $0.row.track.id == trackID }) else {
+            player.message = "The playing track is not among the loaded rows of this list."
+            return
+        }
+        rows.select(IndexSet(integer: found.position), rowID: { cache.loadedRow(at: $0)?.row_id }, basis: selectionBasis)
+        revealRequest = RevealRequest(token: (revealRequest?.token ?? 0) &+ 1, position: found.position)
+    }
+
+    func requestPlaylistPicker() { playlistPickerRequests &+= 1 }
+
     /// The rows at `positions` as a selection for the server.
     func encode(_ positions: IndexSet) throws -> TrackSelection {
         guard let revision = cache.revision else { throw EmptySelection() }
@@ -385,9 +412,6 @@ final class ListModel {
             list: description, revision: revision, positions: positions,
             rowID: { cache.loadedRow(at: $0)?.row_id }, trackID: { cache.loadedRow(at: $0)?.track.id })
     }
-
-    /// Double-click or Return on a row. Runs arrive in Task 13.
-    func activate(position: Int) {}
 
     // MARK: Fetching
 

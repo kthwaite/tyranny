@@ -5,8 +5,8 @@ import TyrannyCore
 
 /// Opt-in acceptance driver for Recently Added and History (`--history-smoke-output`). The gate
 /// prepares the 1,129-track songs library. Controls are driven through the external
-/// Accessibility driver. The one track is enqueued through the wire (double-click on a Songs row
-/// arrives in Task 13) and played to its end on the clocked capture output.
+/// Accessibility driver. The one track is enqueued through the wire (a double-click on a Songs row plays
+/// runs, see `NativeRunsSmoke`) and played to its end on the clocked capture output.
 @MainActor
 enum NativeHistorySmoke {
     private struct Failure: Error, LocalizedError {
@@ -105,11 +105,11 @@ enum NativeHistorySmoke {
         observations["history_entry"] = ["id": entry.id, "track_id": track.id, "title": title]
         cases.append("native-history-row-appears-after-a-counted-play")
 
-        // Double-click adds that track to Up Next without playing it.
+        // Double-click plays that track again (nothing is upcoming, so no sheet).
         let queueBefore = model.snapshot?.queue_length ?? 0
         try await drive("double-click-row", "history-table", "0,0.5")
         try await wait("history enqueue", model) { !model.busy && (model.snapshot?.queue_length ?? 0) == queueBefore + 1 }
-        cases.append("native-history-double-click-appends-the-track")
+        cases.append("native-history-double-click-plays-the-track")
 
         // Songs shows the play in its Plays column.
         try await drive("click-control", Destination.songs.identifier)

@@ -109,6 +109,8 @@ final class NamedBrowseModel {
                         navigation: navigation, key: "artists-appears-on", usesBrowser: false)
             : nil
         detailTitle = title(of: id)
+        detail?.displayName = detailTitle
+        appearsOn?.displayName = detailTitle
         detail?.sync()
         appearsOn?.sync()
     }

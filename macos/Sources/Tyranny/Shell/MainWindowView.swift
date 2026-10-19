@@ -70,6 +70,11 @@ struct MainWindowView: View {
         .frame(minWidth: 940, minHeight: 560)
         .toolbar { toolbar }
         .onChange(of: navigation.filterFocusRequest) { _, _ in filterFocused = true }
+        .sheet(item: Binding(get: { model.activation.prompt }, set: { model.activation.prompt = $0 })) { _ in
+            UpNextPrompt(activation: model.activation)
+        }
+        .onChange(of: navigation.reveal) { _, target in reveal(target) }
+        .onChange(of: navigation.revealPlayingRequest) { _, _ in revealPlaying() }
         .onChange(of: filterError) { _, error in if error == nil { dismissedFilterError = nil } }
         .onChange(of: playlistGone) { _, gone in if gone { navigation.destination = .songs } }
         .onChange(of: model.savedPlaylists.cache.generation) { _, _ in
@@ -213,6 +218,25 @@ struct MainWindowView: View {
         } else {
             DestinationPlaceholder(destination: navigation.destination)
         }
+    }
+
+    /// Show in Album and Show in Artist: move to the destination and select the entry.
+    private func reveal(_ target: NavigationModel.RevealTarget?) {
+        guard let target else { return }
+        navigation.reveal = nil
+        switch target {
+        case .album(let id):
+            navigation.destination = .albums
+            lists.albumGrid(player: model, navigation: navigation).reveal(albumID: id)
+        case .artist(let id):
+            navigation.destination = .artists
+            lists.browse(.artists, player: model, navigation: navigation).select([id])
+        }
+    }
+
+    /// ⌘L: the shown track list selects the playing row.
+    private func revealPlaying() {
+        currentList?.revealPlaying()
     }
 
     private func showSettings(_ tab: SettingsTab) {

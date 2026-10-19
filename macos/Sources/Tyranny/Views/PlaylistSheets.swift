@@ -292,6 +292,8 @@ struct AddToPlaylistSheet: View {
     let playlists: PlaylistsModel
     let selection: TrackSelection
     let count: Int
+    /// Relocates the rows after a `stale_library_revision` reply.
+    var retarget: (@MainActor () async throws -> TrackSelection)?
     @Environment(\.dismiss) private var dismiss
     @State private var filter = ""
     @State private var newName = ""
@@ -360,7 +362,7 @@ struct AddToPlaylistSheet: View {
         failure = nil
         Task {
             let problem = await playlists.run {
-                try await playlists.addSelection(to: destination, selection: selection, count: count)
+                try await playlists.addSelection(to: destination, selection: selection, count: count, retarget: retarget)
             }
             working = false
             if let problem { failure = problem } else { dismiss() }
@@ -374,7 +376,7 @@ struct AddToPlaylistSheet: View {
         let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             let problem = await playlists.run {
-                _ = try await playlists.createAdding(name: name, selection: selection, count: count)
+                _ = try await playlists.createAdding(name: name, selection: selection, count: count, retarget: retarget)
             }
             working = false
             if let problem { failure = problem } else { dismiss() }

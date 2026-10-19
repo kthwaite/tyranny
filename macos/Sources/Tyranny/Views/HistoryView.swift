@@ -73,33 +73,21 @@ final class HistoryModel {
         }
     }
 
-    /// Double-click or Return: appends the played track to Up Next. A stale queue or library
-    /// revision refetches the snapshot and retries once.
-    func activate(position: Int) {
+    func playPause() { player?.transport.playPause() }
+
+    /// Double-click, Return and ⌥Return: plays the track once, or adds it to Up Next. The source
+    /// is Songs named History. A play whose track left the library says so instead.
+    func activate(position: Int, action: ActivationAction = .play) {
         guard let player, let entry = cache.loadedRow(at: position) else { return }
-        guard entry.track_id != nil else {
+        guard let trackID = entry.track_id, let revision = player.snapshot?.library.revision else {
             player.message = "\"\(entry.title)\" is no longer in the library."
             return
         }
-        player.mutate {
-            var retried = false
-            while true {
-                guard player.connected, let state = player.snapshot,
-                      let request = HistoryPlayback.enqueue(entry: entry, libraryRevision: state.library.revision) else {
-                    throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was queued.")
-                }
-                do {
-                    let _: Applied = try await player.send(
-                        "enqueue_tracks", try request.fields(expectedRevision: state.queue_revision))
-                    player.message = "Added \(entry.title.isEmpty ? "the track" : entry.title) to Up Next."
-                    return
-                } catch let failure as ServerFailure
-                    where ["stale_revision", "stale_library_revision"].contains(failure.code) && !retried {
-                    retried = true
-                    try await player.refreshSnapshot()
-                }
-            }
-        }
+        let selection = HistoryPlayback.selection(trackID: trackID, libraryRevision: revision)
+        let title = entry.title.isEmpty ? "the track" : entry.title
+        player.activation.start(EnqueueJob(
+            action: action, source: HistoryPlayback.source, request: .source(selection, player: player),
+            status: action == .addToUpNext ? "Added \(title) to Up Next." : nil))
     }
 }
 
@@ -192,7 +180,7 @@ struct HistoryTable: NSViewRepresentable {
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
-        let table = NSTableView()
+        let table = ActivatingTableView()
         table.setAccessibilityIdentifier(Self.identifier)
         table.style = .fullWidth
         table.rowHeight = 20
@@ -214,6 +202,12 @@ struct HistoryTable: NSViewRepresentable {
         table.delegate = context.coordinator
         table.target = context.coordinator
         table.doubleAction = #selector(Coordinator.activateClickedRow(_:))
+        // Return plays the selected play's track; ⌥Return adds it to Up Next.
+        table.onActivate = { [weak table, weak model = model] action in
+            guard let table, table.selectedRow >= 0 else { return }
+            model?.activate(position: table.selectedRow, action: action)
+        }
+        table.onPlayPause = { [weak model] in model?.playPause() }
         scroll.documentView = table
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(

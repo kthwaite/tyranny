@@ -158,17 +158,6 @@ final class UpNextModel {
         return UpNextSections.upcomingCount(total: drawer.total, playedNotCurrent: played, hasCurrent: hasCurrent)
     }
 
-    /// The loaded start of the queue as one page, for `UpNext.hasUpcoming`. nil when empty.
-    var loadedPage: Page<QueueItem>? {
-        guard let revision = drawer.revision else { return nil }
-        var rows: [QueueItem] = []
-        for (position, row) in drawer.loadedRows() {
-            guard position == rows.count else { break }
-            rows.append(row)
-        }
-        return Page(revision: revision, total: drawer.total, offset: 0, entries: rows)
-    }
-
     /// The drawer's upcoming entries among the loaded windows.
     func upcoming(limit: Int) -> [QueueItem] {
         let current = player?.snapshot?.current_id

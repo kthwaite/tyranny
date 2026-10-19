@@ -50,21 +50,8 @@ import Testing
 }
 
 @Suite struct HistoryPlaybackTests {
-    @Test func appendsTheTrackWithoutPlayingItFromSongsNamedHistory() {
-        let request = HistoryPlayback.enqueue(trackID: 42, libraryRevision: 9)
-        #expect(request.selection == .ids(libraryRevision: 9, trackIDs: [42]))
-        #expect(request.placement == .append)
-        #expect(!request.play)
-        #expect(request.source == QueueSource(kind: .songs, name: "History"))
-    }
-
-    @Test func entryWithoutATrackHasNoRequest() {
-        let entry = HistoryEntry(id: 1, played_at: 0, track_id: nil, title: "Gone", artist: "", album: "",
-                                 duration_ms: nil, source: nil)
-        #expect(HistoryPlayback.enqueue(entry: entry, libraryRevision: 1) == nil)
-        let live = HistoryEntry(id: 2, played_at: 0, track_id: 5, title: "Here", artist: "", album: "",
-                                duration_ms: nil, source: nil)
-        #expect(HistoryPlayback.enqueue(entry: live, libraryRevision: 1)?.selection
-                == .ids(libraryRevision: 1, trackIDs: [5]))
+    @Test func oneTrackByIDFromSongsNamedHistory() {
+        #expect(HistoryPlayback.selection(trackID: 42, libraryRevision: 9) == .ids(libraryRevision: 9, trackIDs: [42]))
+        #expect(HistoryPlayback.source == QueueSource(kind: .songs, name: "History"))
     }
 }
