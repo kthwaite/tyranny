@@ -116,6 +116,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var updating = false
         /// The layout the table's rows show. Replaced only in `update`, with a reload.
         private var layout = GroupLayout(grouping: .none, total: 0, spans: [])
+        private var shownSort: [SortKey] = []
         private var shownLayout: ListModel.LayoutToken?
         private var shownGeneration: UInt64?
         private var shownEpoch: UInt64?
@@ -152,12 +153,13 @@ struct VirtualTrackTable: NSViewRepresentable {
             updating = true
             defer { updating = false }
             let blocks = parent.list.showsAlbumBlocks
-            if parent.hidden != shownHidden || blocks != shownBlocks {
+            if parent.hidden != shownHidden || blocks != shownBlocks || parent.list.sortKeys != shownSort {
+                shownSort = parent.list.sortKeys
                 shownHidden = parent.hidden
                 shownBlocks = blocks
                 for column in table.tableColumns {
                     let id = column.identifier.rawValue
-                    column.isHidden = id == AlbumBlockCell.columnID ? !blocks : parent.hidden.contains(id)
+                    column.isHidden = id == AlbumBlockCell.columnID ? !blocks : isHidden(id)
                 }
                 // Autosaved column order may predate the gutter; it is always first.
                 if let gutter = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == AlbumBlockCell.columnID }),
@@ -446,6 +448,14 @@ struct VirtualTrackTable: NSViewRepresentable {
             // The album gutter stays first.
             let gutter = self.columnIndex(AlbumBlockCell.columnID)
             return columnIndex != gutter && newColumnIndex != gutter
+        }
+
+        /// A hidden column stays visible while the list sorts by it, so the arrow shows
+        /// (Recently Added's default Date Added).
+        private func isHidden(_ id: String) -> Bool {
+            guard parent.hidden.contains(id) else { return false }
+            let field = TrackColumns.column(id)?.sort
+            return !(field != nil && parent.list.sortKeys.contains { $0.field == field })
         }
 
         @objc func activateClickedRow(_ table: NSTableView) {

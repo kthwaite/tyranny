@@ -21,7 +21,7 @@ struct MainWindowView: View {
         case .songs:
             lists.list(for: .songs, source: .library, player: model, navigation: navigation)
         case .recent:
-            lists.list(for: .recent, source: .recent, player: model, navigation: navigation)
+            lists.list(for: .recent, source: .recent, player: model, navigation: navigation, usesBrowser: false)
         case .artists, .genres:
             lists.browse(navigation.destination, player: model, navigation: navigation).detail
         default:

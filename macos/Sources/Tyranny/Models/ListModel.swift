@@ -161,12 +161,14 @@ final class ListModel {
     }
 
     func setSort(_ keys: [SortKey]) {
-        guard keys != sort else { return }
+        // Clearing the sort returns to the destination's default, which the header shows.
+        guard keys != sort, !(keys.isEmpty && sort.isEmpty) else { return }
         sort = keys
         sync()
     }
 
-    var sortKeys: [SortKey] { sort }
+    /// The sort the header shows: the user's, else the destination's default.
+    var sortKeys: [SortKey] { sort.isEmpty ? destination.defaultSort : sort }
 
     func setBrowserGenres(_ ids: Set<UInt64>) { browserSelection.setGenres(ids); sync() }
     func setBrowserArtists(_ ids: Set<UInt64>) { browserSelection.setArtists(ids); sync() }
@@ -473,9 +475,10 @@ final class TrackLists {
     }
 
     func list(for destination: Destination, source: ListSource, player: PlayerModel,
-              navigation: NavigationModel) -> ListModel {
+              navigation: NavigationModel, usesBrowser: Bool = true) -> ListModel {
         if let list = lists[destination] { return list }
-        let list = ListModel(destination: destination, source: source, player: player, navigation: navigation)
+        let list = ListModel(destination: destination, source: source, player: player, navigation: navigation,
+                             usesBrowser: usesBrowser)
         lists[destination] = list
         return list
     }
