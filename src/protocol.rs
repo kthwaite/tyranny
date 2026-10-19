@@ -160,6 +160,9 @@ pub enum Command {
     },
     ListArtists {
         query: String,
+        /// Restricts artists to those with rows in this list; `null` for none.
+        #[serde(deserialize_with = "required")]
+        list: Option<ListDescription>,
         #[serde(deserialize_with = "required")]
         revision: Option<u64>,
         offset: usize,
@@ -769,6 +772,31 @@ mod tests {
     }
 
     #[test]
+    fn list_artists_list_field_is_required_and_nullable() {
+        let base = |list: Option<serde_json::Value>| {
+            let mut request = serde_json::json!({"id":1,"command":"list_artists","query":"",
+                "revision":null,"offset":0,"limit":10});
+            if let Some(list) = list {
+                request["list"] = list;
+            }
+            serde_json::from_value::<Request>(request)
+        };
+        assert!(base(None).is_err());
+        match base(Some(serde_json::Value::Null)).unwrap().command {
+            Command::ListArtists { list: None, .. } => {}
+            other => panic!("decoded as {other:?}"),
+        }
+        let list = serde_json::json!({"source":{"kind":"library"},
+            "browser":{"genre_ids":[3]},"query":"","sort":[],"group":"none"});
+        match base(Some(list)).unwrap().command {
+            Command::ListArtists {
+                list: Some(list), ..
+            } => assert_eq!(list.browser.genre_ids, [3]),
+            other => panic!("decoded as {other:?}"),
+        }
+    }
+
+    #[test]
     fn v9_list_commands_require_every_field() {
         assert_eq!(VERSION, 9);
         let list = serde_json::json!({
@@ -782,7 +810,7 @@ mod tests {
                 "revision":null,"offset":0,"limit":10}),
             serde_json::json!({"id":1,"command":"list_albums","list":list,"sort":"date_added",
                 "descending":true,"revision":3,"offset":0,"limit":10}),
-            serde_json::json!({"id":1,"command":"list_artists","query":"",
+            serde_json::json!({"id":1,"command":"list_artists","query":"","list":null,
                 "revision":null,"offset":0,"limit":10}),
             serde_json::json!({"id":1,"command":"list_genres","query":"",
                 "revision":null,"offset":0,"limit":10}),

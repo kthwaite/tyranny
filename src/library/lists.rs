@@ -67,7 +67,11 @@ pub(super) fn execute(
             page_bounds(*offset, *limit)?;
             (*revision, None)
         }
-        LibraryCommand::ListArtists(page) | LibraryCommand::ListGenres(page) => {
+        LibraryCommand::ListArtists { page, .. } => {
+            page_bounds(page.offset, page.limit)?;
+            (page.revision, Some(Filter::parse(&page.query, 1)?))
+        }
+        LibraryCommand::ListGenres(page) => {
             page_bounds(page.offset, page.limit)?;
             (page.revision, Some(Filter::parse(&page.query, 1)?))
         }
@@ -154,10 +158,21 @@ pub(super) fn execute(
                 entries,
             })
         }
-        LibraryCommand::ListArtists(page) => {
-            let filter = filter.expect("artist filter parsed above");
+        LibraryCommand::ListArtists { page, list } => {
+            // The filter was validated above; `artists` parses it again after the list.
+            // Only membership matters; ordering and grouping would be wasted work.
+            let members = list
+                .map(|list| {
+                    let membership = ListDescription {
+                        sort: Vec::new(),
+                        group: Grouping::None,
+                        ..list
+                    };
+                    compile_members(&transaction, &membership, cutoff, 1)
+                })
+                .transpose()?;
             let (total, entries, compilations) =
-                artists(&transaction, filter, page.offset, page.limit)?;
+                artists(&transaction, members, &page.query, page.offset, page.limit)?;
             LibraryReply::ListArtists {
                 page: Page {
                     revision,
@@ -469,19 +484,36 @@ fn filtered_values(filter: Filter, offset: usize, limit: usize) -> (String, Vec<
 }
 
 /// Album artists of non-compilation albums with a visible track matching the
-/// filter. The compilations row counts compilation albums the same way.
+/// filter, and, given `members`, the track also belonging to that list. The
+/// compilations row counts compilation albums the same way.
 fn artists(
     transaction: &Transaction<'_>,
-    filter: Filter,
+    members: Option<CompiledList>,
+    query: &str,
     offset: usize,
     limit: usize,
 ) -> Result<(u64, Vec<NamedCount>, Option<NamedCount>)> {
-    let filter_count = filter.values.len();
-    let (predicate, values, limit_parameter) = filtered_values(filter, offset, limit);
+    let (member_sql, mut member_values) = match members {
+        Some(CompiledList { sql, values }) => (
+            format!(" AND t.id IN (SELECT track_id FROM ({sql}))"),
+            values,
+        ),
+        None => (String::new(), Vec::new()),
+    };
+    let filter = Filter::parse(query, member_values.len() + 1)?;
+    let filter_count = member_values.len() + filter.values.len();
+    let Filter {
+        sql: predicate,
+        values,
+    } = filter;
+    member_values.extend(values);
+    let limit_parameter = member_values.len() + 1;
+    member_values.extend([Value::Integer(limit as i64), Value::Integer(offset as i64)]);
+    let values = member_values;
     let filter_values = &values[..filter_count];
     let tracks = format!(
         "FROM library_tracks t JOIN library_albums al ON al.id=t.album_id {ASSET}
-         WHERE {VISIBLE} AND ({predicate})"
+         WHERE {VISIBLE} AND ({predicate}){member_sql}"
     );
     let total = transaction.query_row(
         &format!("SELECT COUNT(DISTINCT al.artist_id) {tracks} AND al.compilation=0"),
@@ -493,7 +525,7 @@ fn artists(
         "SELECT ar.id,ar.name,COUNT(DISTINCT al.id),COUNT(*)
          FROM library_artists ar JOIN library_albums al ON al.artist_id=ar.id AND al.compilation=0
          JOIN library_tracks t ON t.album_id=al.id {ASSET}
-         WHERE {VISIBLE} AND ({predicate})
+         WHERE {VISIBLE} AND ({predicate}){member_sql}
          GROUP BY ar.id ORDER BY ar.search,ar.name,ar.id
          LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}"
     ))?;

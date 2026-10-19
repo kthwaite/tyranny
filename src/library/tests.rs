@@ -1963,7 +1963,10 @@ fn artists_exclude_compilations_and_report_compilations_row() {
     let mut connection = library();
     let mut artists = |offset, limit, query: &str| match execute(
         &mut connection,
-        LibraryCommand::ListArtists(page_request(Some(11), offset, limit, query)),
+        LibraryCommand::ListArtists {
+            page: page_request(Some(11), offset, limit, query),
+            list: None,
+        },
     ) {
         LibraryReply::ListArtists { page, compilations } => {
             (page.total, page.entries, compilations)
@@ -1988,6 +1991,73 @@ fn artists_exclude_compilations_and_report_compilations_row() {
     assert_eq!(
         artists(0, 10, "title:six"),
         (1, vec![named(2, "Beta", 1, 1)], None)
+    );
+}
+
+#[test]
+fn artists_narrowed_by_list_count_within_it() {
+    let mut connection = library();
+    let mut artists = |genres: &[u64], query: &str| {
+        let list = ListDescription {
+            browser: Browser {
+                genre_ids: genres.to_vec(),
+                ..Browser::default()
+            },
+            // Ignored for artists.
+            sort: vec![SortKey {
+                field: SortField::Title,
+                descending: true,
+            }],
+            group: Grouping::Album,
+            ..list(ListSource::Library)
+        };
+        match execute(
+            &mut connection,
+            LibraryCommand::ListArtists {
+                page: page_request(Some(11), 0, 10, query),
+                list: Some(list),
+            },
+        ) {
+            LibraryReply::ListArtists { page, compilations } => {
+                (page.total, page.entries, compilations)
+            }
+            other => panic!("unexpected artists reply: {other:?}"),
+        }
+    };
+    // Genre 1: tracks 1, 2 (Alpha) and 6 (Beta); no compilation row.
+    assert_eq!(
+        artists(&[1], ""),
+        (
+            2,
+            vec![named(1, "Alpha", 1, 2), named(2, "Beta", 1, 1)],
+            None
+        )
+    );
+    // Genre 3: track 4 (Alpha) and compilation track 7.
+    assert_eq!(
+        artists(&[3], ""),
+        (
+            1,
+            vec![named(1, "Alpha", 1, 1)],
+            Some(named(0, "Compilations", 1, 1))
+        )
+    );
+    // Genre 2 reaches Alpha's two albums and nobody else.
+    assert_eq!(artists(&[2], ""), (1, vec![named(1, "Alpha", 2, 3)], None));
+    // The name filter still applies inside the list.
+    assert_eq!(
+        artists(&[1], "title:six"),
+        (1, vec![named(2, "Beta", 1, 1)], None)
+    );
+    assert_eq!(artists(&[3], "title:six"), (0, vec![], None));
+    // Several genres union.
+    assert_eq!(
+        artists(&[1, 3], ""),
+        (
+            2,
+            vec![named(1, "Alpha", 2, 3), named(2, "Beta", 1, 1)],
+            Some(named(0, "Compilations", 1, 1))
+        )
     );
 }
 

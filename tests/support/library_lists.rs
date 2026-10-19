@@ -167,7 +167,7 @@ async fn list_tracks_round_trips_over_the_socket_and_rejects_stale_revision() {
     assert_eq!((summary_revision, entries), (revision, vec![album.clone()]));
     let Response::ListArtists { page, compilations } = ok(
         &mut client,
-        json!({"command":"list_artists","query":"","revision":null,"offset":0,"limit":10}),
+        json!({"command":"list_artists","query":"","list":null,"revision":null,"offset":0,"limit":10}),
     )
     .await
     else {

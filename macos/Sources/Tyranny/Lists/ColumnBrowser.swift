@@ -24,9 +24,9 @@ final class BrowserColumnModel<Row: Sendable & Identifiable> where Row.ID == UIn
     }
 }
 
-/// The column browser's three lists (spec 4.2). The Album column follows the Genre
-/// and Artist selections; all three follow the filter field. The server's artist
-/// and genre lists take only the filter, so the Artist column does not narrow by genre.
+/// The column browser's three lists (spec 4.2). The Artist column follows the Genre
+/// selection; the Album column follows the Genre and Artist selections; all three
+/// follow the filter field.
 @MainActor @Observable
 final class ColumnBrowserModel {
     let genres = BrowserColumnModel<NamedCount>()
@@ -38,6 +38,7 @@ final class ColumnBrowserModel {
     @ObservationIgnored private var revision: UInt64?
     @ObservationIgnored private var query: String?
     @ObservationIgnored private var narrowing: Browser?
+    @ObservationIgnored private var genreNarrowing: Browser?
 
     func disconnected(session: UInt64) {
         self.session = nil
@@ -51,15 +52,25 @@ final class ColumnBrowserModel {
               visible: Bool) {
         guard visible else { return }
         self.player = player
+        let genreNarrowing = Browser(genre_ids: narrowing.genre_ids)
         if session != self.session || query != self.query {
             self.session = session
             self.query = query
             self.narrowing = narrowing
+            self.genreNarrowing = genreNarrowing
             self.revision = revision
-            genres.reset { self.namedFetch("list_genres", column: self.genres, query: query, epoch: $0) }
-            artists.reset { self.namedFetch("list_artists", column: self.artists, query: query, epoch: $0) }
+            genres.reset { self.namedFetch("list_genres", column: self.genres, query: query, narrowing: nil, epoch: $0) }
+            artists.reset {
+                self.namedFetch("list_artists", column: self.artists, query: query, narrowing: genreNarrowing, epoch: $0)
+            }
             albums.reset { _ in self.albumFetch(query: query, narrowing: narrowing) }
             return
+        }
+        if genreNarrowing != self.genreNarrowing {
+            self.genreNarrowing = genreNarrowing
+            artists.reset {
+                self.namedFetch("list_artists", column: self.artists, query: query, narrowing: genreNarrowing, epoch: $0)
+            }
         }
         if narrowing != self.narrowing {
             self.narrowing = narrowing
@@ -72,15 +83,21 @@ final class ColumnBrowserModel {
         }
     }
 
+    /// `narrowing` restricts the Artist column to a list; no genre selected sends `null`.
     private func namedFetch(_ command: String, column: BrowserColumnModel<NamedCount>, query: String,
-                            epoch: UInt64) -> ListWindowCache<NamedCount>.Fetch {
+                            narrowing: Browser?, epoch: UInt64) -> ListWindowCache<NamedCount>.Fetch {
         { @MainActor [weak self, weak column] offset, limit, revision in
             guard let player = self?.player else { throw WindowFetchError.failed("The browser closed.") }
-            let fields: [String: JSONValue] = [
+            var fields: [String: JSONValue] = [
                 "query": .string(query), "revision": revision.map(JSONValue.uint) ?? .null,
                 "offset": .int(offset), "limit": .int(limit)]
             do {
                 if command == "list_artists" {
+                    if let narrowing, !narrowing.genre_ids.isEmpty {
+                        fields["list"] = try JSONValue.encoding(ListDescription(source: .library, browser: narrowing))
+                    } else {
+                        fields["list"] = .null
+                    }
                     let reply: ListArtistsResponse = try await player.send(command, fields)
                     if let column, column.epoch == epoch, offset == 0 { column.compilations = reply.compilations }
                     return WindowPage(revision: reply.revision, total: Int(reply.total), offset: reply.offset,

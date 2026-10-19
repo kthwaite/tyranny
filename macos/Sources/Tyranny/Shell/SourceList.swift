@@ -85,7 +85,7 @@ final class SourceCounts {
                     "list": list, "sort": .string(AlbumSort.albumArtist.rawValue), "descending": .bool(false),
                     "revision": .uint(revision), "offset": .int(0), "limit": .int(1)])
                 let artists: ListArtistsResponse = try await model.send("list_artists", [
-                    "query": .string(""), "revision": .uint(revision), "offset": .int(0), "limit": .int(1)])
+                    "query": .string(""), "list": .null, "revision": .uint(revision), "offset": .int(0), "limit": .int(1)])
                 let genres: ListGenresResponse = try await model.send("list_genres", [
                     "query": .string(""), "revision": .uint(revision), "offset": .int(0), "limit": .int(1)])
                 return (albums.total, artists.total, genres.total)

@@ -342,7 +342,7 @@ impl Coordinator {
             LibraryCommand::Rescan { root_id } => self.rescan(root_id),
             command @ (LibraryCommand::ListTracks { .. }
             | LibraryCommand::ListAlbums { .. }
-            | LibraryCommand::ListArtists(_)
+            | LibraryCommand::ListArtists { .. }
             | LibraryCommand::ListGenres(_)
             | LibraryCommand::AlbumSummaries { .. }
             | LibraryCommand::ListGroups { .. }) => {

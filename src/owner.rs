@@ -260,15 +260,19 @@ impl Controller {
             },
             Command::ListArtists {
                 query,
+                list,
                 revision,
                 offset,
                 limit,
-            } => LibraryCommand::ListArtists(PageRequest {
-                revision,
-                offset,
-                limit,
-                query,
-            }),
+            } => LibraryCommand::ListArtists {
+                page: PageRequest {
+                    revision,
+                    offset,
+                    limit,
+                    query,
+                },
+                list,
+            },
             Command::ListGenres {
                 query,
                 revision,

@@ -277,7 +277,11 @@ pub enum LibraryCommand {
         offset: usize,
         limit: usize,
     },
-    ListArtists(PageRequest),
+    /// `list` restricts to artists with rows in it; its sort and group are ignored.
+    ListArtists {
+        page: PageRequest,
+        list: Option<ListDescription>,
+    },
     ListGenres(PageRequest),
     AlbumSummaries {
         album_ids: Vec<u64>,
