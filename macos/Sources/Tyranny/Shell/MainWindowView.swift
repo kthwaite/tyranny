@@ -24,9 +24,23 @@ struct MainWindowView: View {
             lists.list(for: .recent, source: .recent, player: model, navigation: navigation, usesBrowser: false)
         case .artists, .genres:
             lists.browse(navigation.destination, player: model, navigation: navigation).detail
+        case .playlist:
+            currentPlaylist.map { lists.playlist($0, player: model, navigation: navigation) }
         default:
             nil
         }
+    }
+
+    /// The shown destination's playlist, once the catalog has it.
+    private var currentPlaylist: Playlist? {
+        guard case .playlist(let id) = navigation.destination else { return nil }
+        return model.savedPlaylists.playlist(id: id)
+    }
+
+    /// The shown playlist was deleted (here or by another client).
+    private var playlistGone: Bool {
+        guard case .playlist = navigation.destination else { return false }
+        return model.savedPlaylists.isLoaded && currentPlaylist == nil
     }
 
     /// The drawer follows the toggle while connected. Up Next itself already lists the queue.
@@ -57,6 +71,11 @@ struct MainWindowView: View {
         .toolbar { toolbar }
         .onChange(of: navigation.filterFocusRequest) { _, _ in filterFocused = true }
         .onChange(of: filterError) { _, error in if error == nil { dismissedFilterError = nil } }
+        .onChange(of: playlistGone) { _, gone in if gone { navigation.destination = .songs } }
+        .onChange(of: model.savedPlaylists.cache.generation) { _, _ in
+            guard model.savedPlaylists.isLoaded else { return }
+            lists.prunePlaylists(keeping: Set(model.savedPlaylists.rows.map(\.id)))
+        }
     }
 
     // MARK: - Toolbar
@@ -190,7 +209,7 @@ struct MainWindowView: View {
         } else if navigation.destination == .history {
             HistoryView(model: lists.history(player: model), player: model)
         } else if let list = currentList {
-            TrackListView(list: list, player: model, navigation: navigation)
+            TrackListView(list: list, player: model, navigation: navigation, playlist: currentPlaylist)
         } else {
             DestinationPlaceholder(destination: navigation.destination)
         }

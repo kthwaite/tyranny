@@ -490,7 +490,8 @@ struct VirtualTrackTable: NSViewRepresentable {
                 do {
                     let selection = try parent.list.encode(positions)
                     dragToken = parent.player.beginSelectionDrag(selection, count: positions.count,
-                                                                 label: parent.list.destination.title)
+                                                                 label: parent.list.displayName ?? parent.list.destination.title)
+                    if dragToken != nil { parent.list.dragBegan(positions: positions) }
                 } catch {
                     parent.player.message = (error as? LocalizedError)?.errorDescription
                         ?? "Wait for the list to load, then drag again."
@@ -516,22 +517,34 @@ struct VirtualTrackTable: NSViewRepresentable {
             dragToken = nil
             dragItems = 0
             dragLifetime = nil
+            parent.list.dragEnded()
         }
 
-        // MARK: Reorder drops (regular playlists)
+        // MARK: Drops (regular playlists)
+
+        private static let dragType = NSPasteboard.PasteboardType(TrackDrag.type)
 
         func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
                        proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-            // Only this table's own rows are reorder drops. Grouped or sorted, the shown order is
-            // not the playlist's, so the drop is refused and the view says how to reorder.
-            guard info.draggingSource as? NSTableView === tableView, !parent.list.allowsReorder else { return [] }
-            parent.list.showReorderHint()
-            return []
+            guard let token = info.draggingPasteboard.string(forType: Self.dragType) else { return [] }
+            let own = (info.draggingSource as? NSTableView) === tableView
+            switch parent.list.proposeDrop(token: token, own: own, row: row) {
+            case .refuse:
+                return []
+            case .row(let at):
+                tableView.setDropRow(at, dropOperation: .above)
+                return .copy
+            case .table:
+                tableView.setDropRow(-1, dropOperation: .on)
+                return .copy
+            }
         }
 
         func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
                        dropOperation: NSTableView.DropOperation) -> Bool {
-            false
+            guard let token = info.draggingPasteboard.string(forType: Self.dragType) else { return false }
+            let own = (info.draggingSource as? NSTableView) === tableView
+            return parent.list.acceptDrop(token: token, own: own, row: row)
         }
     }
 }

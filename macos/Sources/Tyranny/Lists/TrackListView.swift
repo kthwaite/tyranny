@@ -8,8 +8,23 @@ struct TrackListView: View {
     let list: ListModel
     let player: PlayerModel
     @Bindable var navigation: NavigationModel
+    /// Set when the list is a saved playlist: the header gains its actions.
+    var playlist: Playlist?
     var chrome: Chrome = .page(title: nil)
     private let columns = ColumnPreferences.shared
+    @State private var sheet: Sheet?
+
+    private enum Sheet: Identifiable {
+        case snapshot(Playlist), rule(Playlist), addToPlaylist(TrackSelection, Int)
+
+        var id: String {
+            switch self {
+            case .snapshot: "snapshot"
+            case .rule: "rule"
+            case .addToPlaylist: "add-to-playlist"
+            }
+        }
+    }
 
     /// A page fills the main area. A section sits under another list with a small heading
     /// (Appears On) and the identifier the section is known by.
@@ -42,7 +57,22 @@ struct TrackListView: View {
         .onChange(of: layoutKey, initial: true) { _, _ in list.syncLayout() }
         .onChange(of: list.filterError, initial: true) { _, error in navigation.filterError = error }
         .onDisappear { navigation.filterError = nil }
+        .sheet(item: $sheet) { sheet in
+            switch sheet {
+            case .snapshot(let playlist):
+                SmartPlaylistSnapshotSheet(playlists: player.savedPlaylists, playlist: playlist) {
+                    navigation.destination = .playlist($0.id)
+                }
+            case .rule(let playlist):
+                SmartPlaylistEditor(playlists: player.savedPlaylists, player: player, playlist: playlist)
+            case .addToPlaylist(let selection, let count):
+                AddToPlaylistSheet(playlists: player.savedPlaylists, selection: selection, count: count)
+            }
+        }
         #if DEBUG
+        .onChange(of: list.key, initial: true) { _, _ in
+            if case .playlist = list.destination { NativePlaylistKit.shown = list }
+        }
         .onAppear {
             if list.destination == .songs { NativeSongsSmoke.songsList = list }
             if list.destination == .recent { NativeHistorySmoke.recent = list }
@@ -59,7 +89,7 @@ struct TrackListView: View {
         SyncKey(connected: player.connected, session: player.playlistConnectionGeneration,
                 library: player.snapshot?.library.revision, history: player.snapshot?.history_revision,
                 filter: navigation.filter, browser: list.usesBrowser && navigation.columnBrowserVisible,
-                grouping: navigation.grouping(for: list.destination))
+                grouping: navigation.grouping(for: list.destination), source: list.liveSource)
     }
 
     /// The cache's rows moved on: grouped lists fetch spans for them.
@@ -83,6 +113,8 @@ struct TrackListView: View {
         let filter: String
         let browser: Bool
         let grouping: Grouping
+        /// A playlist's source names its revision, which moves with each edit.
+        let source: ListSource
     }
 
     // MARK: Header
@@ -99,6 +131,14 @@ struct TrackListView: View {
                 .monospacedDigit()
                 .accessibilityIdentifier("list-count")
             Spacer(minLength: 12)
+            if let playlist {
+                playlistActions(playlist)
+            } else {
+                Button("Add to Playlist…", action: addToPlaylist)
+                    .disabled(!player.canMutate || list.selection.isEmpty)
+                    .help("Add the selected tracks to a playlist")
+                    .accessibilityIdentifier("add-to-playlist")
+            }
             Picker("Group", selection: Binding(
                 get: { navigation.grouping(for: list.destination) },
                 set: { navigation.setGrouping($0, for: list.destination) }
@@ -139,8 +179,46 @@ struct TrackListView: View {
         .padding(.vertical, 8)
     }
 
+    // MARK: Playlist actions
+
+    /// Enqueue and Play All use the whole playlist, whatever the filter shows. A smart playlist
+    /// also offers its rule and a regular copy of its results.
+    @ViewBuilder private func playlistActions(_ playlist: Playlist) -> some View {
+        let empty = playlist.isSmart ? list.cache.total == 0 : playlist.entry_count == 0
+        if playlist.isSmart {
+            Button("Edit Rule…") { sheet = .rule(playlist) }
+                .disabled(!player.canMutate)
+                .accessibilityIdentifier("playlist-edit-rule")
+            Button("Create Regular Playlist from Results…") { sheet = .snapshot(playlist) }
+                .disabled(!player.canMutate)
+                .accessibilityIdentifier("playlist-snapshot")
+        }
+        Button("Enqueue") { enqueue(playlist, play: false) }
+            .disabled(!player.canMutate || empty)
+            .help("Add every track of this playlist to Up Next")
+            .accessibilityIdentifier("playlist-enqueue")
+        Button("Play All") { enqueue(playlist, play: true) }
+            .disabled(!player.canMutate || empty)
+            .help("Play this playlist from its start")
+            .accessibilityIdentifier("playlist-play")
+    }
+
+    private func enqueue(_ playlist: Playlist, play: Bool) {
+        player.mutate { [player] in try await player.savedPlaylists.enqueue(playlist, play: play) }
+    }
+
+    private func addToPlaylist() {
+        let positions = list.selectedPositions
+        do {
+            sheet = .addToPlaylist(try list.encode(positions), positions.count)
+        } catch {
+            player.message = (error as? LocalizedError)?.errorDescription ?? "Wait for the list to load, then try again."
+        }
+    }
+
     private var pageTitle: String {
         if case .page(let title?) = chrome { return title }
+        if let playlist { return playlist.name }
         return list.destination.title
     }
 
@@ -183,7 +261,14 @@ struct TrackListView: View {
 
     @ViewBuilder private var emptyState: some View {
         if list.cache.revision != nil, list.cache.total == 0 {
-            if list.destination == .recent, !list.isNarrowed {
+            if let playlist {
+                Text(list.isNarrowed ? "No matching songs"
+                     : playlist.isSmart ? "No available tracks match this rule." : "This playlist is empty. Drop tracks here.")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("playlist-empty")
+            } else if list.destination == .recent, !list.isNarrowed {
                 Text("Nothing added in the last 30 days")
                     .font(.title3)
                     .foregroundStyle(.secondary)

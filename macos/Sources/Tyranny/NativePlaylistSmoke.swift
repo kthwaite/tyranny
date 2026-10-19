@@ -3,270 +3,244 @@ import AppKit
 import Foundation
 import TyrannyCore
 
-/// Opt-in observer: interaction uses external Accessibility actions and real mouse events.
+/// Opt-in acceptance driver for playlists in the source list, in three modes:
+///
+/// - `--playlist-smoke-output`: the gate's fixture is 105 indexed tracks, an empty queue and no
+///   playlists. Playlists are made with the picker and the "+" menu, filled by drops on the
+///   source list, enqueued and played, then all but one are deleted.
+/// - `--playlist-smoke-relaunch`: after a daemon and app restart that playlist is still there.
+/// - `--drag-smoke-output`: insertion drops, reorder, the refused reorder in a grouped list,
+///   and a drop on Up Next, with real mouse drags.
+///
+/// Controls are driven through the external Accessibility driver and CGEvent mouse drags.
+/// Rename and Delete sit in context menus, which that driver cannot open: they call the
+/// model's edits instead.
 @MainActor
 enum NativePlaylistSmoke {
-    private struct Failure: Error, LocalizedError {
-        let message: String
-        var errorDescription: String? { message }
-    }
     private static var started = false
-    private static var cases: [String] = []
-    private static var output = URL(fileURLWithPath: "/tmp/tyranny-playlist-smoke")
-    private static var retainedID: UInt64?
-    private static var retainedEntries: [PlaylistEntry] = []
 
-    static func startIfRequested(_ model: PlayerModel) {
+    static func startIfRequested(_ model: PlayerModel, navigation: NavigationModel) {
         let args = CommandLine.arguments
-        guard !started, let index = args.firstIndex(of: "--playlist-smoke-output"), index + 1 < args.count else { return }
+        let drag = args.firstIndex(of: "--drag-smoke-output")
+        guard !started, let index = drag ?? args.firstIndex(of: "--playlist-smoke-output"), index + 1 < args.count else { return }
         started = true
-        output = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+        let kit = NativePlaylistKit(model: model, navigation: navigation,
+                                    output: URL(fileURLWithPath: args[index + 1], isDirectory: true),
+                                    tag: drag == nil ? "PLAYLIST_SMOKE" : "DRAG_SMOKE")
         Task {
+            var failure: String?
             do {
-                try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-                try await wait("connection and bounded catalog") { model.connected && model.tracks != nil && model.playlists != nil && !model.playlistsLoading }
-                try await NativeSmoke.drive("activate")
-                if args.contains("--playlist-smoke-double-click-only") {
-                    try await press("toggle-playlists")
-                    try await select("playlist-list", [0])
-                    try await wait("saved playlist loaded") { model.playlistReady }
-                    try await exerciseDoubleClick(model)
-                } else if args.contains("--playlist-smoke-relaunch") {
-                    try await relaunch(model)
-                } else {
-                    try await exercise(model)
+                try FileManager.default.createDirectory(at: kit.output, withIntermediateDirectories: true)
+                try await kit.wait("connection and catalog") {
+                    model.connected && model.snapshot?.library.tracks == 105
+                        && model.snapshot?.library.scan.phase == "complete" && model.savedPlaylists.isLoaded
                 }
-                try finish(model, passed: true, error: nil)
+                try await NativeSmoke.drive("activate")
+                try await Task.sleep(for: .milliseconds(300))
+                if drag != nil {
+                    try await exerciseDrag(kit)
+                } else if args.contains("--playlist-smoke-relaunch") {
+                    try await relaunch(kit)
+                } else {
+                    try await exercise(kit)
+                }
             } catch {
-                try? capture("failure")
-                try? finish(model, passed: false, error: error.localizedDescription)
+                try? kit.capture("failure")
+                failure = error.localizedDescription
             }
-            for window in NSApp.windows {
-                if let sheet = window.attachedSheet { window.endSheet(sheet) }
-            }
+            try? kit.finish(automation: "External Accessibility clicks, picker and sheet controls, and CGEvent mouse drags on the displayed SwiftUI/AppKit views; server reads only for expected values; composited window screenshots. Capture-only, no device-output claim.",
+                            error: failure)
+            NativePlaylistKit.endSheets()
             NSApp.terminate(nil)
         }
     }
 
-    private static func exercise(_ model: PlayerModel) async throws {
-        try check(model.snapshot?.queue_length == 0 && model.playlists?.total == 0, "Initial gate requires empty queue and catalog")
-        try check(model.tracks?.total == 105 && model.tracks?.entries.count == 100, "Initial gate requires 105 preindexed real tracks")
-        try await select("track-table", Array(0..<100))
-        try await wait("100 selected tracks") { model.selectedTracks.count == 100 }
-        try await press("add-to-playlist")
-        try await NativeSmoke.drive("value", "playlist-picker-filter", "no-matching-saved-playlist")
-        try await NativeSmoke.drive("value", "playlist-picker-name", "Native Retained Playlist")
-        try capture("create-from-picker")
-        try await press("playlist-picker-create-add")
-        try await wait("created and populated from picker") {
-            !model.busy && !model.playlistsLoading && model.currentPlaylist?.entry_count == 100
-        }
-        retainedID = model.selectedPlaylist
-        try check(retainedID != nil && !model.showPlaylists && model.selectedTracks.count == 100,
-                  "Picker creation lost library navigation or selection")
-        cases.append("AX-create-and-add-100-tracks-without-leaving-library")
-        try await press("toggle-playlists")
-        try await wait("playlist pane") { model.showPlaylists }
-        try await NativeSmoke.drive("value", "playlist-filter", "no-matching-saved-playlist")
-        try await wait("empty catalog filter") { !model.playlistsLoading && model.playlists?.total == 0 }
-        try capture("filtered-playlists")
-        try await NativeSmoke.drive("value", "playlist-filter", "")
-        try await wait("catalog filter reset") { !model.playlistsLoading && model.playlists?.total == 1 }
-        cases.append("AX-bounded-catalog-filter-and-empty-result")
+    // MARK: Create, add, enqueue
 
-        try await press("toggle-playlists")
-        try await press("tracks-next")
-        try await wait("last library page") { model.tracks?.offset == 100 && model.tracks?.entries.count == 5 }
-        try await select("track-table", Array(0..<5))
-        try await wait("five selected tracks") { model.selectedTracks.count == 5 }
-        try await press("add-to-playlist")
-        try await select("playlist-picker-list", [0])
-        try await wait("existing picker destination") { model.currentPlaylist?.entry_count == 100 }
-        try await NativeSmoke.drive("value", "playlist-picker-name", "Native Retained Playlist")
-        try await press("playlist-picker-create-add")
-        try await wait("duplicate creation rejected") { !model.busy }
-        try check(model.playlists?.total == 1 && model.currentPlaylist?.entry_count == 100
-                  && model.selectedTracks.count == 5 && !model.showPlaylists,
-                  "Rejected creation changed playlist contents or selection")
-        try capture("picker-create-error")
-        cases.append("AX-duplicate-create-error-stays-in-picker-and-preserves-selection")
-        try await select("playlist-picker-list", [0])
-        try await press("playlist-picker-add")
-        try await wait("existing destination after rejected creation") {
-            !model.busy && !model.playlistsLoading && model.currentPlaylist?.entry_count == 105
-        }
-        cases.append("AX-library-multiselection-paged-picker-add-105-tracks")
+    private static func exercise(_ kit: NativePlaylistKit) async throws {
+        let model = kit.model
+        try kit.check(model.snapshot?.queue_length == 0 && model.savedPlaylists.cache.total == 0,
+                      "The gate needs an empty queue and no playlists")
+        let songs = try await songsList(kit)
+        let table = "track-table-songs"
 
-        try await press("toggle-playlists")
-        try await select("playlist-list", [0])
-        try await wait("first entry page") { model.playlistReady && model.playlistEntries?.offset == 0 && model.playlistEntries?.entries.count == 100 }
-        let originalIDs = model.playlistEntries!.entries.map(\.id)
-        try await select("playlist-entry-table", [99])
-        try await wait("boundary selection") { model.selectedPlaylistEntries == [originalIDs[99]] }
-        try await press("playlist-down")
-        try await wait("move down across page boundary") {
-            !model.busy && model.playlistReady && model.playlistEntries?.offset == 100
-                && model.playlistEntries?.entries.first?.id == originalIDs[99]
-        }
-        try capture("page-boundary-move")
-        try await select("playlist-entry-table", [0])
-        try await wait("moved entry selected") { model.selectedPlaylistEntries == [originalIDs[99]] }
-        try await press("playlist-up")
-        try await wait("move up across page boundary") {
-            !model.busy && model.playlistReady && model.playlistEntries?.offset == 0
-                && model.playlistEntries?.entries.map(\.id) == originalIDs
-        }
-        cases.append("AX-single-occurrence-move-across-both-page-boundaries")
+        // 100 selected rows, a new playlist from the picker.
+        try await kit.select(table, Array(0..<100))
+        try await kit.wait("100 rows selected") { songs.selectedPositions.count == 100 }
+        try await kit.press("add-to-playlist")
+        try await kit.value("playlist-picker-name", "Native Retained Playlist")
+        try kit.capture("create-from-picker")
+        try await kit.press("playlist-picker-create-add")
+        let retained = try await kit.waitForPlaylist("Native Retained Playlist", entries: 100)
+        try await kit.wait("sidebar row") { model.savedPlaylists.isLoaded }
+        try await kit.drive("exists", Destination.playlist(retained.id).identifier)
+        try kit.check(songs.selectedPositions.count == 100, "Creating from the picker lost the selection")
+        kit.passed("native-picker-creates-a-playlist-and-adds-100-selected-rows")
 
-        try await press("playlist-rename")
-        try await NativeSmoke.drive("value", "playlist-name", "Native Renamed Playlist")
-        try await press("playlist-name-save")
-        try await wait("rename persisted") { !model.busy && model.playlistReady && model.currentPlaylist?.name == "Native Renamed Playlist" }
-        try await select("playlist-entry-table", [0, 1])
-        try await wait("entry multiselection") { model.selectedPlaylistEntries.count == 2 }
-        try await press("playlist-remove")
-        try await wait("atomic multiselect removal") { !model.busy && model.playlistReady && model.playlistEntries?.total == 103 }
-        try check(model.playlistEntries?.entries.first?.id == originalIDs[2], "Removal did not preserve occurrence order")
-        cases.append("AX-rename-and-multiselect-remove")
-        try capture("saved-playlist")
+        // Five more rows: a duplicate name first, then the existing playlist.
+        try await kit.drive("scroll-fraction", table, "1")
+        try await kit.wait("last window") { songs.cache.loadedRow(at: 104) != nil }
+        try await kit.select(table, [100, 101, 102, 103, 104])
+        try await kit.wait("five rows selected") { songs.selectedPositions.count == 5 }
+        try await kit.press("add-to-playlist")
+        try await kit.value("playlist-picker-name", "Native Retained Playlist")
+        try await kit.press("playlist-picker-create-add")
+        try await kit.drive("exists", "playlist-picker-create-error")
+        try kit.check(model.savedPlaylists.rows.count == 1 && model.savedPlaylists.rows[0].entry_count == 100,
+                      "A rejected creation changed the catalog")
+        try await kit.select("playlist-picker-list", [0])
+        try await kit.press("playlist-picker-add")
+        let filled = try await kit.waitForPlaylist("Native Retained Playlist", entries: 105)
+        kit.passed("native-picker-reports-a-duplicate-name-and-adds-to-an-existing-playlist")
 
-        try await press("playlist-enqueue")
-        try await wait("whole playlist enqueue") { !model.busy && model.snapshot?.queue_length == 103 }
-        let firstQueued = model.snapshot?.current_id
-        try await press("playlist-play")
-        try await wait("whole playlist append and play") {
-            !model.busy && model.snapshot?.queue_length == 206 && model.snapshot?.transport == "playing"
-                && model.snapshot?.current_id != firstQueued
+        // The playlist page: rows in playlist order, Enqueue and Play All.
+        try await kit.open(.playlist(filled.id))
+        try await kit.wait("playlist list") { NativePlaylistKit.shown?.destination == .playlist(filled.id) }
+        guard let list = NativePlaylistKit.shown else { throw NativePlaylistKit.Failure(message: "Playlist list missing") }
+        try await kit.wait("playlist rows") { list.cache.total == 105 && list.cache.loadedRow(at: 0) != nil }
+        let entries = try await kit.entries(filled)
+        try kit.check((0..<5).allSatisfy { list.cache.loadedRow(at: $0)?.row_id == entries[$0].id }, "Rows differ from the server's order")
+        try await kit.drive("expect-text", "list-count", "105 songs")
+        try kit.capture("playlist")
+        kit.passed("native-playlist-page-shows-the-playlist-in-its-own-order")
+
+        try await kit.press("playlist-enqueue")
+        try await kit.wait("whole playlist enqueued") { !model.busy && model.snapshot?.queue_length == 105 }
+        try await kit.press("playlist-play")
+        try await kit.wait("whole playlist appended and playing") {
+            !model.busy && model.snapshot?.queue_length == 210 && model.snapshot?.transport == "playing"
         }
-        try check(model.currentPlaylist?.entry_count == 103, "Enqueue mutated saved entries")
-        cases.append("AX-whole-playlist-enqueue-and-append-play-with-independent-occurrences")
-        try capture("playlist-playing")
+        try kit.check(model.savedPlaylists.playlist(id: filled.id)?.entry_count == 105, "Enqueue changed the playlist")
+        kit.passed("native-enqueue-and-play-all-append-independent-occurrences")
 
-        try await create(model, name: "Temporary Playlist")
-        try await press("playlist-delete")
-        try await NativeSmoke.drive("press-title", "Delete Playlist")
-        try await wait("confirmed playlist deletion") { !model.busy && !model.playlistsLoading && model.playlists?.total == 1 }
-        try check(model.snapshot?.queue_length == 206 && model.snapshot?.transport == "playing", "Deleting saved playlist changed queue or playback")
-        cases.append("AX-confirmed-delete-preserves-queue-and-playback")
-        try await select("playlist-list", [0])
-        try await wait("retained playlist") { model.playlistReady && model.selectedPlaylist == retainedID }
-        try await collectRetained(model)
-        try capture("retained-for-restart")
-        try await exerciseDoubleClick(model)
+        // A second playlist from the "+" menu, filled by a drop on its source row.
+        try await kit.drive("choose", "source-add", "New Playlist")
+        try await kit.value("playlist-name", "Temporary Playlist")
+        try await kit.press("playlist-name-save")
+        let temporary = try await kit.waitForPlaylist("Temporary Playlist", entries: 0)
+        try await kit.open(.songs)
+        try await kit.select(table, [0, 2])
+        try await kit.wait("two rows selected") { songs.selectedPositions.count == 2 }
+        let first = try await kit.songs(3)
+        try await kit.drag(table, row: 0, steps: [NativePlaylistKit.target(Destination.playlist(temporary.id).identifier, hold: 0.5)])
+        _ = try await kit.waitForPlaylist("Temporary Playlist", entries: 2)
+        let dropped = try await kit.entries(temporary)
+        try kit.check(dropped.map(\.track_id) == [first[0].track.id, first[2].track.id], "Row drop did not append in order")
+        kit.passed("native-drop-on-a-regular-playlist-row-appends")
+
+        // Rename and delete (context menus: model edits). The queue keeps playing.
+        let queue = model.snapshot?.queue_length
+        try await model.savedPlaylists.rename(temporary, name: "Renamed Temporary")
+        _ = try await kit.waitForPlaylist("Renamed Temporary", entries: 2)
+        let renamed = kit.playlist(named: "Renamed Temporary")!
+        try await model.savedPlaylists.delete(renamed)
+        try await kit.wait("deleted") { kit.playlists.count == 1 }
+        try kit.check(model.snapshot?.queue_length == queue && model.snapshot?.transport == "playing",
+                      "Deleting a playlist changed the queue or playback")
+        kit.passed("native-rename-and-delete-keep-the-queue-and-playback")
+        try await kit.open(.playlist(filled.id))
+        try kit.capture("retained-for-restart")
     }
 
-    private static func exerciseDoubleClick(_ model: PlayerModel) async throws {
-        let originalLength = model.snapshot!.queue_length
-        let originalCurrent = model.snapshot!.current_id
-        try await press("toggle-playlists")
-        if model.tracks?.offset != 0 {
-            try await press("tracks-previous")
-            try await wait("first library page before mouse scenario") { model.tracks?.offset == 0 && model.tracks?.entries.count == 100 }
+    private static func relaunch(_ kit: NativePlaylistKit) async throws {
+        let model = kit.model
+        try kit.check(model.savedPlaylists.rows.count == 1, "Restart must retain exactly one playlist")
+        try kit.check(model.snapshot?.transport == "paused", "The restart fixture must be paused")
+        let playlist = model.savedPlaylists.rows[0]
+        try await kit.open(.playlist(playlist.id))
+        try await kit.wait("playlist rows") {
+            NativePlaylistKit.shown?.destination == .playlist(playlist.id) && (NativePlaylistKit.shown?.cache.total ?? 0) > 100
         }
-        try await press("tracks-next")
-        try await wait("library for mouse activation") { !model.showPlaylists && model.tracks?.entries.count == 5 }
-        let tracks = model.tracks!.entries
-        try await select("track-table", [1])
-        try await wait("different row selected before single click") { model.selectedTracks == [tracks[1].id] }
-        try await NativeSmoke.drive("click-row", "track-table", "0,0.85")
-        try await wait("single click selects only") { model.selectedTracks == [tracks[0].id] }
-        try check(model.selectedTracks == [tracks[0].id], "Single click did not retain the clicked selection")
-        try check(model.snapshot?.queue_length == originalLength && model.snapshot?.current_id == originalCurrent,
-                  "Single click changed playback")
-        try await select("track-table", [0, 1])
-        try await wait("multiselection before activation") { model.selectedTracks.count == 2 }
-        try await NativeSmoke.drive("double-click-row", "track-table", "1,0.85")
-        try await wait("double click plays clicked library track only") {
-            !model.busy && model.snapshot?.queue_length == originalLength + 1
-                && model.snapshot?.transport == "playing"
-                && model.snapshot?.now_playing?.title == tracks[1].metadata.title
-        }
-        cases.append("mouse-single-click-selects-double-click-plays-exact-library-row")
-        let queueID = model.snapshot?.current_id
-
-        try await press("toggle-playlists")
-        try await wait("saved entries for mouse activation") { model.showPlaylists && model.playlistReady }
-        let entries = model.playlistEntries!
-        try await select("playlist-entry-table", [0, 1])
-        try await NativeSmoke.drive("double-click-row", "playlist-entry-table", "1,0.8")
-        try await wait("double click plays single saved occurrence") {
-            !model.busy && model.snapshot?.queue_length == originalLength + 2
-                && model.snapshot?.transport == "playing" && model.snapshot?.current_id != queueID
-                && model.snapshot?.now_playing?.title == entries.entries[1].metadata.title
-        }
-        try check(model.playlistEntries?.revision == entries.revision
-                  && model.playlistEntries?.entries == entries.entries, "Activation edited the saved playlist")
-        try capture("double-click-playback")
-        cases.append("mouse-saved-playlist-double-click-plays-only-clicked-track")
+        try kit.capture("restart-persistence")
+        kit.passed("native-relaunch-shows-the-persisted-playlist")
     }
 
-    private static func relaunch(_ model: PlayerModel) async throws {
-        try check(model.playlists?.total == 1, "Restart must retain exactly one playlist")
-        try check(model.snapshot?.transport == "paused", "Restart fixture must be paused")
-        try await press("toggle-playlists")
-        try await select("playlist-list", [0])
-        try await wait("persisted playlist entries") { model.playlistReady && (model.playlistEntries?.total ?? 0) > 100 }
-        retainedID = model.selectedPlaylist
-        try await collectRetained(model)
-        try capture("restart-persistence")
-        cases.append("AX-relaunch-bounded-persisted-playlist-browsing-with-paused-queue")
+    // MARK: Drags
+
+    private static func exerciseDrag(_ kit: NativePlaylistKit) async throws {
+        let model = kit.model
+        try kit.check(model.snapshot?.queue_length == 0 && model.savedPlaylists.cache.total == 0,
+                      "The drag fixture needs an empty queue and no playlists")
+        let songs = try await songsList(kit)
+        let table = "track-table-songs"
+        let source = try await kit.songs(5)
+        let ids = source.map(\.track.id)
+
+        try await kit.drive("choose", "source-add", "New Playlist")
+        try await kit.value("playlist-name", "Drag Destination")
+        try await kit.press("playlist-name-save")
+        let created = try await kit.waitForPlaylist("Drag Destination", entries: 0)
+        let row = Destination.playlist(created.id).identifier
+        let tableID = "track-table-playlist-\(created.id)"
+        try await kit.open(.songs)
+
+        // Drop on the source row: appended in order.
+        try await kit.select(table, [0, 2, 4])
+        try await kit.wait("three rows selected") { songs.selectedPositions.count == 3 }
+        try await kit.drag(table, row: 0, steps: [NativePlaylistKit.target(row, hold: 0.5)])
+        _ = try await kit.waitForPlaylist("Drag Destination", entries: 3)
+        try kit.check(try await kit.entries(created).map(\.track_id) == [ids[0], ids[2], ids[4]], "The row drop did not append in order")
+        kit.passed("native-drag-on-a-playlist-row-appends-the-selection-in-order")
+
+        // Hold over the row to open the playlist, then drop at an insertion point.
+        try await kit.open(.songs)
+        try await kit.select(table, [1, 3])
+        try await kit.wait("two rows selected") { songs.selectedPositions.count == 2 }
+        try await kit.drag(table, row: 1, steps: [
+            NativePlaylistKit.hover(row), NativePlaylistKit.target(tableID, row: 1, edge: "before")],
+            capture: "playlist-insertion-indicator")
+        _ = try await kit.waitForPlaylist("Drag Destination", entries: 5)
+        var expected = try await kit.entries(created)
+        try kit.check(expected.map(\.track_id) == [0, 1, 3, 2, 4].map { ids[$0] }, "The insertion drop appended instead of inserting")
+        kit.passed("native-drag-inserts-before-the-row-under-the-pointer")
+
+        // Reorder inside the playlist: a non-contiguous selection to the top.
+        guard let list = NativePlaylistKit.shown else { throw NativePlaylistKit.Failure(message: "Playlist list missing") }
+        try await kit.wait("playlist rows") { list.cache.total == 5 && list.cache.loadedRow(at: 4) != nil }
+        try await kit.select(tableID, [1, 3])
+        try await kit.wait("rows selected") { list.selectedPositions == IndexSet([1, 3]) }
+        let revision = model.savedPlaylists.playlist(id: created.id)?.revision ?? 0
+        let reordered = NativePlaylistKit.moved(expected, indexes: [1, 3], before: expected[0].id)
+        try await kit.drag(tableID, row: 1, steps: [NativePlaylistKit.target(tableID, row: 0, edge: "before")],
+                           capture: "playlist-reorder-indicator")
+        try await kit.wait("playlist reordered") { (model.savedPlaylists.playlist(id: created.id)?.revision ?? 0) > revision && !model.busy }
+        expected = try await kit.entries(created)
+        try kit.check(expected.map(\.id) == reordered.map(\.id), "The reorder changed identities or order")
+        kit.passed("native-drag-reorders-a-non-contiguous-selection-inside-a-playlist")
+
+        // Grouped, the shown order is not the playlist's: the drop is refused with a hint.
+        kit.navigation.setGrouping(.album, for: .playlist(created.id))
+        try await kit.wait("grouped") { list.grouping == .album }
+        try await kit.wait("grouped rows") { list.cache.loadedRow(at: 0) != nil && list.layoutIsCurrent }
+        let from = list.layout.displayIndex(ofPosition: 0) ?? 1
+        let to = list.layout.displayIndex(ofPosition: 3) ?? 3
+        try await kit.select(tableID, [from])
+        let before = expected.map(\.id)
+        try await kit.drag(tableID, row: from, steps: [NativePlaylistKit.target(tableID, row: to, edge: "before")])
+        try await kit.drive("exists", "playlist-reorder-hint")
+        try kit.check(try await kit.entries(created).map(\.id) == before, "A refused reorder changed the playlist")
+        kit.navigation.setGrouping(.none, for: .playlist(created.id))
+        kit.passed("native-grouped-playlist-refuses-reorder-and-shows-the-hint")
+
+        // Dropping the playlist's rows on Up Next appends them, named for the playlist.
+        try await kit.wait("ungrouped") { list.grouping == .none && list.cache.loadedRow(at: 1) != nil }
+        try await kit.select(tableID, [0, 1])
+        let length = model.snapshot?.queue_length ?? 0
+        try await kit.drag(tableID, row: 0, steps: [NativePlaylistKit.target(Destination.upNext.identifier, hold: 0.5)])
+        try await kit.wait("queue grew") { !model.busy && model.snapshot?.queue_length == length + 2 }
+        let tail: Page<QueueItem> = try await model.send("queue_page", [
+            "revision": .null, "offset": .int(length), "limit": .int(2)])
+        try kit.check(tail.entries.allSatisfy { $0.source == QueueSource(kind: .drag, name: "Drag Destination") },
+                      "Up Next entries lack the playlist as their source")
+        try kit.capture("after-drag")
+        kit.passed("native-drag-on-up-next-appends-with-the-playlist-as-source")
     }
 
-    private static func collectRetained(_ model: PlayerModel) async throws {
-        guard let page = model.playlistEntries, page.offset == 0 else { throw Failure(message: "Expected first retained page") }
-        retainedEntries = page.entries
-        try await press("playlist-entries-next")
-        try await wait("retained final page") { model.playlistReady && model.playlistEntries?.offset == 100 }
-        retainedEntries += model.playlistEntries!.entries
-        try check(retainedEntries.count == model.playlistEntries?.total, "Retained entry report is incomplete")
-        try await press("playlist-entries-previous")
-        try await wait("restore retained first page") { model.playlistReady && model.playlistEntries?.offset == 0 }
-    }
-
-    private static func create(_ model: PlayerModel, name: String) async throws {
-        try await press("playlist-create")
-        try await NativeSmoke.drive("value", "playlist-name", name)
-        try await press("playlist-name-save")
-        try await wait("created \(name)") { !model.busy && model.playlistReady && model.currentPlaylist?.name == name }
-    }
-    private static func press(_ id: String) async throws { try await NativeSmoke.drive("press", id) }
-    private static func select(_ id: String, _ indexes: [Int]) async throws {
-        try await NativeSmoke.drive("select", id, indexes.map(String.init).joined(separator: ","))
-    }
-    private static func wait(_ label: String, until condition: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(20)
-        while !condition() {
-            if Date() >= deadline { throw Failure(message: "Timed out waiting for \(label)") }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        try await Task.sleep(for: .milliseconds(200))
-    }
-    private static func check(_ condition: Bool, _ message: String) throws {
-        if !condition { throw Failure(message: message) }
-    }
-    private static func capture(_ name: String) throws {
-        guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) else { throw Failure(message: "Native window missing") }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-x", "-o", "-l", String(window.windowNumber), output.appendingPathComponent(name + ".png").path]
-        try process.run()
-        process.waitUntilExit()
-        try check(process.terminationStatus == 0, "Native screenshot failed")
-    }
-    private static func finish(_ model: PlayerModel, passed: Bool, error: String?) throws {
-        var report: [String: Any] = ["passed": passed, "cases": cases,
-            "automation": "External public Accessibility actions and CGEvent mouse clicks on actual SwiftUI controls; composited native window screenshots. Capture-only, no audible/device-output claim.",
-            "retained_entries": try JSONSerialization.jsonObject(with: JSONEncoder().encode(retainedEntries))]
-        if let retainedID { report["retained_playlist_id"] = retainedID }
-        if let snapshot = model.snapshot { report["snapshot"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) }
-        if let playlist = model.currentPlaylist { report["retained_playlist"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(playlist)) }
-        if let error { report["error"] = error }
-        report["selected_tracks"] = model.selectedTracks.sorted()
-        if let message = model.message { report["model_message"] = message }
-        if let error = model.playlistError { report["playlist_error"] = error }
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-            .write(to: output.appendingPathComponent("report.json"))
-        print("PLAYLIST_SMOKE \(passed ? "PASS" : "FAIL") \(output.path)")
+    private static func songsList(_ kit: NativePlaylistKit) async throws -> ListModel {
+        try await kit.wait("songs list") { NativeSongsSmoke.songsList != nil }
+        guard let songs = NativeSongsSmoke.songsList else { throw NativePlaylistKit.Failure(message: "Songs list missing") }
+        try await kit.wait("songs rows") { songs.cache.total == 105 && songs.cache.loadedRow(at: 4) != nil }
+        return songs
     }
 }
 #endif

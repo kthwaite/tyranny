@@ -91,16 +91,16 @@ private struct MainWindow: View {
                 NativeSmoke.startIfRequested(model)
                 NativeLifecycle.startIfRequested(model)
                 NativeScale.startIfRequested(model)
-                NativePlaylistSmoke.startIfRequested(model)
-                NativeFilterSmoke.startIfRequested(model)
-                NativeSmartPlaylistSmoke.startIfRequested(model)
-                NativeArtworkSmoke.startIfRequested(model)
+                                NativeFilterSmoke.startIfRequested(model)
+                                NativeArtworkSmoke.startIfRequested(model)
                 NativeShellSmoke.startIfRequested(model, navigation: navigation)
                 NativeSongsSmoke.startIfRequested(model, navigation: navigation)
                 NativeAlbumsSmoke.startIfRequested(model, navigation: navigation)
                 NativeArtistsSmoke.startIfRequested(model, navigation: navigation)
                 NativeHistorySmoke.startIfRequested(model, navigation: navigation)
                 NativeUpNextSmoke.startIfRequested(model, navigation: navigation)
+                NativePlaylistSmoke.startIfRequested(model, navigation: navigation)
+                NativeSmartPlaylistSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }

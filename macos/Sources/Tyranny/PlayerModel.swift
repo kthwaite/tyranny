@@ -21,6 +21,8 @@ final class PlayerModel {
     let transport = TransportModel()
     /// The Up Next view's and drawer's queue windows.
     let upNext = UpNextModel()
+    /// The saved playlists in the source list, and the edits made to them.
+    let savedPlaylists = PlaylistsModel()
     private(set) var artists: Page<AlbumArtist>?
     private(set) var albums: Page<Album>?
     private(set) var tracks: Page<Track>?
@@ -119,6 +121,7 @@ final class PlayerModel {
         wire.onDisconnect = { [weak self] reason in self?.lostConnection(reason) }
         transport.attach(self)
         upNext.attach(self)
+        savedPlaylists.attach(self)
         updateMediaControls()
     }
 
@@ -159,6 +162,7 @@ final class PlayerModel {
     private func updateMediaControls() {
         transport.stateChanged()
         upNext.sync()
+        savedPlaylists.sync()
     }
 
     private func updateArtwork(invalidate: Bool = false) {
@@ -992,34 +996,6 @@ final class PlayerModel {
 extension PlayerModel {
     var trackDragIsCopy: Bool { activeDrag?.source == .library }
 
-    func beginTrackDrag(source: TrackDragSource, ids: [UInt64]) -> String? {
-        guard canMutate, !ids.isEmpty, ids.count <= 500, let state = snapshot else { return nil }
-        let ordered: [UInt64]
-        let revision: UInt64
-        let positions: [Int]
-        let selected = Set(ids)
-        switch source {
-        case .library:
-            guard libraryReady, let page = tracks, page.revision == state.library.revision else { return nil }
-            ordered = page.entries.filter { selected.contains($0.id) }.map(\.id)
-            revision = page.revision
-            positions = []
-        case .queue:
-            // Up Next drags start in `UpNextModel.beginDrag`.
-            return nil
-        case .playlist(let id):
-            guard currentPlaylist?.isSmart == false, playlistReady, let page = playlistEntries, page.playlist_id == id else { return nil }
-            ordered = page.entries.filter { selected.contains($0.id) }.map(\.id)
-            revision = page.revision
-            positions = page.entries.indices.filter { selected.contains(page.entries[$0].id) }.map { page.offset + $0 }
-        }
-        guard ordered.count == ids.count else { return nil }
-        let drag = TrackDrag(token: UUID().uuidString, connection: playlistSession, source: source,
-            ids: ordered, positions: positions, revision: revision, libraryRevision: state.library.revision)
-        activeDrag = drag
-        return drag.token
-    }
-
     /// Starts a track-list drag. The rows travel as a selection: IDs for a small loaded
     /// selection, otherwise the list description with ranges (spec 5.2).
     func beginSelectionDrag(_ selection: TrackSelection, count: Int, label: String) -> String? {
@@ -1054,23 +1030,15 @@ extension PlayerModel {
                 }
             }
         case .playlist(let id):
-            guard let playlist = playlists?.entries.first(where: { $0.id == id }), !playlist.isSmart else {
+            guard let playlist = savedPlaylists.playlist(id: id), !playlist.isSmart else {
                 message = "Wait for the playlist catalog to finish loading before dropping."
                 return false
             }
             mutate {
-                do {
-                    guard self.connected, self.playlistSession == drag.connection else {
-                        throw ServerFailure(code: "connection_changed", message: "The drag connection changed. Nothing was replayed.")
-                    }
-                    let _: PlaylistApplied = try await self.request("playlist_add_selection", [
-                        "playlist_id": .uint(id), "expected_revision": .uint(playlist.revision),
-                        "selection": try JSONValue.encoding(selection), "before": .null])
-                    self.message = "Added \(DisplayFormat.count(count)) \(noun) to \(playlist.name)."
-                } catch {
-                    self.message = "\(error.localizedDescription) Drop was not replayed; review refreshed state before trying again."
+                guard self.connected, self.playlistSession == drag.connection else {
+                    throw ServerFailure(code: "connection_changed", message: "The drag connection changed. Nothing was replayed.")
                 }
-                self.requestPlaylists(); self.requestPlaylistEntries()
+                try await self.savedPlaylists.addSelection(to: playlist, selection: selection, count: count)
             }
         }
         activeDrag = nil
@@ -1104,20 +1072,18 @@ extension PlayerModel {
 
     func validateTrackDrop(token: String, destination: TrackDragSource?) -> Bool {
         guard let drag = activeDrag, drag.token == token else { return false }
-        if case .playlist(let id) = destination,
-           (playlists?.entries.first { $0.id == id } ?? currentPlaylist)?.isSmart != false { return false }
+        // Smart playlists, and playlists not loaded yet, refuse drops.
+        if case .playlist(let id) = destination {
+            guard let playlist = savedPlaylists.playlist(id: id),
+                  PlaylistDrop.onRow(playlist.isSmart ? .smartPlaylist : .regularPlaylist) == .addSelection else { return false }
+        }
         let problem: String?
         if !connected || drag.connection != playlistSession {
             problem = "The connection changed during this drag. Start a new drag; nothing was replayed."
         } else if !canMutate {
             problem = "Wait for the current command to finish, then start a new drag."
-        } else if drag.source == .library && drag.selection == nil && drag.libraryRevision != snapshot?.library.revision {
-            problem = "The library changed during this drag. Start a new drag from the refreshed tracks."
         } else if drag.source == .queue && drag.revision != snapshot?.queue_revision {
             problem = "The queue changed during this drag. Start a new drag from the refreshed queue."
-        } else if case .playlist(let id) = drag.source,
-                  let playlist = playlists?.entries.first(where: { $0.id == id }), playlist.revision != drag.revision {
-            problem = "The playlist changed during this drag. Start a new drag from the refreshed playlist."
         } else if destination == .library {
             return false
         } else if let destination, drag.source != .library && destination != drag.source {
@@ -1132,113 +1098,12 @@ extension PlayerModel {
         return true
     }
 
-    /// A nil row means catalog-row append. A table row is relative to its bounded page.
+    /// Drops the active drag on a source-list row or the drawer: Up Next appends, a regular
+    /// playlist adds at its end. Drops inside a playlist's table go through its `ListModel`.
     @discardableResult
-    func dropTracks(token: String, destination: TrackDragSource, row: Int? = nil) -> Bool {
+    func dropTracks(token: String, destination: TrackDragSource) -> Bool {
         guard validateTrackDrop(token: token, destination: destination), let drag = activeDrag,
-              let state = snapshot else { return false }
-        if let selection = drag.selection { return dropSelection(selection, of: drag, on: destination) }
-        let revision: UInt64
-        let libraryRevision: UInt64
-        let before: UInt64?
-        let boundary: Int?
-        let destinationIndex: Int
-        let destinationQuery = playlistEntryFilter, destinationFilterEpoch = entryFilterEpoch
-        switch destination {
-        case .library, .queue: return false
-        case .playlist(let id):
-            guard let playlist = playlists?.entries.first(where: { $0.id == id }), !playlist.isSmart,
-                  playlists?.revision == state.playlists_revision, !playlistsLoading else {
-                message = "Wait for the playlist catalog to finish loading before dropping."
-                return false
-            }
-            revision = playlist.revision
-            libraryRevision = state.library.revision
-            if let row {
-                guard playlistReady, let page = playlistEntries, page.playlist_id == id,
-                      (0...page.entries.count).contains(row) else {
-                    message = "Wait for the playlist entries to finish loading before dropping."
-                    return false
-                }
-                before = row < page.entries.count ? page.entries[row].id : nil
-                boundary = row == page.entries.count && page.offset + row < page.total ? page.offset + row : nil
-                destinationIndex = page.offset + row
-            } else {
-                guard drag.source == .library else { return false }
-                before = nil
-                boundary = nil
-                destinationIndex = playlist.entry_count ?? 0
-            }
-        }
-        if drag.source != .library && revision != drag.revision {
-            message = "The destination changed during this drag. Nothing was moved; start a new drag."
-            return false
-        }
-        mutate {
-            do {
-                guard self.activeDrag?.token == drag.token else {
-                    throw ServerFailure(code: "filter_changed", message: "The source filter changed. Start a new drag.")
-                }
-                var anchor = before
-                if let boundary {
-                    switch destination {
-                    case .playlist(let id):
-                        let neighbor: PlaylistEntries = try await self.request("playlist_entries", [
-                            "playlist_id": .uint(id), "revision": .uint(revision),
-                            "library_revision": .uint(libraryRevision), "query": .string(destinationQuery),
-                            "offset": .int(boundary), "limit": .int(1)])
-                        anchor = neighbor.entries.first?.id
-                    case .library, .queue: return
-                    }
-                    guard anchor != nil else {
-                        throw ServerFailure(code: "stale_revision", message: "The next-page insertion anchor is unavailable.")
-                    }
-                }
-                guard self.connected, self.playlistSession == drag.connection else {
-                    throw ServerFailure(code: "connection_changed", message: "The drag connection changed. Nothing was replayed.")
-                }
-                guard self.activeDrag?.token == drag.token else {
-                    throw ServerFailure(code: "filter_changed", message: "The source filter changed. Nothing was inserted or moved.")
-                }
-                if case .playlist(let id) = destination, row != nil {
-                    guard destinationQuery == self.playlistEntryFilter,
-                          destinationFilterEpoch == self.entryFilterEpoch, self.selectedPlaylist == id else {
-                        throw ServerFailure(code: "filter_changed", message: "The destination filter or playlist changed. Choose the insertion point again.")
-                    }
-                }
-                var fields: [String: JSONValue] = [
-                    "expected_revision": .uint(revision), "before": anchor.map(JSONValue.uint) ?? .null]
-                if drag.source == .library {
-                    fields["library_revision"] = .uint(drag.libraryRevision)
-                    fields["track_ids"] = .uints(drag.ids)
-                } else {
-                    fields["entry_ids"] = .uints(drag.ids)
-                }
-                switch destination {
-                case .playlist(let id):
-                    fields["playlist_id"] = .uint(id)
-                    let _: PlaylistApplied = try await self.request(drag.source == .library ? "playlist_add" : "playlist_move", fields)
-                    guard self.playlistSession == drag.connection else { return }
-                    if drag.source == destination, destinationQuery == self.playlistEntryFilter,
-                       destinationFilterEpoch == self.entryFilterEpoch, self.selectedPlaylist == id {
-                        self.selectedPlaylistEntries = Set(drag.ids)
-                        if !drag.ids.contains(anchor ?? 0) {
-                            let insertion = destinationIndex - drag.positions.filter { $0 < destinationIndex }.count
-                            self.entryOffset = (max(0, insertion) / Self.pageSize) * Self.pageSize
-                        }
-                    }
-                    if drag.source == .library {
-                        self.message = "Added \(drag.ids.count) tracks to the playlist."
-                            + (self.playlistEntryFilterActive ? " Some added tracks may be hidden by the entry filter; clear it to see all tracks." : "")
-                    }
-                    self.requestPlaylists(); self.requestPlaylistEntries()
-                case .library, .queue: break
-                }
-            } catch {
-                self.message = "\(error.localizedDescription) Drop was not replayed; review refreshed state before trying again."
-                if case .playlist = destination { self.requestPlaylists(); self.requestPlaylistEntries() }
-            }
-        }
-        return true
+              let selection = drag.selection else { return false }
+        return dropSelection(selection, of: drag, on: destination)
     }
 }

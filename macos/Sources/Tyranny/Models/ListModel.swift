@@ -16,7 +16,9 @@ import TyrannyCore
 @MainActor @Observable
 final class ListModel {
     let destination: Destination
-    let source: ListSource
+    /// A playlist's source names its revision, which moves with each edit: `sync()` follows
+    /// `sourceProvider` and refetches the rows in place.
+    private(set) var source: ListSource
     /// Names the list in identifiers and saved table layouts. A destination's own list uses
     /// the destination's key; the lists inside Artists and Genres add a suffix.
     let key: String
@@ -46,6 +48,15 @@ final class ListModel {
     private(set) var albumCounts: [UInt64: Int] = [:]
     /// true briefly after a refused reorder drop (`playlist-reorder-hint`).
     private(set) var reorderHintShown = false
+    /// Names the list in drag labels. Playlists use their name.
+    @ObservationIgnored var displayName: String?
+    /// Where a playlist list reads its source's current revision from.
+    @ObservationIgnored var sourceProvider: (() -> ListSource?)?
+    /// The list's current source, followed through `sourceProvider`. Reading it in a view body
+    /// makes the view update when the playlist's revision moves.
+    var liveSource: ListSource { sourceProvider?() ?? source }
+    /// The positions of this table's own drag, with the basis they were read at.
+    @ObservationIgnored var ownDrag: (positions: IndexSet, basis: RowSelection.Basis)?
 
     /// Selected row IDs (spec 5.4).
     var selection: Set<UInt64> { rows.ids }
@@ -57,7 +68,7 @@ final class ListModel {
     }
     var isNarrowed: Bool { !description.query.isEmpty || description.browser != Browser() }
 
-    @ObservationIgnored private weak var player: PlayerModel?
+    @ObservationIgnored private(set) weak var player: PlayerModel?
     @ObservationIgnored private let navigation: NavigationModel
     @ObservationIgnored private var sort: [SortKey] = []
     @ObservationIgnored private var query = ""
@@ -141,14 +152,15 @@ final class ListModel {
         }
         let library = snapshot.library.revision
         let history = snapshot.history_revision
+        let sourceMoved = followSource()
         let next = currentDescription()
         if needsReset || next != description {
             needsReset = false
             libraryRevision = library
             historyRevision = history
             apply(next)
-        } else if library != libraryRevision || history != historyRevision {
-            if library != libraryRevision { scheduleTotals() }
+        } else if sourceMoved || library != libraryRevision || history != historyRevision {
+            if library != libraryRevision || sourceMoved { scheduleTotals() }
             libraryRevision = library
             historyRevision = history
             // Play counts change Plays and Last Played without a library revision change.
@@ -158,6 +170,14 @@ final class ListModel {
         browser.sync(player: player, session: session, revision: library, query: query,
                      narrowing: browserSelection.albumColumnBrowser,
                      visible: usesBrowser && navigation.columnBrowserVisible)
+    }
+
+    /// Adopts the playlist's current revision. Returns true when it moved.
+    private func followSource() -> Bool {
+        guard let live = sourceProvider?(), live != source else { return false }
+        source = live
+        description.source = live
+        return true
     }
 
     func setSort(_ keys: [SortKey]) {
@@ -393,6 +413,9 @@ final class ListModel {
     private func fetch(_ description: ListDescription, epoch: UInt64, offset: Int, limit: Int,
                        revision: UInt64?) async throws -> WindowPage<ListRow> {
         guard let player else { throw WindowFetchError.failed("The list closed.") }
+        // A playlist edit moves its revision under a running cache.
+        var description = description
+        if epoch == self.epoch { description.source = source }
         do {
             let reply: ListTracksResponse = try await player.send("list_tracks", [
                 "list": try JSONValue.encoding(description),
@@ -472,6 +495,31 @@ final class TrackLists {
         let grid = AlbumGridModel(player: player, navigation: navigation)
         albums = grid
         return grid
+    }
+
+    /// A playlist's list. It follows the playlist's revision as edits move it.
+    func playlist(_ playlist: Playlist, player: PlayerModel, navigation: NavigationModel) -> ListModel {
+        let destination = Destination.playlist(playlist.id)
+        if let list = lists[destination] {
+            list.displayName = playlist.name
+            return list
+        }
+        let list = ListModel(destination: destination, source: PlaylistsModel.listSource(playlist), player: player,
+                             navigation: navigation, usesBrowser: false)
+        list.displayName = playlist.name
+        let id = playlist.id
+        list.sourceProvider = { [weak playlists = player.savedPlaylists] in
+            playlists?.playlist(id: id).map(PlaylistsModel.listSource)
+        }
+        lists[destination] = list
+        return list
+    }
+
+    /// Forgets the lists of playlists that no longer exist.
+    func prunePlaylists(keeping ids: Set<UInt64>) {
+        for destination in Array(lists.keys) {
+            if case .playlist(let id) = destination, !ids.contains(id) { lists[destination] = nil }
+        }
     }
 
     func list(for destination: Destination, source: ListSource, player: PlayerModel,
