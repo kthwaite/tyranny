@@ -77,3 +77,7 @@ Rulings made during subagent-driven execution of `2026-10-18-library-server.md` 
 ## Open for the user
 
 - Spec §8 target "sorted, grouped and filtered track-list windows below 100 ms p95" is missed at 50k: `list_tracks_sorted_year_desc` p95 ≈105 ms, `list_tracks_grouped_artist_album` p95 ≈141 ms (full 50k window sort per page). Fixing needs stored/cached order — a plan change. Needs explicit sign-off or a follow-up.
+
+## User decisions after execution
+
+- 2026-10-19: the user accepted the recorded p95 misses (sorted_year_desc ~105 ms, grouped_artist_album ~141 ms at 50k) for now. The branch is kept for the client plan.
