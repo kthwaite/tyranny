@@ -77,7 +77,6 @@ final class AlbumGridCellView: NSView {
     private let subtitle = NSTextField(labelWithString: "")
     private var coverSize: CGFloat = 140
     private var image: CGImage?
-    private var artworkState = "loading"
     private var hasAlbum = false
     var selected = false { didSet { if selected != oldValue { needsDisplay = true } } }
 
@@ -122,7 +121,6 @@ final class AlbumGridCellView: NSView {
 
     func showArtwork(_ artwork: ArtworkImage) {
         image = artwork.image
-        artworkState = artwork.state
         needsDisplay = true
     }
 
@@ -150,7 +148,8 @@ final class AlbumGridCellView: NSView {
             rect.fill()
             let configuration = NSImage.SymbolConfiguration(pointSize: coverSize / 4, weight: .regular)
                 .applying(.init(paletteColors: [.secondaryLabelColor]))
-            if let symbol = NSImage(systemSymbolName: artworkState == "loading" ? "photo" : "music.note",
+            // Loading and missing art share the neutral note, so nothing flashes as art arrives.
+            if let symbol = NSImage(systemSymbolName: "music.note",
                                     accessibilityDescription: nil)?.withSymbolConfiguration(configuration) {
                 let size = symbol.size
                 symbol.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,

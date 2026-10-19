@@ -26,7 +26,6 @@ final class AlbumBlockCell: NSTableCellView {
     private var slice = 0
     private var rowHeight: CGFloat = 20
     private var image: CGImage?
-    private var artworkState = "loading"
     private var lines: [String] = []
 
     init() {
@@ -44,7 +43,6 @@ final class AlbumBlockCell: NSTableCellView {
         self.slice = slice
         self.rowHeight = rowHeight
         image = artwork.image
-        artworkState = artwork.state
         lines = facts
         needsDisplay = true
         let coverRow = slice == 0, factsRow = slice == 5
@@ -97,7 +95,7 @@ final class AlbumBlockCell: NSTableCellView {
             rect.fill()
             let configuration = NSImage.SymbolConfiguration(pointSize: 28, weight: .regular)
                 .applying(.init(paletteColors: [.secondaryLabelColor]))
-            if let symbol = NSImage(systemSymbolName: artworkState == "loading" ? "photo" : "music.note",
+            if let symbol = NSImage(systemSymbolName: "music.note",
                                     accessibilityDescription: nil)?.withSymbolConfiguration(configuration) {
                 let size = symbol.size
                 symbol.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,

@@ -490,10 +490,12 @@ final class ListModel {
 
 /// The track lists the window keeps, one per destination, so a list keeps its
 /// scroll position, sort and browser selection while another destination shows.
-/// The Albums grid is kept the same way.
+/// The Albums grid is kept the same way. Playlist lists are bounded: the shown one plus the
+/// four most recently shown stay; older ones are dropped and start fresh when shown again.
 @MainActor
 final class TrackLists {
     private var lists: [Destination: ListModel] = [:]
+    private var recentPlaylists = RecentKeys<Destination>(capacity: 5)
     private var albums: AlbumGridModel?
     private var browsers: [Destination: NamedBrowseModel] = [:]
     private var historyModel: HistoryModel?
@@ -524,6 +526,8 @@ final class TrackLists {
     /// A playlist's list. It follows the playlist's revision as edits move it.
     func playlist(_ playlist: Playlist, player: PlayerModel, navigation: NavigationModel) -> ListModel {
         let destination = Destination.playlist(playlist.id)
+        // Only the shown playlist asks, so the one evicted here is never on screen.
+        for evicted in recentPlaylists.touch(destination) { lists[evicted] = nil }
         if let list = lists[destination] {
             list.displayName = playlist.name
             return list
@@ -542,7 +546,10 @@ final class TrackLists {
     /// Forgets the lists of playlists that no longer exist.
     func prunePlaylists(keeping ids: Set<UInt64>) {
         for destination in Array(lists.keys) {
-            if case .playlist(let id) = destination, !ids.contains(id) { lists[destination] = nil }
+            if case .playlist(let id) = destination, !ids.contains(id) {
+                lists[destination] = nil
+                recentPlaylists.remove(destination)
+            }
         }
     }
 

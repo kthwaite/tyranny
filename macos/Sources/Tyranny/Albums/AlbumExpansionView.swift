@@ -156,7 +156,7 @@ struct AlbumExpansionContent: View {
             if let image = artwork.image {
                 Image(decorative: image, scale: 1).resizable().interpolation(.high)
             } else {
-                Image(systemName: artwork.state == "loading" ? "photo" : "music.note")
+                Image(systemName: "music.note")
                     .font(.system(size: 40)).foregroundStyle(.secondary)
             }
         }

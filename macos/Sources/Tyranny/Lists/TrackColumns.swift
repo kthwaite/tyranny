@@ -21,6 +21,9 @@ struct TrackColumn: Identifiable {
 /// The Songs columns (spec 4.2): status, #, Title, Artist, Album, Time, Year, Genre,
 /// Format, Plays; hidden by default: Album Artist, Disc, Date Added, Last Played,
 /// Bitrate, Sample Rate.
+///
+/// The default columns fit the main area at the default 1180 pt window: 888 pt of columns plus
+/// 6 pt spacing each is 948 pt, against about 960 pt beside a 200 pt sidebar and a scroller.
 @MainActor
 enum TrackColumns {
     static let status = "status"
@@ -29,9 +32,9 @@ enum TrackColumns {
         TrackColumn(id: status, title: "", width: 22, minWidth: 22, hideable: false) { _ in "" },
         TrackColumn(id: "number", title: "#", width: 34, sort: .albumOrder, alignment: .right,
                     monospacedDigits: true) { $0.track_number == 0 ? "" : String($0.track_number) },
-        TrackColumn(id: "title", title: "Title", width: 240, minWidth: 80, sort: .title, hideable: false) { $0.title },
-        TrackColumn(id: "artist", title: "Artist", width: 160, sort: .artist) { $0.artist },
-        TrackColumn(id: "album", title: "Album", width: 180, sort: .album) { $0.album },
+        TrackColumn(id: "title", title: "Title", width: 200, minWidth: 80, sort: .title, hideable: false) { $0.title },
+        TrackColumn(id: "artist", title: "Artist", width: 140, sort: .artist) { $0.artist },
+        TrackColumn(id: "album", title: "Album", width: 150, sort: .album) { $0.album },
         TrackColumn(id: "time", title: "Time", width: 52, sort: .duration, alignment: .right, monospacedDigits: true) {
             $0.duration_ms.map { DisplayFormat.clock(Double($0) / 1000) } ?? ""
         },

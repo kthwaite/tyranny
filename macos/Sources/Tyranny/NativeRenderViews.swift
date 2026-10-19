@@ -11,6 +11,9 @@ import TyrannyCore
 @MainActor
 enum NativeRenderViews {
     private static var started = false
+    /// Tables skip column autosave while rendering, so the images show the default widths and
+    /// leave the user's saved widths alone.
+    static let isRendering = CommandLine.arguments.contains("--render-views")
 
     static func startIfRequested(_ model: PlayerModel, navigation: NavigationModel) {
         let args = CommandLine.arguments
@@ -115,5 +118,9 @@ enum NativeRenderViews {
         }
         return lines.joined(separator: "\n")
     }
+}
+#else
+enum NativeRenderViews {
+    static let isRendering = false
 }
 #endif

@@ -27,7 +27,8 @@ struct ArtworkView: View {
                     .resizable().scaledToFit()
             } else {
                 VStack(spacing: 5) {
-                    Image(systemName: artwork.state == "loading" ? "photo" : "music.note")
+                    // Loading and missing art share the neutral note, so nothing flashes.
+                    Image(systemName: "music.note")
                         .font(.system(size: dimension >= 100 ? 28 : 18))
                     if dimension >= 100 {
                         Text(placeholder).font(.caption2).multilineTextAlignment(.center)

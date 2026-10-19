@@ -49,7 +49,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         table.floatsGroupRows = false
         table.columnAutoresizingStyle = .noColumnAutoresizing
         let gutter = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(AlbumBlockCell.columnID))
-        gutter.title = ""
+        gutter.title = "Album"
         gutter.width = AlbumBlockCell.columnWidth
         gutter.minWidth = AlbumBlockCell.columnWidth
         gutter.maxWidth = AlbumBlockCell.columnWidth
@@ -73,8 +73,10 @@ struct VirtualTrackTable: NSViewRepresentable {
             }
             table.addTableColumn(native)
         }
-        table.autosaveName = identifier
-        table.autosaveTableColumns = true
+        if !NativeRenderViews.isRendering {
+            table.autosaveName = identifier
+            table.autosaveTableColumns = true
+        }
         let menu = NSMenu(title: "Columns")
         menu.delegate = context.coordinator
         table.headerView?.menu = menu

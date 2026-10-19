@@ -27,14 +27,15 @@ struct UpNextTable: NSViewRepresentable {
         var monospaced = false
     }
 
+    /// 916 pt of columns plus 6 pt spacing each fits beside the sidebar at the default 1180 pt.
     static let columns = [
         Column(id: "status", title: "", width: 24),
         Column(id: "number", title: "#", width: 96, alignment: .right, monospaced: true),
-        Column(id: "title", title: "Title", width: 240),
+        Column(id: "title", title: "Title", width: 224),
         Column(id: "artist", title: "Artist", width: 160),
         Column(id: "album", title: "Album", width: 180),
         Column(id: "time", title: "Time", width: 52, alignment: .right, monospaced: true),
-        Column(id: "added-from", title: "Added From", width: 190),
+        Column(id: "added-from", title: "Added From", width: 180),
     ]
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }

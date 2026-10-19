@@ -414,14 +414,26 @@ struct AlbumCollection: NSViewRepresentable {
 
         func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
                             sizeForItemAt indexPath: IndexPath) -> NSSize {
+            // Until a width change is applied, stay within the width the collection view keeps
+            // even when a legacy scroller appears: the flow layout checks its cached sizes
+            // against the new width before it asks again, and rejects wider items.
+            let width = Self.narrowestWidth(collectionView)
             if layout.item(section: indexPath.section, item: indexPath.item) == .expansion {
                 let count = parent.grid.expansion?.album.track_count ?? 0
-                // Until a width change is applied, stay within the current width.
-                let live = collectionView.bounds.width - CGFloat(2 * AlbumGridGeometry.minimumInset) - 1
+                let live = width - CGFloat(2 * AlbumGridGeometry.minimumInset) - 1
                 return NSSize(width: max(1, min(CGFloat(geometry.panelWidth), live)),
                               height: AlbumExpansionMetrics.height(trackCount: count))
             }
-            return NSSize(width: geometry.itemWidth, height: geometry.itemHeight)
+            let live = width - CGFloat(geometry.horizontalInset) - CGFloat(geometry.trailingInset) - 1
+            return NSSize(width: max(1, min(CGFloat(geometry.itemWidth), live)), height: geometry.itemHeight)
+        }
+
+        /// The collection view's width, less a legacy vertical scroller's when none shows yet.
+        private static func narrowestWidth(_ collectionView: NSCollectionView) -> CGFloat {
+            let width = collectionView.bounds.width
+            guard let scroll = collectionView.enclosingScrollView, scroll.scrollerStyle == .legacy,
+                  scroll.verticalScroller?.isHidden ?? true else { return width }
+            return width - NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
         }
 
         func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
@@ -541,3 +553,4 @@ final class AlbumCollectionView: NSCollectionView {
         super.keyDown(with: event)
     }
 }
+
