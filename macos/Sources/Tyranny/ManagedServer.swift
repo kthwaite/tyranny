@@ -232,7 +232,7 @@ final class ManagedServer {
     private func preflight() async throws {
         let result = try await command(helper.path, ["--help"], log: state.appendingPathComponent("helper-check.log"))
         guard result.status == 0, result.text.contains("tyranny-server") else {
-            throw failure("The bundled server cannot start (exit \(result.status)). Install the development decoder dependencies (brew install ffmpeg), then rebuild the app with scripts/build_macos.sh. Details: \(state.appendingPathComponent("helper-check.log").path). \(result.text.prefix(3000))")
+            throw failure("The bundled server cannot start (exit \(result.status)). Reinstall the app or rebuild it with scripts/build_macos.sh release. Release apps include their decoder libraries. Details: \(state.appendingPathComponent("helper-check.log").path). \(result.text.prefix(3000))")
         }
     }
 
