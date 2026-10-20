@@ -114,8 +114,9 @@ public final class StationCatalog {
     /// Reads a `.pls` or `.m3u` file and adds its stations in consecutive `add_stations`
     /// batches (`batches`). Each batch names the revision of the reply before it. The server
     /// skips URLs that are already saved. A failed batch stops the import; earlier batches stay
-    /// added and the error says how many stations they added. Returns how many stations were
-    /// added, or nil on failure.
+    /// added and the error says how many stations they added. A `reset` also stops the import,
+    /// silently. Errors name a station by its 1-based place in the file. Returns how many
+    /// stations were added, or nil on failure.
     public func importFile(text: String, fileName: String) async -> Int? {
         error = nil
         let batches: [[StationInput]]
@@ -125,18 +126,22 @@ public final class StationCatalog {
             self.error = (error as? StationFileError)?.message ?? error.localizedDescription
             return nil
         }
+        let started = epoch
         return await whileEditing {
             var added = 0
             var sent = 0
             var expected: UInt64?
             for batch in batches {
-                guard let applied = await submit(expected: expected, { shown in
+                let applied = await submit(expected: expected) { shown in
                     try Self.addRequest(batch, expected: shown)
-                }) else {
-                    if expected != nil {
-                        error = "Imported \(added) new \(added == 1 ? "station" : "stations") from \(fileName), "
-                            + "then the batch of entries \(sent + 1)–\(sent + batch.count) failed: \(error ?? "")"
-                    }
+                }
+                // A reset forgot the catalog this import was adding to.
+                guard epoch == started else { return nil }
+                guard let applied else {
+                    let failure = Self.renumbered(error ?? "", after: sent, in: fileName)
+                    error = expected == nil ? failure
+                        : "Imported \(added) new \(added == 1 ? "station" : "stations") from \(fileName), "
+                            + "then the batch of entries \(sent + 1)–\(sent + batch.count) failed: \(failure)"
                     return nil
                 }
                 added += applied.stations.count
@@ -172,7 +177,7 @@ public final class StationCatalog {
         for (index, input) in inputs.enumerated() {
             let entry = try encoder.encode(JSONValue.encoding(input)).count
             guard empty + entry <= RequestFrame.limit else {
-                throw StationFileError("\(fileName): station \(index + 1) is too long to send")
+                throw StationFileError("\(Self.entry(index + 1, in: fileName)): too long to send")
             }
             if !batch.isEmpty, batch.count == maximumBatch || size + 1 + entry > RequestFrame.limit {
                 batches.append(batch)
@@ -184,6 +189,21 @@ public final class StationCatalog {
         }
         if !batch.isEmpty { batches.append(batch) }
         return batches
+    }
+
+    /// How import errors name a station: by its 1-based place among the file's stations.
+    private static func entry(_ number: Int, in fileName: String) -> String {
+        "\(fileName): station \(number)"
+    }
+
+    /// The server names an invalid station by its 0-based index in the batch ("station 2: …").
+    /// Names it instead by its place in the file, given how many stations earlier batches sent.
+    /// Other messages are unchanged.
+    private static func renumbered(_ message: String, after sent: Int, in fileName: String) -> String {
+        guard message.hasPrefix("station "),
+              let colon = message.firstIndex(of: ":"),
+              let index = Int(message[message.index(message.startIndex, offsetBy: 8)..<colon]) else { return message }
+        return entry(sent + index + 1, in: fileName) + message[colon...]
     }
 
     private static func frameSize(_ request: CommandRequest) throws -> Int {

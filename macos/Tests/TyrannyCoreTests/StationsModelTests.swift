@@ -238,10 +238,69 @@ private let drone = Station(id: 3, name: "drone zone", url: "https://ice1.somafm
         let added = await catalog.importFile(text: m3u(manyStations(400)), fileName: "many.m3u")
         #expect(added == nil)
         #expect(server.requests.count == 3)
-        let first = entries(server.requests[1]).count - 2
+        let batch = entries(server.requests[1]).count
+        let first = batch - 2
         #expect(catalog.stations.count == first)
         #expect(catalog.error?.contains("Imported \(first) new stations") == true)
-        #expect(catalog.error?.contains("station 3: stream URL requires HTTP(S)") == true)
+        // The server's 0-based index within the batch becomes the 1-based station in the file.
+        #expect(catalog.error?.hasSuffix("many.m3u: station \(batch + 4): stream URL requires HTTP(S)") == true)
+    }
+
+    @Test func aFailedFirstBatchNamesTheStationInTheFile() async throws {
+        let server = FakeStationServer()
+        let catalog = server.catalog()
+        server.replies = [page(1, [])]
+        await catalog.sync(try state(stations: 1))
+
+        server.replies = [.failure(ServerFailure(code: "invalid_command", message: "station 0: stream URL requires a host"))]
+        let added = await catalog.importFile(text: m3u(manyStations(2)), fileName: "two.m3u")
+        #expect(added == nil)
+        #expect(catalog.error == "two.m3u: station 1: stream URL requires a host")
+    }
+
+    @Test func aStationTooLongToSendIsNamedByItsPlaceInTheFile() async throws {
+        let server = FakeStationServer()
+        let catalog = server.catalog()
+        server.replies = [page(1, [])]
+        await catalog.sync(try state(stations: 1))
+
+        var inputs = manyStations(2)
+        inputs.append(StationInput(name: "Huge", url: "https://huge.example.com/" + String(repeating: "x", count: RequestFrame.limit)))
+        let added = await catalog.importFile(text: m3u(inputs), fileName: "huge.m3u")
+        #expect(added == nil)
+        #expect(server.requests.count == 1)
+        #expect(catalog.error == "huge.m3u: station 3: too long to send")
+    }
+
+    @Test func aResetDuringAnImportStopsItWithoutReporting() async throws {
+        let server = FakeStationServer()
+        let catalog = server.catalog()
+        server.replies = [page(1, [])]
+        await catalog.sync(try state(stations: 1))
+
+        var resets = 0
+        server.beforeReply["add_stations"] = {
+            guard resets == 0 else { return }
+            resets += 1
+            catalog.reset()
+        }
+        var revision: UInt64 = 1
+        server.respond = { request in
+            guard revision == 1 else {
+                return .failure(ServerFailure(code: "stale_stations_revision", message: "The stations changed."))
+            }
+            revision += 1
+            return applied(revision, entries(request).enumerated().map {
+                Station(id: UInt64($0.offset + 1), name: $0.element.name, url: $0.element.url)
+            })
+        }
+        let added = await catalog.importFile(text: m3u(manyStations(400)), fileName: "many.m3u")
+        #expect(added == nil)
+        // The fetch and the first batch; no batch is sent after the reset.
+        #expect(server.requests.map(\.name) == ["stations", "add_stations"])
+        #expect(catalog.stations.isEmpty)
+        #expect(catalog.revision == nil)
+        #expect(catalog.error == nil)
     }
 
     @Test func importOfEmptyFileSetsErrorAndSendsNothing() async throws {

@@ -381,7 +381,7 @@ Bind only to loopback, authenticate using a per-user token stored with restricti
 Protocol v12 adds a server-owned catalog of saved internet-radio stations. It has its own `stations_revision`, published in every `ControlState`.
 
 - Commands: `stations` (replies `stations` with `revision` and `stations`), `add_stations`, `update_station` and `remove_station`. Each edit carries `expected_revision` and replies `stations_applied` with the new snapshot and the added or updated rows. A stale revision fails with `stale_stations_revision`.
-- `add_stations` takes `stations: [{name, url}]`. A blank name becomes the URL's host. Every entry passes `StreamSpec::new`, the same check as `append_stream`. If one entry is invalid, the whole command fails with `invalid_command` and the message names its 0-based index. Nothing is saved.
+- `add_stations` takes `stations: [{name, url}]`. A blank name becomes the URL's host. Every entry passes `StreamSpec::new`, the same check as `append_stream`. If one entry is invalid, the whole command fails with `invalid_command` and the message names its 0-based index. Nothing is saved. The macOS import reports it as the 1-based station in the file.
 - Stations are unique by canonical URL. Adding a URL that is already saved is skipped. Updating a station to a URL another station uses is `invalid_command`.
 - The catalog is sorted by name without regard to case, then by ID.
 - Limits: at most 1000 stations, and 1..=500 per `add_stations`.
