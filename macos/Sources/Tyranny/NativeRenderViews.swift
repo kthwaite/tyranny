@@ -85,12 +85,18 @@ enum NativeRenderViews {
                 navigation.nowPlayingArtExpanded = true
                 await shot("16-player-bar-art-expanded")
                 // Collapse the sidebar through AppKit, not a SwiftUI binding: the thumbnail returns.
-                if let sidebar = sidebarItem() {
+                // The probe is unmounted while the sidebar collapses, then mounted again, as at a
+                // launch with the sidebar already collapsed: only its initial report can bring the
+                // thumbnail back.
+                if let probe = sidebarProbe(), let sidebar = probe.sidebarItem(), let parent = probe.superview {
+                    probe.removeFromSuperview()
                     sidebar.isCollapsed = true
+                    try? await Task.sleep(for: .seconds(1))
+                    parent.addSubview(probe)
                     await shot("18-player-bar-sidebar-hidden")
                     sidebar.isCollapsed = false
                     try? await Task.sleep(for: .seconds(1))
-                } else { log.append("sidebar hidden: no split view item") }
+                } else { log.append("sidebar hidden: no probe or sidebar item") }
                 navigation.nowPlayingArtExpanded = false
                 if let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) {
                     window.setContentSize(NSSize(width: 940, height: 560))
@@ -110,17 +116,16 @@ enum NativeRenderViews {
         }
     }
 
-    /// The main window's sidebar split view item, found through the split view's controller.
-    private static func sidebarItem() -> NSSplitViewItem? {
-        func split(in view: NSView) -> NSSplitView? {
-            if let split = view as? NSSplitView, split.delegate is NSSplitViewController { return split }
-            for child in view.subviews { if let found = split(in: child) { return found } }
+    /// The main window's sidebar visibility probe, found in the view tree.
+    private static func sidebarProbe() -> SidebarVisibilityProbe.ProbeView? {
+        func probe(in view: NSView) -> SidebarVisibilityProbe.ProbeView? {
+            if let probe = view as? SidebarVisibilityProbe.ProbeView { return probe }
+            for child in view.subviews { if let found = probe(in: child) { return found } }
             return nil
         }
         guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }),
-              let root = window.contentView?.superview, let view = split(in: root),
-              let controller = view.delegate as? NSSplitViewController else { return nil }
-        return controller.splitViewItems.first { $0.behavior == .sidebar } ?? controller.splitViewItems.first
+              let root = window.contentView?.superview else { return nil }
+        return probe(in: root)
     }
 
     private static func write(_ view: NSView, _ name: String, into output: URL) -> String {

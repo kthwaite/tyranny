@@ -56,7 +56,6 @@ struct MainWindowView: View {
             NavigationSplitView {
                 SourceList(model: model, navigation: navigation, sidebarVisible: sidebarOnScreen)
                     .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 300)
-                    .background(SidebarVisibilityProbe { sidebarOnScreen = $0 })
             } detail: {
                 HStack(spacing: 0) {
                     mainArea
@@ -65,6 +64,8 @@ struct MainWindowView: View {
                         UpNextDrawer(model: model.upNext, player: model)
                     }
                 }
+                // In the detail column: the split view always loads it, even with the sidebar collapsed.
+                .background(SidebarVisibilityProbe { sidebarOnScreen = $0 })
             }
             Divider()
             PlayerBar(model: model, navigation: navigation, sidebarVisible: sidebarOnScreen)
@@ -211,4 +212,3 @@ private struct DestinationPlaceholder: View {
         .accessibilityIdentifier("main-\(destination.key)")
     }
 }
-
