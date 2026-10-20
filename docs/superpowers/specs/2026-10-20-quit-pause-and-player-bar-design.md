@@ -133,12 +133,15 @@ summarised here).
 ### Interactions *(Claude's calls, approved)*
 
 - Click title → reveal the playing row (same as ⌘L, `navigation.revealPlayingRequest`).
-- Click artist → open that artist (`RevealTarget.artist`); click album → open that album
-  (`RevealTarget.album`, from `NowPlaying.album_id`).
-- `NowPlaying` has `album_id` but no artist id. Add an optional `artist_id` to `NowPlaying` in
-  `src/protocol.rs`, filled by the owner from the library alongside `album_id` (the track artist,
-  matching the displayed text). If absent (unindexed entry), the artist and album text is not a
-  link.
+- Click artist → open the album artist (`RevealTarget.artist`, from
+  `NowPlaying.album_artist_id`), as "Show in Artist" does; click album → open that album
+  (`RevealTarget.album`, from `NowPlaying.album_id`). The Artists browser lists only album
+  artists of non-compilation albums, so the artist text is not a link for a compilation.
+- `NowPlaying` has `album_id` but no artist id. Add optional `album_artist_id` and `compilation`
+  to `NowPlaying` in `src/protocol.rs`, mirroring `TrackSummary`, filled by the owner from the
+  library alongside `album_id`. Both are absent for an unindexed entry. The artist text is a link
+  only when `album_artist_id` is present and `compilation` is not true; the album text is a link
+  only when `album_id` is present.
 
 ### States
 
@@ -155,14 +158,15 @@ summarised here).
 - Whether the bar reuses `TransportDisplay` pieces or replaces the file outright.
 - How the large art view is attached to the sidebar (`safeAreaInset(edge: .bottom)` on the
   `List` is a reasonable start).
-- Protocol version handling for the additive `artist_id` field (bump only if the matching-version
+- Protocol version handling for the additive `album_artist_id`/`compilation` fields (bump only if the matching-version
   rule requires it).
 
 ## Verification
 
 - TyrannyCore unit tests for `QuitSuspension` (note on playing; none on paused/stopped/unknown;
   resume only when paused on the same entry and endpoint; note cleared after decision).
-- Rust test that `NowPlaying.artist_id` is filled for indexed entries and `None` otherwise.
+- Rust test that `NowPlaying.album_artist_id`/`compilation` are filled for indexed entries and
+  `None` otherwise.
 - Update `scripts/lifecycle_gate.py` (~lines 244–252) and the `NativeSmoke` relaunch case
   (`native-relaunch-receives-authoritative-playing-state`) to assert: playing → quit → server
   paused at the same position → relaunch → playing again. Add a case: paused → quit → relaunch →

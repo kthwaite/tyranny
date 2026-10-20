@@ -25,11 +25,14 @@ public struct NowPlaying: Codable, Sendable, Equatable {
     public let metadata_error: String?
     public let track_id: UInt64?
     public let album_id: UInt64?
-    public let artist_id: UInt64?
+    /// The album's artist, not the track artist; `nil` for an unindexed entry.
+    public let album_artist_id: UInt64?
+    /// Whether the album is a compilation; `nil` for an unindexed entry.
+    public let compilation: Bool?
     public let format: String
     public let gain_db: Double?
 
-    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, artist_id: UInt64?, format: String, gain_db: Double?) {
+    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, album_artist_id: UInt64?, compilation: Bool?, format: String, gain_db: Double?) {
         self.entry_id = entry_id
         self.title = title
         self.artist = artist
@@ -38,9 +41,17 @@ public struct NowPlaying: Codable, Sendable, Equatable {
         self.metadata_error = metadata_error
         self.track_id = track_id
         self.album_id = album_id
-        self.artist_id = artist_id
+        self.album_artist_id = album_artist_id
+        self.compilation = compilation
         self.format = format
         self.gain_db = gain_db
+    }
+
+    /// The artist the artist text opens, as "Show in Artist" does: the album artist. The
+    /// Artists browser lists only album artists of non-compilation albums, so a compilation
+    /// or unindexed entry has none.
+    public var artistLinkID: UInt64? {
+        compilation == true ? nil : album_artist_id
     }
 }
 

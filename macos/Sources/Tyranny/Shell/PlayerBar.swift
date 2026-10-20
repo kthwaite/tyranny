@@ -65,7 +65,7 @@ struct PlayerBar: View {
                         }
                     }
                     VStack(alignment: .leading, spacing: 1) {
-                        RevealLink(text: transport.artist, target: nowPlaying?.artist_id.map { .artist($0) },
+                        RevealLink(text: transport.artist, target: nowPlaying?.artistLinkID.map { .artist($0) },
                                    help: "Show the artist", identifier: "now-playing-artist-link",
                                    navigation: navigation)
                         RevealLink(text: transport.album, target: nowPlaying?.album_id.map { .album($0) },

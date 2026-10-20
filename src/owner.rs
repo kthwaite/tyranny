@@ -690,7 +690,7 @@ impl Actor {
             upcoming_count,
         }
     }
-    /// Adds the indexed track, album, artist and format to the player's metadata. The
+    /// Adds the indexed track, album, album artist, compilation flag and format to the player's metadata. The
     /// lookup is display-only, so a failed one leaves those fields blank.
     fn describe(&self, now: Arc<NowPlaying>, library_revision: u64) -> Arc<NowPlaying> {
         let key = (now.entry_id, library_revision);
@@ -704,7 +704,8 @@ impl Actor {
         Arc::new(NowPlaying {
             track_id: Some(track.track_id),
             album_id: Some(track.album_id),
-            artist_id: Some(track.artist_id),
+            album_artist_id: Some(track.album_artist_id),
+            compilation: Some(track.compilation),
             format: track.format.clone(),
             ..(*now).clone()
         })

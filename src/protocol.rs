@@ -412,11 +412,14 @@ pub struct NowPlaying {
     pub duration_frames: Option<u64>,
     pub metadata_error: Option<String>,
     /// Indexed track behind the entry, if any. The owner fills this and
-    /// `album_id`/`artist_id`/`format` from the library; the player leaves them blank.
+    /// `album_id`/`album_artist_id`/`compilation`/`format` from the library; the
+    /// player leaves them blank.
     pub track_id: Option<u64>,
     pub album_id: Option<u64>,
-    /// Track artist, not the album artist.
-    pub artist_id: Option<u64>,
+    /// The album's artist, as in `TrackSummary`, not the track artist.
+    pub album_artist_id: Option<u64>,
+    /// Whether the album is a compilation.
+    pub compilation: Option<bool>,
     pub format: String,
     /// Gain the decoder applied; `None` when gain mode is off.
     pub gain_db: Option<f64>,

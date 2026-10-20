@@ -105,14 +105,25 @@ extension JSONValue {
 
 private let nowPlayingBase = #""entry_id":1,"title":"T","artist":"A","album":"B","duration_frames":null,"metadata_error":null,"track_id":3,"album_id":5,"format":"WAV 16/48","gain_db":null"#
 
-@Test func nowPlayingDecodesArtistID() throws {
-    let json = "{\(nowPlayingBase),\"artist_id\":7}"
+@Test func nowPlayingDecodesAlbumArtistAndCompilation() throws {
+    let json = "{\(nowPlayingBase),\"album_artist_id\":7,\"compilation\":false}"
     let decoded = try JSONDecoder().decode(NowPlaying.self, from: Data(json.utf8))
-    #expect(decoded.artist_id == 7)
+    #expect(decoded.album_artist_id == 7)
+    #expect(decoded.compilation == false)
+    #expect(decoded.artistLinkID == 7)
 }
 
-@Test func nowPlayingWithoutArtistIDDecodesNil() throws {
+@Test func nowPlayingCompilationHasNoArtistLink() throws {
+    let json = "{\(nowPlayingBase),\"album_artist_id\":7,\"compilation\":true}"
+    let decoded = try JSONDecoder().decode(NowPlaying.self, from: Data(json.utf8))
+    #expect(decoded.compilation == true)
+    #expect(decoded.artistLinkID == nil)
+}
+
+@Test func nowPlayingWithoutAlbumArtistDecodesNil() throws {
     let json = "{\(nowPlayingBase)}"
     let decoded = try JSONDecoder().decode(NowPlaying.self, from: Data(json.utf8))
-    #expect(decoded.artist_id == nil)
+    #expect(decoded.album_artist_id == nil)
+    #expect(decoded.compilation == nil)
+    #expect(decoded.artistLinkID == nil)
 }
