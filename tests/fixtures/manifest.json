@@ -1,0 +1,514 @@
+{
+  "encoders": {
+    "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+    "lame": "LAME 64bits version 4.0 (https://lame.sourceforge.io)",
+    "afconvert": "/usr/bin/afconvert"
+  },
+  "signal": {
+    "description": "stereo int16; sum of three chirps over 2.0 s: log 40->2000 Hz, log 3000->250 Hz, lin 700->1300 Hz; sample n at rate r is evaluated at t=n/r; channel c = sum_i amplitudes[i]*sin(phase_i(t)+phases[c][i]); quantised round(x*32768)",
+    "amplitudes": [
+      0.25,
+      0.2,
+      0.15
+    ],
+    "phases": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        1.5707963267948966,
+        4.141592653589793,
+        2.0707963267948966
+      ]
+    ]
+  },
+  "formats": {
+    "no_local_encoder": [
+      "amr",
+      "awb",
+      "ape",
+      "dff",
+      "dsf",
+      "mpc",
+      "shn",
+      "spx",
+      "tak"
+    ],
+    "files": [
+      {
+        "extension": "aac",
+        "file": "formats/tone.aac",
+        "codec": "aac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "ac3",
+        "file": "formats/tone.ac3",
+        "codec": "ac3",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "aif",
+        "file": "formats/tone.aif",
+        "codec": "pcm_s16be",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "aiff",
+        "file": "formats/tone.aiff",
+        "codec": "pcm_s16be",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "aifc",
+        "file": "formats/tone.aifc",
+        "codec": "pcm_s16be",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "alac",
+        "file": "formats/tone.alac",
+        "codec": "alac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "au",
+        "file": "formats/tone.au",
+        "codec": "pcm_s16be",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "caf",
+        "file": "formats/tone.caf",
+        "codec": "pcm_s16le",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "dts",
+        "file": "formats/tone.dts",
+        "codec": "dca",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "flac",
+        "file": "formats/tone.flac",
+        "codec": "flac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "m4a",
+        "file": "formats/tone.m4a",
+        "codec": "aac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "m4b",
+        "file": "formats/tone.m4b",
+        "codec": "aac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "mka",
+        "file": "formats/tone.mka",
+        "codec": "flac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "mov",
+        "file": "formats/tone.mov",
+        "codec": "aac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "mp2",
+        "file": "formats/tone.mp2",
+        "codec": "mp2",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "mp3",
+        "file": "formats/tone.mp3",
+        "codec": "libmp3lame",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "mp4",
+        "file": "formats/tone.mp4",
+        "codec": "aac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "oga",
+        "file": "formats/tone.oga",
+        "codec": "flac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "ogg",
+        "file": "formats/tone.ogg",
+        "codec": "vorbis",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "opus",
+        "file": "formats/tone.opus",
+        "codec": "libopus",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "ra",
+        "file": "formats/tone.ra",
+        "codec": "real_144",
+        "rate": 8000,
+        "channels": 1,
+        "seconds": 0.25
+      },
+      {
+        "extension": "tta",
+        "file": "formats/tone.tta",
+        "codec": "tta",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "wav",
+        "file": "formats/tone.wav",
+        "codec": "pcm_s16le",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "wave",
+        "file": "formats/tone.wave",
+        "codec": "pcm_s16le",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "webm",
+        "file": "formats/tone.webm",
+        "codec": "libopus",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "wma",
+        "file": "formats/tone.wma",
+        "codec": "wmav2",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      },
+      {
+        "extension": "wv",
+        "file": "formats/tone.wv",
+        "codec": "wavpack",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25
+      }
+    ]
+  },
+  "gapless": {
+    "sets": [
+      {
+        "name": "wav48",
+        "rate": 48000,
+        "lossless": true,
+        "files": [
+          "gapless/wav48/t1.wav",
+          "gapless/wav48/t2.wav",
+          "gapless/wav48/t3.wav",
+          "gapless/wav48/t4.wav"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg pcm_s16le"
+      },
+      {
+        "name": "flac48",
+        "rate": 48000,
+        "lossless": true,
+        "files": [
+          "gapless/flac48/t1.flac",
+          "gapless/flac48/t2.flac",
+          "gapless/flac48/t3.flac",
+          "gapless/flac48/t4.flac"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg flac"
+      },
+      {
+        "name": "alac48",
+        "rate": 48000,
+        "lossless": true,
+        "files": [
+          "gapless/alac48/t1.m4a",
+          "gapless/alac48/t2.m4a",
+          "gapless/alac48/t3.m4a",
+          "gapless/alac48/t4.m4a"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg alac"
+      },
+      {
+        "name": "mp3cbr48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/mp3cbr48/t1.mp3",
+          "gapless/mp3cbr48/t2.mp3",
+          "gapless/mp3cbr48/t3.mp3",
+          "gapless/mp3cbr48/t4.mp3"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg libmp3lame 192k CBR"
+      },
+      {
+        "name": "mp3vbr48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/mp3vbr48/t1.mp3",
+          "gapless/mp3vbr48/t2.mp3",
+          "gapless/mp3vbr48/t3.mp3",
+          "gapless/mp3vbr48/t4.mp3"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg libmp3lame -q:a 2"
+      },
+      {
+        "name": "mp3lame48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/mp3lame48/t1.mp3",
+          "gapless/mp3lame48/t2.mp3",
+          "gapless/mp3lame48/t3.mp3",
+          "gapless/mp3lame48/t4.mp3"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "lame CLI 192k CBR"
+      },
+      {
+        "name": "aac48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/aac48/t1.m4a",
+          "gapless/aac48/t2.m4a",
+          "gapless/aac48/t3.m4a",
+          "gapless/aac48/t4.m4a"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg aac 192k"
+      },
+      {
+        "name": "aacapple48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/aacapple48/t1.m4a",
+          "gapless/aacapple48/t2.m4a",
+          "gapless/aacapple48/t3.m4a",
+          "gapless/aacapple48/t4.m4a"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "afconvert -f m4af -d aac -b 192000"
+      },
+      {
+        "name": "opus48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/opus48/t1.opus",
+          "gapless/opus48/t2.opus",
+          "gapless/opus48/t3.opus",
+          "gapless/opus48/t4.opus"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg libopus 160k"
+      },
+      {
+        "name": "mp3notag48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/mp3notag48/t1.mp3",
+          "gapless/mp3notag48/t2.mp3",
+          "gapless/mp3notag48/t3.mp3",
+          "gapless/mp3notag48/t4.mp3"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg libmp3lame 192k -write_xing 0"
+      },
+      {
+        "name": "wav44",
+        "rate": 44100,
+        "lossless": true,
+        "files": [
+          "gapless/wav44/t1.wav",
+          "gapless/wav44/t2.wav",
+          "gapless/wav44/t3.wav",
+          "gapless/wav44/t4.wav"
+        ],
+        "lengths": [
+          22063,
+          23887,
+          22979,
+          22961
+        ],
+        "encoder": "ffmpeg pcm_s16le"
+      },
+      {
+        "name": "flac44",
+        "rate": 44100,
+        "lossless": true,
+        "files": [
+          "gapless/flac44/t1.flac",
+          "gapless/flac44/t2.flac",
+          "gapless/flac44/t3.flac",
+          "gapless/flac44/t4.flac"
+        ],
+        "lengths": [
+          22063,
+          23887,
+          22979,
+          22961
+        ],
+        "encoder": "ffmpeg flac"
+      },
+      {
+        "name": "mp3lame44",
+        "rate": 44100,
+        "lossless": false,
+        "files": [
+          "gapless/mp3lame44/t1.mp3",
+          "gapless/mp3lame44/t2.mp3",
+          "gapless/mp3lame44/t3.mp3",
+          "gapless/mp3lame44/t4.mp3"
+        ],
+        "lengths": [
+          22063,
+          23887,
+          22979,
+          22961
+        ],
+        "encoder": "lame CLI 192k CBR"
+      },
+      {
+        "name": "aacapple44",
+        "rate": 44100,
+        "lossless": false,
+        "files": [
+          "gapless/aacapple44/t1.m4a",
+          "gapless/aacapple44/t2.m4a",
+          "gapless/aacapple44/t3.m4a",
+          "gapless/aacapple44/t4.m4a"
+        ],
+        "lengths": [
+          22063,
+          23887,
+          22979,
+          22961
+        ],
+        "encoder": "afconvert -f m4af -d aac -b 192000"
+      }
+    ]
+  }
+}
