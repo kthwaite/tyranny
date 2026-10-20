@@ -7,6 +7,10 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
     var model: PlayerModel?
     var reopenWindow: (() -> Void)?
     private var keyGuard: Any?
+    private enum QuitState { case idle, suspending, suspended }
+    private var quitState = QuitState.idle
+    /// True once AppKit waits for `reply(toApplicationShouldTerminate:)`.
+    private var quitReplyPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -39,8 +43,45 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Quit pauses the server first, so music stops with the app.
+    /// The pause runs once; a second Quit while it runs starts nothing new.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        switch quitState {
+        case .suspended:
+            return .terminateNow
+        case .suspending:
+            return deferQuit()
+        case .idle:
+            guard let model, model.connected else { return .terminateNow }
+            quitState = .suspending
+            Task {
+                await model.suspendForQuit()
+                quitState = .suspended
+                if quitReplyPending {
+                    NSApp.reply(toApplicationShouldTerminate: true)
+                } else {
+                    NSApp.terminate(nil)
+                }
+            }
+            return deferQuit()
+        }
+    }
+
+    /// A quit Apple event (Dock Quit, logout) gets `.terminateLater`, so a logout is not cancelled.
+    /// Any other Quit may run inside a main-queue job, for example a Task that calls `NSApp.terminate`.
+    /// AppKit's `.terminateLater` wait does not drain the main queue from inside that job,
+    /// so the pause task could never run, and Quit would hang.
+    /// So that Quit is cancelled now, and the pause task calls `terminate` again when it is done.
+    private func deferQuit() -> NSApplication.TerminateReply {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventClass == AEEventClass(kCoreEventClass),
+              event.eventID == AEEventID(kAEQuitApplication) else { return .terminateCancel }
+        quitReplyPending = true
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // The daemon owns audio and outlives this controller.
+        // The daemon outlives this controller; quit paused it first.
         model?.shutdown()
     }
 }

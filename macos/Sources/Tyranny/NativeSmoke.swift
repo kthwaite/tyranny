@@ -36,10 +36,10 @@ enum NativeSmoke {
                 try await drive("activate")
                 try await Task.sleep(for: .milliseconds(250))
                 if args.contains("--ui-smoke-relaunch") {
-                    try check(model.snapshot?.transport == "playing", "relaunch did not receive playing state")
+                    try await wait("resumed playback") { model.snapshot?.transport == "playing" }
                     try check((model.snapshot?.position_frames ?? 0) > 0, "relaunch lost playhead")
                     try capture("relaunch")
-                    cases.append("native-relaunch-receives-authoritative-playing-state")
+                    cases.append("native-relaunch-resumes-suspended-playback")
                 } else {
                     guard let folderIndex = args.firstIndex(of: "--ui-smoke-folder"), folderIndex + 1 < args.count else {
                         throw Failure(message: "--ui-smoke-folder required")

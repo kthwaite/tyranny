@@ -241,16 +241,57 @@ def main():
         control.request("append_track", expected_revision=state_before["queue_revision"], library_revision=page["revision"], track_id=page["entries"][0]["id"])
         control.request("set_resume", enabled=True)
         control.request("play", entry_id=None)
-        control.wait(lambda value: value["transport"] == "playing" and value["position_frames"] > 4800)
+        playing = control.wait(lambda value: value["transport"] == "playing" and value["position_frames"] > 4800)
         native = launch("present-playing")
         assert native["snapshot"]["transport"] == "playing", native
         after = connect()
         assert after.hello["instance_id"] == initial_instance
-        first = after.state()
-        time.sleep(0.4)
-        second = after.state()
-        assert second["position_frames"] > first["position_frames"] and second["transport"] == "playing"
-        record("present-daemon-reused-and-playback-survives-client-quit-relaunch", before=first, after=second)
+        paused = after.state()
+        after.close()
+        assert paused["transport"] == "paused", paused
+        assert paused["position_frames"] >= playing["position_frames"], (playing, paused)
+        assert paused["current_id"] == playing["current_id"], (playing, paused)
+        record("present-daemon-reused-and-client-quit-pauses", before=playing, after=paused)
+
+        # Each check uses a fresh connection, so no idle socket backs up across launches.
+        def fresh_state():
+            client = connect()
+            try:
+                return client.state()
+            finally:
+                client.close()
+
+        # The quit note resumes this server. The relaunch's own quit then pauses it again.
+        native = launch("relaunch-resumes")
+        resumed = native["snapshot"]
+        assert resumed["transport"] == "playing", native
+        assert resumed["current_id"] == paused["current_id"], (paused, resumed)
+        repaused = fresh_state()
+        assert repaused["transport"] == "paused", repaused
+        assert repaused["position_frames"] > paused["position_frames"], (paused, repaused)
+        record("client-relaunch-resumes-suspended-playback", before=paused, resumed=resumed, after=repaused)
+
+        # That quit left a note. A launch while stopped takes the note and does not resume.
+        driver_client = connect()
+        driver_client.request("stop")
+        driver_client.wait(lambda value: value["transport"] == "stopped")
+        driver_client.close()
+        native = launch("stopped-takes-note")
+        assert native["snapshot"]["transport"] == "stopped", native
+        assert fresh_state()["transport"] == "stopped"
+        driver_client = connect()
+        driver_client.request("play", entry_id=None)
+        driver_client.wait(lambda value: value["transport"] == "playing" and value["position_frames"] > 0)
+        driver_client.request("pause")
+        held = driver_client.wait(lambda value: value["transport"] == "paused")
+        driver_client.close()
+        native = launch("paused-quit")
+        assert native["snapshot"]["transport"] == "paused", native
+        native = launch("paused-relaunch")
+        assert native["snapshot"]["transport"] == "paused", native
+        still = fresh_state()
+        assert still["transport"] == "paused" and still["current_id"] == held["current_id"], (held, still)
+        record("client-quit-while-paused-does-not-resume", before=held, after=still)
 
         launch("restart", action="restart")
         control = connect(previous=initial_instance)

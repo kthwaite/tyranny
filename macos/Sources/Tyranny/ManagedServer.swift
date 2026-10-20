@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// Development-only, per-login launchd ownership. The app never owns playback.
+/// Development-only, per-login launchd ownership. The daemon owns playback; the app only pauses it on quit.
 @MainActor
 final class ManagedServer {
     let endpoint: String

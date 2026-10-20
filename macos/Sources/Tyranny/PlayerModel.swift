@@ -49,6 +49,11 @@ final class PlayerModel {
     @ObservationIgnored private var needsRoots = false
     @ObservationIgnored private var session: UInt64 = 0
     @ObservationIgnored private var lastRootsRefresh = Date.distantPast
+    /// Set on the first hello of this run, so a quit note is decided once, never on reconnects.
+    @ObservationIgnored private var launchSuspensionChecked = false
+    /// The hello arrives before `connected` is true, and `play` needs `connected`.
+    /// So the decision waits here until the connection loop marks the connection connected.
+    @ObservationIgnored private var launchResumePending = false
     /// The server's page limit.
     private static let catalogLimit = 500
     @ObservationIgnored var activeDrag: TrackDrag?
@@ -118,6 +123,18 @@ final class PlayerModel {
     func shutdown() {
         transport.shutdown()
         disconnect()
+    }
+
+    /// Pauses the server if it is playing, waiting at most 1 s for the reply.
+    /// It writes the quit note only when the reply arrived in time.
+    /// It skips `mutate`, so a busy model cannot block quitting.
+    func suspendForQuit() async {
+        guard connected, let state = snapshot,
+              let note = QuitSuspension.note(endpoint: endpoint, transport: state.transport,
+                                             currentID: state.current_id) else { return }
+        let reply = await Deadline.race(.seconds(1)) { try await self.send("pause") as Applied }
+        guard reply != nil else { return }
+        QuitSuspensionStore(defaults: .standard).save(note)
     }
 
     func start() {
@@ -208,13 +225,17 @@ final class PlayerModel {
                 connectionDetail = "Connecting to \(endpoint)…"
                 do {
                     try await wire.connect(endpoint: endpoint, tokenPath: tokenPath)
+                    let resume = launchResumePending
+                    launchResumePending = false
                     guard generation == session, wantsConnection else { return }
                     connection = "connected"
                     connectionDetail = endpoint
                     connectionTask = nil
                     refresh()
+                    if resume { transport.play() }
                     return
                 } catch {
+                    launchResumePending = false
                     guard generation == session, wantsConnection, !Task.isCancelled else { return }
                     if !attemptedBootstrap, managedEnabled, managesServer,
                        let failure = error as? ServerFailure,
@@ -250,6 +271,13 @@ final class PlayerModel {
         let previous = snapshot
         snapshot = state
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
+        if newInstance, !launchSuspensionChecked {
+            launchSuspensionChecked = true
+            if let note = QuitSuspensionStore(defaults: .standard).take(),
+               note.shouldResume(endpoint: endpoint, transport: state.transport, currentID: state.current_id) {
+                launchResumePending = true
+            }
+        }
         // A rescan that changes only cover files keeps the library revision, so
         // invalidate artwork when a scan finishes, not only on revision change.
         if let previous, previous.library.revision == state.library.revision,
