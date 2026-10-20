@@ -2,8 +2,16 @@
 //! PCM equals decoding each track alone and concatenating the results.
 //! Also pins the decoded length of each track against its source length.
 //!
-//! Three ffmpeg-encoder cases (the spike's excluded encoders) are absent on
-//! purpose: their files carry no usable gapless data, so no claim is made.
+//! Three ffmpeg-encoder cases are absent on purpose, because the files
+//! themselves are not gapless (see target/spikes/ruddy-ape/FINDINGS.md):
+//! - ffmpeg `aac_at` m4a: the edit list includes the encoder padding and there
+//!   is no iTunSMPB, so the file itself has a gap.
+//! - ffmpeg native Vorbis encoder: it writes final granule positions rounded to
+//!   multiples of 64, so the file has a 26-47 sample gap.
+//! - ffmpeg libmp3lame at 44.1 kHz: its LAME tag recorded the wrong padding for
+//!   one track (+5 source samples).
+//!
+//! Apple afconvert AAC and the lame CLI are exact and are tested instead.
 //! `mp3notag48` is kept only to pin the no-codec-constant policy.
 //!
 //! Run against the pinned release FFmpeg (spike method):
@@ -319,7 +327,7 @@ fn player_run_equals_the_tracks_end_to_end() {
         } else {
             assert!(
                 expected.len().abs_diff(actual.len()) <= 4,
-                "{}: {} vs {} frames",
+                "{}: expected {} frames (sum of per-track decodes), got {} from the player",
                 set.name,
                 expected.len(),
                 actual.len()
