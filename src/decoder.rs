@@ -3,7 +3,9 @@
 //! libavcodec applies AV_PKT_DATA_SKIP_SAMPLES itself (SKIP_MANUAL is deliberately
 //! not enabled). Its returned sample count and adjusted timestamps already exclude
 //! that padding. Sample-exact frame durations additionally delimit container edits,
-//! including the short final AAC/MP4 packet. Neither stream duration estimates nor
+//! including the short final AAC/MP4 packet, when one container tick is no longer
+//! than one sample; this is a fallback for demuxers that send no end-trim side
+//! data (FFmpeg 9's mov demuxer does send it). Neither stream duration estimates nor
 //! codec-specific delay constants are used to trim the decoded audio.
 
 use std::{path::Path, ptr, sync::LazyLock};
@@ -625,11 +627,13 @@ fn valid_samples(decoded: usize, duration: i64, time_base: Rational, rate: u32) 
     }
     let numerator = i128::from(duration) * i128::from(time_base.0) * i128::from(rate);
     let denominator = i128::from(time_base.1);
-    // Coarse container ticks cannot define exact sample cuts. A tick longer
-    // than a sample (ASF and Matroska use milliseconds) means the duration was
-    // rounded, even when it happens to be a whole number of samples: at 48 kHz
-    // every millisecond is. Do not round a duration down and silently lose
-    // samples on every ordinary packet.
+    // Coarse container ticks cannot define exact sample cuts, so a tick longer
+    // than a sample is distrusted on purpose. ASF and Matroska round durations
+    // to milliseconds, and at 48 kHz every millisecond is a whole number of
+    // samples, so a rounded duration looks exact. The cost: an exact coarse
+    // tick, such as an HE-AAC core-rate timescale (1/22050 at 44.1 kHz), can no
+    // longer cut a short final packet that lacks end-trim side data. Do not
+    // round a duration down and silently lose samples on every ordinary packet.
     let tick_exceeds_sample = i128::from(time_base.0) * i128::from(rate) > denominator;
     if numerator <= 0 || tick_exceeds_sample || numerator % denominator != 0 {
         return decoded;
@@ -700,6 +704,8 @@ mod tests {
         assert_eq!(valid_samples(4096, 85, Rational(1, 1000), 48_000), 4096);
         assert_eq!(valid_samples(960, 17, Rational(1, 1000), 48_000), 960);
         assert_eq!(valid_samples(160, 20, Rational(1, 1000), 8_000), 160);
+        // Accepted trade-off: an exact two-sample tick is distrusted too.
+        assert_eq!(valid_samples(2048, 512, Rational(1, 22_050), 44_100), 2048);
     }
 
     #[test]

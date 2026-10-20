@@ -50,7 +50,9 @@ fn manifest() -> (Vec<Fixture>, Vec<String>) {
         .map(|entry| Fixture {
             extension: entry["extension"].as_str().unwrap().to_owned(),
             file: entry["file"].as_str().unwrap().to_owned(),
-            frames: entry["frames"].as_u64().unwrap() as usize,
+            frames: entry["frames"].as_u64().expect(
+                "manifest entry lacks frames; regenerate with scripts/make_test_fixtures.py",
+            ) as usize,
         })
         .collect();
     let missing = formats["no_local_encoder"]
@@ -130,7 +132,8 @@ fn every_format_fixture_decodes_to_eof() {
         }
         if total != usize::MAX && total != fixture.frames {
             failures.push(format!(
-                "{}: decoded {total} frames, the ffmpeg CLI decodes {}",
+                "{}: decoded {total} frames, the manifest records {} from the ffmpeg CLI \
+                 (see manifest encoders; regenerate with scripts/make_test_fixtures.py if FFmpeg changed)",
                 fixture.file, fixture.frames
             ));
         }
