@@ -2,7 +2,13 @@
   "encoders": {
     "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
     "lame": "LAME 64bits version 4.0 (https://lame.sourceforge.io)",
-    "afconvert": "/usr/bin/afconvert"
+    "afconvert": "/usr/bin/afconvert",
+    "speexenc": "speexenc (Speex encoder) version 1.2.1 (compiled Jun 16 2022)",
+    "mpcenc": "MPC Encoder 1.30.1 --stable-- (C) 1999-2009 Buschmann/Klemm/Piecha/MDT",
+    "mac": "--- Monkey's Audio Console Front End (v 13.41) Copyright 2000-2026 Matthew T. Ashland ---",
+    "opencore-amr": "/opt/homebrew/Cellar/opencore-amr/0.1.6/lib/libopencore-amrnb.0.dylib",
+    "vo-amrwbenc": "/opt/homebrew/Cellar/vo-amrwbenc/0.1.3/lib/libvo-amrwbenc.0.dylib",
+    "shn, dsf, dff": "written by scripts/make_test_fixtures.py"
   },
   "signal": {
     "description": "stereo int16; sum of three chirps over 2.0 s: log 40->2000 Hz, log 3000->250 Hz, lin 700->1300 Hz; sample n at rate r is evaluated at t=n/r; channel c = sum_i amplitudes[i]*sin(phase_i(t)+phases[c][i]); quantised round(x*32768)",
@@ -25,16 +31,11 @@
     ]
   },
   "formats": {
-    "no_local_encoder": [
-      "amr",
-      "awb",
-      "ape",
-      "dff",
-      "dsf",
-      "mpc",
-      "shn",
-      "spx",
-      "tak"
+    "exceptions": [
+      {
+        "extension": "tak",
+        "reason": "the only TAK encoders are Windows programs, and there is no redistributable sample file"
+      }
     ],
     "files": [
       {
@@ -279,6 +280,79 @@
         "channels": 2,
         "seconds": 0.25,
         "frames": 12000
+      },
+      {
+        "extension": "amr",
+        "file": "formats/tone.amr",
+        "codec": "amr_nb",
+        "rate": 8000,
+        "channels": 1,
+        "seconds": 0.25,
+        "frames": 12480
+      },
+      {
+        "extension": "awb",
+        "file": "formats/tone.awb",
+        "codec": "amr_wb",
+        "rate": 16000,
+        "channels": 1,
+        "seconds": 0.25,
+        "frames": 12480
+      },
+      {
+        "extension": "ape",
+        "file": "formats/tone.ape",
+        "codec": "ape",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25,
+        "frames": 12000
+      },
+      {
+        "extension": "dff",
+        "file": "formats/tone.dff",
+        "codec": "dsd_msbf",
+        "rate": 352800,
+        "channels": 2,
+        "seconds": 0.0625,
+        "frames": 3000
+      },
+      {
+        "extension": "dsf",
+        "file": "formats/tone.dsf",
+        "codec": "dsd_lsbf_planar",
+        "rate": 352800,
+        "channels": 2,
+        "seconds": 0.0625,
+        "frames": 3000
+      },
+      {
+        "extension": "mpc",
+        "file": "formats/tone.mpc",
+        "codec": "musepack8",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25,
+        "frames": 12672
+      },
+      {
+        "extension": "shn",
+        "file": "formats/tone.shn",
+        "codec": "shorten",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25,
+        "frames": 12000
+      },
+      {
+        "extension": "spx",
+        "file": "formats/tone.spx",
+        "codec": "speex",
+        "rate": 16000,
+        "channels": 2,
+        "seconds": 0.25,
+        "frames": 12000,
+        "frames_from": "packet durations"
       }
     ]
   },

@@ -26,7 +26,8 @@ switch, or to the FFmpeg build fails loudly instead of silently adding gaps or l
   through the real library path with zero failures, and decodes through `Decoder` with no error
   to exactly the frame count the ffmpeg CLI gives (amended 2026-10-20, TSK-august-pad).
 - The format test also fails when someone adds an extension to the scanner without a fixture or
-  an entry in an explicit "no local encoder" list.
+  an entry in an explicit exceptions list that names why it has none (amended 2026-10-20: was
+  the "no local encoder" list, see Fixtures).
 - `tests/gapless.rs`: per-track decoded lengths equal the source lengths for every tagged format,
   lossless decodes are bit-exact, and the player's capture of a 4-track run is bit-identical to the
   per-track decodes laid end to end.
@@ -40,8 +41,10 @@ switch, or to the FFmpeg build fails loudly instead of silently adding gaps or l
 - No content sniffing (the spike judged it not worth it).
 - No edits to `scripts/build_ffmpeg.py` or the other release packaging scripts. They are the
   user's uncommitted work in progress.
-- No fixtures for extensions without a local encoder or muxer: amr, awb, ape, dff, dsf, mpc, shn,
-  spx, tak. They are named in the test's "no local encoder" list instead.
+- No fixture for tak: the only TAK encoders are Windows programs, and there is no
+  redistributable sample file. It is the one entry in the manifest's `formats.exceptions` list,
+  with that reason. (Amended 2026-10-20, TSK-aware-yarn: amr, awb, ape, dff, dsf, mpc, shn and
+  spx were also excepted at first, as "no local encoder"; they now have fixtures, see Fixtures.)
 - No automated release-prefix run in `cargo test`. The prefix is built by the user's uncommitted
   script, so the run is a documented manual command for now.
 
@@ -56,10 +59,12 @@ switch, or to the FFmpeg build fails loudly instead of silently adding gaps or l
 ## Fixtures
 
 All fixtures are checked in under `tests/fixtures/` and produced by
-`scripts/make_test_fixtures.py` (Python 3, standard library only; it shells out to the encoders).
-The script is deterministic for a given set of encoder versions, and writes
+`scripts/make_test_fixtures.py` (Python 3, standard library only; it shells out to the encoders,
+and calls the AMR encoder libraries through `ctypes`). The script is deterministic for a given
+set of encoder versions (except `afconvert`, whose output is not byte-stable), and writes
 `tests/fixtures/manifest.json` with the encoder versions it used (`ffmpeg -version` first line,
-`lame --version` first line, `afconvert` presence) and the source lengths.
+`lame --version` first line, `afconvert` presence, and the same for the encoders below) and the
+source lengths.
 
 ### Signal
 
@@ -76,7 +81,26 @@ alac, au, caf, dts, flac, m4a, m4b, mka, mov, mp2, mp3, mp4, oga, ogg, opus, ra,
 webm, wma, wv. Each uses the codec and container the spike used for that extension
 (`target/spikes/aware-yarn/` holds its generator; the manifest records the choice).
 If an extension in that list cannot be produced, the script fails, naming it; the builder then
-moves it to the "no local encoder" list and records why in the manifest.
+moves it to the exceptions list and records why in the manifest.
+
+Amended 2026-10-20 (TSK-aware-yarn): 8 more fixtures, made without ffmpeg's encoders. The script
+fails naming the Homebrew formula when a tool is missing.
+
+| Extension | Made by | Stream | Check at generation |
+|---|---|---|---|
+| `spx` | `speexenc` (formula `speex`) | Ogg Speex wideband, 16 kHz stereo | the random Ogg serial is pinned (CRCs redone) |
+| `mpc` | `mpcenc` (`musepack`) | Musepack SV8, 48 kHz stereo | none (lossy) |
+| `ape` | `mac … -c2000` (`mac`) | Monkey's Audio, 48 kHz stereo | CLI decode equals the source PCM |
+| `amr` | `opencore-amr` via `ctypes` | AMR-NB 12.2 kbit/s, 8 kHz mono (left) | none (lossy) |
+| `awb` | `vo-amrwbenc` via `ctypes` | AMR-WB 23.85 kbit/s, 16 kHz mono (left) | none (lossy) |
+| `shn` | the script | Shorten v2, fixed predictors only, 48 kHz stereo | CLI decode equals the source PCM |
+| `dsf` | the script | DSD64 LSB-first, 0.0625 s stereo | demuxer reads back the bits; decode follows the source |
+| `dff` | the script | DSDIFF DSD64 MSB-first, 0.0625 s stereo | as `dsf`, and both decode identically |
+
+The DSD bits come from a second-order sigma-delta modulator over the signal at half scale. They
+last 0.0625 s, not 0.25 s, to keep each file near one WAV fixture's size; the length still ends
+in a partial DSF block. A swapped bit order still correlates with the source, so the identical
+DSF and DSDIFF decodes are what pin it.
 
 ### `tests/fixtures/gapless/`
 
@@ -113,8 +137,11 @@ For each fixture in `tests/fixtures/formats/`:
    count equals the ffmpeg CLI's count at the engine rate, recorded per fixture as `frames` in
    the manifest. (Amended 2026-10-20: a 90 % floor of the nominal 0.25 s could not hold for WMA
    and hid a per-packet trimming bug in millisecond-timebase containers; TSK-august-pad.)
-3. The set of scanner extensions equals the fixture extensions plus the "no local encoder" list
-   (amr, awb, ape, dff, dsf, mpc, shn, spx, tak). To make this checkable, move the scanner's
+   Exception: `tone.spx` records the sum of its packet durations (`"frames_from": "packet
+   durations"`). The CLI decodes the final Ogg Speex packet whole; `Decoder` cuts it to the
+   end granule, which gives the source length exactly.
+3. The set of scanner extensions equals the fixture extensions plus the exceptions list (tak),
+   the two are disjoint, and every exception has a reason. To make this checkable, move the scanner's
    private `EXTENSIONS` list (`src/scanner.rs:376`) to a public constant that the scanner keeps
    using (location and name are the builder's call, for example
    `tyranny::library_types::AUDIO_EXTENSIONS`).

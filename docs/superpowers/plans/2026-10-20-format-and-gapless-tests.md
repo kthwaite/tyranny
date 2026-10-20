@@ -17,7 +17,9 @@
 - Fixtures total ≤ 3 MB, checked in under `tests/fixtures/`.
 - Engine rate `tyranny::SAMPLE_RATE` = 48000. Int16 → f32 is `value as f32 / 32768.0` (as `tests/playback.rs` asserts).
 - Gapless track lengths: 48 kHz `[24011, 26003, 25013, 24989]`; 44.1 kHz `[22063, 23887, 22979, 22961]`.
-- "No local encoder" extensions: `amr, awb, ape, dff, dsf, mpc, shn, spx, tak`.
+- "No local encoder" extensions: `amr, awb, ape, dff, dsf, mpc, shn, spx, tak`. (Amended
+  2026-10-20, TSK-aware-yarn: all but tak now have fixtures. The manifest's `no_local_encoder`
+  list became `formats.exceptions`, entries `{"extension", "reason"}`; see the spec.)
 - No change to trimming, the resampler, or `scripts/build_ffmpeg.py` and other release packaging scripts.
 - Never stage or modify the user's uncommitted work: `.gitignore`, `SPIKE.md`, `SPIKE_RESULTS.md`, `macos/Info.plist`, `macos/Sources/Tyranny/ManagedServer.swift`, `scripts/build_macos.sh`, `scripts/macos_dependencies.py`, `scripts/test_macos_dependencies.py`, `scripts/build_ffmpeg.py`, `scripts/build_release_server.sh`, `scripts/build_dmg.sh`, `scripts/build_icon.sh`, `icons/`, `justfile`, `macos/Resources/`. Stage by explicit path only.
 - Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
