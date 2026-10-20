@@ -1,4 +1,4 @@
-//! Version 10 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 11 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -7,12 +7,13 @@ use crate::library_types::{
 use crate::listing::ListDescription;
 use crate::{
     decoder::GainMode,
+    equalizer::EqualizerSettings,
     play_order::{RepeatMode, RepeatScope},
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -106,6 +107,9 @@ pub enum Command {
     },
     SetGain {
         mode: GainMode,
+    },
+    SetEqualizer {
+        equalizer: EqualizerSettings,
     },
     SetResume {
         enabled: bool,
@@ -380,6 +384,8 @@ pub struct Settings {
     pub shuffle: bool,
     #[serde(default = "full")]
     pub volume: u8,
+    #[serde(default)]
+    pub equalizer: EqualizerSettings,
 }
 
 fn full() -> u8 {
@@ -393,6 +399,7 @@ impl Default for Settings {
             repeat: RepeatMode::Off,
             shuffle: false,
             volume: full(),
+            equalizer: EqualizerSettings::default(),
         }
     }
 }
@@ -800,6 +807,51 @@ pub enum Message {
 mod tests {
     use super::*;
     #[test]
+    fn equalizer_wire_requires_a_complete_ten_band_configuration() {
+        let equalizer = EqualizerSettings {
+            enabled: true,
+            preamp_db: -6.0,
+            bands_db: [3.0; 10],
+        };
+        let value = serde_json::to_value(Request {
+            id: 1,
+            command: Command::SetEqualizer {
+                equalizer: equalizer.clone(),
+            },
+        })
+        .unwrap();
+        assert_eq!(value["command"], "set_equalizer");
+        assert_eq!(value["equalizer"]["preamp_db"], -6.0);
+        match serde_json::from_value::<Request>(value.clone())
+            .unwrap()
+            .command
+        {
+            Command::SetEqualizer { equalizer: decoded } => assert_eq!(decoded, equalizer),
+            command => panic!("unexpected command: {command:?}"),
+        }
+        for field in ["enabled", "preamp_db", "bands_db"] {
+            let mut missing = value.clone();
+            missing["equalizer"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
+        }
+        for count in [0, 9, 11] {
+            let mut malformed = value.clone();
+            malformed["equalizer"]["bands_db"] = serde_json::json!(vec![0.0; count]);
+            assert!(serde_json::from_value::<Request>(malformed).is_err());
+        }
+        let mut missing = value;
+        missing.as_object_mut().unwrap().remove("equalizer");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+        let settings = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(
+            settings["equalizer"],
+            serde_json::json!({
+                "enabled": false, "preamp_db": 0.0, "bands_db": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            })
+        );
+    }
+
+    #[test]
     fn stream_specs_validate_without_network_and_canonicalize() {
         let spec = StreamSpec::new("HTTPS://EXAMPLE.ORG:443/live".into(), "  ".into()).unwrap();
         assert_eq!(spec.url, "https://example.org/live");
@@ -901,7 +953,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 10);
+        assert_eq!(VERSION, 11);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

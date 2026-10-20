@@ -335,6 +335,22 @@ do {
             } while found == nil && ProcessInfo.processInfo.systemUptime < deadline
             guard let found else { throw DriverFailure(message: "Menu item missing: \(arguments[4])") }
             try check(AXUIElementPerformAction(found, kAXPressAction as CFString), "Choose \(arguments[4])")
+            // Choosing the already-selected item need not change model state.
+            // Wait for AppKit to dismiss its menu before another invocation can
+            // press the picker; otherwise that press closes the old menu.
+            func menuOpen(_ element: AXUIElement, depth: Int) -> Bool {
+                guard depth < 8 else { return false }
+                if attribute(element, kAXRoleAttribute) as? String == kAXMenuRole { return true }
+                return (attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [])
+                    .contains { menuOpen($0, depth: depth + 1) }
+            }
+            let dismissalDeadline = ProcessInfo.processInfo.systemUptime + 3
+            while menuOpen(try find(arguments[3], in: app), depth: 0) {
+                guard ProcessInfo.processInfo.systemUptime < dismissalDeadline else {
+                    throw DriverFailure(message: "Menu did not close after choosing \(arguments[4])")
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
         case "expect-row-count":
             guard arguments.count >= 5, let expected = Int(arguments[4]) else {
                 throw DriverFailure(message: "Row count required")

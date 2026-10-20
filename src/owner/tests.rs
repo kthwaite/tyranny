@@ -480,3 +480,99 @@ fn a_disconnected_owner_writes_its_pending_plays() {
     assert_eq!(page.total, 1);
     let _ = fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equalizer_rejects_invalid_values_without_mutating_state_or_storage() {
+    use crate::equalizer::EqualizerSettings;
+
+    let fixture = Fixture::new();
+    let control = fixture.control();
+    let equalizer = EqualizerSettings {
+        enabled: true,
+        preamp_db: -6.0,
+        bands_db: [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
+    };
+    ok(
+        &control,
+        Command::SetEqualizer {
+            equalizer: equalizer.clone(),
+        },
+    )
+    .await;
+    let before = snapshot(&control).await;
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -24.01, 12.01] {
+        let mut invalid = equalizer.clone();
+        invalid.preamp_db = value;
+        match ask(&control, Command::SetEqualizer { equalizer: invalid }).await {
+            Reply::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidCommand),
+            reply => panic!("accepted invalid preamp {value}: {reply:?}"),
+        }
+        assert_eq!(snapshot(&control).await, before);
+        assert_eq!(
+            Store::open(&fixture.root.join("state.sqlite"))
+                .unwrap()
+                .load()
+                .unwrap()
+                .settings,
+            before.settings
+        );
+    }
+    for band in 0..10 {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -12.01, 12.01] {
+            let mut invalid = equalizer.clone();
+            invalid.bands_db[band] = value;
+            match ask(&control, Command::SetEqualizer { equalizer: invalid }).await {
+                Reply::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidCommand),
+                reply => panic!("accepted invalid band {band} = {value}: {reply:?}"),
+            }
+            assert_eq!(snapshot(&control).await, before);
+        }
+    }
+    assert_eq!(
+        Store::open(&fixture.root.join("state.sqlite"))
+            .unwrap()
+            .load()
+            .unwrap()
+            .settings,
+        before.settings
+    );
+}
+
+#[test]
+fn equalizer_persistence_failure_does_not_publish_or_change_settings() {
+    let root = std::env::temp_dir().join(format!("tyranny-equalizer-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let database_path = root.join("state.sqlite");
+    let mut actor = Actor::open(OwnerConfig {
+        database_path: database_path.clone(),
+        output: OutputConfig::Capture {
+            path: root.join("capture.f32"),
+            clocked: true,
+        },
+    })
+    .unwrap();
+    let before = actor.last.clone();
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_settings BEFORE UPDATE OF settings ON control
+         BEGIN SELECT RAISE(ABORT, 'test settings write failure'); END;",
+        )
+        .unwrap();
+    let result = actor.command(Command::SetEqualizer {
+        equalizer: crate::equalizer::EqualizerSettings {
+            enabled: true,
+            preamp_db: -6.0,
+            bands_db: [3.0; 10],
+        },
+    });
+    assert!(result.is_err());
+    assert_eq!(actor.last, before);
+    assert_eq!(actor.settings, before.settings);
+    assert_eq!(actor.store.load().unwrap().settings, before.settings);
+    actor.library.shutdown().unwrap();
+    drop(actor.player);
+    drop(actor.store);
+    drop(connection);
+    let _ = fs::remove_dir_all(&root);
+}

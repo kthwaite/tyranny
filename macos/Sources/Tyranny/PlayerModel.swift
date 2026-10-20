@@ -20,6 +20,7 @@ final class PlayerModel {
     let notifications = TrackNotifications()
     /// Transport commands and the player bar display. Owns the system media controls.
     let transport = TransportModel()
+    let equalizer = EqualizerModel()
     /// The Up Next view's and drawer's queue windows.
     let upNext = UpNextModel()
     /// The saved playlists in the source list, and the edits made to them.
@@ -104,6 +105,7 @@ final class PlayerModel {
         wire.onSnapshot = { [weak self] state, instance in self?.accept(state, newInstance: instance != nil) }
         wire.onDisconnect = { [weak self] reason in self?.lostConnection(reason) }
         transport.attach(self)
+        equalizer.attach(self)
         upNext.attach(self)
         savedPlaylists.attach(self)
         activation.attach(self)
@@ -187,6 +189,7 @@ final class PlayerModel {
 
     private func updateMediaControls() {
         transport.stateChanged()
+        equalizer.stateChanged()
         upNext.sync()
         savedPlaylists.sync()
     }

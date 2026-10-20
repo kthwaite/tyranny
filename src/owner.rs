@@ -578,6 +578,7 @@ impl Actor {
             loaded.settings.gain_mode,
         )?;
         player.set_volume(loaded.settings.volume);
+        player.set_equalizer(&loaded.settings.equalizer);
         player.set_repeat(loaded.settings.repeat);
         if loaded.settings.shuffle {
             player.set_shuffle(Some(shuffle_strategy()));
@@ -1781,6 +1782,19 @@ impl Actor {
                     .map_err(Failure::persistence)?;
                 self.settings = settings;
                 self.player.set_volume(percent);
+                self.published(None)
+            }
+            Command::SetEqualizer { equalizer } => {
+                equalizer
+                    .validate()
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                settings.equalizer = equalizer;
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.player.set_equalizer(&settings.equalizer);
+                self.settings = settings;
                 self.published(None)
             }
             Command::SetGain { mode } => {

@@ -153,14 +153,15 @@ struct VolumeSlider: NSViewRepresentable {
 
 /// An NSSlider whose accessibility value and increments go through its action.
 final class AccessibleSlider: NSSlider {
+    var accessibilityStep: Double = 5
     override func setAccessibilityValue(_ value: Any?) {
         guard isEnabled, let number = value as? NSNumber, number.doubleValue.isFinite else { return }
         doubleValue = min(max(number.doubleValue, minValue), maxValue)
         sendAction(action, to: target)
     }
 
-    override func accessibilityPerformIncrement() -> Bool { adjust(by: 5) }
-    override func accessibilityPerformDecrement() -> Bool { adjust(by: -5) }
+    override func accessibilityPerformIncrement() -> Bool { adjust(by: accessibilityStep) }
+    override func accessibilityPerformDecrement() -> Bool { adjust(by: -accessibilityStep) }
 
     private func adjust(by step: Double) -> Bool {
         guard isEnabled else { return false }

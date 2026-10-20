@@ -2,6 +2,59 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Audio equalizer (2026-10-20)
+
+Implemented `TSK-sunlit-egret-jywzq` in the isolated
+`../tyranny-sunlit-egret` worktree on `feature/sunlit-egret-equalizer`, branched
+from `dev`. Playback → Equalizer… opens the native ten-band/preamp window.
+The allocation-free stereo biquad bank handles both local and streaming PCM;
+Flat, Bass Boost, Treble Boost and Vocal presets, retained bypass curves,
+server-owned persistence, and reconnect-authoritative edits are implemented.
+Protocol **v11**, SQLite **schema 6 unchanged**. Existing databases start with
+disabled EQ; client and server must be upgraded together.
+
+### Exercised evidence
+
+- `cargo test --locked --all-targets`: **263 passed, one ignored**. Coverage
+  includes exact flat/bypass sample bits, frequency/bandwidth response, stereo
+  isolation, chunk invariance, bounded finite decay, pending-buffer retries,
+  gapless history continuity, explicit discontinuity resets, stream-reconnect
+  alignment, malformed/range/nonfinite settings, persistence failure, existing
+  database defaults, durable restart and two-controller state publication.
+- `cargo clippy --locked --all-targets -- -D warnings` passed; Rust formatting
+  and `cargo build --locked --bins` completed.
+- `swift test --package-path macos --scratch-path target/swift-client
+  -Xswiftc -warnings-as-errors`: **290 passed in 43 suites**, including EQ
+  decoding, validation, preset and bypass behavior; the native executable built.
+- A throwaway real-daemon smoke rendered a three-second stereo fixture through
+  the production PCM consumer. Enabled flat and disabled nonflat EQ produced
+  **1,152,000 identical bytes / 144,000 frames**. A +6 dB 1 kHz band measured
+  **+5.9999998 dB** at 1 kHz and **+0.2215682 dB** at 250 Hz. A −6 dB preamp
+  measured **−6.0000001 dB**. A live edit preserved all frames, left the early
+  buffered samples unchanged, and reached the requested gain after the ring
+  delay. There were no reported underruns. Restart restored the curve; rejected
+  out-of-range input left settings unchanged.
+- Native Accessibility exercised all four presets, all ten bands, preamp,
+  Custom recognition, retained bypass, enabled/disabled editing, queued-edit
+  cancellation on disconnect, authoritative reconnect and daemon/app restart.
+  Both initial and restored windows were captured and visually inspected.
+  Four consecutive complete edit/restart runs passed after fixing the native
+  driver's menu-dismissal race: selecting an already-selected preset does not
+  change model state, so the driver now waits for the actual menu to close before
+  allowing another invocation to press it.
+
+PCM evidence: `target/equalizer-smoke/run-5flchrsq/report.json`. Native evidence:
+`target/equalizer-ui/run-4nt3y0wd/`, with three additional successful race checks
+at `run-ak8gz63s`, `run-u4eeqcc4` and `run-uerj_bpm`. Paths are local to the
+equalizer worktree. The native debug smoke hook and regression tests remain
+reproducible; throwaway orchestration/diagnostic scripts were removed.
+
+Limitations: capture output, not acoustic listening or hardware loopback. No
+release packaging claim. Settings edits retain buffered audio (about 1.4 seconds
+plus decoder/device buffering), reset changed-filter histories, and do not add
+a limiter or transition smoothing. Boosts require preamp headroom. The user's
+running app, daemon and database were not replaced or edited.
+
 ## Development integration (2026-10-20)
 
 Notifications and HTTP streaming were integrated with the current command-language, decoder-component coverage and packet-duration changes. Conflict resolution preserves both native queue-command methods, the expanded required decoder/demuxer sets, and the network/TLS restrictions. Configuration tests exercise rejection of missing audio components instead of copying component lists or inspecting source text.

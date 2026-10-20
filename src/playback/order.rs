@@ -504,6 +504,7 @@ impl Player {
         let from = keep.map_or(0, |keep| keep + 1);
         if from < self.passes.len() {
             self.decoder = None;
+            self.equalizer.reset();
             for pass in self.passes.drain(from..) {
                 pass.token.invalidate();
                 self.prefilled_frames -= pass.prefilled;
@@ -528,6 +529,7 @@ impl Player {
             self.decoder = None;
             self.pending = 0;
             self.decoded_position = 0;
+            self.equalizer.reset();
         }
         let prefilled = &mut self.prefilled_frames;
         self.passes.retain(|pass| {
