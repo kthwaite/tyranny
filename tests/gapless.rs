@@ -13,6 +13,8 @@
 //!
 //! Apple afconvert AAC and the lame CLI are exact and are tested instead.
 //! `mp3notag48` is kept only to pin the no-codec-constant policy.
+//! `mp4opus48` gets no end-trim side data from the mov demuxer, because Opus has
+//! no fixed frame size; it pins the packet-duration cut in `src/decoder.rs`.
 //!
 //! Run against the pinned release FFmpeg (spike method):
 //!
@@ -38,7 +40,7 @@ use tyranny::{
     playback::Player,
 };
 
-const SETS: [&str; 14] = [
+const SETS: [&str; 15] = [
     "wav48",
     "flac48",
     "alac48",
@@ -48,6 +50,7 @@ const SETS: [&str; 14] = [
     "aac48",
     "aacapple48",
     "opus48",
+    "mp4opus48",
     "mp3notag48",
     "wav44",
     "flac44",
