@@ -124,6 +124,8 @@ final class PlayerModel {
     /// when `fields` is the prefetch's request, the server is still the one it asked, and the reply
     /// is fresh for the main connection (`LaunchPrefetchReply.isFresh`). A finished prefetch is
     /// checked at once. One still in flight races a normal send: the first ok reply wins.
+    /// The server's library worker is serial, so in the race the send queues behind the prefetch
+    /// query (or the reverse). That is rare and bounded by the prefetch's 2 s deadline.
     func listTracks(_ fields: [String: JSONValue]) async throws -> ListTracksResponse {
         guard let launch = launchPrefetch else { return try await send("list_tracks", fields) }
         launchPrefetch = nil

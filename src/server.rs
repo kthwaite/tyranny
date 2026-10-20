@@ -456,6 +456,10 @@ async fn serve_connection(
                         // abandoned queued image work is skipped. At most one
                         // next frame is retained, preserving pipelined requests
                         // in order without running them before this reply.
+                        // Invariant the client's launch prefetch relies on: no `state` message
+                        // is written between reading a request and writing its reply. Events
+                        // are polled only after the reply (below), so a reply's connection
+                        // saw no state change in between.
                         let artwork = matches!(&request.command, Command::Artwork { .. });
                         let pending = controller.request(request);
                         tokio::pin!(pending);

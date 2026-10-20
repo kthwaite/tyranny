@@ -205,7 +205,7 @@ struct VirtualTrackTable: NSViewRepresentable {
                     // Ungrouped, a refresh pass changes the total and the rows together.
                     let rowsBefore = table.numberOfRows
                     table.noteNumberOfRowsChanged()
-                    // First rows were just created from current data; reloading them again is redundant.
+                    // First rows were just created; skipping the reload relies on `viewFor` reading the current cache when row views are made.
                     rowsWereCreated = rowsBefore == 0 && table.numberOfRows > 0
                 }
             }

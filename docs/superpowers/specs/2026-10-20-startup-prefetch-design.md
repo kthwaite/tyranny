@@ -103,8 +103,11 @@ the prefetch is still in flight, the fetch sends its normal request at once and 
 prefetch: the first ok reply wins (a prefetched reply only if fresh), and the loser's reply is
 dropped. Neither is cancelled: the send because cancelling a request closes the shared
 connection, the claim because the prefetch's own 2 s deadline bounds it. A failed send waits for
-the prefetch; a stale or failed prefetch waits for the send. So the prefetch never makes the first
-window later than a plain fetch. Decoding the claimed bytes goes through the same
+the prefetch; a stale or failed prefetch waits for the send. In the normal case the prefetch is a
+clear win. In two rare cases it can make the first window later than a plain fetch, by at most the
+2 s deadline: the server's library worker is single-threaded, so in the race the normal send queues
+behind the prefetch query (or the reverse), and a stale prefetch's query delays the send; and a
+failed send waits up to the prefetch deadline before it rethrows. Decoding the claimed bytes goes through the same
 `ListTracksResponse` decode as a normal reply.
 
 Freshness: `ListModel` takes its library and history revisions from the main connection's
