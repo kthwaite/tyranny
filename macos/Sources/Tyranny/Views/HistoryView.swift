@@ -10,6 +10,7 @@ final class HistoryModel {
     let cache: ListWindowCache<HistoryEntry>
     /// Bumps when the cache is reset; table positions from an older epoch mean nothing.
     private(set) var epoch: UInt64 = 0
+    var selectedID: UInt64?
 
     @ObservationIgnored private weak var player: PlayerModel?
     @ObservationIgnored private var session: UInt64?
@@ -31,11 +32,15 @@ final class HistoryModel {
             if session != generation {
                 session = generation
                 cache.discard(session: generation)
+                selectedID = nil
             }
             needsReset = true
             return
         }
-        if session != generation { cache.discard(session: generation) }
+        if session != generation {
+            cache.discard(session: generation)
+            selectedID = nil
+        }
         session = generation
         let history = snapshot.history_revision
         if needsReset {
@@ -110,7 +115,7 @@ struct HistoryView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             Divider()
-            HistoryTable(model: model, generation: model.cache.generation, epoch: model.epoch)
+            HistoryTable(model: model, generation: model.cache.generation, epoch: model.epoch, selectedID: model.selectedID)
                 .overlay {
                     if model.cache.revision != nil, model.cache.total == 0 {
                         Text("Nothing played yet")
@@ -153,6 +158,7 @@ struct HistoryTable: NSViewRepresentable {
     /// Read in the parent's body so SwiftUI updates the table when they change.
     let generation: UInt64
     let epoch: UInt64
+    let selectedID: UInt64?
 
     private struct Column {
         let id: String
@@ -237,6 +243,7 @@ struct HistoryTable: NSViewRepresentable {
         private var shownCount = 0
         private var shownRefreshes: UInt64 = 0
         private var anchor: (id: UInt64, offset: Int)?
+        private var updating = false
 
         init(_ parent: HistoryTable) { self.parent = parent }
 
@@ -245,6 +252,8 @@ struct HistoryTable: NSViewRepresentable {
         func update(_ parent: HistoryTable) {
             self.parent = parent
             guard let table else { return }
+            updating = true
+            defer { updating = false }
             let count = cache.total
             if parent.generation != shownGeneration || parent.epoch != shownEpoch || count != shownCount {
                 let reloadAll = parent.epoch != shownEpoch || count != shownCount
@@ -258,6 +267,8 @@ struct HistoryTable: NSViewRepresentable {
                 }
                 restoreAnchor(table)
             }
+            let selected = parent.selectedID.flatMap { cache.position(of: $0) }.map { IndexSet(integer: $0) } ?? []
+            if table.selectedRowIndexes != selected { table.selectRowIndexes(selected, byExtendingSelection: false) }
             reportVisible()
         }
 
@@ -291,6 +302,11 @@ struct HistoryTable: NSViewRepresentable {
         @objc func activateClickedRow(_ table: NSTableView) {
             guard table.clickedRow >= 0 else { return }
             parent.model.activate(position: table.clickedRow)
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard !updating, let table else { return }
+            parent.model.selectedID = table.selectedRow >= 0 ? cache.loadedRow(at: table.selectedRow)?.id : nil
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { cache.total }

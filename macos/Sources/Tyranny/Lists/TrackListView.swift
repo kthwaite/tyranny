@@ -48,7 +48,7 @@ struct TrackListView: View {
                 list: list, player: player, generation: list.cache.generation, epoch: list.epoch,
                 layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden, explicit: columns.explicit,
                 playingTrackID: player.snapshot?.now_playing?.track_id,
-                revealToken: list.revealRequest?.token)
+                revealToken: list.revealRequest?.token, selectionToken: list.commandSelectionRevision)
                 .overlay { emptyState }
                 .overlay(alignment: .bottom) { reorderHint }
         }

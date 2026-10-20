@@ -42,6 +42,11 @@ func find(_ identifier: String, in app: AXUIElement, byTitle: Bool = false) thro
     let deadline = ProcessInfo.processInfo.systemUptime + 3
     repeat {
         for window in attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? [] {
+            // Search modal sheets before the library's potentially large row subtree.
+            for sheet in attribute(window, kAXChildrenAttribute) as? [AXUIElement] ?? []
+                where attribute(sheet, kAXRoleAttribute) as? String == kAXSheetRole {
+                if let result = visit(sheet, depth: 0) { return result }
+            }
             if let result = visit(window, depth: 0) { return result }
         }
         Thread.sleep(forTimeInterval: 0.01)

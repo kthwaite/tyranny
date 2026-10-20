@@ -26,6 +26,7 @@ struct VirtualTrackTable: NSViewRepresentable {
     let playingTrackID: UInt64?
     /// Read in the parent's body so a ⌘L reveal reaches the table.
     let revealToken: UInt64?
+    let selectionToken: UInt64
 
     var identifier: String { "track-table-\(list.key)" }
 
@@ -219,6 +220,8 @@ struct VirtualTrackTable: NSViewRepresentable {
                 if !reloadedAll { reloadGutter() }
             }
             shownPlaying = parent.playingTrackID
+            let selected = layout.displayIndexes(ofPositions: parent.list.selectedPositions)
+            if table.selectedRowIndexes != selected { table.selectRowIndexes(selected, byExtendingSelection: false) }
             applyReveal(parent.revealToken)
             reportVisible()
         }
