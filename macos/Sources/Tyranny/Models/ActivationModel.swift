@@ -23,6 +23,24 @@ struct SelectionRequest {
     }
 }
 
+extension PlayerModel {
+    /// Fetches the window of `list` around `position`, finds the row by ID and re-encodes the
+    /// selection for `list`, under the revision of that window. Throws `ListChangedError` when
+    /// the row is gone.
+    func relocated(_ selection: TrackSelection, rowID: UInt64, at position: Int,
+                   in list: ListDescription) async throws -> TrackSelection {
+        let window = RowRelocation.window(around: position, size: 200)
+        let reply: ListTracksResponse = try await send("list_tracks", [
+            "list": try JSONValue.encoding(list), "revision": .null,
+            "offset": .int(window.offset), "limit": .int(window.limit)])
+        guard let fresh = SelectionRetarget.relocate(selection, rowID: rowID, from: position,
+                                                     rowIDs: reply.entries.map(\.row_id), offset: reply.offset,
+                                                     libraryRevision: reply.revision, list: list)
+        else { throw ListChangedError() }
+        return fresh
+    }
+}
+
 /// One user request to play or add rows. Every list, grid and table builds one and hands it
 /// to `ActivationModel.start`.
 struct EnqueueJob {

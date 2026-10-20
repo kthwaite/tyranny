@@ -190,6 +190,18 @@ private func item(_ id: UInt64, played: Bool) -> QueueItem {
                            excluded: [], firstRowID: 1002))
     }
 
+    @Test func aRunFollowsItsFirstTrackAfterTheLibraryMovedOn() throws {
+        // A scan added a track before the clicked one; the panel still shows the old order.
+        let run = try AlbumPanel.selection(albumID: 7, revision: 12, positions: IndexSet([2]), asRun: true,
+                                           rowID: rowID, trackID: trackID)
+        let list = AlbumPlayback.list(albumID: 7)
+        #expect(SelectionRetarget.relocate(run, rowID: 1002, from: 2, rowIDs: [1000, 1001, 999, 1002], offset: 0,
+                                           libraryRevision: 13, list: list)
+                == .list(list: list, libraryRevision: 13, ranges: [[3, UInt64.max]], excluded: [], firstRowID: 1002))
+        #expect(SelectionRetarget.relocate(run, rowID: 1002, from: 2, rowIDs: [1000, 1001], offset: 0,
+                                           libraryRevision: 13, list: list) == nil)
+    }
+
     @Test func otherChoicesSendExactlyTheChosenTracks() throws {
         // Several rows, even as a run, and one row not as a run: their track IDs, in album order.
         let several = try AlbumPanel.selection(albumID: 7, revision: 12, positions: IndexSet([3, 1]), asRun: true,

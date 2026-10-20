@@ -269,7 +269,8 @@ final class AlbumGridModel {
     }
 
     /// The panel's tracks at `positions`, under the revision they were loaded at. No positions
-    /// is the whole album under the current revision.
+    /// is the whole album under the current revision. A run starts at a position, so after the
+    /// library moved on its first track is found again in the album as it is now.
     private func selectionRequest(_ expansion: AlbumExpansion, positions: IndexSet, asRun: Bool) throws -> SelectionRequest {
         if positions.isEmpty, let whole = wholeAlbum(expansion.albumID) { return whole }
         guard let player, let revision = expansion.basis?.revision else { throw EmptySelection() }
@@ -278,7 +279,14 @@ final class AlbumGridModel {
             albumID: expansion.albumID, revision: revision, positions: positions, asRun: asRun,
             rowID: { tracks.indices.contains($0) ? tracks[$0].row_id : nil },
             trackID: { tracks.indices.contains($0) ? tracks[$0].track.id : nil })
-        return .source(selection, player: player)
+        // Track IDs do not move with the album. The whole album has no row to find.
+        if case .ids = selection { return .source(selection, player: player) }
+        guard let first = positions.first, tracks.indices.contains(first) else { return .source(selection, player: player) }
+        let rowID = tracks[first].row_id, list = AlbumPlayback.list(albumID: expansion.albumID)
+        return SelectionRequest(selection: selection) { [weak player] in
+            guard let player else { throw ListChangedError() }
+            return try await player.relocated(selection, rowID: rowID, at: first, in: list)
+        }
     }
 
     /// Show in Album: selects the album and opens its panel.

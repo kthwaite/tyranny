@@ -59,22 +59,12 @@ extension ListModel {
         }
     }
 
-    /// Fetches the window around the clicked row, finds the row by ID and re-encodes the
-    /// selection for the list description of that fetch, under the revision of that window.
+    /// Finds the clicked row again in the list as it is now.
     private func relocated(_ selection: TrackSelection, rowID: UInt64, at position: Int) async throws -> TrackSelection {
         guard let player else { throw ListChangedError() }
-        let window = RowRelocation.window(around: position, size: 200)
         var request = description
         request.source = source
-        let reply: ListTracksResponse = try await player.send("list_tracks", [
-            "list": try JSONValue.encoding(request), "revision": .null,
-            "offset": .int(window.offset), "limit": .int(window.limit)])
-        guard case .found(let now) = RowRelocation.locate(rowID: rowID, rowIDs: reply.entries.map(\.row_id),
-                                                          offset: reply.offset),
-              let fresh = SelectionRetarget.apply(selection, libraryRevision: reply.revision, delta: now - position,
-                                                  list: request)
-        else { throw ListChangedError() }
-        return fresh
+        return try await player.relocated(selection, rowID: rowID, at: position, in: request)
     }
 
     // MARK: Context menu targets

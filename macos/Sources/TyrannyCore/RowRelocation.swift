@@ -39,4 +39,16 @@ public enum SelectionRetarget {
                          firstRowID: firstRowID)
         }
     }
+
+    /// The selection moved to where its first row (`rowID`, last seen at `position`) is in a freshly
+    /// fetched window of `list`: `rowIDs` from list position `offset`, under `libraryRevision`.
+    /// nil when the row left the window or the move cannot be applied.
+    public static func relocate(_ selection: TrackSelection, rowID: UInt64, from position: Int,
+                                rowIDs: [UInt64], offset: Int, libraryRevision: UInt64,
+                                list: ListDescription) -> TrackSelection? {
+        guard case .found(let now) = RowRelocation.locate(rowID: rowID, rowIDs: rowIDs, offset: offset) else {
+            return nil
+        }
+        return apply(selection, libraryRevision: libraryRevision, delta: now - position, list: list)
+    }
 }
