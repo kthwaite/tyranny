@@ -267,6 +267,110 @@ async fn two_controllers_receive_ordered_state_and_reconnect_to_current_authorit
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equalizer_is_durable_coherent_and_authoritative_after_reconnect() {
+    use tyranny::equalizer::EqualizerSettings;
+
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut first = running.connect().await;
+    let mut second = running.connect().await;
+    let initial = hello(&mut first, &running.instance_id).await;
+    assert_eq!(initial.settings.equalizer, EqualizerSettings::default());
+    let mut first_sequence = initial.sequence;
+    let mut second_sequence = hello(&mut second, &running.instance_id).await.sequence;
+    let mut equalizer = EqualizerSettings {
+        enabled: true,
+        preamp_db: -6.0,
+        bands_db: [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
+    };
+    for (id, enabled) in [(1, true), (2, false)] {
+        equalizer.enabled = enabled;
+        first
+            .send(Frame::Text(
+                serde_json::json!({
+                    "id": id, "command": "set_equalizer", "equalizer": equalizer,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let applied = reply(&mut first, id, &mut first_sequence).await;
+        assert_eq!(applied.settings.equalizer, equalizer);
+        assert_eq!(applied.queue_revision, initial.queue_revision);
+        // The successful reply follows the durable write, not only an in-memory update.
+        let database = rusqlite::Connection::open(scratch.path("state/state.sqlite3")).unwrap();
+        let saved: String = database
+            .query_row(
+                "SELECT settings FROM control WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let saved: tyranny::protocol::Settings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved, applied.settings);
+        loop {
+            match receive(&mut second).await {
+                Message::State { snapshot } => {
+                    assert!(snapshot.sequence > second_sequence);
+                    second_sequence = snapshot.sequence;
+                    if snapshot.sequence >= applied.sequence {
+                        assert_eq!(snapshot.settings, applied.settings);
+                        assert_eq!(snapshot.queue_revision, applied.queue_revision);
+                        break;
+                    }
+                }
+                message => panic!("unexpected controller event: {message:?}"),
+            }
+        }
+    }
+    let mut invalid = equalizer.clone();
+    invalid.bands_db[3] = 12.01;
+    first
+        .send(Frame::Text(
+            serde_json::json!({
+                "id": 3, "command": "set_equalizer", "equalizer": invalid,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    match receive(&mut first).await {
+        Message::Reply {
+            id: 3,
+            reply: Reply::Error { code, .. },
+        } => {
+            assert_eq!(code, ErrorCode::InvalidCommand);
+        }
+        message => panic!("invalid equalizer was not rejected: {message:?}"),
+    }
+    first
+        .send(Frame::Text(r#"{"id":4,"command":"snapshot"}"#.into()))
+        .await
+        .unwrap();
+    let unchanged = reply(&mut first, 4, &mut first_sequence).await;
+    assert_eq!(unchanged.settings.equalizer, equalizer);
+    assert_eq!(unchanged.sequence, second_sequence);
+    first.close(None).await.unwrap();
+    let mut reconnected = running.connect().await;
+    assert_eq!(
+        hello(&mut reconnected, &running.instance_id).await.settings,
+        unchanged.settings
+    );
+    running.stop().await;
+    let restarted = Running::start(&scratch).await;
+    let mut reconnected = restarted.connect().await;
+    assert_eq!(
+        hello(&mut reconnected, &restarted.instance_id)
+            .await
+            .settings,
+        unchanged.settings
+    );
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_binary_and_oversized_requests_disconnect_only_the_offending_controller() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;

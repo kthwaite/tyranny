@@ -56,12 +56,12 @@ def main():
         report['cases'].append({'name': name, 'passed': True, **details})
         print('Passed ' + name, flush=True)
 
-    def connect(version=10):
+    def connect(version=11):
         client = WebSocket(ready['address'], Path(ready['token_path']).read_text().strip(), expected_version=version)
         connections.append(client)
         return client
 
-    def start(binary, version=10):
+    def start(binary, version=11):
         nonlocal process, ready
         index = len(report['launches'])
         command = [str(Path(binary).resolve()), '--state-dir', str(state), '--bind', '127.0.0.1:0',
@@ -156,8 +156,11 @@ def main():
             a = start(args.server)
             migrated = a.state()
             assert queue(a) == old['queue']
-            for field in ['queue_revision', 'current_id', 'position_frames', 'settings']:
+            for field in ['queue_revision', 'current_id', 'position_frames']:
                 assert migrated[field] == old['snapshot'][field], field
+            for field, value in old['snapshot']['settings'].items():
+                assert migrated['settings'][field] == value, field
+            assert not migrated['settings']['equalizer']['enabled']
             assert migrated['transport'] == 'paused' and migrated['library']['tracks'] == 105
             with sqlite3.connect(state / 'state.sqlite3') as database:
                 assert database.execute('PRAGMA user_version').fetchone()[0] == 6

@@ -6,7 +6,7 @@ continuous CoreAudio stream. The native engine, persistent local server,
 durable library, and native SwiftUI controller are implemented and exercised;
 see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations.
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
-Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v10 requires matching client/server processes; the main database is schema 6.
+Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v11 requires matching client/server processes; the main database is schema 6.
 
 ## Development commands
 
@@ -41,6 +41,49 @@ To package the development app, stop the app/daemon before running
 with a debug client. `scripts/build_macos.sh release` instead builds both
 components in release mode and assembles a self-contained
 `target/release/Tyranny.app`. An optional second argument selects the app destination.
+
+### Audio equalizer
+
+Open **Playback → Equalizer…** (`⌥⌘E`), or use **Settings → Playback → Open
+Equalizer…**. The separate window controls ten octave bands from 31.25 Hz to
+16 kHz (−12…+12 dB), a −24…+12 dB preamp, and enable/bypass. Flat, Bass Boost,
+Treble Boost and Vocal presets replace the whole curve; manual changes show
+Custom. Bypass retains the gains. Settings belong to the server and survive
+client reconnection and daemon restart.
+
+The allocation-free stereo biquad bank runs after decoding/ReplayGain and before
+the output ring, for both local files and live streams. Disabled EQ and an enabled
+all-zero curve leave every PCM sample bit-identical. Filter history spans natural
+gapless track boundaries, but resets on seek, stop, explicit reselection and
+stream reconnection. Changed settings start clean histories; identical settings
+do not reset the filters.
+
+Edits affect newly processed PCM, not samples already buffered: allow roughly
+1.4 seconds plus decoder/device buffering. Editing while paused does not discard
+the old buffer; it plays before the new settings become audible. There is no
+limiter or transition smoothing. Boosts can clip, so reduce preamp for headroom;
+the preset attenuation is not a guarantee against clipping.
+
+Protocol **v11** requires matching client/server builds. `set_equalizer` accepts
+one complete `equalizer` object, also published in `snapshot.settings.equalizer`:
+
+```json
+{"id":1,"command":"set_equalizer","equalizer":{"enabled":true,"preamp_db":-6,"bands_db":[5,5,3,1,0,0,0,0,0,0]}}
+```
+
+The ten gains must be finite and within range. Invalid changes are rejected before
+settings or audio mutation. The server persists accepted settings before applying
+them; older databases default to disabled EQ without changing SQLite schema 6.
+Preset names are derived client-side from the persisted gains, not stored separately.
+
+Regression checks: `cargo test --locked equalizer` and
+`swift test --package-path macos --scratch-path target/swift-client --filter EqualizerTests`.
+The debug client's `--equalizer-smoke-output <directory>` hook exercises native
+controls against an explicitly supplied isolated loopback daemon with empty
+library/queue. Supply `--url`, `--token-file` and `--ui-driver`; add
+`--equalizer-smoke-restore` after restarting that daemon to verify restored state.
+Build the Accessibility driver from current source:
+`swiftc scripts/native_ui_driver.swift -o target/native-ui-driver`.
 
 ### Client command language
 
@@ -379,7 +422,7 @@ The reproducible scale gate seeds a declared metadata-only 50,000-track index an
 - Remaining codecs/containers, audio CD, module/BASS support, and every non-CoreAudio output. Maintain a tested capability list; broad dependency support is not a coverage claim.
 - Saved internet-radio stations and station-file imports; dynamic queue autofill; the directory-browser screen. Direct SHOUTcast/Icecast MP3/Ogg playback is implemented; see [streaming evidence](SPIKE_RESULTS.md#http-stream-playback).
 - MusicBrainz tag retrieval, additional cover providers and artist/title matching, lyrics providers, scrobbling, and tag writing. Artwork fallback uses an existing MusicBrainz release ID only; it does not search for or rewrite tags.
-- Equalizer/analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
+- Audio analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
 - CUE ingestion and sophisticated release reconciliation; preserve the identity seams now.
 - MPRIS remains a later Linux integration; macOS media keys/Now Playing route the same Rust commands without a second player. Native track notifications are implemented; authorized banner/artwork delivery verification awaits macOS permission (see [SPIKE_RESULTS.md](SPIKE_RESULTS.md)).
 - Remote networking, multiple users/zones, MPD wire compatibility, client-local streaming, App Store sandboxing, and a production installer.

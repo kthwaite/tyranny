@@ -6,13 +6,15 @@ public struct PlayerSettings: Codable, Sendable, Equatable {
     public let volume: UInt8
     public let `repeat`: RepeatMode
     public let shuffle: Bool
+    public let equalizer: EqualizerSettings
 
-    public init(gain_mode: String, resume_on_start: Bool, volume: UInt8, repeat: RepeatMode, shuffle: Bool) {
+    public init(gain_mode: String, resume_on_start: Bool, volume: UInt8, repeat: RepeatMode, shuffle: Bool, equalizer: EqualizerSettings) {
         self.gain_mode = gain_mode
         self.resume_on_start = resume_on_start
         self.volume = volume
         self.`repeat` = `repeat`
         self.shuffle = shuffle
+        self.equalizer = equalizer
     }
 }
 
