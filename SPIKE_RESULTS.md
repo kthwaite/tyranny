@@ -2,6 +2,43 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Compilation inference (2026-10-20)
+
+`TSK-jolly-dingo-6x70y` adds explicit album-artist/compilation provenance and
+bounded post-probe reconciliation. Same-folder/title and shared-release
+compilations group without losing per-track artists or durable track IDs.
+Explicit non-VA album artists, explicit false flags, conflicting release IDs,
+and unknown metadata fallbacks prevent speculative merging. Partial release IDs
+join only an unambiguous folder peer; raw MusicBrainz metadata remains unchanged.
+
+Final verification: **288 Rust tests passed, one ignored**; Clippy with warnings
+denied and formatting checks passed. The full run exposed two playback race
+fixtures that assumed current-track identity implied next-track prebuffering.
+Their setup now fills the buffer while paused, then waits for audible entry 1
+before preparing the edit; the transition/PCM assertions remain unchanged.
+
+Real-daemon verification in `../tyranny-jolly-dingo`:
+
+- Twenty generated FLAC fixtures passed untagged/mixed-tag grouping, VA aliases,
+  explicit-tag protection, distinct-release isolation, cross-folder release
+  grouping, partial MusicBrainz association, unchanged rescans, removal/re-add,
+  retag reversal, and restart persistence. Every surviving/restored track kept
+  its ID.
+- A separate 512-directory/512-track import completed in **0.367 s**; its
+  unchanged rescan completed in **0.198 s**. These are local fixture timings,
+  not production-library latency guarantees.
+- The existing library process gate passed all **13 scenarios** with **2,056
+  tracks**, including import during clocked PCM playback, migrations, bounded
+  queries, retags, missing/unreadable roots, crash recovery and indexed playback.
+  Maximum observed control-request latency during import was **1.57 ms** with
+  **zero underruns**.
+
+Reports: `target/compilations-smoke-1jop8gkk/report.json` and
+`target/compilation-library-gate/run-2buyt_2v/report.json` in that worktree.
+Existing roots need a manual rescan to extract provenance (metadata version 3);
+no database-schema or protocol-version change. Verification used isolated state,
+not the user's daemon/library. No new native UI or acoustic-listening claim.
+
 ## Audio equalizer (2026-10-20)
 
 Implemented `TSK-sunlit-egret-jywzq` in the isolated

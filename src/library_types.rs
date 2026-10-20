@@ -9,12 +9,18 @@ pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub album_artist: String,
+    /// Explicit album artist, trimmed, before display normalization or inference.
+    #[serde(default)]
+    pub album_artist_tag: Option<String>,
     pub album: String,
     pub track_number: Option<u32>,
     pub track_total: Option<u32>,
     pub disc_number: Option<u32>,
     pub disc_total: Option<u32>,
     pub compilation: bool,
+    /// Explicit compilation flag; absent or unrecognized tags remain `None`.
+    #[serde(default)]
+    pub compilation_tag: Option<bool>,
     pub duration_ms: Option<u64>,
     pub sample_rate: u32,
     pub channels: u16,

@@ -2,6 +2,7 @@
 //! coordinator owns SQL and bounded worklists; one scanner owns filesystem and
 //! native metadata IO. Root completion watermarks make reconciliation atomic.
 mod db;
+mod grouping;
 mod lists;
 mod query;
 #[cfg(test)]
@@ -203,6 +204,7 @@ struct Active {
     enumerated: bool,
     complete: bool,
     in_flight: usize,
+    grouping: grouping::Reconciliation,
 }
 struct Coordinator {
     connection: Connection,
@@ -228,6 +230,7 @@ impl Coordinator {
         connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
+        grouping::initialize(&connection)?;
         publish(&shared, db::recover(&mut connection)?);
         let upgrading: bool = connection.query_row(
             "SELECT pending_upgrade FROM library_state WHERE singleton=1",
@@ -266,7 +269,7 @@ impl Coordinator {
                 Err(mpsc::error::TryRecvError::Empty) => {}
             }
             if self.active.is_some() {
-                self.scan_tick()?;
+                worked |= self.scan_tick()?;
             }
             if self.upgrading && self.active.is_none() {
                 self.upgrade_step()?;
@@ -447,6 +450,10 @@ impl Coordinator {
     fn launch(&mut self, root: PathBuf, serial: u64, mut status: ScanStatus) -> Result<()> {
         self.dirty = true;
         self.cleanup_pending = true;
+        grouping::begin(
+            &self.connection,
+            status.root_id.context("scan has no root")?,
+        )?;
         match Scanner::start(root) {
             Ok(scanner) => {
                 self.active = Some(Active {
@@ -456,6 +463,7 @@ impl Coordinator {
                     enumerated: false,
                     complete: false,
                     in_flight: 0,
+                    grouping: grouping::Reconciliation::default(),
                 })
             }
             Err(failure) => {
@@ -468,20 +476,22 @@ impl Coordinator {
         }
         self.publish(true)
     }
-    fn scan_tick(&mut self) -> Result<()> {
+    fn scan_tick(&mut self) -> Result<bool> {
         let mut active = self
             .active
             .take()
             .context("scan tick without active scan")?;
         let previous_phase = active.status.phase;
         match advance(&mut self.connection, &mut active) {
-            Ok(done) => {
-                self.dirty = true;
+            Ok(step) => {
+                let done = step == ScanStep::Complete;
+                self.dirty |= step != ScanStep::Waiting;
                 let transition = done || active.status.phase != previous_phase;
                 if !done {
                     self.active = Some(active);
                 }
                 self.publish(transition)?;
+                Ok(step != ScanStep::Waiting)
             }
             Err(failure) => {
                 if let Some(scanner) = active.scanner.take() {
@@ -492,14 +502,25 @@ impl Coordinator {
                 self.persist(&active.status)?;
                 self.cleanup_pending = true;
                 self.publish(true)?;
+                Ok(true)
             }
         }
-        Ok(())
     }
 }
 
-fn advance(connection: &mut Connection, active: &mut Active) -> Result<bool> {
+#[derive(PartialEq, Eq)]
+enum ScanStep {
+    Waiting,
+    Progress,
+    Complete,
+}
+
+fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep> {
+    if !active.grouping.seed(connection)? {
+        return Ok(ScanStep::Progress);
+    }
     let scanner = active.scanner.as_ref().context("scan worker missing")?;
+    let mut progressed = true;
     match scanner.try_recv() {
         Ok(ScanEvent::Candidates(candidates)) => {
             ensure!(
@@ -536,13 +557,21 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<bool> {
             db::probed(connection, active.serial, &mut active.status, results)?;
             active.in_flight = 0;
         }
-        Err(startup::TryRecvError::Empty) => {}
+        Err(startup::TryRecvError::Empty) => progressed = false,
         Err(startup::TryRecvError::Disconnected) => {
             return Err(anyhow!("scanner disconnected before scan completion"));
         }
     }
     if active.enumerated && active.in_flight == 0 {
         if active.status.total == Some(active.status.processed) {
+            if !active.grouping.step(
+                connection,
+                active.status.root_id.context("scan has no root")?,
+                active.serial,
+                active.complete,
+            )? {
+                return Ok(ScanStep::Progress);
+            }
             active
                 .scanner
                 .take()
@@ -554,13 +583,18 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<bool> {
                 &mut active.status,
                 active.complete,
             )?;
-            return Ok(true);
+            return Ok(ScanStep::Complete);
         }
+        let processed = active.status.processed;
         let probes = db::next_batch(connection, active.serial, &mut active.status)?;
+        progressed |= active.status.processed != processed;
         if !probes.is_empty() {
             let count = probes.len();
             match scanner.try_probe(probes) {
-                Ok(()) => active.in_flight = count,
+                Ok(()) => {
+                    active.in_flight = count;
+                    progressed = true;
+                }
                 Err(startup::TrySendError::Full(_)) => {} // persisted work remains pending
                 Err(startup::TrySendError::Disconnected(_)) => {
                     return Err(anyhow!("scanner disconnected before metadata probing"));
@@ -568,5 +602,9 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<bool> {
             }
         }
     }
-    Ok(false)
+    Ok(if progressed {
+        ScanStep::Progress
+    } else {
+        ScanStep::Waiting
+    })
 }
