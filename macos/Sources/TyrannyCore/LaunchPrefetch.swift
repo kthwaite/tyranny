@@ -94,6 +94,12 @@ public actor LaunchPrefetchSlot {
         return false
     }
 
+    /// true while a claim is suspended waiting for the prefetch. For tests.
+    var isWaiting: Bool {
+        if case .waiting = state { return true }
+        return false
+    }
+
     /// The deadline passed while a claim waits: give up. A no-op once `fulfil` already resumed it.
     private func expire() {
         guard case .waiting(let continuation) = state else { return }

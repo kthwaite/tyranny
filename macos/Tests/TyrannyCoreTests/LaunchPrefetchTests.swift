@@ -12,6 +12,16 @@ import Testing
         Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
     }
 
+    /// Polls (bounded to 2 s) until the claim task is suspended in the slot, so `fulfil` really
+    /// meets a waiting claim.
+    private func waitUntilWaiting(_ slot: LaunchPrefetchSlot) async throws {
+        for _ in 0..<2000 {
+            if await slot.isWaiting { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        Issue.record("claim never started waiting")
+    }
+
     @Test func fulfilledEqualRequestIsClaimed() async {
         let slot = LaunchPrefetchSlot(request: r)
         await slot.fulfil(data)
@@ -39,7 +49,7 @@ import Testing
         let request = r
         let deadline = soon
         let claim = Task { await slot.claim(request, until: deadline) }
-        try await Task.sleep(for: .milliseconds(20))
+        try await waitUntilWaiting(slot)
         await slot.fulfil(data)
         #expect(await claim.value == data)
     }
@@ -60,7 +70,7 @@ import Testing
         let clock = ContinuousClock()
         let start = clock.now
         let claim = Task { await slot.claim(request, until: clock.now + .seconds(5)) }
-        try await Task.sleep(for: .milliseconds(20))
+        try await waitUntilWaiting(slot)
         await slot.fulfil(nil)
         #expect(await claim.value == nil)
         #expect(seconds(clock.now - start) < 0.5)
