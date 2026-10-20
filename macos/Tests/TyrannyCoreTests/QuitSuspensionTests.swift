@@ -67,7 +67,10 @@ import Testing
         let clock = ContinuousClock()
         let start = clock.now
         let value: Int? = await Deadline.race(.milliseconds(100)) {
-            while true { try? await Task.sleep(for: .seconds(10)) }
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { c.resume() }
+            }
+            return 0
         }
         #expect(value == nil)
         #expect(clock.now - start < .seconds(1))
