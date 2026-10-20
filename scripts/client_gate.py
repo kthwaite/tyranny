@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true",
                         help="Run the app's headless model gate (NativeModelGate, no Accessibility driver) without claiming visual verification")
+    parser.add_argument("--commands-only", action="store_true",
+                        help="Exercise the command-language dispatcher against a real server (no UI input or visual verification)")
     parser.add_argument("--scenario", choices=["core", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs"], default="core",
                         help="core: folder import, a double-click run, the seek slider, filter, rescan, disconnect and a relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
@@ -40,6 +42,8 @@ def main():
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
+    if args.model_only and args.commands_only:
+        parser.error("--model-only and --commands-only are mutually exclusive")
     if args.app.endswith(".app") or args.app.endswith(".app/"):
         args.app = str(Path(args.app) / "Contents" / "MacOS" / "Tyranny")
     work = Path(args.work_dir).resolve()
@@ -49,7 +53,7 @@ def main():
     root.mkdir()
     source = run / "source.wav"
     fixture(source)
-    for index in range(105):
+    for index in range(3 if args.commands_only else 105):
         os.link(source, root / f"Track {index:03}.wav")
     state_dir = run / "state"
     server_command = [str(Path(args.server).resolve()), "--state-dir", str(state_dir), "--bind", "127.0.0.1:0"]
@@ -69,6 +73,18 @@ def main():
             token = Path(ready["token_path"]).read_text().strip()
             controller = WebSocket(ready["address"], token)
             app = str(Path(args.app).resolve())
+            if args.commands_only:
+                command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+                           "--command-smoke-output", str(run / "commands.json"),
+                           "--command-smoke-folder", str(root)]
+                with (run / "commands.stdout").open("w") as stdout, (run / "commands.stderr").open("w") as stderr:
+                    result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=150)
+                report["commands"] = json.loads((run / "commands.json").read_text())
+                report["visual_verification"] = False
+                report["limitations"] = ["Real command dispatcher and server; no UI input, screenshot, acoustic output, or managed-server verification"]
+                assert result.returncode == 0 and report["commands"]["passed"], report["commands"]
+                report["passed"] = True
+                return
             if args.model_only:
                 command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
                            "--model-gate-output", str(run / "native-model.json"), "--model-gate-folder", str(root),

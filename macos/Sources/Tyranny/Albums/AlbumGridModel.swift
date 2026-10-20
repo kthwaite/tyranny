@@ -263,7 +263,7 @@ final class AlbumGridModel {
 
     /// The whole album is a source selection, so it has no row to relocate: a stale library
     /// revision only needs the fresh revision.
-    private func wholeAlbum(_ albumID: UInt64) -> SelectionRequest? {
+    func wholeAlbum(_ albumID: UInt64) -> SelectionRequest? {
         guard let player, let revision = player.snapshot?.library.revision else { return nil }
         return .source(AlbumPlayback.selection(albumID: albumID, libraryRevision: revision), player: player)
     }
@@ -271,7 +271,7 @@ final class AlbumGridModel {
     /// The panel's tracks at `positions`, under the revision they were loaded at. No positions
     /// is the whole album under the current revision. A run starts at a position, so after the
     /// library moved on its first track is found again in the album as it is now.
-    private func selectionRequest(_ expansion: AlbumExpansion, positions: IndexSet, asRun: Bool) throws -> SelectionRequest {
+    func selectionRequest(_ expansion: AlbumExpansion, positions: IndexSet, asRun: Bool) throws -> SelectionRequest {
         if positions.isEmpty, let whole = wholeAlbum(expansion.albumID) { return whole }
         guard let player, let revision = expansion.basis?.revision else { throw EmptySelection() }
         let tracks = expansion.tracks
@@ -291,15 +291,25 @@ final class AlbumGridModel {
 
     /// Show in Album: selects the album and opens its panel.
     func reveal(albumID: UInt64) {
-        guard let player else { return }
-        selectedID = albumID
         Task { @MainActor [weak self] in
-            let reply: AlbumSummariesResponse? = try? await player.send("album_summaries", [
-                "album_ids": .uints([albumID]), "revision": .null])
-            guard let self, selectedID == albumID, expansion?.albumID != albumID,
-                  let album = reply?.entries.first else { return }
-            toggleExpansion(album)
+            do { try await self?.revealAwaitingReply(albumID: albumID) }
+            catch { self?.player?.message = error.localizedDescription }
         }
+    }
+
+    func revealAwaitingReply(albumID: UInt64) async throws {
+        guard let player, player.connected else { throw CommandLanguageError("Connect before revealing an album.") }
+        let session = player.playlistConnectionGeneration
+        selectedID = albumID
+        let reply: AlbumSummariesResponse = try await player.send("album_summaries", [
+            "album_ids": .uints([albumID]), "revision": .null])
+        guard player.connected, session == player.playlistConnectionGeneration, selectedID == albumID else {
+            throw CancellationError()
+        }
+        guard let album = reply.entries.first else {
+            throw CommandLanguageError("That album is no longer in the library.")
+        }
+        if expansion?.albumID != albumID { toggleExpansion(album) }
     }
 
     /// Adds the selected tracks, or the whole album when none are selected, to the end of a

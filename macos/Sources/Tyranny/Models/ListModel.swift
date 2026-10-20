@@ -38,6 +38,7 @@ final class ListModel {
     private(set) var browserSelection = BrowserSelection()
     let browser = ColumnBrowserModel()
     @ObservationIgnored private(set) var rows = RowSelection()
+    private(set) var commandSelectionRevision: UInt64 = 0
     /// Album block facts for the albums in view.
     let facts: AlbumFactsCache
     /// The grouped layout from the latest spans. Unused while ungrouped.
@@ -380,6 +381,11 @@ final class ListModel {
         rows.select(positions, rowID: { cache.loadedRow(at: $0)?.row_id }, basis: selectionBasis)
     }
 
+    func selectForCommand(_ positions: IndexSet) {
+        userSelected(positions)
+        commandSelectionRevision &+= 1
+    }
+
     /// Rows or the total changed. Returns the positions to show selected.
     func rowsChanged() -> IndexSet {
         rows.rowsChanged(loaded: cache.loadedRows().map { ($0.position, $0.row.row_id) },
@@ -499,6 +505,23 @@ final class TrackLists {
     private var albums: AlbumGridModel?
     private var browsers: [Destination: NamedBrowseModel] = [:]
     private var historyModel: HistoryModel?
+
+    /// The window and command adapter resolve destinations through this same store.
+    func current(player: PlayerModel, navigation: NavigationModel) -> ListModel? {
+        switch navigation.destination {
+        case .songs:
+            return list(for: .songs, source: .library, player: player, navigation: navigation)
+        case .recent:
+            return list(for: .recent, source: .recent, player: player, navigation: navigation, usesBrowser: false)
+        case .artists, .genres:
+            return browse(navigation.destination, player: player, navigation: navigation).detail
+        case .playlist(let id):
+            guard let current = player.savedPlaylists.playlist(id: id) else { return nil }
+            return playlist(current, player: player, navigation: navigation)
+        case .albums, .history, .upNext:
+            return nil
+        }
+    }
 
     func history(player: PlayerModel) -> HistoryModel {
         if let historyModel { return historyModel }

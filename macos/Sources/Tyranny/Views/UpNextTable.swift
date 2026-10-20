@@ -16,6 +16,8 @@ struct UpNextTable: NSViewRepresentable {
     let epoch: UInt64
     /// The current entry, its position and the shuffle state: what decides the sections.
     let context: QueueContext
+    let selected: Set<UInt64>
+    let revealToken: UInt64?
 
     static let identifier = "up-next-table"
 
@@ -120,6 +122,7 @@ struct UpNextTable: NSViewRepresentable {
         private var dragToken: String?
         private var dragItems = 0
         private var dragLifetime: Coordinator?
+        private var shownReveal: UInt64?
 
         init(_ parent: UpNextTable) { self.parent = parent }
 
@@ -152,6 +155,15 @@ struct UpNextTable: NSViewRepresentable {
                 if epochChanged { table.scrollRowToVisible(0) }
                 restoreAnchor(table)
                 focusCurrentEntry(table)
+            }
+            updating = true
+            let selectedRows = IndexSet(parent.selected.compactMap { cache.position(of: $0) })
+            if table.selectedRowIndexes != selectedRows { table.selectRowIndexes(selectedRows, byExtendingSelection: false) }
+            updating = false
+            if parent.revealToken != shownReveal, let request = model.revealRequest,
+               request.position < table.numberOfRows {
+                shownReveal = parent.revealToken
+                table.scrollRowToVisible(request.position)
             }
             reportVisible()
         }

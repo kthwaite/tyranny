@@ -42,6 +42,104 @@ with a debug client. `scripts/build_macos.sh release` instead builds both
 components in release mode and assembles a self-contained
 `target/release/Tyranny.app`. An optional second argument selects the app destination.
 
+### Client command language
+
+`TyrannyCore.CommandLanguage` defines the client-only grammar, command registry,
+argument validation, completion, and snapshot-relative transport resolution.
+The Rust protocol still accepts structured commands, not command strings.
+The macOS `CommandDispatcher` maps commands to the existing playback, activation,
+playlist, queue, navigation, and selection models. It uses the window's
+`TrackLists`, not a second selection store.
+
+The library window installs `NavigationModel.submitCommand(_:) async throws`
+and `completeCommand(_:)`. These are the entry points for future keybindings and
+command-mode UI. **There is no interactive command bar or configurable keybinding
+UI yet.** Existing menus and controls continue calling their typed models.
+
+Grammar: optional leading `:`, a case-sensitive command name, then
+whitespace-separated arguments. Single/double quotes group a literal argument;
+backslash escapes the next character, including inside quotes. Quoted and
+unquoted pieces may form one argument. No shell execution, expansion, pipelines,
+or command chaining. Unknown commands, missing/extra arguments, invalid enum
+values, unterminated quotes, and trailing escapes are errors. Names/rules cannot
+be blank; `filter ""` clears the filter.
+
+Examples:
+
+```text
+:seek +1m
+seek -10s
+seek 50%
+volume +5%
+playlist-open "Night Mix"
+playlist-rename "Night Mix" "Evening 日本語"
+smart-create Jazz "genre:Jazz"
+```
+
+Seek values are decimal seconds (default), `s`, `m`, `h`, or `%` of the current
+track duration. A leading `+`/`-` makes the value relative to the authoritative
+position. Seeking requires a current occurrence, known positive duration and
+sample rate; the request retains its entry ID so a track change cannot redirect
+it. Results are floored to whole frames and clamped to `0...duration_frames-1`.
+Overflow/nonfinite values are rejected. Volume uses absolute or signed-relative
+percentage points, clamped to `0...100` and rounded to whole percentages.
+
+| Action family | Commands |
+| --- | --- |
+| Playback | `play`, `pause`, `toggle`, `stop`, `next`, `previous`, `seek`, `volume`, `repeat off\|all\|one\|cycle`, `shuffle on\|off\|toggle`, `gain off\|track\|album`, `resume on\|off\|toggle` |
+| Navigation | `go songs\|albums\|artists\|genres\|recent\|history\|up-next`, `filter`, `focus-filter`, `reveal-playing`, `settings connection\|library\|playback`, `quit` |
+| Connection/library | `connect`, `disconnect`, `server start\|restart\|stop`, `choose-folder`, `rescan <root-id>`, `retry-import`, `browse-library` |
+| Playlists | `playlist-open`, `playlist-create`, `playlist-rename`, `playlist-delete`, `playlist-play`, `playlist-enqueue`, `playlist-add`, `smart-create`, `smart-update`, `smart-snapshot` |
+| Queue/selection | `queue-clear`, `queue-shuffle`, `queue-save`, `selection-play`, `selection-run`, `selection-next`, `selection-enqueue`, `selection-remove`, `selection-move <entry-id\|end>`, `selection-album`, `selection-artist`, `selection-all`, `selection-clear` |
+| View preferences | `browser`, `drawer`, `artwork` (`on\|off\|toggle`); `group none\|album\|artist_album`; `sort <field> [asc\|desc]` or `sort none`; `column <column-id> on\|off\|toggle`; `album-sort album_artist\|year\|date_added`; `cover-size 96...200`; `album-expand`, `album-collapse`; `browser-genre`, `browser-artist`, `browser-album` (`<id\|all>`) |
+| Activation/help | `up-next-policy ask\|keep\|replace`, `prompt keep\|clear\|cancel`, `help [command]` |
+
+`help` uses the registry's usage/summary metadata. Playlist commands resolve exact
+names against the paged server catalog; missing or ambiguous names are errors.
+Rename/snapshot take a second name, smart create/update take a rule, and
+`playlist-add` uses the current selection. Selection commands follow the current
+view; operations unavailable there fail explicitly. `selection-run` plays a run
+from a single selected row; `selection-play` plays the selected rows.
+Queue clear/shuffle/save act on **upcoming** entries, preserving the current track.
+Playlist reorder requires an ungrouped, unsorted regular playlist.
+
+Mutations await their server reply and propagate failure through the normal busy
+gate. Playback state changes may arrive later. Commands that need an Up Next
+decision open the existing prompt rather than bypassing Ask/Keep/Replace; use
+`prompt` or the sheet to resolve it. A rescan reply accepts asynchronous indexing;
+it does not mean indexing is finished.
+
+`CommandLanguage.completions(_:playlistNames:)` completes at the **end** of the
+supplied text and returns whole replacement lines. It completes command names,
+enumerated arguments, and playlist names, including partially quoted names;
+insertions are escaped and preserve the optional colon. Free text/numeric
+arguments are described by registry metadata rather than invented suggestions.
+The app adapter requests the existing playlist catalog windows; suggestions
+reflect the catalog currently loaded and can be requested again as it arrives.
+
+Verification:
+
+```sh
+just test-client
+python3 scripts/client_gate.py --commands-only \
+  --app target/swift-client/debug/Tyranny --work-dir target/command-gate
+```
+
+The command gate uses an isolated real Rust server and three generated audio
+tracks. It checks ordered selection enqueue, absolute/relative/percentage seeks,
+volume/modes, quoted playlist operations and completion, smart snapshots, local
+navigation preferences, and rejected invalid/disconnected commands. It is
+dispatch verification, not UI-input, screenshot, or acoustic-output proof.
+
+Verified on 2026-10-20: 270 Swift tests in 39 suites; all six command-gate
+scenarios; and all six native `--scenario runs` scenarios, including the
+Ask/Keep/Replace prompts and adding 1,129 selected tracks in one playlist
+revision. The Accessibility driver now searches modal sheets before the
+underlying library row tree; the previous traversal stalled at the playlist
+picker in this large-selection run. Passing reports:
+`target/command-gate/run-gs_2x3bj/commands.json` and
+`target/command-ui-modal/run-mxy6r54o/runs/report.json`.
+
 ### Release disk image
 
 Run `just dmg` or `scripts/build_dmg.sh` to build the release client and server,

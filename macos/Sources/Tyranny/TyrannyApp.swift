@@ -201,6 +201,7 @@ private struct MainWindow: View {
                 model.start()
                 #if DEBUG
                 NativeModelGate.startIfRequested(model)
+                NativeCommandSmoke.startIfRequested(model)
                 NativeSmoke.startIfRequested(model, navigation: navigation)
                 NativeLifecycle.startIfRequested(model)
                 NativeScale.startIfRequested(model, navigation: navigation)
