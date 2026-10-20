@@ -249,7 +249,7 @@ The reproducible scale gate seeds a declared metadata-only 50,000-track index an
 - MusicBrainz tag retrieval, additional cover providers and artist/title matching, lyrics providers, scrobbling, and tag writing. Artwork fallback uses an existing MusicBrainz release ID only; it does not search for or rewrite tags.
 - Equalizer/analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
 - CUE ingestion and sophisticated release reconciliation; preserve the identity seams now.
-- Native notifications and MPRIS. MPRIS remains a later Linux integration; macOS media keys/Now Playing now route the same Rust commands without a second player.
+- MPRIS remains a later Linux integration; macOS media keys/Now Playing route the same Rust commands without a second player. Native track notifications are implemented; authorized banner/artwork delivery verification awaits macOS permission (see [SPIKE_RESULTS.md](SPIKE_RESULTS.md)).
 - Remote networking, multiple users/zones, MPD wire compatibility, client-local streaming, App Store sandboxing, and a production installer.
 
 These are sequencing decisions for an initial spike, not deletions from REQUIREMENTS.md.
