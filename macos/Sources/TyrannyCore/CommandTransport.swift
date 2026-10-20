@@ -108,3 +108,16 @@ extension CommandLanguage {
         return result
     }
 }
+
+/// One request frame as the client sends it: the command's fields plus `id` and `command`.
+public enum RequestFrame {
+    /// The most bytes one frame may hold. The server refuses larger frames (`MAX_REQUEST_BYTES`).
+    public static let limit = 16 * 1024
+
+    public static func encode(_ command: String, fields: [String: JSONValue], id: UInt64) throws -> Data {
+        var object = fields
+        object["id"] = .uint(id)
+        object["command"] = .string(command)
+        return try JSONEncoder().encode(object)
+    }
+}

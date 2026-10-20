@@ -3,12 +3,13 @@ import Observation
 
 /// The saved radio stations, and the commands that read and edit them (protocol v11).
 ///
-/// The catalog has one revision, `ControlState.stations_revision`. `sync` fetches the whole
-/// catalog (`stations`) when a snapshot names another revision than the one shown. Edits name
-/// the shown revision as `expected_revision`, and a `stations_applied` reply updates the shown
-/// rows and revision, so its broadcast does not refetch. A `stale_stations_revision` reply
-/// refetches and reports the server's message. The edit is not retried: the user sees what
-/// changed first.
+/// The catalog has one revision, `ControlState.stations_revision`. `observe` notes each
+/// snapshot's revision; when the shown catalog lags it, `sync` fetches the whole catalog
+/// (`stations`). Edits name the shown revision as `expected_revision`, and a `stations_applied`
+/// reply updates the shown rows and revision. While an edit is in flight no fetch starts: the
+/// reply's own snapshot reaches the client before the reply does. When the edit ends, a
+/// snapshot newer than the reply fetches. A `stale_stations_revision` reply refetches and
+/// reports the server's message. The edit is not retried: the user sees what changed first.
 ///
 /// `send` carries one request to the server and returns the reply's result object.
 /// `addStream` appends a stream to Up Next, plays it when asked, and returns failure text.
@@ -16,6 +17,9 @@ import Observation
 public final class StationCatalog {
     public typealias Send = @MainActor (CommandRequest) async throws -> Data
     public typealias AddStream = @MainActor (_ url: String, _ title: String, _ play: Bool) async -> String?
+
+    /// The server's limit on stations in one `add_stations` (`MAX_STATION_BATCH`).
+    public static let maximumBatch = 500
 
     /// In the server's order: by name ignoring case, then by ID.
     public private(set) var stations: [Station] = []
@@ -30,6 +34,7 @@ public final class StationCatalog {
     /// The latest snapshot's revision.
     @ObservationIgnored private var wanted: UInt64?
     @ObservationIgnored private var fetching = false
+    @ObservationIgnored private var editing = false
     /// Bumps on `reset`. A reply that arrives after it belongs to the old connection.
     @ObservationIgnored private var epoch: UInt64 = 0
 
@@ -45,19 +50,26 @@ public final class StationCatalog {
         revision = nil
         wanted = nil
         fetching = false
+        editing = false
         error = nil
     }
 
-    /// The snapshot names another catalog than the one shown.
-    public func needsFetch(_ snapshot: ControlState) -> Bool {
-        revision != snapshot.stations_revision
+    /// Notes the snapshot's catalog revision. True when `sync` should run now: the shown catalog
+    /// lags the snapshot, and no fetch or edit is in flight (each checks again when it ends).
+    public func observe(_ snapshot: ControlState) -> Bool {
+        wanted = snapshot.stations_revision
+        return !fetching && !editing && lags
     }
 
-    /// Fetches the catalog when the snapshot's revision differs from the shown one. A snapshot
-    /// that arrives during the fetch is checked when the fetch ends.
+    /// `observe`, then `sync` when it asks.
     public func sync(_ snapshot: ControlState) async {
-        wanted = snapshot.stations_revision
-        guard !fetching, revision != wanted else { return }
+        if observe(snapshot) { await sync() }
+    }
+
+    /// Fetches the catalog while it lags the latest snapshot. A snapshot that arrives during
+    /// the fetch is checked when the fetch ends.
+    public func sync() async {
+        guard !fetching, !editing, lags else { return }
         fetching = true
         let started = epoch
         defer { if epoch == started { fetching = false } }
@@ -65,44 +77,74 @@ public final class StationCatalog {
         repeat {
             asked = wanted
             guard await refetch() else { return }
-        } while wanted != asked && revision != wanted
+        } while wanted != asked && lags
+    }
+
+    /// Nothing is shown yet, or the latest snapshot names a newer catalog. Revisions only grow
+    /// on one connection.
+    private var lags: Bool {
+        guard let wanted else { return false }
+        return revision.map { $0 < wanted } ?? true
     }
 
     /// Adds one station. The server names a station with a blank name after its URL's host.
     public func add(name: String, url: String) async -> Bool {
-        await edit { shown in
-            CommandRequest("add_stations", ["expected_revision": .uint(shown),
-                                            "stations": try JSONValue.encoding([StationInput(name: name, url: url)])])
+        await whileEditing {
+            await submit { shown in try Self.addRequest([StationInput(name: name, url: url)], expected: shown) }
         } != nil
     }
 
     public func update(_ id: UInt64, name: String, url: String) async -> Bool {
-        await edit { shown in
-            CommandRequest("update_station", ["station_id": .uint(id), "expected_revision": .uint(shown),
-                                              "name": .string(name), "url": .string(url)])
+        await whileEditing {
+            await submit { shown in
+                CommandRequest("update_station", ["station_id": .uint(id), "expected_revision": .uint(shown),
+                                                  "name": .string(name), "url": .string(url)])
+            }
         } != nil
     }
 
     public func remove(_ id: UInt64) async -> Bool {
-        await edit(removing: id) { shown in
-            CommandRequest("remove_station", ["station_id": .uint(id), "expected_revision": .uint(shown)])
+        await whileEditing {
+            await submit(removing: id) { shown in
+                CommandRequest("remove_station", ["station_id": .uint(id), "expected_revision": .uint(shown)])
+            }
         } != nil
     }
 
-    /// Reads a `.pls` or `.m3u` file and adds its stations in one `add_stations`. The server
-    /// skips URLs that are already saved. Returns how many stations were added, or nil on failure.
+    /// Reads a `.pls` or `.m3u` file and adds its stations in consecutive `add_stations`
+    /// batches (`batches`). Each batch names the revision of the reply before it. The server
+    /// skips URLs that are already saved. A failed batch stops the import; earlier batches stay
+    /// added and the error says how many stations they added. Returns how many stations were
+    /// added, or nil on failure.
     public func importFile(text: String, fileName: String) async -> Int? {
-        let inputs: [StationInput]
+        error = nil
+        let batches: [[StationInput]]
         do {
-            inputs = try StationFile.parse(text, fileName: fileName)
+            batches = try Self.batches(StationFile.parse(text, fileName: fileName), fileName: fileName)
         } catch {
             self.error = (error as? StationFileError)?.message ?? error.localizedDescription
             return nil
         }
-        return await edit { shown in
-            CommandRequest("add_stations", ["expected_revision": .uint(shown),
-                                            "stations": try JSONValue.encoding(inputs)])
-        }?.stations.count
+        return await whileEditing {
+            var added = 0
+            var sent = 0
+            var expected: UInt64?
+            for batch in batches {
+                guard let applied = await submit(expected: expected, { shown in
+                    try Self.addRequest(batch, expected: shown)
+                }) else {
+                    if expected != nil {
+                        error = "Imported \(added) new \(added == 1 ? "station" : "stations") from \(fileName), "
+                            + "then the batch of entries \(sent + 1)–\(sent + batch.count) failed: \(error ?? "")"
+                    }
+                    return nil
+                }
+                added += applied.stations.count
+                sent += batch.count
+                expected = applied.snapshot.stations_revision
+            }
+            return added
+        }
     }
 
     /// Appends the station's stream to Up Next under the station's name, and plays it.
@@ -115,7 +157,57 @@ public final class StationCatalog {
         error = await addStream(station.url, station.name, false)
     }
 
+    // MARK: Batches
+
+    /// Splits stations, in order, into `add_stations` batches. A batch holds at most
+    /// `maximumBatch` stations, and its request frame fits `RequestFrame.limit` with the
+    /// largest revision and request ID. Throws when one station alone does not fit.
+    private static func batches(_ inputs: [StationInput], fileName: String) throws -> [[StationInput]] {
+        let encoder = JSONEncoder()
+        // A frame is the empty frame plus each station's JSON, separated by commas.
+        let empty = try frameSize(addRequest([], expected: .max))
+        var batches: [[StationInput]] = []
+        var batch: [StationInput] = []
+        var size = empty
+        for (index, input) in inputs.enumerated() {
+            let entry = try encoder.encode(JSONValue.encoding(input)).count
+            guard empty + entry <= RequestFrame.limit else {
+                throw StationFileError("\(fileName): station \(index + 1) is too long to send")
+            }
+            if !batch.isEmpty, batch.count == maximumBatch || size + 1 + entry > RequestFrame.limit {
+                batches.append(batch)
+                batch = []
+                size = empty
+            }
+            size += (batch.isEmpty ? 0 : 1) + entry
+            batch.append(input)
+        }
+        if !batch.isEmpty { batches.append(batch) }
+        return batches
+    }
+
+    private static func frameSize(_ request: CommandRequest) throws -> Int {
+        try RequestFrame.encode(request.name, fields: request.fields, id: .max).count
+    }
+
+    private static func addRequest(_ inputs: [StationInput], expected: UInt64) throws -> CommandRequest {
+        CommandRequest("add_stations", ["expected_revision": .uint(expected), "stations": try JSONValue.encoding(inputs)])
+    }
+
     // MARK: Requests
+
+    /// Runs one edit. No fetch starts meanwhile; afterwards the catalog catches up with any
+    /// snapshot newer than the edit's reply.
+    private func whileEditing<T>(_ body: () async -> T) async -> T {
+        editing = true
+        let started = epoch
+        let result = await body()
+        if epoch == started {
+            editing = false
+            await sync()
+        }
+        return result
+    }
 
     /// Fetches the whole catalog. A reply older than the shown catalog is dropped.
     /// Returns false when the fetch failed or the connection changed meanwhile.
@@ -137,12 +229,13 @@ public final class StationCatalog {
         }
     }
 
-    /// Sends one edit built for the shown revision. The reply's rows replace or join the shown
-    /// ones (`removing` drops one), unless a fetch moved the shown catalog on meanwhile.
-    private func edit(removing: UInt64? = nil,
-                      _ request: (UInt64) throws -> CommandRequest) async -> StationsApplied? {
+    /// Sends one edit built for `expected`, or for the shown revision. The reply's rows replace
+    /// or join the shown ones (`removing` drops one), unless a fetch moved the shown catalog on
+    /// meanwhile.
+    private func submit(expected: UInt64? = nil, removing: UInt64? = nil,
+                        _ request: (UInt64) throws -> CommandRequest) async -> StationsApplied? {
         error = nil
-        guard let shown = revision else {
+        guard let shown = expected ?? revision else {
             error = "Wait for the stations to load."
             return nil
         }

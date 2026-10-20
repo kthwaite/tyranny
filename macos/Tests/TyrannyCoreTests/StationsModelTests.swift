@@ -7,12 +7,19 @@ import Testing
 private final class FakeStationServer {
     var requests: [CommandRequest] = []
     var replies: [Result<String, ServerFailure>] = []
+    /// Answers when `replies` is empty.
+    var respond: ((CommandRequest) -> Result<String, ServerFailure>)?
+    /// Runs after a request is recorded and before its reply, as WireClient applies a reply's
+    /// snapshot before the caller resumes.
+    var beforeReply: [String: () async -> Void] = [:]
     var streams: [(url: String, title: String, play: Bool)] = []
     var streamFailure: String?
 
     func send(_ request: CommandRequest) async throws -> Data {
         requests.append(request)
-        return Data(try replies.removeFirst().get().utf8)
+        if let hook = beforeReply[request.name] { await hook() }
+        let reply = replies.isEmpty ? respond!(request) : replies.removeFirst()
+        return Data(try reply.get().utf8)
     }
 
     func addStream(url: String, title: String, play: Bool) async -> String? {
@@ -55,6 +62,12 @@ private func applied(_ revision: UInt64, _ stations: [Station]) -> Result<String
     .success(#"{"kind":"stations_applied","snapshot":\#(stateJSON(stations: revision)),"stations":\#(json(stations))}"#)
 }
 
+/// Delivers a snapshot as PlayerModel does: the catalog notes it and syncs when it asks to.
+@MainActor
+private func deliver(_ snapshot: ControlState, to catalog: StationCatalog) async {
+    if catalog.observe(snapshot) { await catalog.sync() }
+}
+
 private let groove = Station(id: 1, name: "Groove Salad", url: "https://ice1.somafm.com/groovesalad-128-mp3")
 private let kexp = Station(id: 2, name: "KEXP", url: "https://kexp.streamguys1.com/kexp160.aac")
 private let drone = Station(id: 3, name: "drone zone", url: "https://ice1.somafm.com/dronezone-128-mp3")
@@ -89,6 +102,8 @@ private let drone = Station(id: 3, name: "drone zone", url: "https://ice1.somafm
         await catalog.sync(try state(stations: 2))
 
         server.replies = [applied(3, [drone])]
+        // The reply's snapshot reaches the catalog before the edit resumes.
+        server.beforeReply["add_stations"] = { await deliver(try! state(stations: 3), to: catalog) }
         let added = await catalog.add(name: drone.name, url: drone.url)
         #expect(added)
         #expect(server.requests.last == CommandRequest("add_stations", [
@@ -99,10 +114,24 @@ private let drone = Station(id: 3, name: "drone zone", url: "https://ice1.somafm
         // Sorted by name, ignoring case, as the server sorts.
         #expect(catalog.stations == [drone, kexp])
         #expect(catalog.error == nil)
+        // Neither the reply's snapshot nor a later broadcast of the same revision refetches.
+        await deliver(try state(stations: 3), to: catalog)
+        #expect(server.requests.map(\.name) == ["stations", "add_stations"])
+    }
 
-        // The broadcast of the same revision does not refetch.
-        await catalog.sync(try state(stations: 3))
-        #expect(server.requests.count == 2)
+    @Test func aNewerRevisionDuringAnEditFetchesWhenTheEditEnds() async throws {
+        let server = FakeStationServer()
+        let catalog = server.catalog()
+        server.replies = [page(2, [kexp])]
+        await catalog.sync(try state(stations: 2))
+
+        // Another client edits right after this one: its broadcast arrives during the edit.
+        server.replies = [applied(3, [drone]), page(4, [drone, groove, kexp])]
+        server.beforeReply["add_stations"] = { await deliver(try! state(stations: 4), to: catalog) }
+        #expect(await catalog.add(name: drone.name, url: drone.url))
+        #expect(server.requests.map(\.name) == ["stations", "add_stations", "stations"])
+        #expect(catalog.revision == 4)
+        #expect(catalog.stations == [drone, groove, kexp])
     }
 
     @Test func updateAndRemoveApplyTheReply() async throws {
@@ -152,6 +181,68 @@ private let drone = Station(id: 3, name: "drone zone", url: "https://ice1.somafm
         #expect(catalog.error == nil)
     }
 
+    @Test func importSendsBatchesThatFitTheRequestLimit() async throws {
+        let server = FakeStationServer()
+        let catalog = server.catalog()
+        server.replies = [page(10, [])]
+        await catalog.sync(try state(stations: 10))
+
+        let inputs = manyStations(400)
+        var revision: UInt64 = 10
+        var nextID: UInt64 = 100
+        server.respond = { request in
+            revision += 1
+            let rows = entries(request).map { input -> Station in
+                nextID += 1
+                return Station(id: nextID, name: input.name, url: input.url)
+            }
+            return applied(revision, rows)
+        }
+        let added = await catalog.importFile(text: m3u(inputs), fileName: "many.m3u")
+        let batches = Array(server.requests.dropFirst())
+        #expect(batches.count > 1)
+        #expect(batches.allSatisfy { $0.name == "add_stations" })
+        for (index, batch) in batches.enumerated() {
+            let frame = try RequestFrame.encode(batch.name, fields: batch.fields, id: UInt64.max)
+            #expect(frame.count <= RequestFrame.limit)
+            #expect(entries(batch).count <= 500)
+            // Each batch names the revision of the reply before it.
+            #expect(batch.fields["expected_revision"] == .uint(10 + UInt64(index)))
+        }
+        #expect(batches.flatMap(entries) == inputs)
+        #expect(added == 400)
+        #expect(catalog.stations.count == 400)
+        #expect(catalog.revision == 10 + UInt64(batches.count))
+        #expect(catalog.error == nil)
+    }
+
+    @Test func aFailedLaterBatchReportsWhatEarlierBatchesAdded() async throws {
+        let server = FakeStationServer()
+        let catalog = server.catalog()
+        server.replies = [page(1, [])]
+        await catalog.sync(try state(stations: 1))
+
+        var sent = 0
+        server.respond = { request in
+            sent += 1
+            guard sent == 1 else {
+                return .failure(ServerFailure(code: "invalid_command", message: "station 3: stream URL requires HTTP(S)"))
+            }
+            // The server skips two URLs that were already saved.
+            let rows = entries(request).dropFirst(2).enumerated().map {
+                Station(id: UInt64($0.offset + 1), name: $0.element.name, url: $0.element.url)
+            }
+            return applied(2, Array(rows))
+        }
+        let added = await catalog.importFile(text: m3u(manyStations(400)), fileName: "many.m3u")
+        #expect(added == nil)
+        #expect(server.requests.count == 3)
+        let first = entries(server.requests[1]).count - 2
+        #expect(catalog.stations.count == first)
+        #expect(catalog.error?.contains("Imported \(first) new stations") == true)
+        #expect(catalog.error?.contains("station 3: stream URL requires HTTP(S)") == true)
+    }
+
     @Test func importOfEmptyFileSetsErrorAndSendsNothing() async throws {
         let server = FakeStationServer()
         let catalog = server.catalog()
@@ -197,5 +288,27 @@ private let drone = Station(id: 3, name: "drone zone", url: "https://ice1.somafm
         server.streamFailure = "Wait for the current command to finish."
         await catalog.play(groove)
         #expect(catalog.error == "Wait for the current command to finish.")
+    }
+}
+
+/// Stations with ~100-byte URLs.
+private func manyStations(_ count: Int) -> [StationInput] {
+    (0..<count).map { index in
+        StationInput(name: "Station \(index)",
+                     url: "https://radio\(index).example.com/" + String(repeating: "x", count: 72) + "/live.mp3")
+    }
+}
+
+private func m3u(_ inputs: [StationInput]) -> String {
+    "#EXTM3U\n" + inputs.map { "#EXTINF:-1,\($0.name)\n\($0.url)\n" }.joined()
+}
+
+/// The stations an `add_stations` request carries.
+private func entries(_ request: CommandRequest) -> [StationInput] {
+    guard case .array(let items)? = request.fields["stations"] else { return [] }
+    return items.compactMap { item in
+        guard case .object(let fields) = item, case .string(let name)? = fields["name"],
+              case .string(let url)? = fields["url"] else { return nil }
+        return StationInput(name: name, url: url)
     }
 }

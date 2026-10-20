@@ -47,10 +47,12 @@ final class StationsModel {
         sync(snapshot)
     }
 
+    /// The reply to this model's own edit brings its snapshot first; the catalog does not fetch
+    /// for it (`StationCatalog.observe`).
     func sync(_ snapshot: ControlState) {
-        guard catalog.needsFetch(snapshot) else { return }
+        guard catalog.observe(snapshot) else { return }
         // A cancelled request would close the shared connection: fetch unstructured.
-        Task { @MainActor in await catalog.sync(snapshot) }
+        Task { @MainActor in await catalog.sync() }
     }
 
     // MARK: Edits

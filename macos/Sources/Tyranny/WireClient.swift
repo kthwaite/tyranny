@@ -9,7 +9,7 @@ final class WireClient {
     var onDisconnect: ((String) -> Void)?
     private(set) var instanceID: String?
 
-    nonisolated static let requestLimit = 16 * 1024
+    nonisolated static let requestLimit = RequestFrame.limit
     nonisolated static let responseLimit = 8 * 1024 * 1024
     private static let pendingLimit = 32
 
@@ -36,7 +36,6 @@ final class WireClient {
     private var sequence: UInt64?
     private var ready = false
     private let decoder = JSONDecoder()
-    private let encoder = JSONEncoder()
     private let requestDeadlineSeconds: UInt64
 
     init(requestDeadlineSeconds: UInt64 = 10) {
@@ -155,12 +154,9 @@ final class WireClient {
             throw ServerFailure(code: "request_ids_exhausted", message: "Request IDs are exhausted. Reopen the client before sending another command.")
         }
         let id = nextRequestID
-        var object = fields
-        object["id"] = .uint(id)
-        object["command"] = .string(command)
         let bytes: Data
         do {
-            bytes = try encoder.encode(object)
+            bytes = try RequestFrame.encode(command, fields: fields, id: id)
         } catch {
             throw ServerFailure(code: "invalid_request", message: "The command could not be encoded and was not sent.")
         }
