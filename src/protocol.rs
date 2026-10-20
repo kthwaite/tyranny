@@ -47,6 +47,10 @@ pub enum Command {
         library_revision: u64,
         size: ArtworkSize,
     },
+    Lyrics {
+        entry_id: u64,
+        library_revision: u64,
+    },
     QueuePage {
         revision: Option<u64>,
         offset: usize,
@@ -374,6 +378,32 @@ pub struct Artwork {
     pub message: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LyricsStatus {
+    Ready,
+    Missing,
+    Unavailable,
+    Instrumental,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LyricsSource {
+    Embedded,
+    Lrclib,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Lyrics {
+    pub status: LyricsStatus,
+    pub source: Option<LyricsSource>,
+    pub plain_text: Option<String>,
+    pub synced_lrc: Option<String>,
+    pub attribution_url: Option<String>,
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Settings {
     pub gain_mode: GainMode,
@@ -646,6 +676,9 @@ pub struct PlaylistEntry {
 pub enum Response {
     Artwork {
         artwork: Artwork,
+    },
+    Lyrics {
+        lyrics: Lyrics,
     },
     Snapshot {
         snapshot: Box<ControlState>,
@@ -924,6 +957,32 @@ mod tests {
         let mut invalid = command;
         invalid["size"] = serde_json::json!("original");
         assert!(serde_json::from_value::<Request>(invalid).is_err());
+    }
+
+    #[test]
+    fn lyrics_wire_requires_identity_and_rejects_paths() {
+        let command = serde_json::json!({
+            "id": 1, "command": "lyrics", "entry_id": 7, "library_revision": 2
+        });
+        assert!(matches!(
+            serde_json::from_value::<Request>(command.clone())
+                .unwrap()
+                .command,
+            Command::Lyrics {
+                entry_id: 7,
+                library_revision: 2
+            }
+        ));
+        for field in ["entry_id", "library_revision"] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
+        }
+        for field in ["path", "url", "title", "artist"] {
+            let mut unsafe_target = command.clone();
+            unsafe_target[field] = serde_json::json!("untrusted");
+            assert!(serde_json::from_value::<Request>(unsafe_target).is_err());
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ continuous CoreAudio stream. The native engine, persistent local server,
 durable library, and native SwiftUI controller are implemented and exercised;
 see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations.
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
-Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v10 requires matching client/server processes; the main database is schema 6.
+Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v11 requires matching client/server processes; the main database is schema 6.
 
 ## Development commands
 
@@ -182,6 +182,38 @@ underlying library row tree; the previous traversal stalled at the playlist
 picker in this large-selection run. Passing reports:
 `target/command-gate/run-gs_2x3bj/commands.json` and
 `target/command-ui-modal/run-mxy6r54o/runs/report.json`.
+
+### Lyrics
+
+The player-bar **Lyrics** button (**⌥⌘L**) opens a pane for the current queue
+occurrence. Embedded `USLT`/`LYRICS` tags take precedence. Without embedded
+lyrics, the server requests an exact title/artist/album/duration match from
+[LRCLIB](https://lrclib.net/docs); it never falls back to fuzzy search or uses
+radio station titles as song metadata. The pane distinguishes loading, missing,
+unavailable and instrumental results, displays plain lyrics or highlights LRC
+lines using the server playhead, and credits the provider with a record link.
+Pausing and seeking retain the authoritative position rather than extrapolating
+a separate lyrics clock.
+
+Only an open, mounted pane creates lyrics demand. A separate client connection
+and two bounded server workers keep file probing and HTTPS requests off playback
+controls. Track, library revision, connection and completed-scan changes
+invalidate client results. Closing the pane cancels its request.
+
+The additive protocol-v10 request is
+`{"id":1,"command":"lyrics","entry_id":7,"library_revision":2}`; its result has
+`kind:"lyrics"` and a `lyrics` payload. Queue IDs and library revisions are
+validated before and after discovery; clients cannot supply paths or provider
+URLs. The main database schema stays unchanged.
+
+The private `state.lyrics.sqlite` cache is disposable: up to 16 MiB of payload
+and 2,048 records. Online successes survive restart/rescan until eviction;
+misses expire after 24 hours and transient failures after 60 seconds. Embedded
+discovery uses file fingerprints and scan watermarks; remote results use track
+metadata, so an unrelated scan does not discard offline lyrics. Requests are
+sequential with a 500 ms delay and honor provider backoff. No credentials or
+additional provider scrapers are configured. See the cited
+[provider assessment](docs/lyrics-providers.md) for access and licensing limits.
 
 ### Release disk image
 

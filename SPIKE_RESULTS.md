@@ -13,6 +13,14 @@ server-owned persistence, and reconnect-authoritative edits are implemented.
 Protocol **v11**, SQLite **schema 6 unchanged**. Existing databases start with
 disabled EQ; client and server must be upgraded together.
 
+Integration verification with the decoder and lyrics changes: **279 Rust tests
+passed, one ignored; 296 Swift tests passed in 44 suites** with warnings as
+errors. Clippy, formatting, and binary builds passed. Independent standards and
+specification reviews found no actionable issues. Native controls passed again;
+the rebuilt integrated client/server restored the persisted Bass Boost curve
+after daemon restart. Screenshots were inspected. Evidence:
+`../tyranny-sunlit-egret/target/equalizer-ui/integration-cf4w4vdz/`.
+
 ### Exercised evidence
 
 - `cargo test --locked --all-targets`: **263 passed, one ignored**. Coverage
@@ -54,6 +62,56 @@ release packaging claim. Settings edits retain buffered audio (about 1.4 seconds
 plus decoder/device buffering), reset changed-filter histories, and do not add
 a limiter or transition smoothing. Boosts require preamp headroom. The user's
 running app, daemon and database were not replaced or edited.
+
+## Lyrics retrieval and display (2026-10-20)
+
+TSK-smart-gale-rqmwc implements embedded-first lyrics, cached LRCLIB lookup,
+and the native Lyrics pane (**⌥⌘L**). Protocol v10 gains an additive `lyrics`
+request; the main database schema remains unchanged. Source/access decisions
+for all eight requested providers are documented in
+[docs/lyrics-providers.md](docs/lyrics-providers.md). Only LRCLIB is enabled
+remotely; no third-party lyrics scrapers or credentials were added.
+
+Verification in the isolated `../tyranny-smart-gale` worktree:
+
+- Full Rust suite: **256 passed, one ignored**. Clippy with warnings denied and
+  formatting checks passed. The 13 lyrics-focused tests cover real embedded
+  tags, exact metadata matching, instrumental/missing/error outcomes, bounded
+  responses/cache, expiry, offline persistence, rescan/duplicate-file cache
+  reuse, cancellation, and removal during slow lookup.
+- Swift: **291 tests in 43 suites passed** with warnings as errors; the final
+  native build also passed with warnings as errors. LRC tests cover fractions,
+  multiple timestamps, offsets, duplicate-time lines, invalid input, backward
+  seeks and provider-link restrictions.
+- Ten real-daemon smoke scenarios passed, including genuine ID3v2.4 **USLT**
+  and FLAC **LYRICS**, a live LRCLIB HTTPS request, embedded precedence,
+  invalid/stale/removed entries, stream exclusion, persisted online lyrics
+  after offline restart, and unavailable—not missing—on an uncached outage.
+  Deterministic loopback tests separately verify HTTP 404 negative caching.
+- Nine native scenarios passed using actual Accessibility toggle, pause,
+  scrubber and close controls. Fixture selection and disconnect use the normal
+  model commands. The mounted pane followed playback, paused at the second
+  line, sought backward to the opening line, released hidden demand, rendered
+  plain lyrics, rejected superseded occurrences, refreshed on explicit rescan,
+  recovered after reconnect, and displayed missing/online states and attribution.
+  Screen-window captures were visually inspected; no model-driven fallback was
+  used.
+
+The native smoke caught two integration defects before delivery: the existing
+wire reply-kind allowlist needed `lyrics`, and a tiny no-op rescan could complete
+without an observable state change. Accepted explicit rescans now refresh
+visible lyrics directly; observed scan completion still invalidates them.
+Remote cache identity excludes unrelated library revisions and file paths, so
+rescans and duplicate files do not defeat offline reuse.
+
+Local evidence: `target/lyrics-smoke/report.json` and
+`target/lyrics-smoke/native/{report.json,*.png}`. The orchestration script was
+a throwaway probe; `NativeLyricsSmoke` remains the opt-in native entrypoint.
+Generated silent audio and clock-paced capture do not constitute an acoustic
+listening test. The user's daemon, database and installed app were not changed.
+An exploratory unknown-track request received LRCLIB's temporary backoff;
+the integration retained `unavailable` and honored the delay rather than
+converting it into a permanent miss or bypassing throttling.
 
 ## Development integration (2026-10-20)
 

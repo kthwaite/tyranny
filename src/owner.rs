@@ -7,6 +7,7 @@ use crate::{
     library_types::{
         LibraryCommand, LibraryError, LibraryErrorKind, PageRequest, StaleLibraryRevision,
     },
+    lyrics::{Handle as LyricsHandle, LyricsWorkers, Request as LyricsRequest},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, ShuffleStrategy, UniformShuffle},
     playback::{CountedPlay, Player, PreparedRemove, Start},
@@ -48,6 +49,7 @@ pub struct OwnerConfig {
 pub struct Owner {
     controller: Controller,
     artwork: ArtworkWorkers,
+    lyrics: LyricsWorkers,
     thread: thread::JoinHandle<Result<()>>,
 }
 #[derive(Clone)]
@@ -55,6 +57,7 @@ pub struct Controller {
     sender: mpsc::Sender<Work>,
     library: LibraryHandle,
     artwork: ArtworkHandle,
+    lyrics: LyricsHandle,
     resolver: Arc<Resolver>,
 }
 pub struct Subscription {
@@ -100,15 +103,18 @@ impl Owner {
         match initialized {
             Ok((library, capture)) => {
                 let resolver = Arc::new(Resolver::new(database.clone(), capture));
-                let artwork = ArtworkWorkers::start(database);
+                let artwork = ArtworkWorkers::start(database.clone());
+                let lyrics = LyricsWorkers::start(database);
                 Ok(Self {
                     controller: Controller {
                         sender,
                         library,
                         artwork: artwork.handle(),
+                        lyrics: lyrics.handle(),
                         resolver,
                     },
                     artwork,
+                    lyrics,
                     thread,
                 })
             }
@@ -130,6 +136,7 @@ impl Owner {
     }
     pub async fn shutdown(self) -> Result<()> {
         self.artwork.stop();
+        self.lyrics.stop();
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = self.controller.sender.send(Work::Shutdown(reply_tx)).await;
         let result = if sent.is_ok() {
@@ -141,6 +148,7 @@ impl Owner {
         };
         let joined = tokio::task::spawn_blocking(move || {
             self.artwork.shutdown();
+            self.lyrics.shutdown();
             self.thread.join()
         })
         .await
@@ -161,6 +169,19 @@ impl Controller {
     pub async fn request(&self, request: Request) -> Result<Message> {
         let id = request.id;
         let command = match request.command {
+            Command::Lyrics {
+                entry_id,
+                library_revision,
+            } => {
+                let reply = self
+                    .lyrics
+                    .request(LyricsRequest {
+                        entry_id,
+                        library_revision,
+                    })
+                    .await;
+                return Ok(Message::Reply { id, reply });
+            }
             Command::Artwork {
                 album_id,
                 entry_id,
@@ -1528,6 +1549,7 @@ impl Actor {
                 unreachable!("run selections are resolved before the owner (`Work::Resolved`)")
             }
             Command::Artwork { .. }
+            | Command::Lyrics { .. }
             | Command::AddRoot { .. }
             | Command::Rescan { .. }
             | Command::LibraryRoots { .. }
@@ -1540,7 +1562,7 @@ impl Actor {
             | Command::ListGenres { .. }
             | Command::AlbumSummaries { .. }
             | Command::ListGroups { .. } => {
-                unreachable!("library and artwork commands are routed to their own workers")
+                unreachable!("library, artwork and lyrics commands are routed to their own workers")
             }
             Command::Remove {
                 expected_revision,

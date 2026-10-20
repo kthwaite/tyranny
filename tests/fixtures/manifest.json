@@ -353,6 +353,15 @@
         "seconds": 0.25,
         "frames": 12000,
         "frames_from": "packet durations"
+      },
+      {
+        "extension": "caf",
+        "file": "formats/tone-heaac.caf",
+        "codec": "aac",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.25,
+        "frames": 15216
       }
     ]
   },
