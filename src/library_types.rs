@@ -245,6 +245,13 @@ pub struct PageRequest {
     pub query: String,
 }
 
+/// Extensions the scanner treats as audio candidates (case-insensitive).
+pub const AUDIO_EXTENSIONS: &[&str] = &[
+    "aac", "ac3", "aif", "aiff", "aifc", "alac", "amr", "ape", "au", "awb", "caf", "dff", "dsf",
+    "dts", "flac", "m4a", "m4b", "mka", "mov", "mp2", "mp3", "mp4", "mpc", "oga", "ogg", "opus",
+    "ra", "shn", "spx", "tak", "tta", "wav", "wave", "webm", "wma", "wv",
+];
+
 #[derive(Debug)]
 pub enum LibraryCommand {
     AddRoot {
