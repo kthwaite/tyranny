@@ -75,6 +75,9 @@ final class PlayerModel {
     /// The server's page limit.
     private static let catalogLimit = 500
     @ObservationIgnored var activeDrag: TrackDrag?
+    /// The launch prefetch, until the first list fetch claims it. It names the server it asked.
+    @ObservationIgnored private var launchPrefetch: (slot: LaunchPrefetchSlot, endpoint: String, tokenPath: String,
+                                                     deadline: ContinuousClock.Instant)?
 
     init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore) {
         self.quitSuspensions = quitSuspensions
@@ -95,6 +98,7 @@ final class PlayerModel {
             message = error.localizedDescription
             configurationError = error.localizedDescription
         }
+        startLaunchPrefetch()
         wire.onSnapshot = { [weak self] state, instance in self?.accept(state, newInstance: instance != nil) }
         wire.onDisconnect = { [weak self] reason in self?.lostConnection(reason) }
         transport.attach(self)
@@ -102,6 +106,29 @@ final class PlayerModel {
         savedPlaylists.attach(self)
         activation.attach(self)
         updateMediaControls()
+    }
+
+    /// The main queue is busy building the window for the first ≈0.5 s, so the main connection
+    /// and the Songs list's first `list_tracks` start late. The prefetch sends that request now,
+    /// off the main actor. The grouping is read where the window's `NavigationModel()` reads it.
+    private func startLaunchPrefetch() {
+        guard configurationError == nil,
+              let request = try? TrackListRequest.launchSongs(
+                  defaultSort: Destination.songs.defaultSort,
+                  group: NavigationModel.grouping(for: .songs, in: .standard)) else { return }
+        let deadline = ContinuousClock.now + LaunchPrefetch.budget
+        launchPrefetch = (LaunchPrefetch.start(endpoint: endpoint, tokenPath: tokenPath, request: request),
+                          endpoint, tokenPath, deadline)
+    }
+
+    /// The prefetched reply when `fields` is the prefetch's request and the server is still the one
+    /// it asked; otherwise nil. Only the first call can return a reply; it may wait for the prefetch
+    /// until the prefetch's own deadline.
+    func claimLaunchPrefetch(_ fields: [String: JSONValue]) async -> Data? {
+        guard let launch = launchPrefetch else { return nil }
+        launchPrefetch = nil
+        guard launch.endpoint == endpoint, launch.tokenPath == tokenPath else { return nil }
+        return await launch.slot.claim(fields, until: launch.deadline)
     }
 
     var connected: Bool { connection == "connected" }

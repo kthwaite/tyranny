@@ -9,8 +9,8 @@ final class WireClient {
     var onDisconnect: ((String) -> Void)?
     private(set) var instanceID: String?
 
-    private static let requestLimit = 16 * 1024
-    private static let responseLimit = 8 * 1024 * 1024
+    nonisolated static let requestLimit = 16 * 1024
+    nonisolated static let responseLimit = 8 * 1024 * 1024
     private static let pendingLimit = 32
 
     private struct PendingRequest: Sendable {
@@ -69,14 +69,7 @@ final class WireClient {
         let destination = try Self.validateEndpoint(endpoint)
         let token = try Self.readToken(at: tokenPath)
         let connectionID = generation
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.connectionProxyDictionary = [:]
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = TimeInterval(requestDeadlineSeconds)
+        let configuration = Self.sessionConfiguration(timeout: TimeInterval(requestDeadlineSeconds))
         let delegate = RedirectRejector { [weak self] in
             Task { @MainActor [weak self] in
                 self?.endConnection(
@@ -290,15 +283,7 @@ final class WireClient {
             if let expected = request.expectedKind, expected != header.kind {
                 throw protocolFailure("The server reply kind does not match its request.")
             }
-            let result: Data
-            do {
-                // Keep the complete result, including metadata fields this UI does not decode.
-                guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let object = envelope["result"] as? [String: Any] else {
-                    throw protocolFailure("The server reply has no result object.")
-                }
-                result = try JSONSerialization.data(withJSONObject: object)
-            } catch {
+            guard let result = Self.result(ofReply: data) else {
                 throw protocolFailure("The server reply result is not a valid JSON object.")
             }
             pending.removeValue(forKey: id)
@@ -379,7 +364,28 @@ final class WireClient {
         }
     }
 
-    private static func validateEndpoint(_ endpoint: String) throws -> URL {
+    /// No caches, cookies, stored credentials or proxies. `timeout` bounds each request.
+    nonisolated static func sessionConfiguration(timeout: TimeInterval) -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.urlCredentialStorage = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.connectionProxyDictionary = [:]
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = timeout
+        return configuration
+    }
+
+    /// The `result` object of an ok reply frame, re-encoded on its own. It keeps the complete
+    /// result, including metadata fields this UI does not decode. Nil when there is none.
+    nonisolated static func result(ofReply data: Data) -> Data? {
+        guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let object = envelope["result"] as? [String: Any] else { return nil }
+        return try? JSONSerialization.data(withJSONObject: object)
+    }
+
+    nonisolated static func validateEndpoint(_ endpoint: String) throws -> URL {
         let invalid = ServerFailure(
             code: "invalid_endpoint",
             message: "Use ws://127.x.x.x:port/ws or ws://[::1]:port/ws, without user information, a query, or a fragment."
@@ -412,7 +418,7 @@ final class WireClient {
         return url
     }
 
-    private static func readToken(at path: String) throws -> String {
+    nonisolated static func readToken(at path: String) throws -> String {
         let descriptor = open((path as NSString).expandingTildeInPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         guard descriptor >= 0 else {
             throw ServerFailure(code: "token_read_failed", message: "The private authentication token file could not be opened.")
@@ -448,7 +454,7 @@ final class WireClient {
 }
 
 /// No delegate method exposes a request, credential, or underlying error to UI/logs.
-private final class RedirectRejector: NSObject, URLSessionTaskDelegate, Sendable {
+final class RedirectRejector: NSObject, URLSessionTaskDelegate, Sendable {
     private let rejected: @Sendable () -> Void
 
     init(rejected: @escaping @Sendable () -> Void) {
@@ -476,7 +482,7 @@ private final class RedirectRejector: NSObject, URLSessionTaskDelegate, Sendable
     }
 }
 
-private struct ResultHeader: Decodable {
+struct ResultHeader: Decodable {
     let kind: String
     let snapshot: ControlState?
 
@@ -497,7 +503,7 @@ private struct ResultHeader: Decodable {
     }
 }
 
-private enum IncomingMessage: Decodable {
+enum IncomingMessage: Decodable {
     case hello(UInt32, String, ControlState)
     case state(ControlState)
     case success(UInt64, ResultHeader)

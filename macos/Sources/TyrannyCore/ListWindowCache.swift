@@ -116,7 +116,7 @@ public enum WindowFetchError: Error {
 
     /// `sleep` is the throttle's timer. Tests inject a manual one.
     public init(
-        windowSize: Int = 200, maxWindows: Int = 10, refreshInterval: Duration = .milliseconds(500),
+        windowSize: Int = TrackListRequest.windowSize, maxWindows: Int = 10, refreshInterval: Duration = .milliseconds(500),
         sleep: @escaping Sleep = { try await Task.sleep(for: $0) }, fetch: @escaping Fetch
     ) {
         precondition(windowSize > 0 && windowSize <= 500, "window size must fit the server page limit")

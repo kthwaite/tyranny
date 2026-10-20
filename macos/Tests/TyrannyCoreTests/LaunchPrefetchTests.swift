@@ -94,3 +94,62 @@ import Testing
         #expect(await slot.claim(b, until: soon) == data)
     }
 }
+
+/// The launch prefetch's request must equal the Songs list's first fetch, field for field.
+@MainActor @Suite struct LaunchSongsRequestTests {
+    private struct Row: Identifiable, Sendable { let id: UInt64 }
+
+    @MainActor private final class Recorder {
+        var requests: [(offset: Int, limit: Int, revision: UInt64?)] = []
+    }
+
+    /// The first window a reset cache asks for: `ListModel` resets its cache for each description.
+    private func firstWindow() async throws -> (offset: Int, limit: Int, revision: UInt64?) {
+        let recorder = Recorder()
+        let cache = ListWindowCache<Row> { _, _, _ in throw WindowFetchError.failed("not started") }
+        cache.reset { @MainActor offset, limit, revision in
+            recorder.requests.append((offset, limit, revision))
+            throw WindowFetchError.failed("test")
+        }
+        for _ in 0..<500 where recorder.requests.isEmpty { await Task.yield() }
+        return try #require(recorder.requests.first)
+    }
+
+    /// What `ListModel` sends first for Songs: `currentDescription()` with a new list's state
+    /// (no picked sort, an empty filter, a new browser selection when the browser is shown).
+    private func listModelFirstFetch(group: Grouping, browserShown: Bool) async throws -> [String: JSONValue] {
+        let window = try await firstWindow()
+        let list = TrackListRequest.description(
+            source: .library, browser: browserShown ? BrowserSelection().browser : nil,
+            query: "", sort: [], defaultSort: [], group: group)
+        return try TrackListRequest.fields(list: list, revision: window.revision, offset: window.offset,
+                                           limit: window.limit)
+    }
+
+    @Test func defaultDefaultsMatchTheFirstSongsFetch() async throws {
+        let launch = try TrackListRequest.launchSongs(defaultSort: [], group: .none)
+        #expect(try await listModelFirstFetch(group: .none, browserShown: false) == launch)
+        #expect(try await listModelFirstFetch(group: .none, browserShown: true) == launch)
+        #expect(launch["offset"] == .int(0))
+        #expect(launch["limit"] == .int(200))
+        #expect(launch["revision"] == JSONValue.null)
+    }
+
+    @Test func songsGroupedByAlbumMatchTheFirstSongsFetch() async throws {
+        let launch = try TrackListRequest.launchSongs(defaultSort: [], group: .album)
+        #expect(try await listModelFirstFetch(group: .album, browserShown: false) == launch)
+        #expect(try await listModelFirstFetch(group: .album, browserShown: true) == launch)
+        #expect(launch != (try TrackListRequest.launchSongs(defaultSort: [], group: .none)))
+    }
+
+    @Test func aPickedSortOrFilterDoesNotMatch() throws {
+        let launch = try TrackListRequest.launchSongs(defaultSort: [], group: .none)
+        let sorted = TrackListRequest.description(source: .library, browser: nil, query: "",
+                                                  sort: [SortKey(field: .title, descending: false)],
+                                                  defaultSort: [], group: .none)
+        let filtered = TrackListRequest.description(source: .library, browser: nil, query: "a", sort: [],
+                                                    defaultSort: [], group: .none)
+        #expect(try TrackListRequest.fields(list: sorted, revision: nil, offset: 0, limit: 200) != launch)
+        #expect(try TrackListRequest.fields(list: filtered, revision: nil, offset: 0, limit: 200) != launch)
+    }
+}

@@ -204,10 +204,9 @@ final class ListModel {
     func setBrowserAlbums(_ ids: Set<UInt64>) { browserSelection.setAlbums(ids); sync() }
 
     private func currentDescription() -> ListDescription {
-        ListDescription(source: source,
-                        browser: usesBrowser && navigation.columnBrowserVisible ? browserSelection.browser : Browser(),
-                        query: query, sort: sort.isEmpty ? destination.defaultSort : sort,
-                        group: navigation.grouping(for: destination))
+        TrackListRequest.description(
+            source: source, browser: usesBrowser && navigation.columnBrowserVisible ? browserSelection.browser : nil,
+            query: query, sort: sort, defaultSort: destination.defaultSort, group: navigation.grouping(for: destination))
     }
 
     private func apply(_ next: ListDescription) {
@@ -441,10 +440,15 @@ final class ListModel {
         var description = description
         if epoch == self.epoch { description.source = source }
         do {
-            let reply: ListTracksResponse = try await player.send("list_tracks", [
-                "list": try JSONValue.encoding(description),
-                "revision": revision.map(JSONValue.uint) ?? .null,
-                "offset": .int(offset), "limit": .int(limit)])
+            let fields = try TrackListRequest.fields(list: description, revision: revision, offset: offset, limit: limit)
+            // The Songs list's first window may already be here from the launch prefetch.
+            let reply: ListTracksResponse
+            if let data = await player.claimLaunchPrefetch(fields),
+               let claimed = try? JSONDecoder().decode(ListTracksResponse.self, from: data) {
+                reply = claimed
+            } else {
+                reply = try await player.send("list_tracks", fields)
+            }
             if epoch == self.epoch {
                 if let totals = reply.totals { self.totals = totals }
                 filterError = nil

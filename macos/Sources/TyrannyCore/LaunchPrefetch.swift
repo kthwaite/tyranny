@@ -68,3 +68,33 @@ public actor LaunchPrefetchSlot {
         continuation.resume(returning: nil)
     }
 }
+
+/// A track list's `list_tracks` request. `ListModel` and the launch prefetch both build theirs
+/// here, so equal inputs give structurally equal fields.
+public enum TrackListRequest {
+    /// Rows per window. `ListWindowCache` uses it by default, so it is a list's first `limit`.
+    public static let windowSize = 200
+
+    /// The description a track list shows. `browser` is nil while the column browser is hidden or
+    /// does not narrow this list. With no sort picked, the destination's default sort applies.
+    public static func description(source: ListSource, browser: Browser?, query: String, sort: [SortKey],
+                                   defaultSort: [SortKey], group: Grouping) -> ListDescription {
+        ListDescription(source: source, browser: browser ?? Browser(), query: query,
+                        sort: sort.isEmpty ? defaultSort : sort, group: group)
+    }
+
+    /// The fields of one window's request: everything but `command` and `id`.
+    public static func fields(list: ListDescription, revision: UInt64?, offset: Int,
+                              limit: Int) throws -> [String: JSONValue] {
+        ["list": try JSONValue.encoding(list), "revision": revision.map(JSONValue.uint) ?? .null,
+         "offset": .int(offset), "limit": .int(limit)]
+    }
+
+    /// The Songs list's first request at launch. A new list has no browser selection and no picked
+    /// sort, and the filter field starts empty. Its first window is unpinned.
+    public static func launchSongs(defaultSort: [SortKey], group: Grouping) throws -> [String: JSONValue] {
+        try fields(list: description(source: .library, browser: nil, query: "", sort: [],
+                                     defaultSort: defaultSort, group: group),
+                   revision: nil, offset: 0, limit: windowSize)
+    }
+}

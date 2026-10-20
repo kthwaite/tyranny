@@ -52,7 +52,13 @@ final class NavigationModel {
 
     func grouping(for destination: Destination) -> Grouping {
         _ = groupingRevision
-        return defaults.string(forKey: Self.groupingKey(destination)).flatMap(Grouping.init(rawValue:))
+        return Self.grouping(for: destination, in: defaults)
+    }
+
+    /// The grouping `grouping(for:)` reads from `defaults`, for code that runs before the window
+    /// has a `NavigationModel` (the launch prefetch).
+    static func grouping(for destination: Destination, in defaults: UserDefaults) -> Grouping {
+        defaults.string(forKey: groupingKey(destination)).flatMap(Grouping.init(rawValue:))
             ?? destination.defaultGrouping
     }
 
