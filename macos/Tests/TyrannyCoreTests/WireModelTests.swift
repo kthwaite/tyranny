@@ -127,3 +127,44 @@ private let nowPlayingBase = #""entry_id":1,"title":"T","artist":"A","album":"B"
     #expect(decoded.compilation == nil)
     #expect(decoded.artistLinkID == nil)
 }
+
+@Test func streamQueueEntryDecodesAndDisplaysItsIdentity() throws {
+    let payload = #"""
+    {"id":8,"path":"https://radio.example/live","stream":{"url":"https://radio.example/live","title":"Night Radio"},
+     "track_id":null,"source":{"kind":"stream","name":"Night Radio"},"run_id":8,"played":false,
+     "title":"","artist":"","album":"","album_id":null,"duration_ms":null}
+    """#
+    let entry = try JSONDecoder().decode(QueueItem.self, from: Data(payload.utf8))
+    #expect(entry.stream == StreamSpec(url: "https://radio.example/live", title: "Night Radio"))
+    #expect(entry.displayTitle == "Night Radio")
+    #expect(entry.displayArtist == "https://radio.example/live")
+    #expect(entry.displayDuration == "Live")
+    #expect(entry.track_id == nil)
+    #expect(entry.album_id == nil)
+    #expect(UpNextSections.addedFrom(entry.source) == "Stream: Night Radio")
+    #expect(try JSONDecoder().decode(QueueItem.self, from: JSONEncoder().encode(entry)) == entry)
+}
+
+@Test func localQueueEntryRetainsFileFallbackAndUnknownDuration() throws {
+    let payload = #"""
+    {"id":9,"path":"/music/untagged.mp3","stream":null,"track_id":null,"source":null,
+     "run_id":null,"played":false,"title":"","artist":"","album":"","album_id":null,"duration_ms":null}
+    """#
+    let entry = try JSONDecoder().decode(QueueItem.self, from: Data(payload.utf8))
+    #expect(entry.stream == nil)
+    #expect(entry.displayTitle == "untagged.mp3")
+    #expect(entry.displayDuration.isEmpty)
+}
+
+@Test func liveMetadataHasNoDurationOrLibraryNavigation() throws {
+    let payload = #"""
+    {"entry_id":8,"title":"Artist — Live Song","artist":"","album":"Night Radio","duration_frames":null,
+     "metadata_error":null,"track_id":null,"album_id":null,"album_artist_id":null,
+     "compilation":null,"format":"MP3","gain_db":0}
+    """#
+    let playing = try JSONDecoder().decode(NowPlaying.self, from: Data(payload.utf8))
+    #expect(playing.title == "Artist — Live Song")
+    #expect(playing.duration_frames == nil)
+    #expect(playing.artistLinkID == nil)
+    #expect(playing.album_id == nil)
+}

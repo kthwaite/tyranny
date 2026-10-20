@@ -20,18 +20,7 @@ struct MainWindowView: View {
 
     /// The shown destination's track list, if it is one.
     private var currentList: ListModel? {
-        switch navigation.destination {
-        case .songs:
-            lists.list(for: .songs, source: .library, player: model, navigation: navigation)
-        case .recent:
-            lists.list(for: .recent, source: .recent, player: model, navigation: navigation, usesBrowser: false)
-        case .artists, .genres:
-            lists.browse(navigation.destination, player: model, navigation: navigation).detail
-        case .playlist:
-            currentPlaylist.map { lists.playlist($0, player: model, navigation: navigation) }
-        default:
-            nil
-        }
+        lists.current(player: model, navigation: navigation)
     }
 
     /// The shown destination's playlist, once the catalog has it.
@@ -76,6 +65,16 @@ struct MainWindowView: View {
         }
         .frame(minWidth: 940, minHeight: 560)
         .toolbar { toolbar }
+        .onAppear {
+            let dispatcher = CommandDispatcher(player: model, navigation: navigation, lists: lists)
+            navigation.commandSubmission = { try await dispatcher.execute($0) }
+            navigation.commandCompletion = { dispatcher.completions($0) }
+        }
+        .onDisappear {
+            navigation.commandSubmission = nil
+            navigation.commandCompletion = nil
+        }
+        .onChange(of: navigation.settingsRequest) { _, _ in openSettings() }
         .onChange(of: navigation.filterFocusRequest) { _, _ in filterFocused = true }
         .sheet(item: Binding(get: { model.activation.prompt }, set: { model.activation.prompt = $0 })) { _ in
             UpNextPrompt(activation: model.activation)

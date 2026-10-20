@@ -225,9 +225,20 @@ public struct TrackMetadata: Codable, Sendable, Equatable {
     }
 }
 
+public struct StreamSpec: Codable, Sendable, Equatable {
+    public let url: String
+    public let title: String
+
+    public init(url: String, title: String) {
+        self.url = url
+        self.title = title
+    }
+}
+
 public struct QueueItem: Codable, Sendable, Equatable, Identifiable {
     public let id: UInt64
     public let path: String
+    public let stream: StreamSpec?
     public let track_id: UInt64?
     public let source: QueueSource?
     public let run_id: UInt64?
@@ -238,9 +249,22 @@ public struct QueueItem: Codable, Sendable, Equatable, Identifiable {
     public let album_id: UInt64?
     public let duration_ms: UInt64?
 
-    public init(id: UInt64, path: String, track_id: UInt64?, source: QueueSource?, run_id: UInt64?, played: Bool, title: String, artist: String, album: String, album_id: UInt64?, duration_ms: UInt64?) {
+    public var displayTitle: String {
+        if let stream { return stream.title.isEmpty ? stream.url : stream.title }
+        return title.isEmpty ? (path as NSString).lastPathComponent : title
+    }
+
+    public var displayArtist: String { stream?.url ?? artist }
+
+    public var displayDuration: String {
+        if stream != nil { return "Live" }
+        return duration_ms.map { DisplayFormat.clock(Double($0) / 1000) } ?? ""
+    }
+
+    public init(id: UInt64, path: String, track_id: UInt64?, source: QueueSource?, run_id: UInt64?, played: Bool, title: String, artist: String, album: String, album_id: UInt64?, duration_ms: UInt64?, stream: StreamSpec? = nil) {
         self.id = id
         self.path = path
+        self.stream = stream
         self.track_id = track_id
         self.source = source
         self.run_id = run_id
@@ -416,7 +440,7 @@ public enum RepeatMode: String, Codable, Sendable, Equatable {
 }
 
 public enum SourceKind: String, Codable, Sendable, Equatable {
-    case album, playlist, smart, songs, genre, artist, recent, compilations, drag, direct
+    case album, playlist, smart, songs, genre, artist, recent, compilations, drag, direct, stream
 }
 
 public enum Placement: String, Codable, Sendable, Equatable {

@@ -14,7 +14,7 @@ struct SettingsView: View {
             MusicFoldersPane(model: model)
                 .tabItem { Label("Library", systemImage: "folder") }
                 .tag(SettingsTab.library)
-            PlaybackSettingsPane(transport: model.transport)
+            PlaybackSettingsPane(transport: model.transport, notifications: model.notifications)
                 .tabItem { Label("Playback", systemImage: "play.circle") }
                 .tag(SettingsTab.playback)
         }
@@ -145,6 +145,7 @@ struct MusicFoldersPane: View {
 /// Gain mode, resume on start, and what playing from a list does to Up Next.
 struct PlaybackSettingsPane: View {
     let transport: TransportModel
+    @Bindable var notifications: TrackNotifications
     @AppStorage("upNextOnPlay") private var upNextOnPlay = UpNextPolicy.ask.rawValue
 
     var body: some View {
@@ -168,8 +169,23 @@ struct PlaybackSettingsPane: View {
             .accessibilityIdentifier("settings-up-next-on-play")
             Text("Double-click or Return plays from the clicked track to the end of the list. Keep plays it now and the old Up Next entries follow.")
                 .font(.caption).foregroundStyle(.secondary)
+            Section("Track notifications") {
+                Toggle("Notify when the track changes", isOn: Binding(
+                    get: { notifications.enabled }, set: { notifications.setEnabled($0) }))
+                    .disabled(notifications.requesting)
+                    .accessibilityIdentifier("notifications-enabled")
+                Toggle("Show while Tyranny is frontmost", isOn: $notifications.showWhileActive)
+                    .disabled(!notifications.enabled)
+                    .accessibilityIdentifier("notifications-while-active")
+                Text(notifications.authorization).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("notifications-authorization")
+                if let error = notifications.error {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+            }
         }
         .formStyle(.grouped)
         .padding(12).frame(width: 600)
+        .task { await notifications.refreshAuthorization() }
     }
 }

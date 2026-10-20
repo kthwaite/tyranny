@@ -90,6 +90,20 @@ final class ActivationModel {
         }
     }
 
+    /// A command may finish by presenting the existing choice sheet, but never claims that
+    /// playback started before the server accepted it.
+    func execute(_ job: EnqueueJob) async throws {
+        guard prompt == nil else { throw CommandLanguageError("Answer the pending Up Next prompt first.") }
+        try await send(job, choice: nil)
+        if prompt != nil { player?.message = "Choose prompt keep, prompt clear, or prompt cancel to continue." }
+    }
+
+    func answerForCommand(_ choice: UpNextChoice?) async throws {
+        guard let job = prompt?.job else { throw CommandLanguageError("There is no pending Up Next prompt.") }
+        prompt = nil
+        if let choice { try await send(job, choice: choice) }
+    }
+
     /// Decides, then sends. Without a `choice` the Up Next policy decides from the queue as the
     /// snapshot's revision saw it, so `expected_revision` matches what the decision read.
     /// `stale_revision`: the queue moved; refetch the snapshot and decide again (entries may

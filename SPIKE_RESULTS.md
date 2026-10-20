@@ -2,6 +2,50 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Development integration (2026-10-20)
+
+Notifications and HTTP streaming were integrated with the current command-language, decoder-component coverage and packet-duration changes. Conflict resolution preserves both native queue-command methods, the expanded required decoder/demuxer sets, and the network/TLS restrictions. Configuration tests exercise rejection of missing audio components instead of copying component lists or inspecting source text.
+
+Combined verification: **243 Rust tests passed, one ignored; 267 Swift tests passed** with warnings as errors; Clippy and formatting passed. The merged portable FFmpeg configuration rebuilt successfully, its four configuration-rejection tests passed, and **46 format/transport tests** passed against that prefix, including HTTP/ICY stall recovery. The real native command-dispatch smoke passed six scenarios against an isolated daemon (`target/merge-command-gate/run-ov15z8zc/`); that run did not claim UI or acoustic verification. Native notification banner/artwork delivery remains blocked on macOS authorization.
+
+## Native track notifications
+
+Settings → Playback now offers opt-in track-change notifications and an option to show them while Tyranny is frontmost. Notification authorization is requested only on opt-in; permission status and delivery errors remain visible in Settings. Notifications carry title, artist, album and available current artwork. Artwork waits at most one second on the existing artwork demand and never blocks playback.
+
+Initial/reconnected snapshots establish a quiet baseline. Buffering waits for actual playback; position ticks, pause/resume and preference/focus changes do not replay an already-considered occurrence. Pending deliveries are cancelled when their occurrence changes or the connection ends. Generation-specific request identifiers prevent a late obsolete delivery from removing a newer notification.
+
+Verification: `swift test --package-path macos -Xswiftc -warnings-as-errors` passed, including three notification-transition regressions. A throwaway bundled native probe connected to a real isolated server with clocked PCM output, reached the actual settings controls through Accessibility, and self-rendered the settings pane. Its notification authorization status was denied, with no delivered notifications. **Banner delivery and artwork attachment require an authorized native run; they are not claimed verified.** The probe used a separate bundle identifier and never changed the user's daemon, database or normal notification preferences.
+
+## HTTP stream playback
+
+**Up Next → Add Stream…** accepts a direct HTTP(S) MP3 or Ogg URL and an optional station title. **Add to Up Next** persists it without starting playback; **Add & Play** starts its new queue occurrence. The queue displays the station, URL and **Live** duration; Now Playing displays changing ICY titles. Live sources have no seek range or library-navigation target. URL credentials, non-HTTP schemes, missing hosts, control characters and oversized fields are rejected without changing the queue. Playlist-file imports and a saved-station catalog remain the separate radio task.
+
+Protocol **v10**, SQLite **schema 6**. Queue items have an optional `stream` descriptor; `append_stream` uses the existing queue-revision contract. Stream identity survives restart independently of local paths, and a restored stream resumes from the live endpoint rather than seeking a saved frame offset. Upgrade the client and server together; older servers cannot open schema 6. Verification used isolated state and capture output, not the user's daemon/database or audio device.
+
+### Decode ownership and bounds
+
+- Local playback retains its synchronous decoder and file-only protocol whitelist. Explicit stream entries alone may open HTTP/HTTPS/TCP/TLS, and only MP3/Ogg demuxers. HTTPS certificate verification is enabled.
+- Network open, probing and decoding run off the playback owner. Four recycled PCM blocks bound each worker's handoff; the owner polls without waiting on network I/O, joining a thread or acquiring a blocking metadata lock. Temporary starvation pauses output and resumes after half a second of prebuffer without changing queue identity.
+- Each connection has a ten-second open/probe/prime deadline and five-second read deadlines. Four consecutive failed or short connections exhaust recovery, with 250/500/1,000 ms backoff; ten seconds of decoded audio resets that failure count. Pause, stop and replacement can cancel a worker without joining it. A platform DNS call may outlive cancellation; the cap of four active/retiring workers bounds this limitation.
+- ICY metadata is bounded and change-driven. Missing titles retain the station fallback. Artwork/library inspection never treats a stream URL as a local file.
+- The pinned FFmpeg build enables Secure Transport and exactly `file,http,https,tcp,tls`. RTP/RTSP/SAP/SDP demuxers are explicitly disabled because they otherwise pull in RTP/UDP protocols.
+
+### Exercised evidence
+
+- Rust: **243 passed, one ignored** across the full suite; Clippy with warnings denied and formatting checks passed. Three build-configuration rejection tests cover missing TLS and unwanted protocols.
+- Swift: **248 tests passed** with warnings as errors.
+- The local Icecast-style HTTP integration uses real MP3/Ogg bytes and ICY framing, verifies a transient 503, title changes without replacing queue identity, non-silent PCM, restart persistence, rejected live seeks, and responsive snapshot/pause/stop commands while a server stalls. An established stream also hits its read deadline, reconnects under the same occurrence, and resumes advancing PCM.
+- The native Accessibility smoke entered an invalid URL without queue mutation, added and played a valid stream, observed a changing ICY title, checked disabled live seeking/library navigation, and exercised pause/resume. Window captures were visually inspected. This exposed and fixed inherited sheet Accessibility identifiers; the existing playlist-sheet containment pattern now preserves each field's identity.
+- The source-built portable FFmpeg passed the local stream integration and a real HTTPS Icecast smoke using [SomaFM's published MP3 endpoint](https://somafm.com/groovesalad.pls). The observed server was `Icecast 2.4.0-kh22-Soma1.7`; the client published `Bluetech - Unidentified Flying Octopus` and captured 124,928 non-silent scalar PCM samples. A separate self-signed TLS endpoint was rejected before an HTTP request reached it.
+
+Local reports/captures are under `target/stream-smoke-zrbnpu96/` and `target/https-stream-g0aprz93/` in the streaming worktree. The permanent local integration is reproducible without external network access:
+
+```sh
+cargo test --test server_transport live_streams_recover_publish_icy_persist_and_keep_controls_responsive
+```
+
+`scripts/make_test_fixtures.py` regenerates `tests/fixtures/streams/live.mp3` and `live.ogg` alongside the existing fixtures. Native and real-station smoke scripts were throwaway probes; their captured evidence is local, not a claimed fresh-checkout gate.
+
 ## Album artwork
 
 Artwork is implemented and verified in Rust and SwiftUI. The matching protocol-v8 development bundle is installed at `target/Tyranny.app`; the prior protocol-v7 bundle is preserved at `target/artwork/Tyranny.app`. The directories were atomically exchanged, preserving the old executable inodes; both bundle signatures verified. The user's running daemon/database were not changed. To load matching processes: **Connection Settings → Stop…, quit the client, then reopen `target/Tyranny.app`**.

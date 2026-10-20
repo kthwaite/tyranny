@@ -6,7 +6,7 @@ use crate::{
     play_order::RunInfo,
     protocol::{
         ErrorCode, MAX_RUN_ENTRIES, PLAYED_RETENTION, QueueItem, QueueSource, Settings, SourceKind,
-        TrackSelection,
+        StreamSpec, TrackSelection,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -30,7 +30,7 @@ pub(crate) use selection::resolve_selection;
 #[cfg(test)]
 mod playlists_tests;
 const APPLICATION_ID: i64 = 0x7479726e;
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Runs the migration ladder up to `target`; tests use a lower target to build old schemas.
 pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
@@ -112,6 +112,13 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
         transaction.commit()?;
         version = 5;
     }
+    if version == 5 && target > 5 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch("ALTER TABLE queue ADD COLUMN stream_title TEXT;")?;
+        transaction.pragma_update(None, "user_version", 6)?;
+        transaction.commit()?;
+        version = 6;
+    }
     ensure!(version == target, "unsupported database version {version}");
     Ok(version)
 }
@@ -126,6 +133,7 @@ pub(crate) struct Checkpoint {
 pub(crate) struct LoadedEntry {
     pub id: u64,
     pub path: PathBuf,
+    pub stream: Option<StreamSpec>,
     pub run: Option<RunInfo>,
     /// Play order: set to the next value each time the entry becomes current.
     pub played_seq: Option<u64>,
@@ -148,6 +156,10 @@ pub(crate) struct Loaded {
     pub settings: Settings,
 }
 pub(crate) enum Edit<'a> {
+    AppendStream {
+        id: u64,
+        stream: &'a StreamSpec,
+    },
     Append {
         id: u64,
         path: &'a str,
@@ -213,27 +225,52 @@ fn file_stem(path: &str) -> String {
 /// A queue entry with the display fields of its track; read by `queue_item`.
 const QUEUE_ITEM: &str = "SELECT q.id,q.path,q.track_id,q.source_kind,q.source_name,q.run_id,
         q.played_seq,json_extract(t.metadata,'$.title'),json_extract(t.metadata,'$.artist'),
-        al.title,t.album_id,json_extract(t.metadata,'$.duration_ms')
+        al.title,t.album_id,json_extract(t.metadata,'$.duration_ms'),q.stream_title
     FROM queue q
-    LEFT JOIN library_tracks t ON t.id=q.track_id
+    LEFT JOIN library_tracks t ON t.id=q.track_id AND q.stream_title IS NULL
     LEFT JOIN library_albums al ON al.id=t.album_id";
 fn queue_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueItem> {
     let path: String = row.get(1)?;
     let title: Option<String> = row.get(7)?;
+    let stream = row
+        .get::<_, Option<String>>(12)?
+        .map(|title| {
+            StreamSpec::new(path.clone(), title).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    )),
+                )
+            })
+        })
+        .transpose()?;
     Ok(QueueItem {
         id: row.get(0)?,
-        track_id: row.get(2)?,
-        source: source(row.get(3)?, row.get(4)?),
+        track_id: if stream.is_some() { None } else { row.get(2)? },
+        source: if let Some(stream) = &stream {
+            Some(QueueSource::stamped(SourceKind::Stream, &stream.title))
+        } else {
+            source(row.get(3)?, row.get(4)?)
+        },
         run_id: row.get(5)?,
         played: row.get::<_, Option<u64>>(6)?.is_some(),
-        title: title
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| file_stem(&path)),
+        title: stream
+            .as_ref()
+            .map(|stream| stream.title.clone())
+            .unwrap_or_else(|| {
+                title
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| file_stem(&path))
+            }),
         artist: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
         album: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
         album_id: row.get(10)?,
         duration_ms: row.get(11)?,
         path,
+        stream,
     })
 }
 /// A stored source label. A kind this server does not know reads as none.
@@ -273,7 +310,7 @@ impl Store {
             "SELECT revision,next_id,current_id,position_frames,playing,settings FROM control WHERE singleton=1", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?;
         let mut query = self.connection.prepare(
-            "SELECT id,path,ordinal,source_kind,run_id,played_seq FROM queue ORDER BY ordinal",
+            "SELECT id,path,ordinal,source_kind,run_id,played_seq,stream_title FROM queue ORDER BY ordinal",
         )?;
         let rows = query.query_map([], |row| {
             Ok((
@@ -283,17 +320,29 @@ impl Store {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<u64>>(4)?,
                 row.get::<_, Option<u64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?;
         let mut entries = Vec::new();
         for row in rows {
-            let (id, path, ordinal, kind, run_id, played_seq) = row?;
+            let (id, path, ordinal, kind, run_id, played_seq, stream_title) = row?;
             ensure!(
                 id > 0 && id < next_id && ordinal >= 0,
                 "invalid persisted queue identity/order"
             );
-            let path = PathBuf::from(path);
-            ensure!(path.is_absolute(), "persisted source path is not absolute");
+            let stream = stream_title
+                .map(|title| StreamSpec::new(path.clone(), title))
+                .transpose()
+                .context("reading persisted stream descriptor")?;
+            let path = PathBuf::from(
+                stream
+                    .as_ref()
+                    .map_or(path.as_str(), |stream| stream.url.as_str()),
+            );
+            ensure!(
+                stream.is_some() || path.is_absolute(),
+                "persisted source path is not absolute"
+            );
             let run =
                 kind.as_deref()
                     .and_then(SourceKind::parse)
@@ -305,6 +354,7 @@ impl Store {
             entries.push(LoadedEntry {
                 id,
                 path,
+                stream,
                 run,
                 played_seq,
             });
@@ -601,6 +651,15 @@ impl Store {
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         match edit {
+            Edit::AppendStream { id, stream } => {
+                let validated = StreamSpec::new(stream.url.clone(), stream.title.clone())?;
+                ensure!(&validated == stream, "stream descriptor is not canonical");
+                transaction.execute(
+                    "INSERT INTO queue(id,ordinal,path,track_id,source_kind,source_name,run_id,stream_title)
+                     SELECT ?1,COALESCE(MAX(ordinal),-1)+1,?2,NULL,'stream',?3,?1,?3 FROM queue",
+                    params![id, &stream.url, &stream.title],
+                )?;
+            }
             Edit::Append {
                 id,
                 path,
@@ -653,6 +712,91 @@ mod tests {
         play_order::{RepeatScope, RunInfo},
         protocol::{QueueSource, SourceKind},
     };
+    #[test]
+    fn schema_six_preserves_files_and_round_trips_streams() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let mut connection = Connection::open(&path)?;
+            migrate(&mut connection, 5)?;
+            connection.execute_batch(
+                "INSERT INTO queue(id,ordinal,path) VALUES(1,0,'/music/a.flac');
+                 UPDATE control SET next_id=2,revision=2,current_id=1,position_frames=48000;",
+            )?;
+            drop(connection);
+            let mut store = Store::open(&path)?;
+            let local = store.load()?;
+            assert!(local.entries[0].stream.is_none());
+            assert_eq!(local.checkpoint.position_frames, 48_000);
+            assert_eq!(user_version(&path), 6);
+            let stream =
+                StreamSpec::new("HTTPS://RADIO.EXAMPLE:443/live".into(), "Station".into())?;
+            store.edit(
+                Edit::AppendStream {
+                    id: 2,
+                    stream: &stream,
+                },
+                3,
+                3,
+            )?;
+            drop(store);
+            let store = Store::open(&path)?;
+            let loaded = store.load()?;
+            assert_eq!((loaded.revision, loaded.next_id), (3, 3));
+            assert_eq!(loaded.entries[0].path, PathBuf::from("/music/a.flac"));
+            assert!(loaded.entries[0].stream.is_none());
+            assert_eq!(loaded.entries[1].stream.as_ref(), Some(&stream));
+            assert_eq!(loaded.entries[1].path, PathBuf::from(&stream.url));
+            let rows = store.queue_page(0, 10)?;
+            assert!(rows[0].stream.is_none());
+            assert_eq!(rows[1].stream.as_ref(), Some(&stream));
+            assert_eq!(rows[1].title, "Station");
+            assert_eq!(rows[1].source.as_ref().unwrap().kind, SourceKind::Stream);
+            assert_eq!(rows[1].run_id, Some(2));
+            assert!(rows[1].track_id.is_none());
+            assert!(rows[1].album_id.is_none());
+            assert!(rows[1].duration_ms.is_none());
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+
+    #[test]
+    fn invalid_stream_descriptors_never_commit_and_corrupt_restores_fail() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let mut store = Store::open(&path)?;
+            let invalid = StreamSpec {
+                url: "file:///music/a.mp3".into(),
+                title: "Not live".into(),
+            };
+            assert!(
+                store
+                    .edit(
+                        Edit::AppendStream {
+                            id: 1,
+                            stream: &invalid
+                        },
+                        2,
+                        2
+                    )
+                    .is_err()
+            );
+            let loaded = store.load()?;
+            assert_eq!((loaded.revision, loaded.next_id), (1, 1));
+            assert!(loaded.entries.is_empty());
+            store.connection.execute_batch(
+                "INSERT INTO queue(id,ordinal,path,stream_title) VALUES(1,0,'file:///music/a.mp3','Invalid');
+                 UPDATE control SET next_id=2;"
+            )?;
+            assert!(store.load().is_err());
+            assert!(store.queue_page(0, 10).is_err());
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+
     #[test]
     fn failed_edit_rolls_back_queue_and_revision() -> Result<()> {
         let path =
@@ -955,7 +1099,7 @@ mod tests {
         let result = (|| -> Result<()> {
             let store = Store::open(&path)?;
             let loaded = store.load()?;
-            assert_eq!(user_version(&path), 5);
+            assert_eq!(user_version(&path), 6);
             assert_eq!(loaded.entries.len(), 1);
             assert_eq!(loaded.checkpoint.current_id, Some(1));
             assert_eq!(pending_upgrade(&path), 1);
@@ -1015,7 +1159,7 @@ mod tests {
         let path = schema_4_file(false);
         let result = (|| -> Result<()> {
             Store::open(&path)?;
-            assert_eq!(user_version(&path), 5);
+            assert_eq!(user_version(&path), 6);
             assert_eq!(pending_upgrade(&path), 0);
             Ok(())
         })();

@@ -2,11 +2,12 @@
 //!
 //! libavcodec applies AV_PKT_DATA_SKIP_SAMPLES itself (SKIP_MANUAL is deliberately
 //! not enabled). Its returned sample count and adjusted timestamps already exclude
-//! that padding. Sample-exact frame durations additionally delimit container edits,
-//! including the short final AAC/MP4 packet, when one container tick is no longer
-//! than one sample; this is a fallback for demuxers that send no end-trim side
-//! data (FFmpeg 9's mov demuxer does send it). Neither stream duration estimates nor
-//! codec-specific delay constants are used to trim the decoded audio.
+//! that padding. Sample-exact frame durations additionally delimit container edits
+//! when one container tick is no longer than one sample. This cuts a short final
+//! packet that has no end-trim side data. FFmpeg 9's mov demuxer sends that trim
+//! only for unfragmented files whose codec has a fixed frame size, so Opus in MP4
+//! and fragmented MP4 rely on the cut, as does Ogg Speex. Neither stream duration
+//! estimates nor codec-specific delay constants are used to trim the decoded audio.
 
 use std::{path::Path, ptr, sync::LazyLock};
 
@@ -147,8 +148,59 @@ pub struct Decoder {
 impl Decoder {
     pub fn open(path: &Path, mode: GainMode) -> Result<Self> {
         initialize_ffmpeg()?;
-        let mut input = ffmpeg::format::input(path)
+        let mut options = ffmpeg::Dictionary::new();
+        options.set("protocol_whitelist", "file");
+        let input = ffmpeg::format::input_with_dictionary(path, options)
             .with_context(|| format!("opening audio source {}", path.display()))?;
+        Self::from_input(input, path, mode)
+    }
+
+    /// Only called on the stream worker: open, probing and priming all share
+    /// the caller's interrupt deadline. Filesystem playback never uses this.
+    pub(crate) fn open_stream(
+        url: &str,
+        title: &str,
+        mode: GainMode,
+        interrupt: impl FnMut() -> bool + Send + 'static,
+    ) -> Result<Self> {
+        ensure!(
+            url.starts_with("http://") || url.starts_with("https://"),
+            "stream source must use HTTP or HTTPS"
+        );
+        initialize_ffmpeg()?;
+        let mut options = ffmpeg::Dictionary::new();
+        options.set("protocol_whitelist", "http,https,tcp,tls");
+        options.set("format_whitelist", "mp3,ogg");
+        options.set("codec_whitelist", "mp3,mp3float,vorbis,opus,flac");
+        options.set("tls_verify", "1");
+        options.set("http_proxy", "");
+        options.set("rw_timeout", "5000000");
+        options.set("probesize", "131072");
+        options.set("analyzeduration", "500000");
+        options.set("max_probe_packets", "128");
+        options.set("max_streams", "8");
+        options.set("skip_estimate_duration_from_pts", "1");
+        options.set("seekable", "0");
+        options.set("icy", "1");
+        // Reconnection belongs to the worker, not nested libavformat loops.
+        options.set("reconnect", "0");
+        options.set("reconnect_at_eof", "0");
+        options.set("reconnect_on_network_error", "0");
+        let input = ffmpeg::format::input_with_interrupt_and_dictionary(url, interrupt, options)
+            .context("opening HTTP audio stream")?;
+        let mut decoder = Self::from_input(input, Path::new(title), mode)?;
+        decoder.duration = None;
+        // A station is not a filesystem basename (dots and slashes are valid).
+        // Live ICY titles replace this fallback on the worker.
+        decoder.metadata.as_mut().unwrap().title = title.to_owned();
+        Ok(decoder)
+    }
+
+    fn from_input(
+        mut input: ffmpeg::format::context::Input,
+        path: &Path,
+        mode: GainMode,
+    ) -> Result<Self> {
         // Match the codec's strict error policy at the demuxer, without asking
         // libavformat to discard corrupt packets or synthesize missing audio.
         unsafe {
@@ -238,6 +290,45 @@ impl Decoder {
 
     pub(crate) fn take_metadata(&mut self) -> PlaybackMetadata {
         self.metadata.take().expect("source metadata already taken")
+    }
+
+    /// Borrow the current bounded ICY packet without av_opt_get's per-poll
+    /// allocation. FFmpeg owns it; no input reads may occur while it is borrowed.
+    pub(crate) fn icy_metadata(&self) -> Option<&[u8]> {
+        unsafe {
+            let io = (*self.input.as_ptr()).pb;
+            if io.is_null() {
+                return None;
+            }
+            let mut target = ptr::null_mut();
+            let option = ffi::av_opt_find2(
+                io.cast(),
+                c"icy_metadata_packet".as_ptr(),
+                ptr::null(),
+                0,
+                ffi::AV_OPT_SEARCH_CHILDREN,
+                &mut target,
+            );
+            if option.is_null()
+                || target.is_null()
+                || (*option).type_ != ffi::AVOptionType::AV_OPT_TYPE_STRING
+                || (*option).offset < 0
+            {
+                return None;
+            }
+            let value = target
+                .cast::<u8>()
+                .add((*option).offset as usize)
+                .cast::<*const libc::c_char>()
+                .read();
+            if value.is_null() {
+                return None;
+            }
+            // ICY's one-byte length limits packets to 255 * 16 bytes. strnlen
+            // includes one extra byte to reject an unexpectedly oversized value.
+            let length = libc::strnlen(value, 255 * 16 + 1);
+            (length <= 255 * 16).then(|| std::slice::from_raw_parts(value.cast(), length))
+        }
     }
 
     /// Fill a nonempty destination; zero means both codec and resampler drained.
@@ -653,6 +744,18 @@ fn grid_skip(position: i64, rate: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_decoder_rejects_network_and_nested_protocols() {
+        for source in [
+            "http://127.0.0.1:1/live.mp3",
+            "https://127.0.0.1:1/live.ogg",
+            "concat:file:/tmp/one.mp3|file:/tmp/two.mp3",
+            "data:audio/mpeg;base64,AAAA",
+        ] {
+            assert!(Decoder::open(Path::new(source), GainMode::Off).is_err());
+        }
+    }
 
     #[test]
     fn album_fallback_uses_matching_peak_and_off_is_unity() {

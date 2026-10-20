@@ -349,12 +349,23 @@ impl Engine {
             ),
             (None, Some(id)) => {
                 let id = i64::try_from(id).map_err(|_| invalid("invalid queue entry id"))?;
-                let entry: Option<(String, Option<i64>)> = transaction.query_row(
-                    "SELECT q.path,(SELECT t.album_id FROM library_tracks t JOIN library_assets a ON a.id=t.asset_id
+                let entry: Option<(String, Option<i64>, bool)> = transaction.query_row(
+                    "SELECT q.path,CASE WHEN q.stream_title IS NULL THEN
+                     (SELECT t.album_id FROM library_tracks t JOIN library_assets a ON a.id=t.asset_id
                      JOIN library_roots r ON r.id=a.root_id WHERE a.path=q.path AND a.indexed=1 AND a.last_seen_scan>=r.completed_scan)
-                     FROM queue q WHERE q.id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-                let (path, album) =
+                     END,q.stream_title IS NOT NULL
+                     FROM queue q WHERE q.id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+                let (path, album, stream) =
                     entry.ok_or_else(|| invalid("queue entry is unknown or removed"))?;
+                if stream {
+                    transaction.commit()?;
+                    return Ok(Target {
+                        paths: Vec::new(),
+                        release_id: None,
+                        key: String::new(),
+                        direct: false,
+                    });
+                }
                 (album, Some(PathBuf::from(path)))
             }
             _ => return Err(invalid("artwork requires exactly one album_id or entry_id")),
@@ -438,6 +449,9 @@ impl Engine {
         })
     }
     fn load(&mut self, target: Target, size: ArtworkSize) -> Artwork {
+        if target.paths.is_empty() {
+            return Artwork::missing();
+        }
         let local: Local = if let Some(cached) =
             self.cache.as_ref().and_then(|cache| cache.get(&target.key))
         {

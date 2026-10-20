@@ -80,6 +80,9 @@ GAPLESS_SETS = [
     ("aac48", 48000, False, "m4a", "ffmpeg aac 192k", "ffmpeg", ["-c:a", "aac", "-b:a", "192k"]),
     ("aacapple48", 48000, False, "m4a", "afconvert -f m4af -d aac -b 192000", "afconvert", None),
     ("opus48", 48000, False, "opus", "ffmpeg libopus 160k", "ffmpeg", ["-c:a", "libopus", "-b:a", "160k"]),
+    # Opus has no fixed frame size, so the mov demuxer sends no end trim; only the
+    # short final stts duration ends these tracks at their source length.
+    ("mp4opus48", 48000, False, "mp4", "ffmpeg libopus 64k in mp4", "ffmpeg", ["-c:a", "libopus", "-b:a", "64k"]),
     ("mp3notag48", 48000, False, "mp3", "ffmpeg libmp3lame 192k -write_xing 0", "ffmpeg",
      ["-c:a", LAME, "-b:a", "192k", "-write_xing", "0"]),
     ("wav44", 44100, True, "wav", "ffmpeg pcm_s16le", "ffmpeg", ["-c:a", "pcm_s16le"]),
@@ -161,6 +164,18 @@ def probe(path):
     return json.loads(out)["streams"][0]
 
 
+def stream_fixtures(ff, fixtures):
+    """Four seconds of generated 440 Hz tone; no encoder is needed by tests."""
+    directory = os.path.join(fixtures, "streams")
+    os.makedirs(directory, exist_ok=True)
+    signal = ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4"]
+    run([ff, *FF_BASE, *signal, "-c:a", LAME, "-b:a", "64k",
+         "-reservoir", "0", "-write_xing", "0", "-id3v2_version", "0",
+         os.path.join(directory, "live.mp3")])
+    run([ff, *FF_BASE, *signal, "-ac", "2", "-c:a", "vorbis", "-strict", "experimental",
+         os.path.join(directory, "live.ogg")])
+
+
 def main():
     ff, lame, af = require_tools()
     fixtures = os.path.realpath(FIXTURES)
@@ -235,6 +250,8 @@ def main():
             manifest["gapless"]["sets"].append({
                 "name": name, "rate": rate, "lossless": lossless, "files": files,
                 "lengths": LENGTHS[rate], "encoder": label})
+
+    stream_fixtures(ff, fixtures)
 
     with open(os.path.join(fixtures, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)

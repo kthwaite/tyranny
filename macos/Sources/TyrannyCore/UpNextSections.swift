@@ -103,6 +103,7 @@ public enum UpNextSections {
         case .compilations: return "Compilations"
         case .drag: return name.isEmpty ? "Dragged" : "Dragged from \(name)"
         case .direct: return ""
+        case .stream: return name.isEmpty ? "Stream" : "Stream: \(name)"
         }
     }
 

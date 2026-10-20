@@ -155,7 +155,17 @@ final class UpNextModel {
     // MARK: Selection
 
     /// Selected entry IDs in position order.
-    @ObservationIgnored var selection: Set<UInt64> = []
+    var selection: Set<UInt64> = []
+    private(set) var revealRequest: (token: UInt64, position: Int)?
+
+    func revealPlaying() throws {
+        guard let id = context.currentID, let position = context.currentIndex else {
+            throw CommandLanguageError("Nothing is playing.")
+        }
+        selection = [id]
+        cache.visible(position..<position + 1)
+        revealRequest = ((revealRequest?.token ?? 0) &+ 1, position)
+    }
 
     func selectedIDs() -> [UInt64] {
         cache.loadedRows().filter { selection.contains($0.row.id) }.map(\.row.id)
@@ -224,6 +234,79 @@ final class UpNextModel {
         }
     }
 
+    /// Awaitable queue edits share the view's revision checks and retry path.
+    func execute(_ command: CommandID, ids: [UInt64] = [], before: UInt64? = nil,
+                 name: String = "") async throws {
+        switch command {
+        case .selectionPlay, .selectionRun:
+            guard let id = ids.first else { throw EmptySelection() }
+            try await run("play", fields: { _ in ["entry_id": .uint(id)] })
+        case .selectionRemove:
+            guard !ids.isEmpty else { throw EmptySelection() }
+            for id in ids {
+                try await run("remove", fields: { state in
+                    ["expected_revision": .uint(state.queue_revision), "entry_id": .uint(id)]
+                })
+            }
+            selection.subtract(ids)
+        case .selectionMove:
+            guard !ids.isEmpty else { throw EmptySelection() }
+            guard ids.count <= 500 else { throw CommandLanguageError("Select 500 or fewer entries to move.") }
+            guard !ids.contains(before ?? 0) else {
+                throw CommandLanguageError("The insertion point is inside the selected entries.")
+            }
+            try await run("move", fields: { state in
+                ["expected_revision": .uint(state.queue_revision), "entry_ids": .uints(ids),
+                 "before": before.map(JSONValue.uint) ?? .null]
+            })
+        case .queueClear, .queueShuffle:
+            try await run(command == .queueClear ? "clear_upcoming" : "shuffle_upcoming", fields: { state in
+                ["expected_revision": .uint(state.queue_revision)]
+            })
+        case .queueSave:
+            let _: PlaylistApplied = try await edit("save_upcoming", fields: { state in
+                ["expected_revision": .uint(state.queue_revision),
+                 "expected_playlists_revision": .uint(state.playlists_revision), "name": .string(name)]
+            })
+        default:
+            throw CommandLanguageError("This command is not a queue edit.")
+        }
+    }
+
+    /// Append is revision-checked; play is sent only after a durable append succeeds.
+    /// A play failure never invites retrying the already successful append.
+    func addStream(url: String, title: String, play: Bool) async -> String? {
+        guard let player, player.canMutate else { return "Wait for the current command to finish." }
+        return await withCheckedContinuation { continuation in
+            player.mutate { [weak self] in
+                do {
+                    guard let self else { throw CancellationError() }
+                    let connection = player.playlistConnectionGeneration
+                    let added: Applied = try await self.edit("append_stream", fields: { state in
+                        ["expected_revision": .uint(state.queue_revision),
+                         "url": .string(url), "title": .string(title)] })
+                    player.message = "Added stream to Up Next."
+                    if play {
+                        do {
+                            guard player.connected, player.playlistConnectionGeneration == connection else {
+                                throw ServerFailure(code: "connection_changed", message: "Connection changed. Select the stream in Up Next to play it.")
+                            }
+                            guard let id = added.entry_id else {
+                                throw ServerFailure(code: "missing_entry", message: "The server did not return the stream entry.")
+                            }
+                            try await self.run("play", fields: { _ in ["entry_id": .uint(id)] })
+                        } catch {
+                            player.message = "Stream added, but playback could not start: \(error.localizedDescription)"
+                        }
+                    }
+                    continuation.resume(returning: nil)
+                } catch {
+                    continuation.resume(returning: error.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func run(_ command: String, fields: (ControlState) -> [String: JSONValue]) async throws {
         let _: Applied = try await edit(command, fields: fields)
     }
@@ -232,9 +315,10 @@ final class UpNextModel {
     /// snapshot and retries once.
     private func edit<T: Decodable>(_ command: String, fields: (ControlState) -> [String: JSONValue]) async throws -> T {
         guard let player else { throw CancellationError() }
+        let connection = player.playlistConnectionGeneration
         var retried = false
         while true {
-            guard player.connected, let state = player.snapshot else {
+            guard player.connected, player.playlistConnectionGeneration == connection, let state = player.snapshot else {
                 throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was changed.")
             }
             do {

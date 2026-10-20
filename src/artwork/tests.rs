@@ -359,6 +359,32 @@ async fn local_missing_is_cached_and_no_cover_does_not_change_queue() {
 }
 
 #[tokio::test]
+async fn live_queue_occurrences_have_neutral_artwork_without_local_discovery() {
+    let fixture = Fixture::new();
+    let db = Connection::open(&fixture.database).unwrap();
+    db.execute_batch(
+        "INSERT INTO queue(id,ordinal,path,stream_title,source_kind)
+         VALUES(7,0,'https://radio.example/live.mp3','Radio','stream');
+         UPDATE control SET next_id=8,revision=2;",
+    )
+    .unwrap();
+    let workers = fixture.workers();
+    let art = artwork(
+        &workers.handle(),
+        Request {
+            album_id: None,
+            entry_id: Some(7),
+            library_revision: 1,
+            size: ArtworkSize::Display,
+        },
+    )
+    .await;
+    assert_eq!(art.status, ArtworkStatus::Missing);
+    assert!(art.source.is_none());
+    shutdown(workers).await;
+}
+
+#[tokio::test]
 async fn durable_direct_queue_occurrence_is_authoritative_and_invalid_targets_are_typed() {
     let fixture = Fixture::new();
     let path = fixture.music("direct.wav");

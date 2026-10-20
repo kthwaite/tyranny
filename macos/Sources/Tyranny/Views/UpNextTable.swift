@@ -16,6 +16,8 @@ struct UpNextTable: NSViewRepresentable {
     let epoch: UInt64
     /// The current entry, its position and the shuffle state: what decides the sections.
     let context: QueueContext
+    let selected: Set<UInt64>
+    let revealToken: UInt64?
 
     static let identifier = "up-next-table"
 
@@ -120,6 +122,7 @@ struct UpNextTable: NSViewRepresentable {
         private var dragToken: String?
         private var dragItems = 0
         private var dragLifetime: Coordinator?
+        private var shownReveal: UInt64?
 
         init(_ parent: UpNextTable) { self.parent = parent }
 
@@ -152,6 +155,15 @@ struct UpNextTable: NSViewRepresentable {
                 if epochChanged { table.scrollRowToVisible(0) }
                 restoreAnchor(table)
                 focusCurrentEntry(table)
+            }
+            updating = true
+            let selectedRows = IndexSet(parent.selected.compactMap { cache.position(of: $0) })
+            if table.selectedRowIndexes != selectedRows { table.selectRowIndexes(selectedRows, byExtendingSelection: false) }
+            updating = false
+            if parent.revealToken != shownReveal, let request = model.revealRequest,
+               request.position < table.numberOfRows {
+                shownReveal = parent.revealToken
+                table.scrollRowToVisible(request.position)
             }
             reportVisible()
         }
@@ -249,10 +261,10 @@ struct UpNextTable: NSViewRepresentable {
             let text: String
             switch id {
             case "number": text = String(row + 1)
-            case "title": text = Self.title(item)
-            case "artist": text = item.artist
-            case "album": text = item.album
-            case "time": text = item.duration_ms.map { DisplayFormat.clock(Double($0) / 1000) } ?? ""
+            case "title": text = item.displayTitle
+            case "artist": text = item.displayArtist
+            case "album": text = item.stream == nil ? item.album : "Live stream"
+            case "time": text = item.displayDuration
             default: text = UpNextSections.addedFrom(item.source)
             }
             let weight: NSFont.Weight = section == .nowPlaying && id == "title" ? .semibold : .regular
@@ -264,10 +276,6 @@ struct UpNextTable: NSViewRepresentable {
             return cell
         }
 
-        /// An entry the library does not know has no title: its file name stands in.
-        private static func title(_ item: QueueItem) -> String {
-            item.title.isEmpty ? (item.path as NSString).lastPathComponent : item.title
-        }
 
         // MARK: Delegate
 

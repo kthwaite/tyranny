@@ -17,6 +17,7 @@ final class PlayerModel {
     }
     private(set) var playbackSession: UInt64 = 0
     let artwork = ArtworkStore()
+    let notifications = TrackNotifications()
     /// Transport commands and the player bar display. Owns the system media controls.
     let transport = TransportModel()
     /// The Up Next view's and drawer's queue windows.
@@ -44,6 +45,7 @@ final class PlayerModel {
     @ObservationIgnored private let decoder = JSONDecoder()
     @ObservationIgnored private var wantsConnection = false
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
+    @ObservationIgnored private var commandConnectionReply: CheckedContinuation<Void, Error>?
     @ObservationIgnored private var rootsTask: Task<Void, Never>?
     @ObservationIgnored private var rootsTimer: Task<Void, Never>?
     @ObservationIgnored private var needsRoots = false
@@ -200,6 +202,7 @@ final class PlayerModel {
     }
 
     func shutdown() {
+        notifications.shutdown()
         transport.shutdown()
         disconnect()
     }
@@ -235,30 +238,16 @@ final class PlayerModel {
     func restartManagedServer() { manageServer(restart: true) }
     func stopManagedServer() { manageServer(restart: false) }
     private func manageServer(restart: Bool) {
-        guard managesServer, let managedServer, !serverManagementBusy, !busy else { return }
-        disconnect()
-        message = nil
-        serverManagementBusy = true
         Task {
-            defer { serverManagementBusy = false }
-            do {
-                if restart {
-                    try await managedServer.restart()
-                    managedEnabled = true
-                    serverManagementBusy = false
-                    start()
-                } else {
-                    try await managedServer.uninstall()
-                    managedEnabled = false
-                    connectionDetail = "Background job removed; data retained. Manually started servers are not stopped."
-                }
-            } catch {
+            do { try await manageServerForCommand(restart ? "restart" : "stop") }
+            catch {
                 message = error.localizedDescription
                 connectionDetail = error.localizedDescription
             }
         }
     }
     func disconnect() {
+        finishConnectionCommand(.failure(CommandLanguageError("The connection attempt was cancelled.")))
         wantsConnection = false
         session &+= 1
         connectionTask?.cancel()
@@ -271,6 +260,7 @@ final class PlayerModel {
         if busy { message = "Disconnected during a command. Its outcome is uncertain; reconnect and inspect state before repeating it." }
     }
     private func clearRemoteState() {
+        notifications.disconnected()
         rootsTimer?.cancel(); rootsTimer = nil
         needsRoots = false
         activeDrag = nil
@@ -312,6 +302,7 @@ final class PlayerModel {
                     connectionTask = nil
                     refresh()
                     if resume { transport.play() }
+                    finishConnectionCommand(.success(()))
                     return
                 } catch {
                     launchResumePending = false
@@ -334,11 +325,13 @@ final class PlayerModel {
                             message = error.localizedDescription
                             wantsConnection = false
                             connectionTask = nil
+                            finishConnectionCommand(.failure(error))
                             return
                         }
                     }
                     connection = "disconnected"
                     connectionDetail = "\(error.localizedDescription) Retrying in \(delay)s."
+                    finishConnectionCommand(.failure(error))
                     do { try await Task.sleep(for: .seconds(delay)) } catch { return }
                     delay = min(delay * 2, 10)
                 }
@@ -349,6 +342,7 @@ final class PlayerModel {
         if !newInstance, let previous = snapshot, state.sequence < previous.sequence { return }
         let previous = snapshot
         snapshot = state
+        notifications.receive(state, newSession: newInstance, artwork: artwork)
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
         if newInstance, !launchImportChecked {
             launchImportChecked = true
@@ -442,21 +436,10 @@ final class PlayerModel {
     }
 
     func chooseFolder() {
-        guard canMutate,
-              let parent = NSApp.keyWindow ?? NSApp.mainWindow
-                ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain }) else { return }
-        let window = parent.attachedSheet ?? parent
-        let panel = NSOpenPanel()
-        panel.title = "Choose Music Folder"
-        panel.prompt = "Add Music Folder"
-        panel.canChooseDirectories = true; panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        #if DEBUG
-        NativeSmoke.prepareFolderPanel(panel)
-        #endif
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let path = panel.url?.path else { return }
-            Task { @MainActor in await self?.addRoot(path) }
+        Task {
+            do { try await chooseFolderForCommand() }
+            catch is CancellationError { }
+            catch { message = error.localizedDescription }
         }
     }
     /// The path of the root being imported, abbreviated, once the root list has it.
@@ -474,26 +457,9 @@ final class PlayerModel {
     }
     /// Try Again: a fresh baseline, then a rescan of the same root.
     func retryImport() {
-        guard canMutate, let scan = snapshot?.library.scan, var session = importSession else { return }
-        session.retry(baseline: scan)
-        importSession = session
-        updateImportProgress()
-        busy = true; message = nil
-        let rootID = session.rootID
         Task {
-            defer { busy = false }
-            do {
-                let _: ScanAccepted = try await request("rescan", ["root_id": .uint(rootID)])
-                refresh()
-            } catch {
-                // The rescan never started, so the old Stopped screen comes back.
-                if var current = importSession, current.rootID == rootID {
-                    current.cancelRetry()
-                    importSession = current
-                    updateImportProgress()
-                }
-                message = error.localizedDescription
-            }
+            do { try await retryImportForCommand() }
+            catch { message = error.localizedDescription }
         }
     }
     private func setImportSession(_ session: ImportSession?) {
@@ -514,17 +480,19 @@ final class PlayerModel {
         importSession = session
     }
     func addRoot(_ path: String) async {
-        guard canMutate else { return }
-        busy = true
-        defer { busy = false }
-        let rootsBefore = snapshot?.library.roots ?? 0
-        let baseline = snapshot?.library.scan
-        do {
+        do { try await addRootAwaitingReply(path) }
+        catch { message = error.localizedDescription }
+    }
+
+    private func addRootAwaitingReply(_ path: String) async throws {
+        try await performMutation {
+            let rootsBefore = snapshot?.library.roots ?? 0
+            let baseline = snapshot?.library.scan
             let added: RootAdded = try await request("add_root", ["path": .string(path)])
             setImportSession(ImportSession.afterAddRoot(
                 rootID: added.root.id, rootsBefore: rootsBefore, current: importSession, baseline: baseline))
-            message = nil; refresh()
-        } catch { message = error.localizedDescription }
+            refresh()
+        }
     }
     /// Runs one user mutation: marks the model busy, reports failure in `message`,
     /// afterwards.
@@ -536,8 +504,122 @@ final class PlayerModel {
             do { try await action() } catch { message = error.localizedDescription }
         }
     }
+
+    /// Awaitable user mutation for non-view callers. The same busy gate as `mutate`, but
+    /// failure reaches the caller and completion means the remote operation has replied.
+    func performMutation(_ action: @MainActor () async throws -> Void) async throws {
+        guard connected else { throw CommandLanguageError("Disconnected. Connect before running this command.") }
+        guard canMutate else { throw CommandLanguageError("Wait for the current command to finish.") }
+        busy = true
+        message = nil
+        defer { busy = false }
+        do { try await action() }
+        catch { message = error.localizedDescription; throw error }
+    }
+
+    func connectForCommand() async throws {
+        guard !serverManagementBusy, !busy else {
+            throw CommandLanguageError("Wait for the current command to finish.")
+        }
+        if connected { return }
+        if connectionTask == nil { reconnect() }
+        guard connectionTask != nil else { throw CommandLanguageError(connectionDetail) }
+        guard commandConnectionReply == nil else { throw CommandLanguageError("A connection command is already waiting.") }
+        try await withCheckedThrowingContinuation { commandConnectionReply = $0 }
+    }
+
+    private func finishConnectionCommand(_ result: Result<Void, Error>) {
+        let reply = commandConnectionReply
+        commandConnectionReply = nil
+        reply?.resume(with: result)
+    }
+
+    func manageServerForCommand(_ operation: String) async throws {
+        guard managesServer, let managedServer else {
+            throw CommandLanguageError("This connection does not use the managed local server.")
+        }
+        guard !serverManagementBusy, !busy, connection != "connecting" else {
+            throw CommandLanguageError("Wait for the current command to finish.")
+        }
+        if operation == "start" {
+            managedEnabled = true
+            try await connectForCommand()
+            return
+        }
+        disconnect()
+        serverManagementBusy = true
+        defer { serverManagementBusy = false }
+        if operation == "restart" {
+            try await managedServer.restart()
+            managedEnabled = true
+            serverManagementBusy = false
+            try await connectForCommand()
+        } else {
+            try await managedServer.uninstall()
+            managedEnabled = false
+            connectionDetail = "Background job removed; data retained. Manually started servers are not stopped."
+        }
+    }
+
+    func rescanForCommand(_ rootID: UInt64) async throws {
+        guard !scanActive else { throw CommandLanguageError("A library scan is already running.") }
+        try await performMutation {
+            let _: ScanAccepted = try await request("rescan", ["root_id": .uint(rootID)])
+            refresh()
+        }
+    }
+
+    func retryImportForCommand() async throws {
+        guard !scanActive, importProgress?.stage == .stopped,
+              let scan = snapshot?.library.scan, var session = importSession else {
+            throw CommandLanguageError("There is no stopped import to retry.")
+        }
+        try await performMutation {
+            session.retry(baseline: scan)
+            importSession = session
+            updateImportProgress()
+            do {
+                let _: ScanAccepted = try await request("rescan", ["root_id": .uint(session.rootID)])
+                refresh()
+            } catch {
+                if var current = importSession, current.rootID == session.rootID {
+                    current.cancelRetry()
+                    importSession = current
+                    updateImportProgress()
+                }
+                throw error
+            }
+        }
+    }
+
+    func chooseFolderForCommand() async throws {
+        guard canMutate, !scanActive else {
+            throw CommandLanguageError("Connect and wait for the current command or scan to finish.")
+        }
+        guard let parent = NSApp.keyWindow ?? NSApp.mainWindow
+            ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain }) else {
+            throw CommandLanguageError("Open a window before choosing a music folder.")
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Choose Music Folder"
+        panel.prompt = "Add Music Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        #if DEBUG
+        NativeSmoke.prepareFolderPanel(panel)
+        #endif
+        let response = await withCheckedContinuation { continuation in
+            panel.beginSheetModal(for: parent.attachedSheet ?? parent) { continuation.resume(returning: $0) }
+        }
+        guard response == .OK, let path = panel.url?.path else { throw CancellationError() }
+        try await addRootAwaitingReply(path)
+    }
     func rescan(_ rootID: UInt64) {
-        mutate { let _: ScanAccepted = try await self.request("rescan", ["root_id": .uint(rootID)]); self.refresh() }
+        Task {
+            do { try await rescanForCommand(rootID) }
+            catch { message = error.localizedDescription }
+        }
     }
     /// One page of regular (non-smart) saved playlists, as the server's catalog holds them.
     func regularPlaylistPage(query: String, offset: Int) async throws -> Page<Playlist> {

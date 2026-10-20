@@ -167,6 +167,7 @@ struct TyrannyApp: App {
                 Divider()
                 Button("Show Playing Track") { navigation.revealPlaying() }
                     .keyboardShortcut("l")
+                    .disabled(model.transport.nowPlaying?.track_id == nil)
             }
             CommandMenu("Go") {
                 ForEach(Array((Destination.library + Destination.playing).enumerated()), id: \.offset) { index, destination in
@@ -201,6 +202,7 @@ private struct MainWindow: View {
                 model.start()
                 #if DEBUG
                 NativeModelGate.startIfRequested(model)
+                NativeCommandSmoke.startIfRequested(model)
                 NativeSmoke.startIfRequested(model, navigation: navigation)
                 NativeLifecycle.startIfRequested(model)
                 NativeScale.startIfRequested(model, navigation: navigation)

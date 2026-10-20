@@ -152,6 +152,32 @@ final class PlaylistsModel {
         fetched = fresh
     }
 
+    /// Exact-name lookup pages the server's catalog search, not just the sidebar's bounded
+    /// windows. The pinned revision rejects an edit during paging instead of mixing catalogs.
+    func named(_ name: String) async throws -> Playlist {
+        guard let player, player.connected else { throw CommandLanguageError("Connect before choosing a playlist.") }
+        let session = player.playlistConnectionGeneration
+        var offset = 0
+        var revision: UInt64?
+        var match: Playlist?
+        while true {
+            let page: Page<Playlist> = try await player.send("saved_playlists", [
+                "query": .string(name), "revision": revision.map(JSONValue.uint) ?? .null,
+                "offset": .int(offset), "limit": .int(500)])
+            guard player.connected, session == player.playlistConnectionGeneration else { throw CancellationError() }
+            revision = page.revision
+            for entry in page.entries where entry.name == name {
+                guard match == nil else { throw CommandLanguageError("More than one playlist is named “\(name)”.") }
+                match = entry
+            }
+            offset += page.entries.count
+            if offset >= page.total || page.entries.isEmpty { break }
+        }
+        guard let match else { throw CommandLanguageError("No playlist named “\(name)”.") }
+        fetched[match.id] = match
+        return match
+    }
+
     /// Sends one playlist command. `fields` gets the playlist's latest state (nil for commands
     /// that name none) and the snapshot. `stale_revision` and `stale_playlist_revision`
     /// refetch and retry once, and so does `stale_library_revision` when `retryLibrary` is set

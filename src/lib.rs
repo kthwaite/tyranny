@@ -17,3 +17,4 @@ pub mod protocol;
 mod scanner;
 pub mod server;
 mod store;
+mod stream;

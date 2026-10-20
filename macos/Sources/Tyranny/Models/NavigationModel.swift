@@ -15,6 +15,10 @@ final class NavigationModel {
     /// Set by the current view's list when the server rejects `filter`.
     var filterError: String?
     var settingsTab: SettingsTab = .connection
+    private(set) var settingsRequest: UInt64 = 0
+    /// Installed by the library window with its own TrackLists; no second selection store.
+    @ObservationIgnored var commandSubmission: (@MainActor (String) async throws -> Void)?
+    @ObservationIgnored var commandCompletion: (@MainActor (String) -> [String])?
     /// Incremented by ⌘F; the filter field takes focus when it changes.
     private(set) var filterFocusRequest = 0
 
@@ -69,6 +73,20 @@ final class NavigationModel {
 
     func focusFilter() { filterFocusRequest &+= 1 }
     func revealPlaying() { revealPlayingRequest &+= 1 }
+
+    func showSettings(_ tab: SettingsTab) {
+        settingsTab = tab
+        settingsRequest &+= 1
+    }
+
+    func submitCommand(_ text: String) async throws {
+        guard let commandSubmission else { throw CommandLanguageError("Open the library window before submitting commands.") }
+        try await commandSubmission(text)
+    }
+
+    func completeCommand(_ text: String) -> [String] {
+        commandCompletion?(text) ?? CommandLanguage.completions(text)
+    }
 
     static func groupingKey(_ destination: Destination) -> String { "group.\(destination.key)" }
 }

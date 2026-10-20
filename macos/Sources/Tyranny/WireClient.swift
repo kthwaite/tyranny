@@ -100,7 +100,7 @@ final class WireClient {
                 helloDeadline = Task { @MainActor [weak self] in
                     do { try await Task.sleep(for: .seconds(10)) } catch { return }
                     self?.endConnection(
-                        ServerFailure(code: "hello_timeout", message: "The server did not send a protocol v9 hello within 10 seconds."),
+                        ServerFailure(code: "hello_timeout", message: "The server did not send a protocol v10 hello within 10 seconds."),
                         generation: connectionID
                     )
                 }
@@ -227,7 +227,7 @@ final class WireClient {
             }
             data = Data(text.utf8)
         case .data:
-            throw protocolFailure("The server sent a binary message; protocol v9 requires JSON text.")
+            throw protocolFailure("The server sent a binary message; protocol v10 requires JSON text.")
         @unknown default:
             throw protocolFailure("The server sent an unsupported WebSocket message.")
         }
@@ -235,15 +235,15 @@ final class WireClient {
         do {
             incoming = try decoder.decode(IncomingMessage.self, from: data)
         } catch {
-            throw protocolFailure("The server sent malformed or incompatible protocol v9 JSON. Upgrade the client and server together.")
+            throw protocolFailure("The server sent malformed or incompatible protocol v10 JSON. Upgrade the client and server together.")
         }
 
         if case .hello(let version, let instance, let snapshot) = incoming {
             guard !ready, let waiter = helloWaiter else {
                 throw protocolFailure("The server sent more than one hello.")
             }
-            guard version == 9 else {
-                throw protocolFailure("The server protocol is incompatible; this client requires version 9.")
+            guard version == 10 else {
+                throw protocolFailure("The server protocol is incompatible; this client requires version 10.")
             }
             guard !instance.isEmpty else {
                 throw protocolFailure("The server hello did not identify its instance.")
@@ -263,7 +263,7 @@ final class WireClient {
             return
         }
         guard ready else {
-            throw protocolFailure("The server sent a message before its protocol v9 hello.")
+            throw protocolFailure("The server sent a message before its protocol v10 hello.")
         }
         switch incoming {
         case .hello:
@@ -359,7 +359,7 @@ final class WireClient {
         case "enqueue_playlist": return "applied"
         case "add_root": return "root_added"
         case "rescan": return "scan_accepted"
-        case "append", "append_track", "remove", "move", "clear", "play", "pause", "toggle_play_pause", "next", "previous", "stop", "seek", "set_gain", "set_resume": return "applied"
+        case "append", "append_stream", "append_track", "remove", "move", "clear", "play", "pause", "toggle_play_pause", "next", "previous", "stop", "seek", "set_gain", "set_resume": return "applied"
         default: return nil
         }
     }
@@ -498,7 +498,7 @@ struct ResultHeader: Decodable {
              "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history":
             snapshot = nil
         default:
-            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown protocol v9 result kind")
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown protocol v10 result kind")
         }
     }
 }
@@ -539,7 +539,7 @@ enum IncomingMessage: Decodable {
                 throw DecodingError.dataCorruptedError(forKey: .status, in: container, debugDescription: "Unknown reply status")
             }
         default:
-            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown protocol v9 message type")
+            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown protocol v10 message type")
         }
     }
 }
