@@ -217,6 +217,17 @@ struct PlayerBar: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(transport.formatLine)
             .accessibilityIdentifier("now-playing-format")
+            Toggle(isOn: Binding(get: { model.lyrics.isVisible }, set: { model.lyrics.setVisible($0) })) {
+                Label("Lyrics", systemImage: "quote.bubble")
+                    .foregroundStyle(model.lyrics.isVisible ? Color.accentColor : Color.secondary)
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.borderless)
+            .labelStyle(.iconOnly)
+            .help("Show or hide lyrics (⌥⌘L)")
+            .keyboardShortcut("l", modifiers: [.option, .command])
+            .accessibilityValue(model.lyrics.isVisible ? "shown" : "hidden")
+            .accessibilityIdentifier("lyrics-toggle")
             Toggle(isOn: $navigation.upNextDrawerVisible) {
                 Label("Up Next Drawer", systemImage: "sidebar.right")
                     .foregroundStyle(navigation.upNextDrawerVisible ? Color.accentColor : Color.secondary)

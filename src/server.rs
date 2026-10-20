@@ -451,23 +451,23 @@ async fn serve_connection(
                             Ok(request) => request,
                             Err(_) => break (CloseCode::Invalid, "invalid request JSON"),
                         };
-                        // Artwork has no mutations to replay. Observe its socket
-                        // closing while it waits, dropping the worker oneshot so
-                        // abandoned queued image work is skipped. At most one
+                        // Artwork and lyrics have no mutations to replay. Observe
+                        // socket closure while waiting so abandoned discovery
+                        // work is cancelled. At most one
                         // next frame is retained, preserving pipelined requests
                         // in order without running them before this reply.
                         // Invariant the client's launch prefetch relies on: no `state` message
                         // is written between reading a request and writing its reply. Events
                         // are polled only after the reply (below), so a reply's connection
                         // saw no state change in between.
-                        let artwork = matches!(&request.command, Command::Artwork { .. });
+                        let discovery = matches!(&request.command, Command::Artwork { .. } | Command::Lyrics { .. });
                         let pending = controller.request(request);
                         tokio::pin!(pending);
                         let reply = loop {
                             tokio::select! {
                                 biased;
                                 _ = shutdown.changed() => break 'connection (CloseCode::Away, "server stopping"),
-                                incoming = socket.next(), if artwork && deferred.is_none() => match incoming {
+                                incoming = socket.next(), if discovery && deferred.is_none() => match incoming {
                                     Some(Ok(Frame::Ping(_) | Frame::Pong(_))) => {},
                                     Some(Ok(Frame::Close(_))) | None => break 'connection (CloseCode::Normal, "controller disconnected"),
                                     Some(Ok(frame)) => deferred = Some(frame),

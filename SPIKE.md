@@ -140,6 +140,38 @@ picker in this large-selection run. Passing reports:
 `target/command-gate/run-gs_2x3bj/commands.json` and
 `target/command-ui-modal/run-mxy6r54o/runs/report.json`.
 
+### Lyrics
+
+The player-bar **Lyrics** button (**⌥⌘L**) opens a pane for the current queue
+occurrence. Embedded `USLT`/`LYRICS` tags take precedence. Without embedded
+lyrics, the server requests an exact title/artist/album/duration match from
+[LRCLIB](https://lrclib.net/docs); it never falls back to fuzzy search or uses
+radio station titles as song metadata. The pane distinguishes loading, missing,
+unavailable and instrumental results, displays plain lyrics or highlights LRC
+lines using the server playhead, and credits the provider with a record link.
+Pausing and seeking retain the authoritative position rather than extrapolating
+a separate lyrics clock.
+
+Only an open, mounted pane creates lyrics demand. A separate client connection
+and two bounded server workers keep file probing and HTTPS requests off playback
+controls. Track, library revision, connection and completed-scan changes
+invalidate client results. Closing the pane cancels its request.
+
+The additive protocol-v10 request is
+`{"id":1,"command":"lyrics","entry_id":7,"library_revision":2}`; its result has
+`kind:"lyrics"` and a `lyrics` payload. Queue IDs and library revisions are
+validated before and after discovery; clients cannot supply paths or provider
+URLs. The main database schema stays unchanged.
+
+The private `state.lyrics.sqlite` cache is disposable: up to 16 MiB of payload
+and 2,048 records. Online successes survive restart/rescan until eviction;
+misses expire after 24 hours and transient failures after 60 seconds. Embedded
+discovery uses file fingerprints and scan watermarks; remote results use track
+metadata, so an unrelated scan does not discard offline lyrics. Requests are
+sequential with a 500 ms delay and honor provider backoff. No credentials or
+additional provider scrapers are configured. See the cited
+[provider assessment](docs/lyrics-providers.md) for access and licensing limits.
+
 ### Release disk image
 
 Run `just dmg` or `scripts/build_dmg.sh` to build the release client and server,
