@@ -190,24 +190,28 @@ struct AlbumExpansionContent: View {
         }
     }
 
+    /// `album-expansion-tracks` in Accessibility: the table's scroll view, valued with the track
+    /// count, or the placeholder while the tracks load or fail.
     @ViewBuilder private var table: some View {
         Group {
             if let failure = expansion.failure {
                 Text(failure).font(.callout).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .accessibilityLabel("Tracks")
+                    .accessibilityValue(failure)
+                    .accessibilityIdentifier(AlbumTrackTable.tracksIdentifier)
             } else if !expansion.isLoaded {
                 ProgressView().controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .accessibilityLabel("Tracks")
+                    .accessibilityValue("loading")
+                    .accessibilityIdentifier(AlbumTrackTable.tracksIdentifier)
             } else {
                 AlbumTrackTable(expansion: expansion, grid: grid, player: player,
-                                tracks: expansion.tracks, selected: expansion.selectedRowIDs)
+                                tracks: expansion.tracks, selected: expansion.selectedRowIDs, total: expansion.total)
             }
         }
         .frame(height: AlbumExpansionMetrics.tableHeight(trackCount: album.track_count))
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Tracks")
-        .accessibilityValue(expansion.isLoaded ? String(expansion.total) : "loading")
-        .accessibilityIdentifier("album-expansion-tracks")
     }
 
     // MARK: Actions

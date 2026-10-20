@@ -10,6 +10,9 @@ import TyrannyCore
 /// as a run, several as exactly those rows. ⌥Return adds the selection to Up Next. Space
 /// toggles play/pause. Escape closes the panel and gives focus back to the grid. Left and
 /// Right do nothing, so they do not reach the grid.
+///
+/// The scroll view is `album-expansion-tracks` in Accessibility, with the album's track count
+/// as its value.
 struct AlbumTrackTable: NSViewRepresentable {
     let expansion: AlbumExpansion
     let grid: AlbumGridModel
@@ -17,8 +20,12 @@ struct AlbumTrackTable: NSViewRepresentable {
     /// Read in the parent's body so SwiftUI updates the table when they change.
     let tracks: [ListRow]
     let selected: Set<UInt64>
+    /// The album's track count, which can exceed the rows shown.
+    let total: Int
 
     static let identifier = "album-track-table"
+    /// The panel's tracks area. While the tracks load or fail, the panel's placeholder carries it.
+    static let tracksIdentifier = "album-expansion-tracks"
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -30,6 +37,8 @@ struct AlbumTrackTable: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
         scroll.automaticallyAdjustsContentInsets = false
+        scroll.setAccessibilityIdentifier(Self.tracksIdentifier)
+        scroll.setAccessibilityLabel("Tracks")
         let table = ActivatingTableView()
         table.setAccessibilityIdentifier(Self.identifier)
         table.ignoresLeftRight = true
@@ -63,11 +72,13 @@ struct AlbumTrackTable: NSViewRepresentable {
             name: NSView.frameDidChangeNotification, object: scroll.contentView)
         context.coordinator.attach(table)
         context.coordinator.update(self)
+        scroll.setAccessibilityValue(String(total))
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.update(self)
+        scroll.setAccessibilityValue(String(total))
     }
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
