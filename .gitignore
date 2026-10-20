@@ -1,3 +1,11 @@
 /target
 .build/
 __pycache__/
+
+# Generated verification reports, screenshots, and agent scratch output
+/spike-results/
+/.superpowers/
+
+# Python bytecode and macOS metadata
+*.py[cod]
+.DS_Store

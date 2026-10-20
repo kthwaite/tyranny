@@ -192,7 +192,7 @@ Bind only to loopback, authenticate using a per-user token stored with restricti
 
 ### 1. Prove the audio path before committing to it
 
-The first candidate used GStreamer `playbin3`, `osxaudiosink`, and global `rgvolume`. It failed trim, transition, gain-fallback, and mixed-rate checks. The rejected measurements remain in [spike-results/audio-gate.json](spike-results/audio-gate.json); that backend is no longer part of the executable.
+The first candidate used GStreamer `playbin3`, `osxaudiosink`, and global `rgvolume`. It failed trim, transition, gain-fallback, and mixed-rate checks. The rejected measurements were recorded in `spike-results/audio-gate.json` (generated reports are now ignored and have been removed from Git history); that backend is no longer part of the executable. Written findings remain in [SPIKE_RESULTS.md](SPIKE_RESULTS.md).
 
 The replacement uses a fresh native FFmpeg demuxer/decoder/resampler per track, applies gain before buffering, and feeds one CoreAudio DefaultOutput AudioUnit with 48 kHz stereo client PCM. CoreAudio converts to the device's native format without changing its nominal clock; the original CPAL output adapter incorrectly required 48 kHz hardware and has been removed. Queue-occurrence tokens invalidate prepared PCM. The fixture suite covers FLAC, two MP3 encoder variants, libvorbis, Opus, WAV, and AAC-in-MP4; these tested formats do not establish the complete FFmpeg/libmodplug/BASS requirement.
 
