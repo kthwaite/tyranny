@@ -3,7 +3,10 @@
 //! libavcodec applies AV_PKT_DATA_SKIP_SAMPLES itself (SKIP_MANUAL is deliberately
 //! not enabled). Its returned sample count and adjusted timestamps already exclude
 //! that padding. Sample-exact frame durations additionally delimit container edits
-//! when one container tick is no longer than one sample. This cuts a short final
+//! when one container tick is no longer than one sample, and only after a packet's
+//! duration has matched its decoded count (CAF gives HE-AAC durations at the SBR
+//! core rate, half of every frame, and so proves them only at its end-trimmed last
+//! frame; the proof resets on seek). This cuts a short final
 //! packet that has no end-trim side data. FFmpeg 9's mov demuxer sends that trim
 //! only for unfragmented files whose codec has a fixed frame size, so Opus in MP4
 //! and fragmented MP4 rely on the cut, as does Ogg Speex. Neither stream duration
@@ -131,6 +134,11 @@ pub struct Decoder {
     multiplier: f32,
     frame_offset: usize,
     frame_samples: usize,
+    /// Set once a frame's duration equals its decoded sample count, which shows the
+    /// durations count output samples (libavcodec rewrites an end-trimmed frame's
+    /// duration, so the match can come from it too). Until then none are cut; reset
+    /// on seek.
+    durations_count_samples: bool,
     // Mono stays mono through swresample and is duplicated only on read. This
     // avoids the default -3 dB mono-to-stereo mixing matrix entirely.
     output_channels: usize,
@@ -253,6 +261,7 @@ impl Decoder {
             multiplier: 1.0,
             frame_offset: 0,
             frame_samples: 0,
+            durations_count_samples: false,
             output_channels: 2,
             samples: Box::new([0.0; BLOCK_FRAMES * 2]),
             buffered: 0,
@@ -422,6 +431,10 @@ impl Decoder {
         self.next_output = None;
         self.seek_target = Some(target);
         self.alignment_skip = 0;
+        // libavcodec rewrites an end-trimmed frame's duration to its kept count, so
+        // a stream can prove its durations only at its last frame (HE-AAC in CAF).
+        // Prove them again after a seek.
+        self.durations_count_samples = false;
         // Actually decode/discard preroll now so seek errors are not deferred
         // until after a successful transport acknowledgement.
         self.refill()?;
@@ -557,6 +570,7 @@ impl Decoder {
             self.decoded.packet().duration,
             self.time_base,
             rate,
+            &mut self.durations_count_samples,
         );
         let timestamp = self.decoded.pts().or_else(|| self.decoded.timestamp());
         if self.origin_ts.is_none() {
@@ -712,7 +726,18 @@ fn rescale(value: i64, from: Rational, to: Rational) -> i64 {
     unsafe { ffi::av_rescale_q(value, from.into(), to.into()) }
 }
 
-fn valid_samples(decoded: usize, duration: i64, time_base: Rational, rate: u32) -> usize {
+/// The decoded samples a frame keeps. A sample-exact duration shorter than the
+/// decoded frame cuts it, but only once `proven`: an earlier packet's duration
+/// matched its decoded count, so durations count output samples. CAF reports
+/// HE-AAC durations at the SBR core rate under a full-rate time base, half the
+/// decoded frame on every packet; without the proof each frame would be halved.
+fn valid_samples(
+    decoded: usize,
+    duration: i64,
+    time_base: Rational,
+    rate: u32,
+    proven: &mut bool,
+) -> usize {
     if duration <= 0 {
         return decoded;
     }
@@ -729,7 +754,11 @@ fn valid_samples(decoded: usize, duration: i64, time_base: Rational, rate: u32) 
     if numerator <= 0 || tick_exceeds_sample || numerator % denominator != 0 {
         return decoded;
     }
-    decoded.min((numerator / denominator).min(usize::MAX as i128) as usize)
+    let exact = (numerator / denominator).min(usize::MAX as i128) as usize;
+    if exact == decoded {
+        *proven = true;
+    }
+    if *proven { decoded.min(exact) } else { decoded }
 }
 
 fn grid_skip(position: i64, rate: u32) -> usize {
@@ -789,13 +818,52 @@ mod tests {
         assert_eq!(raw_peak(50_000), Some(0.5));
     }
 
+    /// A cut on a stream whose durations have already been shown to count samples.
+    fn proven_cut(decoded: usize, duration: i64, time_base: Rational, rate: u32) -> usize {
+        let mut proven = true;
+        valid_samples(decoded, duration, time_base, rate, &mut proven)
+    }
+
     #[test]
     fn duration_only_shortens_when_it_defines_exact_samples() {
-        assert_eq!(valid_samples(1024, 137, Rational(1, 48_000), 48_000), 137);
-        assert_eq!(valid_samples(137, 137, Rational(1, 48_000), 48_000), 137);
-        assert_eq!(valid_samples(1024, 2048, Rational(1, 48_000), 48_000), 1024);
-        assert_eq!(valid_samples(1024, 23, Rational(1, 1000), 44_100), 1024);
-        assert_eq!(valid_samples(1024, 0, Rational(1, 48_000), 48_000), 1024);
+        assert_eq!(proven_cut(1024, 137, Rational(1, 48_000), 48_000), 137);
+        assert_eq!(proven_cut(137, 137, Rational(1, 48_000), 48_000), 137);
+        assert_eq!(proven_cut(1024, 2048, Rational(1, 48_000), 48_000), 1024);
+        assert_eq!(proven_cut(1024, 23, Rational(1, 1000), 44_100), 1024);
+        assert_eq!(proven_cut(1024, 0, Rational(1, 48_000), 48_000), 1024);
+    }
+
+    #[test]
+    fn durations_cut_only_after_a_packet_proves_they_count_samples() {
+        let tb = Rational(1, 48_000);
+        let mut proven = false;
+        // Before any proof, a short duration does not cut.
+        assert_eq!(valid_samples(1024, 413, tb, 48_000, &mut proven), 1024);
+        assert!(!proven);
+        // A frame that decodes short of its duration (a start trim not reflected in
+        // the duration) does not prove it.
+        assert_eq!(valid_samples(648, 960, tb, 48_000, &mut proven), 648);
+        assert!(!proven);
+        // A full packet whose duration equals its decoded count proves it.
+        assert_eq!(valid_samples(960, 960, tb, 48_000, &mut proven), 960);
+        assert!(proven);
+        // Then the short final packet is cut.
+        assert_eq!(valid_samples(960, 413, tb, 48_000, &mut proven), 413);
+    }
+
+    #[test]
+    fn core_rate_durations_never_halve_he_aac_frames() {
+        // CAF reports HE-AAC packet durations at the SBR core rate (1024 ticks)
+        // under a full-rate time base, while each frame decodes to 2048 samples.
+        // No ordinary frame proves the durations, so nothing is cut.
+        let mut proven = false;
+        for _ in 0..12 {
+            assert_eq!(
+                valid_samples(2048, 1024, Rational(1, 44_100), 44_100, &mut proven),
+                2048
+            );
+        }
+        assert!(!proven);
     }
 
     #[test]
@@ -803,12 +871,12 @@ mod tests {
         // ASF and Matroska round packet durations to whole milliseconds. At
         // 48 kHz every millisecond is a whole number of samples, so a rounded
         // duration looks exact but is not: WMA 2048 samples is 42.67 ms -> 42.
-        assert_eq!(valid_samples(2048, 42, Rational(1, 1000), 48_000), 2048);
-        assert_eq!(valid_samples(4096, 85, Rational(1, 1000), 48_000), 4096);
-        assert_eq!(valid_samples(960, 17, Rational(1, 1000), 48_000), 960);
-        assert_eq!(valid_samples(160, 20, Rational(1, 1000), 8_000), 160);
+        assert_eq!(proven_cut(2048, 42, Rational(1, 1000), 48_000), 2048);
+        assert_eq!(proven_cut(4096, 85, Rational(1, 1000), 48_000), 4096);
+        assert_eq!(proven_cut(960, 17, Rational(1, 1000), 48_000), 960);
+        assert_eq!(proven_cut(160, 20, Rational(1, 1000), 8_000), 160);
         // Accepted trade-off: an exact two-sample tick is distrusted too.
-        assert_eq!(valid_samples(2048, 512, Rational(1, 22_050), 44_100), 2048);
+        assert_eq!(proven_cut(2048, 512, Rational(1, 22_050), 44_100), 2048);
     }
 
     #[test]
