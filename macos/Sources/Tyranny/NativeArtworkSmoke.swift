@@ -27,6 +27,11 @@ enum NativeArtworkSmoke {
                 try await NativeSmoke.drive("activate")
                 UserDefaults.standard.set(UpNextPolicy.replace.rawValue, forKey: "upNextOnPlay")
                 defer { UserDefaults.standard.removeObject(forKey: "upNextOnPlay") }
+                // `now-playing-art` is the player bar's thumbnail, which shows only while the art is
+                // collapsed. This is the user's real preference; restore it when done.
+                let savedArtExpanded = navigation.nowPlayingArtExpanded
+                navigation.nowPlayingArtExpanded = false
+                defer { navigation.nowPlayingArtExpanded = savedArtExpanded }
                 if argument("--artwork-smoke-mode") == "restore" { try await restore(model, navigation) }
                 else { try await exercise(model, navigation) }
                 try finish(model, error: nil)

@@ -84,6 +84,13 @@ enum NativeRenderViews {
                 await shot("15-player-bar-collapsed")
                 navigation.nowPlayingArtExpanded = true
                 await shot("16-player-bar-art-expanded")
+                // Collapse the sidebar through AppKit, not a SwiftUI binding: the thumbnail returns.
+                if let sidebar = sidebarItem() {
+                    sidebar.isCollapsed = true
+                    await shot("18-player-bar-sidebar-hidden")
+                    sidebar.isCollapsed = false
+                    try? await Task.sleep(for: .seconds(1))
+                } else { log.append("sidebar hidden: no split view item") }
                 navigation.nowPlayingArtExpanded = false
                 if let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) {
                     window.setContentSize(NSSize(width: 940, height: 560))
@@ -101,6 +108,19 @@ enum NativeRenderViews {
             try? log.joined(separator: "\n").write(to: output.appendingPathComponent("render.log"), atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
         }
+    }
+
+    /// The main window's sidebar split view item, found through the split view's controller.
+    private static func sidebarItem() -> NSSplitViewItem? {
+        func split(in view: NSView) -> NSSplitView? {
+            if let split = view as? NSSplitView, split.delegate is NSSplitViewController { return split }
+            for child in view.subviews { if let found = split(in: child) { return found } }
+            return nil
+        }
+        guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }),
+              let root = window.contentView?.superview, let view = split(in: root),
+              let controller = view.delegate as? NSSplitViewController else { return nil }
+        return controller.splitViewItems.first { $0.behavior == .sidebar } ?? controller.splitViewItems.first
     }
 
     private static func write(_ view: NSView, _ name: String, into output: URL) -> String {

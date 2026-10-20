@@ -10,7 +10,10 @@ struct MainWindowView: View {
     @FocusState private var filterFocused: Bool
     @State private var dismissedFilterError: String?
     @State private var lists = TrackLists()
-    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    /// Whether the sidebar is on screen, from the split view's own sidebar item. The split view can
+    /// collapse the sidebar without a visibility binding hearing of it (restored state, a drag,
+    /// a narrow window), so expanded art follows this instead.
+    @State private var sidebarOnScreen = true
 
     /// Set by the shown track list from `list_tracks` `invalid_filter` replies.
     private var filterError: String? { navigation.filterError }
@@ -48,14 +51,12 @@ struct MainWindowView: View {
         navigation.upNextDrawerVisible && model.connected && navigation.destination != .upNext
     }
 
-    /// Expanded art moves into the sidebar only while the sidebar shows.
-    private var sidebarVisible: Bool { columnVisibility != .detailOnly }
-
     var body: some View {
         VStack(spacing: 0) {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
-                SourceList(model: model, navigation: navigation, sidebarVisible: sidebarVisible)
+            NavigationSplitView {
+                SourceList(model: model, navigation: navigation, sidebarVisible: sidebarOnScreen)
                     .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 300)
+                    .background(SidebarVisibilityProbe { sidebarOnScreen = $0 })
             } detail: {
                 HStack(spacing: 0) {
                     mainArea
@@ -66,7 +67,7 @@ struct MainWindowView: View {
                 }
             }
             Divider()
-            PlayerBar(model: model, navigation: navigation, sidebarVisible: sidebarVisible)
+            PlayerBar(model: model, navigation: navigation, sidebarVisible: sidebarOnScreen)
             Divider()
             StatusBar(model: model, totals: currentList?.totals, filteredFrom: currentList?.filteredFrom) {
                 showSettings(.connection)
@@ -210,3 +211,4 @@ private struct DestinationPlaceholder: View {
         .accessibilityIdentifier("main-\(destination.key)")
     }
 }
+
