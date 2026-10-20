@@ -12,18 +12,20 @@ enum LaunchPrefetch {
     /// The whole exchange, from start to reply.
     static let budget: Duration = .seconds(2)
 
-    static func start(endpoint: String, tokenPath: String, request: [String: JSONValue]) -> LaunchPrefetchSlot {
+    /// Starts the exchange and returns at once. `deadline` ends the exchange; claims wait no longer.
+    static func start(endpoint: String, tokenPath: String,
+                      request: [String: JSONValue]) -> (slot: LaunchPrefetchSlot, deadline: ContinuousClock.Instant) {
         let slot = LaunchPrefetchSlot(request: request)
         let deadline = ContinuousClock.now + budget
         Task.detached(priority: .userInitiated) {
             let reply = await fetch(endpoint: endpoint, tokenPath: tokenPath, request: request, deadline: deadline)
             await slot.fulfil(reply)
         }
-        return slot
+        return (slot, deadline)
     }
 
     private static func fetch(endpoint: String, tokenPath: String, request: [String: JSONValue],
-                              deadline: ContinuousClock.Instant) async -> Data? {
+                              deadline: ContinuousClock.Instant) async -> LaunchPrefetchReply? {
         // Do not even open the credential until the complete destination is validated.
         guard let destination = try? WireClient.validateEndpoint(endpoint),
               let token = try? WireClient.readToken(at: tokenPath) else { return nil }
@@ -48,11 +50,15 @@ enum LaunchPrefetch {
         return try? await exchange(on: socket, request: request)
     }
 
-    /// Waits for the hello, sends the request with ID 1 and returns its ok reply's result: the
-    /// bytes `WireClient.request` would return. Nil for an error reply or any protocol surprise.
-    private static func exchange(on socket: URLSessionWebSocketTask, request: [String: JSONValue]) async throws -> Data? {
-        guard case (.hello(let version, let instance, _), _)? = try await receive(on: socket),
+    /// Waits for the hello, sends the request with ID 1 and returns its ok reply's result (the
+    /// bytes `WireClient.request` would return) with the hello's instance and the latest history
+    /// revision seen. Nil for an error reply or any protocol surprise.
+    private static func exchange(on socket: URLSessionWebSocketTask,
+                                 request: [String: JSONValue]) async throws -> LaunchPrefetchReply? {
+        guard case (.hello(let version, let instance, let snapshot), _)? = try await receive(on: socket),
               version == 9, !instance.isEmpty else { return nil }
+        var history = snapshot.history_revision
+        var sequence = snapshot.sequence
         var object = request
         object["id"] = .uint(1)
         object["command"] = .string("list_tracks")
@@ -61,10 +67,16 @@ enum LaunchPrefetch {
         try await socket.send(.string(String(decoding: bytes, as: UTF8.self)))
         while let (message, data) = try await receive(on: socket) {
             switch message {
-            case .state:
-                continue
+            case .state(let state):
+                // As `WireClient.apply`: only a newer snapshot counts.
+                if state.sequence > sequence {
+                    sequence = state.sequence
+                    history = state.history_revision
+                }
             case .success(1, let header) where header.kind == "list_tracks":
-                return WireClient.result(ofReply: data)
+                return WireClient.result(ofReply: data).map {
+                    LaunchPrefetchReply(body: $0, instanceID: instance, historyRevision: history)
+                }
             case .hello, .success, .failure:
                 return nil
             }

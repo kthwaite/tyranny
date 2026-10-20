@@ -1,13 +1,39 @@
 import Foundation
 
+/// The launch prefetch's ok reply, with the server state it was answered in.
+public struct LaunchPrefetchReply: Sendable, Equatable {
+    /// The reply's `result` object: the bytes a normal request returns.
+    public let body: Data
+    /// The prefetch connection's hello `instance_id`.
+    public let instanceID: String
+    /// The latest `history_revision` the prefetch connection saw before the reply: the hello
+    /// snapshot's, or a later `state` message's.
+    public let historyRevision: UInt64
+
+    public init(body: Data, instanceID: String, historyRevision: UInt64) {
+        self.body = body
+        self.instanceID = instanceID
+        self.historyRevision = historyRevision
+    }
+
+    /// Whether the reply may stand in for a request on the main connection now. The rows must
+    /// come from the same server instance, at the library revision of the main connection's
+    /// snapshot, with no history change since (play counts move without a library revision).
+    /// `pageRevision` is the reply's own `revision`. Nil current values never match.
+    public func isFresh(pageRevision: UInt64, instanceID current: String?, libraryRevision: UInt64?,
+                        historyRevision currentHistory: UInt64?) -> Bool {
+        instanceID == current && pageRevision == libraryRevision && historyRevision == currentHistory
+    }
+}
+
 /// Holds the reply of the one list request the client sends early at launch.
 /// The first fetch whose request equals the prefetch's takes the reply; every other fetch
 /// (or any later one) gets nil and sends its own request.
 public actor LaunchPrefetchSlot {
     private enum State {
         case pending
-        case waiting(CheckedContinuation<Data?, Never>)
-        case ready(Data?)
+        case waiting(CheckedContinuation<LaunchPrefetchReply?, Never>)
+        case ready(LaunchPrefetchReply?)
         case claimed
     }
 
@@ -20,8 +46,8 @@ public actor LaunchPrefetchSlot {
         self.request = request
     }
 
-    /// The prefetch finished: the raw ok reply body, or nil for any failure. Later calls are ignored.
-    public func fulfil(_ reply: Data?) {
+    /// The prefetch finished: its ok reply, or nil for any failure. Later calls are ignored.
+    public func fulfil(_ reply: LaunchPrefetchReply?) {
         switch state {
         case .pending:
             state = .ready(reply)
@@ -35,7 +61,8 @@ public actor LaunchPrefetchSlot {
 
     /// One-shot. Returns the reply when this is the first claim, `request` equals the prefetch's
     /// request, and the prefetch succeeds by `deadline`; otherwise nil. The slot is empty afterwards.
-    public func claim(_ request: [String: JSONValue], until deadline: ContinuousClock.Instant) async -> Data? {
+    public func claim(_ request: [String: JSONValue],
+                      until deadline: ContinuousClock.Instant) async -> LaunchPrefetchReply? {
         let held = state
         switch held {
         case .claimed, .waiting:
@@ -48,7 +75,7 @@ public actor LaunchPrefetchSlot {
                 state = .claimed
                 return nil
             }
-            let reply = await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
+            let reply = await withCheckedContinuation { (continuation: CheckedContinuation<LaunchPrefetchReply?, Never>) in
                 state = .waiting(continuation)
                 timer = Task { [weak self] in
                     try? await Task.sleep(until: deadline, clock: .continuous)
@@ -59,6 +86,12 @@ public actor LaunchPrefetchSlot {
             timer = nil
             return reply
         }
+    }
+
+    /// true until the prefetch finishes or a claim takes the slot.
+    public var isPending: Bool {
+        if case .pending = state { return true }
+        return false
     }
 
     /// The deadline passed while a claim waits: give up. A no-op once `fulfil` already resumed it.

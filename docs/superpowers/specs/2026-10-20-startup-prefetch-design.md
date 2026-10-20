@@ -65,7 +65,9 @@ and `tokenPath` are resolved (both are set in `init`, including the managed-serv
   until ≈470 ms, so anything on the main actor would not start early.)
 - It opens its own `URLSessionWebSocketTask` to the same endpoint, waits for the server's
   protocol v9 `hello`, sends one `list_tracks` request (below), waits for that request's reply,
-  keeps the raw reply bytes, and closes the socket. It ignores every other server message.
+  keeps the raw reply bytes with the hello's `instance_id` and the latest `history_revision` it saw
+  (the hello snapshot's, or a newer `state` message's before the reply), and closes the socket. It
+  ignores every other server message.
 - It gives up silently on any error, on a non-ok reply, or after 2 s in total. Giving up means the
   slot is empty.
 - It reuses `WireClient`'s endpoint validation, token reading and redirect rejection (make the
@@ -93,17 +95,28 @@ all hold:
 - it is the first claim since launch (the slot empties on the first claim, used or not);
 - the fetch's encoded fields (`list`, `revision`, `offset`, `limit`) equal the prefetch's, compared
   as `JSONValue` (structural equality, not string bytes);
-- the prefetch finished with an ok reply.
+- the prefetch finished with an ok reply;
+- the reply is fresh for the main connection (below).
 
-If the prefetch is still in flight at the claim, the fetch waits for it, bounded by the prefetch's
-own 2 s deadline, then falls back to a normal fetch if the slot is empty. Decoding the claimed
-bytes goes through the same `ListTracksResponse` decode as a normal reply.
+If the prefetch has finished at the claim, the fetch checks it and uses it or sends normally. If
+the prefetch is still in flight, the fetch sends its normal request at once and races it with the
+prefetch: the first ok reply wins (a prefetched reply only if fresh), and the loser's reply is
+dropped. Neither is cancelled: the send because cancelling a request closes the shared
+connection, the claim because the prefetch's own 2 s deadline bounds it. A failed send waits for
+the prefetch; a stale or failed prefetch waits for the send. So the prefetch never makes the first
+window later than a plain fetch. Decoding the claimed bytes goes through the same
+`ListTracksResponse` decode as a normal reply.
 
-Revision safety: a claimed reply carries its own library revision, exactly as a normal first
-fetch with `revision: null` does. The existing revision sync then refreshes if the library moved.
-No new staleness handling.
+Freshness: `ListModel` takes its library and history revisions from the main connection's
+snapshot, and the window cache never compares a page's revision with them. A page from before a
+library move (a scan finishing at launch) or a history move (a track ending changes play counts)
+would never be refreshed. So a prefetched reply is used only when the prefetch's hello
+`instance_id` equals the main connection's, the page's `revision` equals the main snapshot's
+`library.revision`, and the prefetch's last-seen `history_revision` equals the main snapshot's
+`history_revision`. Any mismatch means a normal fetch.
 
-The pure parts (slot state, one-shot claim, request equality) live in TyrannyCore with unit tests.
+The pure parts (slot state, one-shot claim, request equality, the freshness rule) live in
+TyrannyCore with unit tests.
 
 ## Cheaper cells
 

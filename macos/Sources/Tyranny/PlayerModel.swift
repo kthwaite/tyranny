@@ -75,9 +75,9 @@ final class PlayerModel {
     /// The server's page limit.
     private static let catalogLimit = 500
     @ObservationIgnored var activeDrag: TrackDrag?
-    /// The launch prefetch, until the first list fetch claims it. It names the server it asked.
-    @ObservationIgnored private var launchPrefetch: (slot: LaunchPrefetchSlot, endpoint: String, tokenPath: String,
-                                                     deadline: ContinuousClock.Instant)?
+    /// The launch prefetch, until the first `listTracks` takes it. It names the server it asked.
+    @ObservationIgnored private var launchPrefetch: (slot: LaunchPrefetchSlot, deadline: ContinuousClock.Instant,
+                                                     endpoint: String, tokenPath: String)?
 
     init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore) {
         self.quitSuspensions = quitSuspensions
@@ -116,19 +116,49 @@ final class PlayerModel {
               let request = try? TrackListRequest.launchSongs(
                   defaultSort: Destination.songs.defaultSort,
                   group: NavigationModel.grouping(for: .songs, in: .standard)) else { return }
-        let deadline = ContinuousClock.now + LaunchPrefetch.budget
-        launchPrefetch = (LaunchPrefetch.start(endpoint: endpoint, tokenPath: tokenPath, request: request),
-                          endpoint, tokenPath, deadline)
+        let started = LaunchPrefetch.start(endpoint: endpoint, tokenPath: tokenPath, request: request)
+        launchPrefetch = (started.slot, started.deadline, endpoint, tokenPath)
     }
 
-    /// The prefetched reply when `fields` is the prefetch's request and the server is still the one
-    /// it asked; otherwise nil. Only the first call can return a reply; it may wait for the prefetch
-    /// until the prefetch's own deadline.
-    func claimLaunchPrefetch(_ fields: [String: JSONValue]) async -> Data? {
-        guard let launch = launchPrefetch else { return nil }
+    /// One `list_tracks` window. The first call may be answered by the launch prefetch instead: only
+    /// when `fields` is the prefetch's request, the server is still the one it asked, and the reply
+    /// is fresh for the main connection (`LaunchPrefetchReply.isFresh`). A finished prefetch is
+    /// checked at once. One still in flight races a normal send: the first ok reply wins.
+    func listTracks(_ fields: [String: JSONValue]) async throws -> ListTracksResponse {
+        guard let launch = launchPrefetch else { return try await send("list_tracks", fields) }
         launchPrefetch = nil
-        guard launch.endpoint == endpoint, launch.tokenPath == tokenPath else { return nil }
-        return await launch.slot.claim(fields, until: launch.deadline)
+        guard launch.endpoint == endpoint, launch.tokenPath == tokenPath else {
+            return try await send("list_tracks", fields)
+        }
+        guard await launch.slot.isPending else {
+            if let page = freshPrefetchPage(await launch.slot.claim(fields, until: launch.deadline)) { return page }
+            return try await send("list_tracks", fields)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let race = FirstListReply(continuation)
+            // A cancelled request would close the shared connection: send it unstructured. Neither
+            // task is cancelled; the loser's reply is dropped.
+            Task { @MainActor in
+                do {
+                    race.sent(.success(try await self.send("list_tracks", fields)))
+                } catch {
+                    race.sent(.failure(error))
+                }
+            }
+            Task { @MainActor [weak self] in
+                let claimed = await launch.slot.claim(fields, until: launch.deadline)
+                race.prefetched(self?.freshPrefetchPage(claimed))
+            }
+        }
+    }
+
+    /// The claimed reply's page, when it is fresh for the main connection now.
+    private func freshPrefetchPage(_ reply: LaunchPrefetchReply?) -> ListTracksResponse? {
+        guard let reply, let page = try? decoder.decode(ListTracksResponse.self, from: reply.body),
+              reply.isFresh(pageRevision: page.revision, instanceID: wire.instanceID,
+                            libraryRevision: snapshot?.library.revision,
+                            historyRevision: snapshot?.history_revision) else { return nil }
+        return page
     }
 
     var connected: Bool { connection == "connected" }
@@ -634,5 +664,43 @@ extension PlayerModel {
         guard validateTrackDrop(token: token, destination: destination), let drag = activeDrag,
               let selection = drag.selection else { return false }
         return dropSelection(selection, of: drag, on: destination)
+    }
+}
+
+/// The first ok reply of a launch-time `list_tracks` send and the launch prefetch. A failed send
+/// waits for the prefetch; a stale or failed prefetch waits for the send.
+@MainActor
+private final class FirstListReply {
+    private var continuation: CheckedContinuation<ListTracksResponse, any Error>?
+    private var sendFailure: (any Error)?
+    private var prefetchFinished = false
+
+    init(_ continuation: CheckedContinuation<ListTracksResponse, any Error>) {
+        self.continuation = continuation
+    }
+
+    func sent(_ result: Result<ListTracksResponse, any Error>) {
+        switch result {
+        case .success(let page):
+            finish(.success(page))
+        case .failure(let error):
+            if prefetchFinished { finish(.failure(error)) } else { sendFailure = error }
+        }
+    }
+
+    /// `page` is the fresh prefetched page, or nil when there is none.
+    func prefetched(_ page: ListTracksResponse?) {
+        if let page {
+            finish(.success(page))
+            return
+        }
+        prefetchFinished = true
+        if let sendFailure { finish(.failure(sendFailure)) }
+    }
+
+    private func finish(_ result: Result<ListTracksResponse, any Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(with: result)
     }
 }

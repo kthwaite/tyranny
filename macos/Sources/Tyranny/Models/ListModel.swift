@@ -441,14 +441,8 @@ final class ListModel {
         if epoch == self.epoch { description.source = source }
         do {
             let fields = try TrackListRequest.fields(list: description, revision: revision, offset: offset, limit: limit)
-            // The Songs list's first window may already be here from the launch prefetch.
-            let reply: ListTracksResponse
-            if let data = await player.claimLaunchPrefetch(fields),
-               let claimed = try? JSONDecoder().decode(ListTracksResponse.self, from: data) {
-                reply = claimed
-            } else {
-                reply = try await player.send("list_tracks", fields)
-            }
+            // The Songs list's first window may come from the launch prefetch.
+            let reply = try await player.listTracks(fields)
             if epoch == self.epoch {
                 if let totals = reply.totals { self.totals = totals }
                 filterError = nil

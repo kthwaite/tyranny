@@ -5,7 +5,7 @@ import Testing
 @Suite struct LaunchPrefetchTests {
     private let r: [String: JSONValue] = ["list": .string("songs"), "revision": .null,
                                           "offset": .int(0), "limit": .int(200)]
-    private let data = Data("reply".utf8)
+    private let data = LaunchPrefetchReply(body: Data("reply".utf8), instanceID: "a", historyRevision: 3)
     private var soon: ContinuousClock.Instant { ContinuousClock.now + .seconds(1) }
 
     private func seconds(_ d: Duration) -> Double {
@@ -48,7 +48,7 @@ import Testing
         let slot = LaunchPrefetchSlot(request: r)
         await slot.fulfil(nil)
         let clock = ContinuousClock()
-        var result: Data?
+        var result: LaunchPrefetchReply?
         let elapsed = await clock.measure { result = await slot.claim(r, until: clock.now + .seconds(5)) }
         #expect(result == nil)
         #expect(seconds(elapsed) < 0.5)
@@ -69,7 +69,7 @@ import Testing
     @Test func claimGivesUpAtTheDeadline() async {
         let slot = LaunchPrefetchSlot(request: r)
         let clock = ContinuousClock()
-        var result: Data?
+        var result: LaunchPrefetchReply?
         let elapsed = await clock.measure { result = await slot.claim(r, until: clock.now + .milliseconds(50)) }
         #expect(result == nil)
         #expect(seconds(elapsed) >= 0.04)
@@ -95,7 +95,48 @@ import Testing
     }
 }
 
-/// The launch prefetch's request must equal the Songs list's first fetch, field for field.
+@Suite struct LaunchPrefetchFreshnessTests {
+    private let reply = LaunchPrefetchReply(body: Data("{}".utf8), instanceID: "server-a", historyRevision: 7)
+
+    @Test func sameInstanceRevisionAndHistoryIsFresh() {
+        #expect(reply.isFresh(pageRevision: 12, instanceID: "server-a", libraryRevision: 12, historyRevision: 7))
+    }
+
+    @Test func anotherServerInstanceIsNotFresh() {
+        #expect(!reply.isFresh(pageRevision: 12, instanceID: "server-b", libraryRevision: 12, historyRevision: 7))
+    }
+
+    @Test func aLibraryMoveSinceThePageIsNotFresh() {
+        // A scan finished between the prefetch's reply and the main connection's hello.
+        #expect(!reply.isFresh(pageRevision: 12, instanceID: "server-a", libraryRevision: 13, historyRevision: 7))
+    }
+
+    @Test func aHistoryMoveIsNotFresh() {
+        // A track ended: play counts changed without a library revision change.
+        #expect(!reply.isFresh(pageRevision: 12, instanceID: "server-a", libraryRevision: 12, historyRevision: 8))
+    }
+
+    @Test func noMainConnectionStateIsNotFresh() {
+        #expect(!reply.isFresh(pageRevision: 12, instanceID: nil, libraryRevision: 12, historyRevision: 7))
+        #expect(!reply.isFresh(pageRevision: 12, instanceID: "server-a", libraryRevision: nil, historyRevision: 7))
+        #expect(!reply.isFresh(pageRevision: 12, instanceID: "server-a", libraryRevision: 12, historyRevision: nil))
+    }
+
+    @Test func pendingEndsWithFulfilOrTheFirstClaim() async {
+        let request: [String: JSONValue] = ["limit": .int(200)]
+        let fulfilled = LaunchPrefetchSlot(request: request)
+        #expect(await fulfilled.isPending)
+        await fulfilled.fulfil(nil)
+        #expect(!(await fulfilled.isPending))
+
+        let claimed = LaunchPrefetchSlot(request: request)
+        #expect(await claimed.claim(["limit": .int(100)], until: .now + .seconds(1)) == nil)
+        #expect(!(await claimed.isPending))
+    }
+}
+
+/// The launch prefetch's request must equal the Songs list's first fetch, field for field. These
+/// tests check the shared request builder and the cache's first window, which both use.
 @MainActor @Suite struct LaunchSongsRequestTests {
     private struct Row: Identifiable, Sendable { let id: UInt64 }
 
@@ -115,9 +156,11 @@ import Testing
         return try #require(recorder.requests.first)
     }
 
-    /// What `ListModel` sends first for Songs: `currentDescription()` with a new list's state
-    /// (no picked sort, an empty filter, a new browser selection when the browser is shown).
-    private func listModelFirstFetch(group: Grouping, browserShown: Bool) async throws -> [String: JSONValue] {
+    /// The shared builder's fields for the inputs `ListModel.currentDescription()` passes for a new
+    /// Songs list (no picked sort, an empty filter, a new browser selection when the browser is
+    /// shown), at the offset, limit and revision of a reset cache's first request. It does not run
+    /// `ListModel` itself: the app target has no test target.
+    private func sharedBuilderFirstFetch(group: Grouping, browserShown: Bool) async throws -> [String: JSONValue] {
         let window = try await firstWindow()
         let list = TrackListRequest.description(
             source: .library, browser: browserShown ? BrowserSelection().browser : nil,
@@ -128,8 +171,8 @@ import Testing
 
     @Test func defaultDefaultsMatchTheFirstSongsFetch() async throws {
         let launch = try TrackListRequest.launchSongs(defaultSort: [], group: .none)
-        #expect(try await listModelFirstFetch(group: .none, browserShown: false) == launch)
-        #expect(try await listModelFirstFetch(group: .none, browserShown: true) == launch)
+        #expect(try await sharedBuilderFirstFetch(group: .none, browserShown: false) == launch)
+        #expect(try await sharedBuilderFirstFetch(group: .none, browserShown: true) == launch)
         #expect(launch["offset"] == .int(0))
         #expect(launch["limit"] == .int(200))
         #expect(launch["revision"] == JSONValue.null)
@@ -137,8 +180,8 @@ import Testing
 
     @Test func songsGroupedByAlbumMatchTheFirstSongsFetch() async throws {
         let launch = try TrackListRequest.launchSongs(defaultSort: [], group: .album)
-        #expect(try await listModelFirstFetch(group: .album, browserShown: false) == launch)
-        #expect(try await listModelFirstFetch(group: .album, browserShown: true) == launch)
+        #expect(try await sharedBuilderFirstFetch(group: .album, browserShown: false) == launch)
+        #expect(try await sharedBuilderFirstFetch(group: .album, browserShown: true) == launch)
         #expect(launch != (try TrackListRequest.launchSongs(defaultSort: [], group: .none)))
     }
 
