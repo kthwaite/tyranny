@@ -151,6 +151,8 @@ public enum AlbumPlayback {
 public enum AlbumPanel {
     /// Longer albums show their first tracks and "and N more…".
     public static let trackLimit = 200
+    /// The table scrolls past this many rows.
+    public static let maximumRows = 12
 
     /// What the shown tracks were fetched for.
     public struct Loaded: Equatable, Sendable {
@@ -172,5 +174,27 @@ public enum AlbumPanel {
 
     public static func moreText(total: Int, shown: Int) -> String? {
         total > shown ? "and \(DisplayFormat.count(total - shown)) more…" : nil
+    }
+
+    /// The rows the panel sends. No rows chosen sends the whole album, and the server picks
+    /// the start. Otherwise it is an activation over the album's tracks: one row as a run
+    /// plays from it to the album's end, and anything else sends exactly the rows chosen.
+    public static func selection(
+        albumID: UInt64, revision: UInt64, positions: IndexSet, asRun: Bool,
+        rowID: (Int) -> UInt64?, trackID: (Int) -> UInt64?
+    ) throws -> TrackSelection {
+        guard !positions.isEmpty else { return AlbumPlayback.selection(albumID: albumID, libraryRevision: revision) }
+        return try SelectionEncoder.activation(list: AlbumPlayback.list(albumID: albumID), revision: revision,
+                                               positions: positions, asRun: asRun, rowID: rowID, trackID: trackID)
+    }
+
+    /// The rows the table shows without scrolling. An empty album still shows one.
+    public static func visibleRows(trackCount: Int) -> Int {
+        max(1, min(trackCount, trackLimit, maximumRows))
+    }
+
+    /// "and N more…" shows when the album has more tracks than one request fetches.
+    public static func showsMore(trackCount: Int) -> Bool {
+        trackCount > trackLimit
     }
 }
