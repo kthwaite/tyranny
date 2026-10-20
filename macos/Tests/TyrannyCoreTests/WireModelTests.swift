@@ -102,3 +102,17 @@ extension JSONValue {
         return nil
     }
 }
+
+private let nowPlayingBase = #""entry_id":1,"title":"T","artist":"A","album":"B","duration_frames":null,"metadata_error":null,"track_id":3,"album_id":5,"format":"WAV 16/48","gain_db":null"#
+
+@Test func nowPlayingDecodesArtistID() throws {
+    let json = "{\(nowPlayingBase),\"artist_id\":7}"
+    let decoded = try JSONDecoder().decode(NowPlaying.self, from: Data(json.utf8))
+    #expect(decoded.artist_id == 7)
+}
+
+@Test func nowPlayingWithoutArtistIDDecodesNil() throws {
+    let json = "{\(nowPlayingBase)}"
+    let decoded = try JSONDecoder().decode(NowPlaying.self, from: Data(json.utf8))
+    #expect(decoded.artist_id == nil)
+}

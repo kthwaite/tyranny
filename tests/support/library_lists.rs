@@ -403,6 +403,17 @@ async fn now_playing_reports_format_and_applied_gain() {
     let now = client.state.now_playing.clone().unwrap();
     assert_eq!(now.track_id, Some(track.id));
     assert_eq!(now.album_id, Some(track.album_id));
+    // `Track` carries no artist ID, so read the track artist from the list row.
+    let Response::ListTracks { page: rows, .. } = ok(
+        &mut client,
+        list_tracks(list(json!({"kind":"library"})), None, 0, 10),
+    )
+    .await
+    else {
+        panic!("expected a list page");
+    };
+    assert_eq!(rows.entries[0].track.id, track.id);
+    assert_eq!(now.artist_id, Some(rows.entries[0].track.artist_id));
     assert_eq!(now.format, "WAV 16/48");
     assert_eq!(now.gain_db, None);
 
@@ -430,8 +441,13 @@ async fn now_playing_reports_format_and_applied_gain() {
     client.until(|state| state.current_id == Some(2)).await;
     let now = client.state.now_playing.clone().unwrap();
     assert_eq!(
-        (now.track_id, now.album_id, now.format.as_str()),
-        (None, None, "")
+        (
+            now.track_id,
+            now.album_id,
+            now.artist_id,
+            now.format.as_str()
+        ),
+        (None, None, None, "")
     );
     running.stop().await;
 }

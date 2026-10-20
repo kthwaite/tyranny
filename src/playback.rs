@@ -1409,6 +1409,7 @@ impl Player {
             metadata_error: metadata.metadata_error,
             track_id: None,
             album_id: None,
+            artist_id: None,
             format: String::new(),
             gain_db: (mode != GainMode::Off).then(|| decoder.gain_db()),
         })

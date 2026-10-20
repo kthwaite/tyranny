@@ -25,10 +25,11 @@ public struct NowPlaying: Codable, Sendable, Equatable {
     public let metadata_error: String?
     public let track_id: UInt64?
     public let album_id: UInt64?
+    public let artist_id: UInt64?
     public let format: String
     public let gain_db: Double?
 
-    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, format: String, gain_db: Double?) {
+    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, artist_id: UInt64?, format: String, gain_db: Double?) {
         self.entry_id = entry_id
         self.title = title
         self.artist = artist
@@ -37,6 +38,7 @@ public struct NowPlaying: Codable, Sendable, Equatable {
         self.metadata_error = metadata_error
         self.track_id = track_id
         self.album_id = album_id
+        self.artist_id = artist_id
         self.format = format
         self.gain_db = gain_db
     }

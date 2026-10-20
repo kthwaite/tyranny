@@ -135,6 +135,7 @@ pub(crate) struct LoadedEntry {
 pub(crate) struct EntryTrack {
     pub track_id: u64,
     pub album_id: u64,
+    pub artist_id: u64,
     pub format: String,
 }
 pub(crate) struct Loaded {
@@ -358,20 +359,21 @@ impl Store {
         Ok(self
             .connection
             .query_row(
-                "SELECT t.id,t.album_id,t.codec,t.bit_depth,
+                "SELECT t.id,t.album_id,t.artist_id,t.codec,t.bit_depth,
                         COALESCE(json_extract(t.metadata,'$.sample_rate'),0),t.bitrate_kbps
                  FROM queue q JOIN library_tracks t ON t.id=q.track_id WHERE q.id=?1",
                 [entry_id],
                 |row| {
-                    let codec: Option<String> = row.get(2)?;
+                    let codec: Option<String> = row.get(3)?;
                     Ok(EntryTrack {
                         track_id: row.get(0)?,
                         album_id: row.get(1)?,
+                        artist_id: row.get(2)?,
                         format: format_label(
                             codec.as_deref(),
-                            row.get(3)?,
                             row.get(4)?,
                             row.get(5)?,
+                            row.get(6)?,
                         ),
                     })
                 },
