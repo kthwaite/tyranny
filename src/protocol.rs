@@ -16,6 +16,8 @@ pub const VERSION: u32 = 10;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
+pub const MAX_STATIONS: usize = 1000;
+pub const MAX_STATION_BATCH: usize = 500;
 /// The most ranges one list selection may name.
 pub const MAX_SELECTION_RANGES: usize = 64;
 /// Played entries the queue keeps, not counting the current entry.
@@ -492,6 +494,14 @@ impl StreamSpec {
         );
         Ok(Self { url, title })
     }
+}
+
+/// A saved radio station: a canonical stream URL and its display name.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Station {
+    pub id: u64,
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -22,6 +22,7 @@ use std::{
 mod history;
 mod playlists;
 mod selection;
+mod stations;
 pub(crate) use history::{PendingPlays, PlayRecord, count_threshold_frames};
 pub(crate) use playlists::{
     PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule, playlist_sources,
@@ -29,8 +30,10 @@ pub(crate) use playlists::{
 pub(crate) use selection::resolve_selection;
 #[cfg(test)]
 mod playlists_tests;
+#[cfg(test)]
+mod stations_tests;
 const APPLICATION_ID: i64 = 0x7479726e;
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Runs the migration ladder up to `target`; tests use a lower target to build old schemas.
 pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
@@ -118,6 +121,13 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
         transaction.pragma_update(None, "user_version", 6)?;
         transaction.commit()?;
         version = 6;
+    }
+    if version == 6 && target > 6 {
+        let transaction = connection.transaction()?;
+        stations::migrate(&transaction)?;
+        transaction.pragma_update(None, "user_version", 7)?;
+        transaction.commit()?;
+        version = 7;
     }
     ensure!(version == target, "unsupported database version {version}");
     Ok(version)
@@ -727,7 +737,7 @@ mod tests {
             let local = store.load()?;
             assert!(local.entries[0].stream.is_none());
             assert_eq!(local.checkpoint.position_frames, 48_000);
-            assert_eq!(user_version(&path), 6);
+            assert_eq!(user_version(&path), 7);
             let stream =
                 StreamSpec::new("HTTPS://RADIO.EXAMPLE:443/live".into(), "Station".into())?;
             store.edit(
@@ -1099,7 +1109,7 @@ mod tests {
         let result = (|| -> Result<()> {
             let store = Store::open(&path)?;
             let loaded = store.load()?;
-            assert_eq!(user_version(&path), 6);
+            assert_eq!(user_version(&path), 7);
             assert_eq!(loaded.entries.len(), 1);
             assert_eq!(loaded.checkpoint.current_id, Some(1));
             assert_eq!(pending_upgrade(&path), 1);
@@ -1159,7 +1169,7 @@ mod tests {
         let path = schema_4_file(false);
         let result = (|| -> Result<()> {
             Store::open(&path)?;
-            assert_eq!(user_version(&path), 6);
+            assert_eq!(user_version(&path), 7);
             assert_eq!(pending_upgrade(&path), 0);
             Ok(())
         })();
