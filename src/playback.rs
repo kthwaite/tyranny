@@ -5,8 +5,9 @@ use crate::{
     decoder::{Decoder, GainMode},
     output::{Output, OutputConfig, OutputSnapshot, TrackToken},
     play_order::{PlayOrder, RepeatMode, RepeatScope, RunInfo, ShuffleStrategy},
-    protocol::{NowPlaying, Placement},
+    protocol::{NowPlaying, Placement, StreamSpec},
     store::LoadedEntry,
+    stream::StreamDecoder,
 };
 use anyhow::{Context, Result, ensure};
 use order::{Pass, Plan};
@@ -21,9 +22,87 @@ pub use order::CountedPlay;
 
 const PREBUFFER_FRAMES: usize = SAMPLE_RATE as usize / 2;
 
+/// Local reads retain their synchronous fast path; live reads only poll a bounded worker.
+struct SourceDecoder {
+    // Exactly one slot is populated. Keep both in-place rather than adding a
+    // heap allocation to every local track just to shrink an enum variant.
+    file: Option<Decoder>,
+    stream: Option<StreamDecoder>,
+    initial: Option<crate::metadata::PlaybackMetadata>,
+}
+
+impl SourceDecoder {
+    fn open(entry: &Entry, mode: GainMode) -> Result<Self> {
+        match &entry.stream {
+            Some(spec) => Ok(Self {
+                file: None,
+                stream: Some(StreamDecoder::open(spec, mode)?),
+                initial: Some(crate::metadata::PlaybackMetadata {
+                    title: spec.title.clone(),
+                    artist: String::new(),
+                    album: String::new(),
+                    metadata_error: None,
+                }),
+            }),
+            None => Ok(Self {
+                file: Some(Decoder::open(&entry.path, mode)?),
+                stream: None,
+                initial: None,
+            }),
+        }
+    }
+
+    fn read(&mut self, destination: &mut [Frame]) -> Result<Option<usize>> {
+        match &mut self.file {
+            Some(decoder) => decoder.read(destination).map(Some),
+            None => self
+                .stream
+                .as_mut()
+                .expect("stream source")
+                .poll(destination),
+        }
+    }
+
+    fn take_metadata(&mut self) -> crate::metadata::PlaybackMetadata {
+        match &mut self.file {
+            Some(decoder) => decoder.take_metadata(),
+            None => self
+                .stream
+                .as_mut()
+                .expect("stream source")
+                .take_metadata()
+                .or_else(|| self.initial.take())
+                .expect("new stream has initial display metadata"),
+        }
+    }
+
+    fn take_update(&mut self) -> Option<crate::metadata::PlaybackMetadata> {
+        self.stream.as_mut().and_then(StreamDecoder::take_metadata)
+    }
+
+    fn duration_frames(&self) -> Option<u64> {
+        self.file.as_ref().and_then(Decoder::duration_frames)
+    }
+
+    fn gain_db(&self) -> f64 {
+        match &self.file {
+            Some(decoder) => decoder.gain_db(),
+            None => self.stream.as_ref().expect("stream source").gain_db(),
+        }
+    }
+
+    fn seek(&mut self, frame: u64) -> Result<()> {
+        match &mut self.file {
+            Some(decoder) => decoder.seek(frame),
+            None => anyhow::bail!("live streams cannot seek"),
+        }
+    }
+}
+
 struct Entry {
     id: u64,
     path: PathBuf,
+    stream: Option<StreamSpec>,
     /// The token of the entry's latest pass, or a fresh one.
     token: Arc<TrackToken>,
     metadata: Option<Arc<NowPlaying>>,
@@ -45,7 +124,7 @@ pub struct PreparedSelection {
     id: u64,
     frame: u64,
     mode: GainMode,
-    decoder: Decoder,
+    decoder: SourceDecoder,
     metadata: Arc<NowPlaying>,
 }
 
@@ -195,7 +274,8 @@ pub struct Player {
     next_id: u64,
     mode: GainMode,
     cursor: usize,
-    decoder: Option<Decoder>,
+    decoder: Option<SourceDecoder>,
+    stream_buffering: bool,
     block: Box<[Frame; BLOCK_FRAMES]>,
     pending: usize,
     decoded_position: u64,
@@ -243,6 +323,7 @@ impl Player {
                 Entry {
                     id,
                     path,
+                    stream: None,
                     token: TrackToken::new(id),
                     metadata: None,
                     run: None,
@@ -267,6 +348,7 @@ impl Player {
             .map(|(id, path)| LoadedEntry {
                 id,
                 path,
+                stream: None,
                 run: None,
                 played_seq: None,
             })
@@ -292,6 +374,7 @@ impl Player {
             .map(|entry| Entry {
                 id: entry.id,
                 path: entry.path,
+                stream: entry.stream,
                 token: TrackToken::new(entry.id),
                 metadata: None,
                 run: entry.run,
@@ -317,6 +400,7 @@ impl Player {
             mode,
             cursor: 0,
             decoder: None,
+            stream_buffering: false,
             block: Box::new([[0.0; 2]; BLOCK_FRAMES]),
             pending: 0,
             decoded_position: 0,
@@ -379,6 +463,7 @@ impl Player {
     fn invalidate_buffer(&mut self) {
         self.drop_passes();
         self.started = false;
+        self.stream_buffering = false;
         self.prefilled_frames = 0;
         for entry in &mut self.queue {
             entry.token.invalidate();
@@ -420,7 +505,7 @@ impl Player {
         }
         if self.decoder.is_none() {
             let entry = &mut self.queue[self.cursor];
-            let mut decoder = Decoder::open(&entry.path, self.mode).with_context(|| {
+            let mut decoder = SourceDecoder::open(entry, self.mode).with_context(|| {
                 format!("opening queue entry {}: {}", entry.id, entry.path.display())
             })?;
             entry.metadata = Some(Self::source_metadata(&mut decoder, entry.id, self.mode));
@@ -430,7 +515,26 @@ impl Player {
             self.begin_pass();
         }
         if self.pending == 0 {
-            self.pending = self.decoder.as_mut().unwrap().read(&mut self.block[..])?;
+            let decoder = self.decoder.as_mut().unwrap();
+            let read = decoder.read(&mut self.block[..])?;
+            if let Some(metadata) = decoder.take_update() {
+                self.queue[self.cursor].metadata = Some(Self::display_metadata(
+                    metadata,
+                    decoder,
+                    self.queue[self.cursor].id,
+                    self.mode,
+                ));
+            }
+            let Some(count) = read else {
+                // Rebuffer before a live source empties the ring. Keep the same
+                // token/position: silence during a stall is not end-of-track.
+                if self.output.snapshot().buffered_frames < BLOCK_FRAMES * 2 {
+                    self.stream_buffering = true;
+                    self.output.set_paused(true);
+                }
+                return Ok(());
+            };
+            self.pending = count;
             if self.pending == 0 {
                 self.decoder = None;
                 self.decoded_position = 0;
@@ -458,6 +562,12 @@ impl Player {
     fn maybe_start(&mut self) {
         if !self.playing || self.stopped {
             return;
+        }
+        if self.stream_buffering {
+            if !self.finished && self.output.snapshot().buffered_frames < PREBUFFER_FRAMES {
+                return;
+            }
+            self.stream_buffering = false;
         }
         if self.started || self.finished || self.prefilled_frames >= PREBUFFER_FRAMES {
             self.output.set_paused(false);
@@ -561,6 +671,7 @@ impl Player {
         self.queue.push(Entry {
             id,
             path,
+            stream: None,
             token: TrackToken::new(id),
             metadata: None,
             run: Some(RunInfo {
@@ -600,6 +711,28 @@ impl Player {
         self.replan();
     }
 
+    pub(crate) fn is_stream(&self, entry_id: u64) -> bool {
+        self.queue
+            .iter()
+            .any(|entry| entry.id == entry_id && entry.stream.is_some())
+    }
+
+    /// No network work during the durable append preparation.
+    pub(crate) fn prepare_stream(
+        &mut self,
+        stream: StreamSpec,
+        expected_revision: u64,
+    ) -> Result<PreparedAppend> {
+        let mut prepared = self.prepare_append(
+            std::iter::once(PathBuf::from(&stream.url)),
+            expected_revision,
+            false,
+            RepeatScope::Queue,
+        )?;
+        prepared.entries[0].stream = Some(stream);
+        Ok(prepared)
+    }
+
     pub(crate) fn prepare_append(
         &mut self,
         paths: impl ExactSizeIterator<Item = PathBuf>,
@@ -627,6 +760,7 @@ impl Player {
             entries.push(Entry {
                 id,
                 path,
+                stream: None,
                 token: TrackToken::new(id),
                 metadata: None,
                 run: Some(RunInfo {
@@ -662,7 +796,7 @@ impl Player {
         revision: u64,
         index: usize,
     ) -> Result<PreparedSelection> {
-        let mut decoder = Decoder::open(&first.path, self.mode).with_context(|| {
+        let mut decoder = SourceDecoder::open(first, self.mode).with_context(|| {
             format!("opening queue entry {}: {}", first.id, first.path.display())
         })?;
         let metadata = Self::source_metadata(&mut decoder, first.id, self.mode);
@@ -681,6 +815,7 @@ impl Player {
     /// replaced, so no old PCM can play.
     fn adopt_first(&mut self, selection: PreparedSelection) {
         self.started = false;
+        self.stream_buffering = false;
         self.prefilled_frames = 0;
         self.queue[selection.index].metadata = Some(selection.metadata);
         self.decoder = Some(selection.decoder);
@@ -1398,8 +1533,21 @@ impl Player {
         self.output.mark_end(false);
     }
 
-    fn source_metadata(decoder: &mut Decoder, entry_id: u64, mode: GainMode) -> Arc<NowPlaying> {
+    fn source_metadata(
+        decoder: &mut SourceDecoder,
+        entry_id: u64,
+        mode: GainMode,
+    ) -> Arc<NowPlaying> {
         let metadata = decoder.take_metadata();
+        Self::display_metadata(metadata, decoder, entry_id, mode)
+    }
+
+    fn display_metadata(
+        metadata: crate::metadata::PlaybackMetadata,
+        decoder: &SourceDecoder,
+        entry_id: u64,
+        mode: GainMode,
+    ) -> Arc<NowPlaying> {
         Arc::new(NowPlaying {
             entry_id,
             title: metadata.title,
@@ -1411,7 +1559,11 @@ impl Player {
             album_id: None,
             album_artist_id: None,
             compilation: None,
-            format: String::new(),
+            format: if decoder.stream.is_some() {
+                "HTTP stream".to_owned()
+            } else {
+                String::new()
+            },
             gain_db: (mode != GainMode::Off).then(|| decoder.gain_db()),
         })
     }
@@ -1429,7 +1581,7 @@ impl Player {
             .position(|entry| entry.id == entry_id)
             .context("queue entry not found")?;
         let entry = &self.queue[index];
-        let mut decoder = Decoder::open(&entry.path, mode).with_context(|| {
+        let mut decoder = SourceDecoder::open(entry, mode).with_context(|| {
             format!("opening queue entry {}: {}", entry.id, entry.path.display())
         })?;
         if frame != 0 {
@@ -1489,6 +1641,7 @@ impl Player {
             .snapshot()
             .current_id
             .context("no current entry to seek")?;
+        ensure!(!self.is_stream(id), "live streams cannot seek");
         let prepared = self.prepare_selection(id, frame, self.mode)?;
         self.commit_selection(prepared);
         Ok(())
@@ -1653,6 +1806,7 @@ mod batch_tests {
         let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
             id,
             path: path.clone(),
+            stream: None,
             run: None,
             played_seq: played.then_some(id),
         };
@@ -1773,6 +1927,7 @@ mod batch_tests {
         let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
             id,
             path: path.clone(),
+            stream: None,
             run: None,
             played_seq: played.then_some(id),
         };
@@ -1866,6 +2021,7 @@ mod batch_tests {
         let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
             id,
             path: path.clone(),
+            stream: None,
             run: None,
             played_seq: played.then_some(id),
         };
@@ -1951,6 +2107,7 @@ mod batch_tests {
         let loaded = |id: u64, path: &PathBuf, played: bool| LoadedEntry {
             id,
             path: path.clone(),
+            stream: None,
             run: None,
             played_seq: played.then_some(id),
         };

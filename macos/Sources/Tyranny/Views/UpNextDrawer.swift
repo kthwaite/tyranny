@@ -94,13 +94,13 @@ struct UpNextDrawer: View {
     private func entry(_ item: QueueItem) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.title.isEmpty ? (item.path as NSString).lastPathComponent : item.title)
+                Text(item.displayTitle)
                     .font(.system(size: 12)).lineLimit(1)
-                Text(item.artist)
+                Text(item.displayArtist)
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
-            Text(item.duration_ms.map { DisplayFormat.clock(Double($0) / 1000) } ?? "")
+            Text(item.displayDuration)
                 .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10).padding(.vertical, 4)

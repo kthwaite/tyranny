@@ -6,7 +6,7 @@ continuous CoreAudio stream. The native engine, persistent local server,
 durable library, and native SwiftUI controller are implemented and exercised;
 see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations.
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
-Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Protocol v8 requires matching client/server processes; the main database remains schema 4.
+Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v10 requires matching client/server processes; the main database is schema 6.
 
 ## Development commands
 
@@ -163,9 +163,11 @@ app itself supports spaces and Unicode in its installation path.
 The controlled configuration retains native decoders/demuxers and embedded image
 support, builds shared avcodec/avformat/avutil/swresample, and disables GPL,
 nonfree, version-3-only code, external-library autodetection, encoders, muxers,
-devices, filters, hardware acceleration, and networking. It uses macOS system
-zlib, bzlib, and iconv. This preserves the current local-file playback path;
-it does not add the external decoder engines or streaming features in the requirements.
+devices, filters, and hardware acceleration. It uses macOS system zlib, bzlib,
+iconv and Secure Transport. The only enabled protocols are file, HTTP, HTTPS,
+TCP and TLS; stream entries use verified HTTPS and an MP3/Ogg demuxer whitelist,
+while local playback keeps its file-only protocol whitelist. External decoder
+engines remain outside this configuration.
 
 Packaging copies the four dylibs to `Contents/Frameworks`, rewrites their
 transitive dependencies and install IDs to `@loader_path`, and removes runpaths.
@@ -343,7 +345,7 @@ The reproducible scale gate seeds a declared metadata-only 50,000-track index an
 ## Explicitly deferred from this spike
 
 - Remaining codecs/containers, audio CD, module/BASS support, and every non-CoreAudio output. Maintain a tested capability list; broad dependency support is not a coverage claim.
-- SHOUTcast/Icecast and internet radio; dynamic queue autofill; the directory-browser screen.
+- Saved internet-radio stations and station-file imports; dynamic queue autofill; the directory-browser screen. Direct SHOUTcast/Icecast MP3/Ogg playback is implemented; see [streaming evidence](SPIKE_RESULTS.md#http-stream-playback).
 - MusicBrainz tag retrieval, additional cover providers and artist/title matching, lyrics providers, scrobbling, and tag writing. Artwork fallback uses an existing MusicBrainz release ID only; it does not search for or rewrite tags.
 - Equalizer/analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
 - CUE ingestion and sophisticated release reconciliation; preserve the identity seams now.

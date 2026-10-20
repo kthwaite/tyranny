@@ -515,6 +515,18 @@ def external_makers(ff, tools, tmp, pcm):
     ]
 
 
+def stream_fixtures(ff, fixtures):
+    """Four seconds of generated 440 Hz tone; no encoder is needed by tests."""
+    directory = os.path.join(fixtures, "streams")
+    os.makedirs(directory, exist_ok=True)
+    signal = ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4"]
+    run([ff, *FF_BASE, *signal, "-c:a", LAME, "-b:a", "64k",
+         "-reservoir", "0", "-write_xing", "0", "-id3v2_version", "0",
+         os.path.join(directory, "live.mp3")])
+    run([ff, *FF_BASE, *signal, "-ac", "2", "-c:a", "vorbis", "-strict", "experimental",
+         os.path.join(directory, "live.ogg")])
+
+
 def main():
     ff, lame, af = require_tools()
     tools = require_external()
@@ -603,6 +615,8 @@ def main():
             manifest["gapless"]["sets"].append({
                 "name": name, "rate": rate, "lossless": lossless, "files": files,
                 "lengths": LENGTHS[rate], "encoder": label})
+
+    stream_fixtures(ff, fixtures)
 
     with open(os.path.join(fixtures, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)

@@ -7,6 +7,7 @@ struct UpNextView: View {
     let model: UpNextModel
     let player: PlayerModel
     @State private var saving = false
+    @State private var addingStream = false
 
     private var upcoming: Int? { model.upcomingCount }
     private var canEdit: Bool { player.canMutate }
@@ -35,6 +36,7 @@ struct UpNextView: View {
         }
         .onDisappear { model.setViewShown(false) }
         .sheet(isPresented: $saving) { SavePlaylistSheet(model: model) }
+        .sheet(isPresented: $addingStream) { AddStreamSheet(model: model) }
     }
 
     private var header: some View {
@@ -47,6 +49,9 @@ struct UpNextView: View {
                 .monospacedDigit()
                 .accessibilityIdentifier("up-next-count")
             Spacer(minLength: 0)
+            Button("Add Stream…") { addingStream = true }
+                .disabled(!canEdit)
+                .accessibilityIdentifier("up-next-add-stream")
             Button("Shuffle Upcoming") { model.shuffleUpcoming() }
                 .disabled(!canEdit || upcoming == 0)
                 .accessibilityIdentifier("up-next-shuffle")
@@ -115,6 +120,68 @@ private struct SavePlaylistSheet: View {
         let name = trimmed
         Task {
             let problem = await model.savePlaylist(name: name)
+            working = false
+            if let problem { failure = problem } else { dismiss() }
+        }
+    }
+}
+
+private struct AddStreamSheet: View {
+    let model: UpNextModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var url = ""
+    @State private var title = ""
+    @State private var failure: String?
+    @State private var working = false
+
+    private var trimmedURL: String { url.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add Stream").font(.headline)
+            Text("Enter a direct HTTP or HTTPS MP3/Ogg stream URL, not a playlist or web page.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("Stream URL", text: $url)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("stream-url")
+            TextField("Title (optional)", text: $title)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("stream-title")
+            if let failure {
+                Text(failure).font(.callout).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("stream-error")
+            }
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(working)
+                Spacer()
+                Button("Add & Play") { add(play: true) }
+                    .disabled(trimmedURL.isEmpty || working)
+                    .accessibilityIdentifier("stream-add-play")
+                Button("Add to Up Next") { add(play: false) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedURL.isEmpty || working)
+                    .accessibilityIdentifier("stream-add")
+            }
+        }
+        .frame(width: 420)
+        .padding(20)
+        .interactiveDismissDisabled(working)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("add-stream-sheet")
+    }
+
+    private func add(play: Bool) {
+        guard !working, !trimmedURL.isEmpty else { return }
+        working = true
+        failure = nil
+        let url = trimmedURL
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            let problem = await model.addStream(url: url, title: title, play: play)
             working = false
             if let problem { failure = problem } else { dismiss() }
         }

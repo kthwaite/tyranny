@@ -360,13 +360,13 @@ fn unknown_newer_schema_is_rejected_without_resetting_existing_state() -> Result
     let path = scratch.database();
     legacy_database(&path, 1)?;
     let connection = Connection::open(&path)?;
-    connection.pragma_update(None, "user_version", 6)?;
+    connection.pragma_update(None, "user_version", 7)?;
     assert!(
         Store::open(&path)
             .err()
             .unwrap()
             .to_string()
-            .contains("unsupported database version 6")
+            .contains("unsupported database version 7")
     );
     connection.pragma_update(None, "user_version", 1)?;
     drop(connection);
@@ -734,7 +734,7 @@ fn batch_reorders_and_inserts_are_atomic_bounded_and_revision_bound() -> Result<
         restored
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u64>(0))?,
-        5
+        6
     );
     restored
         .connection

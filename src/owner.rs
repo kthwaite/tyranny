@@ -13,7 +13,7 @@ use crate::{
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
         NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
-        TrackSelection, Transport,
+        StreamSpec, TrackSelection, Transport,
     },
     store::{
         Checkpoint, Edit, EntryTrack, LoadedEntry, PendingPlays, PlayRecord, PlaylistChange,
@@ -478,7 +478,9 @@ fn capture_destination(config: &OwnerConfig, entries: &[LoadedEntry]) -> Result<
         "capture destination overlaps private server state"
     );
     ensure!(
-        !entries.iter().any(|entry| same_file(&capture, &entry.path)),
+        !entries
+            .iter()
+            .any(|entry| entry.stream.is_none() && same_file(&capture, &entry.path)),
         "capture destination overlaps a queued source"
     );
     Ok(Some(capture))
@@ -584,7 +586,11 @@ impl Actor {
         if let Some(id) = loaded.checkpoint.current_id {
             match player.prepare_selection(
                 id,
-                loaded.checkpoint.position_frames,
+                if player.is_stream(id) {
+                    0
+                } else {
+                    loaded.checkpoint.position_frames
+                },
                 loaded.settings.gain_mode,
             ) {
                 Ok(prepared) => {
@@ -693,6 +699,9 @@ impl Actor {
     /// Adds the indexed track, album, album artist, compilation flag and format to the
     /// player's metadata. The lookup is display-only, so a failed one leaves those fields blank.
     fn describe(&self, now: Arc<NowPlaying>, library_revision: u64) -> Arc<NowPlaying> {
+        if self.player.is_stream(now.entry_id) {
+            return now;
+        }
         let key = (now.entry_id, library_revision);
         let mut cache = self.now_track.borrow_mut();
         if cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
@@ -729,7 +738,11 @@ impl Actor {
         }
         Checkpoint {
             current_id: state.current_id,
-            position_frames: state.position_frames,
+            position_frames: if state.current_id.is_some_and(|id| self.player.is_stream(id)) {
+                0
+            } else {
+                state.position_frames
+            },
             playing: state.playing && self.player.error().is_none() && self.fault.is_none(),
         }
     }
@@ -1262,6 +1275,38 @@ impl Actor {
         self.applied(Some(id))
     }
 
+    fn append_stream(
+        &mut self,
+        expected_revision: u64,
+        url: String,
+        title: String,
+    ) -> CommandResult<Response> {
+        self.check_revision(expected_revision)?;
+        let revision = self.next_revision()?;
+        let stream =
+            StreamSpec::new(url, title).map_err(|error| Failure::invalid(error.to_string()))?;
+        let prepared = self
+            .player
+            .prepare_stream(stream.clone(), expected_revision)
+            .map_err(Failure::playback)?;
+        let id = prepared.first_id();
+        if id >= i64::MAX as u64 {
+            return Err(Failure::invalid("queue ID exhausted"));
+        }
+        self.store
+            .edit(
+                Edit::AppendStream {
+                    id,
+                    stream: &stream,
+                },
+                revision,
+                id + 1,
+            )
+            .map_err(Failure::persistence)?;
+        self.player.commit_append(prepared);
+        self.published(Some(id))
+    }
+
     fn command(&mut self, command: Command) -> CommandResult<Response> {
         match command {
             Command::Snapshot => {
@@ -1314,6 +1359,11 @@ impl Actor {
                 expected_revision,
                 path,
             } => self.append(expected_revision, path, None, SourceKind::Direct),
+            Command::AppendStream {
+                expected_revision,
+                url,
+                title,
+            } => self.append_stream(expected_revision, url, title),
             Command::AppendTrack {
                 expected_revision,
                 library_revision,
@@ -1665,6 +1715,9 @@ impl Actor {
                 let state = self.player.snapshot();
                 if state.current_id != Some(entry_id) {
                     return Err(Failure::invalid("seek occurrence is no longer current"));
+                }
+                if self.player.is_stream(entry_id) {
+                    return Err(Failure::invalid("live streams cannot seek"));
                 }
                 if state
                     .now_playing
