@@ -690,8 +690,8 @@ impl Actor {
             upcoming_count,
         }
     }
-    /// Adds the indexed track, album, album artist, compilation flag and format to the player's metadata. The
-    /// lookup is display-only, so a failed one leaves those fields blank.
+    /// Adds the indexed track, album, album artist, compilation flag and format to the
+    /// player's metadata. The lookup is display-only, so a failed one leaves those fields blank.
     fn describe(&self, now: Arc<NowPlaying>, library_revision: u64) -> Arc<NowPlaying> {
         let key = (now.entry_id, library_revision);
         let mut cache = self.now_track.borrow_mut();
