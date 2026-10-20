@@ -10,7 +10,8 @@
 //! ```
 //!
 //! `<prefix>` is what `scripts/build_ffmpeg.py` prints, for example
-//! `target/native/ffmpeg-9.0.2-arm64-...`.
+//! `target/native/ffmpeg-9.0.2-arm64-...` (directory pattern
+//! `target/native/ffmpeg-9.0.2-arm64-*`).
 use std::{
     collections::BTreeSet,
     fs,
@@ -96,8 +97,13 @@ fn scanner_extensions_are_all_covered() {
 #[test]
 fn every_format_fixture_decodes_to_eof() {
     let (files, _) = manifest();
-    // Fixtures are 0.25 s. The ffmpeg CLI also drops the last partial packet of
-    // wma (10240 of 12000 frames), so the floor is 80%, not 90%.
+    // Fixtures are 0.25 s. tone.wma is only 10240 of 12000 frames even in the
+    // ffmpeg CLI, so a 90% floor is unachievable. Our decoder loses more: 10080
+    // frames, because `valid_samples` trims each 2048-sample WMA frame to the
+    // container's 42 ms packet duration (2016 frames at 48 kHz), 32 frames per
+    // packet, for millisecond-timebase containers at 48 kHz. That is a known
+    // decoder bug tracked separately. The 80% floor guards only against gross
+    // truncation.
     let floor = (0.8 * 0.25 * f64::from(SAMPLE_RATE)) as usize;
     let mut failures = Vec::new();
     let mut buffer = vec![Frame::default(); 4096];
@@ -167,10 +173,16 @@ async fn every_format_fixture_indexes_without_failures() {
         .await
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
+    // The deadline guards a hang, not timing.
     let state = loop {
         let state = library.state();
-        if state.scan.phase == ScanPhase::Complete {
-            break state;
+        match state.scan.phase {
+            ScanPhase::Complete => break state,
+            ScanPhase::Failed | ScanPhase::Interrupted => panic!(
+                "scan ended {:?}: {:?}",
+                state.scan.phase, state.scan.last_error
+            ),
+            ScanPhase::Idle | ScanPhase::Discovering | ScanPhase::Indexing => {}
         }
         assert!(
             Instant::now() < deadline,

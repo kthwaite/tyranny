@@ -135,9 +135,9 @@ Engine rate is 48 kHz (`tyranny::SAMPLE_RATE`). For each set:
   `OutputConfig::Capture { clocked: false }` and `GainMode::Off`, pumped to completion, writes a
   capture that is bit-identical to the four per-track decodes laid end to end. This is the
   property that makes playback gapless: the player adds and drops nothing at a track switch.
-  - Exception: 44.1k sets may differ within ±1 frame of each boundary, because each track restarts
-    the resampler. Assert the total length within ±4 frames and bit-identity away from the
-    boundaries (outside ±64 frames). A comment points at the deferred swr-carry task.
+  - Exact for all 14 sets, 44.1k included: the per-track decode restarts the resampler per track
+    just as the player does, so the two match byte for byte (measured). The ±1-frame difference
+    applies only against a continuous decode; a comment points at the deferred swr-carry task.
 
 ## Release-prefix run
 

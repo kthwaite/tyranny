@@ -3,7 +3,7 @@
 //! Also pins the decoded length of each track against its source length.
 //!
 //! Three ffmpeg-encoder cases are absent on purpose, because the files
-//! themselves are not gapless (see target/spikes/ruddy-ape/FINDINGS.md):
+//! themselves are not gapless (see docs/superpowers/specs/2026-10-20-format-and-gapless-tests-design.md):
 //! - ffmpeg `aac_at` m4a: the edit list includes the encoder padding and there
 //!   is no iTunSMPB, so the file itself has a gap.
 //! - ffmpeg native Vorbis encoder: it writes final granule positions rounded to
@@ -22,7 +22,8 @@
 //! ```
 //!
 //! `<prefix>` is what `scripts/build_ffmpeg.py` prints, for example
-//! `target/native/ffmpeg-9.0.2-arm64-...`.
+//! `target/native/ffmpeg-9.0.2-arm64-...` (directory pattern
+//! `target/native/ffmpeg-9.0.2-arm64-*`).
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -302,6 +303,11 @@ fn lossless_decodes_are_bit_exact() {
         if let Some(diff) = first_difference(&source, &decoded) {
             panic!("wav48 track {}: {diff}", index + 1);
         }
+        let flac44 = decode_all(&named(&sets, "flac44").files[index]);
+        let wav44 = decode_all(&named(&sets, "wav44").files[index]);
+        if let Some(diff) = first_difference(&wav44, &flac44) {
+            panic!("flac44 track {} differs from wav44: {diff}", index + 1);
+        }
         for name in ["flac48", "alac48"] {
             let other = decode_all(&named(&sets, name).files[index]);
             if let Some(diff) = first_difference(&decoded, &other) {
@@ -313,40 +319,18 @@ fn lossless_decodes_are_bit_exact() {
 
 #[test]
 fn player_run_equals_the_tracks_end_to_end() {
-    // The 44.1k sets are resampled per track, so the resampler's tail at a
-    // boundary may differ from a carried-over run; exact equality there waits
-    // on the deferred swr-carry follow-up.
+    // Exact for every set, 44.1k included: per-track `decode_all` restarts the
+    // resampler per track just as the player does, so the capture equals the
+    // concatenation. (Against a *continuous* decode the per-track restart is
+    // still a known +-1 frame difference; that waits on the deferred swr-carry
+    // follow-up.)
+    let mut failures = Vec::new();
     for set in sets() {
-        let tracks: Vec<Vec<Frame>> = set.files.iter().map(|file| decode_all(file)).collect();
-        let expected: Vec<Frame> = tracks.concat();
+        let expected: Vec<Frame> = set.files.iter().flat_map(|file| decode_all(file)).collect();
         let actual = capture_run(&set.files);
-        if set.rate == 48_000 {
-            if let Some(diff) = first_difference(&expected, &actual) {
-                panic!("{}: {diff}", set.name);
-            }
-        } else {
-            assert!(
-                expected.len().abs_diff(actual.len()) <= 4,
-                "{}: expected {} frames (sum of per-track decodes), got {} from the player",
-                set.name,
-                expected.len(),
-                actual.len()
-            );
-            let mut boundaries = Vec::new();
-            let mut total = 0;
-            for track in &tracks[..tracks.len() - 1] {
-                total += track.len();
-                boundaries.push(total);
-            }
-            let near = |index: usize| boundaries.iter().any(|&b| index.abs_diff(b) <= 64);
-            for index in 0..expected.len().min(actual.len()) {
-                if !near(index) && expected[index] != actual[index] {
-                    panic!(
-                        "{}: frame {index} differs: {:?} vs {:?}",
-                        set.name, expected[index], actual[index]
-                    );
-                }
-            }
+        if let Some(diff) = first_difference(&expected, &actual) {
+            failures.push(format!("{}: {diff}", set.name));
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

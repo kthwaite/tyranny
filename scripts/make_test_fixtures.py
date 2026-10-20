@@ -6,6 +6,8 @@ Usage: python3 scripts/make_test_fixtures.py
 Needs ffmpeg (with encoders), lame and afconvert on this machine. Python 3 stdlib only.
 Removes stale files under tests/fixtures/ first. Tests never need the encoders; only this
 script does.
+afconvert output (the 8 aacapple* files) is not byte-stable across runs; decoded lengths and
+the manifest are, so regeneration dirtying those files is expected.
 """
 import json, math, os, shutil, struct, subprocess, sys, tempfile
 
@@ -67,7 +69,6 @@ FORMATS = [
 ]
 
 # set name -> (rate, lossless, extension, encoder label, command template)
-# Templates use {i} input wav, {o} output; "ffmpeg" means FF + args.
 FF_BASE = ["-hide_banner", "-loglevel", "error", "-y"]
 GAPLESS_SETS = [
     ("wav48", 48000, True, "wav", "ffmpeg pcm_s16le", "ffmpeg", ["-c:a", "pcm_s16le"]),
