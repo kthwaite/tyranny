@@ -22,8 +22,58 @@ SOURCE_SHA256 = "84960df915059e8754fef2cd7c9afeb614062b1b5458ec471eecee619ee04e9
 SIGNER = "FCF986EA15E6E293A5644F10B4322F04D67658D8"
 MINIMUM_OS = "14.0"
 LIBRARIES = {"avcodec": 63, "avformat": 63, "avutil": 61, "swresample": 7}
-DECODERS = "flac mp3 aac alac opus vorbis wavpack mpc7 mpc8 wmav1 wmav2 wmapro wmalossless wmavoice ape tta shorten png mjpeg".split()
-DEMUXERS = "flac mp3 aac mov ogg wv mpc mpc8 asf ape tta shorten wav aiff matroska".split()
+# DECODERS and DEMUXERS are post-configure assertions, not an allowlist.
+# Configure enables every LGPL decoder and demuxer; require_configuration only
+# checks that these are among them. Each scanner extension (AUDIO_EXTENSIONS in
+# src/library_types.rs) maps to the demuxers and decoders it needs. An
+# allowlist build would pass exactly these lists with --disable-decoders
+# --disable-demuxers. Verify such a build with tests/ffmpeg_formats.rs against
+# the new prefix; that file's header has the command.
+PCM = ("pcm_s8 pcm_u8 pcm_s16le pcm_s16be pcm_s24le pcm_s24be pcm_s32le pcm_s32be "
+       "pcm_f32le pcm_f32be pcm_f64le pcm_f64be pcm_alaw pcm_mulaw")
+DSD = "dsd_lsbf dsd_msbf dsd_lsbf_planar dsd_msbf_planar"
+EXTENSIONS = {  # extension: (demuxers, decoders)
+    "aac": ("aac", "aac"),
+    "ac3": ("ac3 eac3", "ac3 eac3"),
+    "aif": ("aiff", f"{PCM} adpcm_ima_qt"),
+    "aiff": ("aiff", f"{PCM} adpcm_ima_qt"),
+    "aifc": ("aiff", f"{PCM} adpcm_ima_qt"),
+    "alac": ("mov", "alac"),
+    "amr": ("amr amrnb", "amrnb amrwb"),
+    "ape": ("ape", "ape"),
+    "au": ("au", PCM),
+    "awb": ("amr amrwb", "amrwb"),
+    "caf": ("caf", f"{PCM} adpcm_ima_qt alac aac"),
+    "dff": ("iff", DSD),
+    "dsf": ("dsf", DSD),
+    "dts": ("dts dtshd", "dca"),
+    "flac": ("flac", "flac"),
+    "m4a": ("mov", "aac alac"),
+    "m4b": ("mov", "aac alac"),
+    "mka": ("matroska", f"flac opus vorbis mp3 aac ac3 eac3 {PCM}"),
+    "mov": ("mov", f"aac alac {PCM} adpcm_ima_qt"),
+    "mp2": ("mp3", "mp2"),
+    "mp3": ("mp3", "mp3"),
+    "mp4": ("mov", "aac alac mp3 opus flac ac3 eac3"),
+    "mpc": ("mpc mpc8", "mpc7 mpc8"),
+    "oga": ("ogg", "vorbis flac opus speex"),
+    "ogg": ("ogg", "vorbis flac opus speex"),
+    "opus": ("ogg", "opus"),
+    "ra": ("rm", "ra_144 ra_288 cook sipr"),
+    "shn": ("shorten", "shorten"),
+    "spx": ("ogg", "speex"),
+    "tak": ("tak", "tak"),
+    "tta": ("tta", "tta"),
+    "wav": ("wav", f"{PCM} adpcm_ima_wav adpcm_ms"),
+    "wave": ("wav", f"{PCM} adpcm_ima_wav adpcm_ms"),
+    "webm": ("matroska", "opus vorbis"),
+    "wma": ("asf", "wmav1 wmav2 wmapro wmalossless wmavoice"),
+    "wv": ("wv", "wavpack"),
+}
+COVER_ART_DECODERS = "png mjpeg"
+DECODERS = sorted({name for _, names in EXTENSIONS.values() for name in names.split()}
+                  | set(COVER_ART_DECODERS.split()))
+DEMUXERS = sorted({name for names, _ in EXTENSIONS.values() for name in names.split()})
 
 
 def digest(path):
