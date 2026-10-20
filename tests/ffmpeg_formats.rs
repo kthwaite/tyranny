@@ -1,6 +1,7 @@
-//! Guards the claim that every scanner extension we can encode a fixture for
-//! indexes and decodes with the linked FFmpeg. Extensions with no local encoder
-//! are listed in the manifest and only checked for coverage.
+//! Guards the claim that every scanner extension indexes and decodes with the
+//! linked FFmpeg. Each extension has a fixture, or a manifest exception that
+//! names why it has none (tak: no encoder outside Windows); exceptions are only
+//! checked for coverage.
 //!
 //! Run against the pinned release FFmpeg (spike method):
 //!
@@ -31,7 +32,9 @@ use tyranny::{
 struct Fixture {
     extension: String,
     file: String,
-    /// Stereo frames the ffmpeg CLI decodes at the engine rate.
+    /// Stereo frames the ffmpeg CLI decodes at the engine rate, or, where the
+    /// manifest says `"frames_from": "packet durations"`, that the packet
+    /// durations add up to.
     frames: usize,
 }
 
@@ -39,7 +42,13 @@ fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn manifest() -> (Vec<Fixture>, Vec<String>) {
+/// A scanner extension with no fixture, and why.
+struct Exception {
+    extension: String,
+    reason: String,
+}
+
+fn manifest() -> (Vec<Fixture>, Vec<Exception>) {
     let text = fs::read_to_string(fixture_root().join("manifest.json")).unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     let formats = &json["formats"];
@@ -55,13 +64,16 @@ fn manifest() -> (Vec<Fixture>, Vec<String>) {
             ) as usize,
         })
         .collect();
-    let missing = formats["no_local_encoder"]
+    let exceptions = formats["exceptions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|entry| entry.as_str().unwrap().to_owned())
+        .map(|entry| Exception {
+            extension: entry["extension"].as_str().unwrap().to_owned(),
+            reason: entry["reason"].as_str().unwrap_or_default().to_owned(),
+        })
         .collect();
-    (files, missing)
+    (files, exceptions)
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -85,17 +97,22 @@ impl Drop for Scratch {
 
 #[test]
 fn scanner_extensions_are_all_covered() {
-    let (files, no_encoder) = manifest();
+    let (files, exceptions) = manifest();
     let fixtures: BTreeSet<&str> = files.iter().map(|f| f.extension.as_str()).collect();
-    let unencodable: BTreeSet<&str> = no_encoder.iter().map(String::as_str).collect();
+    let excepted: BTreeSet<&str> = exceptions.iter().map(|e| e.extension.as_str()).collect();
+    let unexplained: Vec<_> = exceptions
+        .iter()
+        .filter(|e| e.reason.trim().is_empty())
+        .map(|e| e.extension.as_str())
+        .collect();
     let scanner: BTreeSet<&str> = AUDIO_EXTENSIONS.iter().copied().collect();
-    let both: Vec<_> = fixtures.intersection(&unencodable).collect();
-    let covered: BTreeSet<&str> = fixtures.union(&unencodable).copied().collect();
+    let both: Vec<_> = fixtures.intersection(&excepted).collect();
+    let covered: BTreeSet<&str> = fixtures.union(&excepted).copied().collect();
     let missing: Vec<_> = scanner.difference(&covered).collect();
     let extra: Vec<_> = covered.difference(&scanner).collect();
     assert!(
-        both.is_empty() && missing.is_empty() && extra.is_empty(),
-        "in both fixtures and no_local_encoder: {both:?}; scanner extensions without coverage: {missing:?}; covered but not scanned: {extra:?}"
+        both.is_empty() && missing.is_empty() && extra.is_empty() && unexplained.is_empty(),
+        "in both fixtures and exceptions: {both:?}; scanner extensions without coverage: {missing:?}; covered but not scanned: {extra:?}; exceptions without a reason: {unexplained:?}"
     );
 }
 
@@ -107,6 +124,9 @@ fn every_format_fixture_decodes_to_eof() {
     // not the nominal 0.25 s, is the reference: tone.wma is 10240 of 12000
     // frames even there. Exact counts catch a decoder that trims or pads every
     // packet, as millisecond container durations once did for ASF and Matroska.
+    // tone.spx is the exception: the CLI decodes its final Ogg Speex packet
+    // whole, while `Decoder` cuts it to the duration the end granule gives, so
+    // its reference is the packet durations' sum (the 0.25 s source exactly).
     let mut failures = Vec::new();
     let mut buffer = vec![Frame::default(); 4096];
     for fixture in &files {
