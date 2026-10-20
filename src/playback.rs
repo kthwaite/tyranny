@@ -2418,10 +2418,17 @@ mod batch_tests {
             GainMode::Off,
         )?;
         player.play();
+        player.pause();
         let deadline = Instant::now() + Duration::from_secs(5);
+        // Fill the transition while paused: selecting entry 1 alone does not
+        // guarantee that a later pump has decoded entry 2.
+        while player.snapshot().output.buffered_frames < PREBUFFER_FRAMES {
+            assert!(Instant::now() < deadline, "transition did not prebuffer");
+            player.pump()?;
+        }
+        player.play();
         while player.snapshot().current_id != Some(1) {
             assert!(Instant::now() < deadline, "playback did not start");
-            player.pump()?;
             thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(player.snapshot().prepared_id, Some(2));
@@ -2475,11 +2482,17 @@ mod batch_tests {
             GainMode::Off,
         )?;
         player.play();
+        player.pause();
         let deadline = Instant::now() + Duration::from_secs(5);
-        // The prebuffer holds all of entry 1 and the start of entry 2.
+        // Fill entry 1 and the beginning of entry 2 before allowing output to
+        // consume the transition. Current identity is not a prebuffer barrier.
+        while player.snapshot().output.buffered_frames < PREBUFFER_FRAMES {
+            assert!(Instant::now() < deadline, "transition did not prebuffer");
+            player.pump()?;
+        }
+        player.play();
         while player.snapshot().current_id != Some(1) {
             assert!(Instant::now() < deadline, "playback did not start");
-            player.pump()?;
             thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(player.snapshot().prepared_id, Some(2));
