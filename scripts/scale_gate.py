@@ -31,7 +31,7 @@ PAGE = 100  # the legacy library_* page cases below
 WINDOW = 200  # the client's list and Up Next window size
 # Startup budgets (spec: faster client startup). Server: release build, 50k tracks.
 SERVER_BUDGET_MS = dict(ready_ms=300, hello_ms=50, first_page_ms=250, total_ms=500)
-NATIVE_MODEL_READY_BUDGET_MS = 1500  # warm startup.process_to_model_ready_ms, debug client
+NATIVE_MODEL_READY_BUDGET_MS = 1500  # warm startup.process_to_model_ready_ms, any native profile
 
 
 class MeasuredWebSocket(WebSocket):
@@ -197,7 +197,7 @@ def main():
                                **{f"server_{name}": dict(operator="<=", value=value, release_server_only=True)
                                   for name, value in SERVER_BUDGET_MS.items()}),
                   launches=[], query_samples=[], query_distributions={}, native_runs=[],
-                  limitations=["Process-cold means newly started daemon and client before library query warmup; OS/filesystem caches remain uncontrolled, with no purge",
+                  limitations=["Process-cold means newly started daemon and client before any library query on the daemon (a separate unprobed launch); OS/filesystem caches remain uncontrolled, with no purge",
                                "Query latency is end-to-end authenticated WebSocket round trip, including JSON decoding, not SQLite-only time",
                                "Native filter timing includes external Accessibility process overhead, debounce, queries and observed UI completion",
                                "Bounded native/model and reply pages checked; not a heap profiler or proof of server-internal constant memory",
@@ -208,7 +208,7 @@ def main():
     control = None
     logs = []
 
-    def start(budgeted=False):
+    def start(budgeted=False, probe=True):
         nonlocal process, control
         number = len(report["launches"]) + 1
         argv = [str(server), "--state-dir", str(state_dir), "--bind", "127.0.0.1:0"]
@@ -226,33 +226,40 @@ def main():
         ready_ms = (time.monotonic()-started)*1000
         ready = json.loads(line)
         token = Path(ready["token_path"]).read_text()
-        # Startup timing on a fresh connection: hello, then the client's first Songs window
-        # (library source, default browser/query/sort, grouping none, revision null, offset 0,
-        # limit 200; same fields as TrackListRequest.launchSongs).
-        hello_started = time.monotonic()
-        probe = MeasuredWebSocket(ready["address"], token)
-        assert probe.status == 101
-        hello_ms = (time.monotonic()-hello_started)*1000
-        try:
-            page_started = time.monotonic()
-            page = probe.request("list_tracks", list=dict(source=dict(kind="library"),
-                browser=dict(genre_ids=[], artist_ids=[], compilations=False, album_ids=[]),
-                query="", sort=[], group="none"), revision=None, offset=0, limit=WINDOW)
-            first_page_ms = (time.monotonic()-page_started)*1000
-            total_ms = (time.monotonic()-started)*1000
-            assert page["offset"] == 0 and len(page["entries"]) <= WINDOW
-        finally:
-            probe.close()
+        hello_ms = first_page_ms = total_ms = page = None
+        if probe:
+            # Startup timing on a fresh connection: hello, then the client's first Songs window
+            # (library source, default browser/query/sort, grouping none, revision null, offset 0,
+            # limit 200; same fields as TrackListRequest.launchSongs). hello_ms covers TCP
+            # connect, the WebSocket upgrade and receipt of the hello message. The probe warms
+            # the server's library worker, so the process-cold native run uses a launch without it.
+            hello_started = time.monotonic()
+            probe_socket = MeasuredWebSocket(ready["address"], token)
+            assert probe_socket.status == 101
+            hello_ms = (time.monotonic()-hello_started)*1000
+            try:
+                page_started = time.monotonic()
+                page = probe_socket.request("list_tracks", list=dict(source=dict(kind="library"),
+                    browser=dict(genre_ids=[], artist_ids=[], compilations=False, album_ids=[]),
+                    query="", sort=[], group="none"), revision=None, offset=0, limit=WINDOW)
+                first_page_ms = (time.monotonic()-page_started)*1000
+                total_ms = (time.monotonic()-started)*1000
+                assert page["offset"] == 0 and len(page["entries"]) <= WINDOW
+            finally:
+                probe_socket.close()
         control = MeasuredWebSocket(ready["address"], token)
         assert control.status == 101
         launch = dict(argv=argv, ready=ready, process_launch_uptime=started,
                       authenticated_ready_ms=(time.monotonic()-started)*1000,
                       ready_ms=ready_ms, hello_ms=hello_ms, first_page_ms=first_page_ms, total_ms=total_ms,
-                      first_page_total=page["total"], first_page_returned=len(page["entries"]),
-                      server_budgets_asserted=budgeted and args.server_profile == "release")
+                      first_page_total=page and page["total"], first_page_returned=page and len(page["entries"]),
+                      server_budgets_asserted=probe and budgeted and args.server_profile == "release")
         report["launches"].append(launch)
-        print(f"server launch {number}: ready {ready_ms:.1f} hello {hello_ms:.1f} first_page {first_page_ms:.1f} "
-              f"total {total_ms:.1f} ms (tracks {page['total']})", flush=True)
+        if probe:
+            print(f"server launch {number}: ready {ready_ms:.1f} hello {hello_ms:.1f} first_page {first_page_ms:.1f} "
+                  f"total {total_ms:.1f} ms (tracks {page['total']})", flush=True)
+        else:
+            print(f"server launch {number}: ready {ready_ms:.1f} ms (no probe; library worker unwarmed)", flush=True)
         if launch["server_budgets_asserted"]:
             assert page["total"] == TRACKS, f"launch {number}: budgeted launch must serve the seeded library, got {page['total']}"
             for name, limit in SERVER_BUDGET_MS.items():
@@ -374,10 +381,16 @@ def main():
         initial = control.state()
         assert initial["library"]["tracks"] == TRACKS and initial["queue_length"] == QUEUE
         report["initial_snapshot"] = initial
+        if not args.queries_only:
+            # The budgeted launch's probe ran the client's first Songs query, so its library
+            # worker is warm. Replace it with a daemon that has seen no library query.
+            stop()
+            ready = start(probe=False)
+            assert control.state()["library"]["tracks"] == TRACKS
         control.request("play")
         control.wait(lambda state: state["transport"] == "playing")
         if not args.queries_only:
-            # Fresh daemon + first native client, before any library query
+            # Fresh unprobed daemon + first native client, before any library query
             # distributions. State/play readiness is part of this combined time.
             native_run(0, ready, server_launch_uptime=report["launches"][-1]["process_launch_uptime"])
             report["process_cold_startup"] = report["native_runs"][0]["startup"]
@@ -619,7 +632,7 @@ def main():
         # Every startup and query distribution uses exactly 50k/10k; scanning
         # adds real tracks only after the final warm native startup measurement.
         if args.server_profile != "release":
-            report["limitations"].append(f"Server startup budgets (ready/hello/first page/total) recorded, NOT asserted: --server-profile {args.server_profile} (the debug first page is about 315 ms)")
+            report["limitations"].append(f"Server startup budgets (ready/hello/first page/total) recorded, NOT asserted: --server-profile {args.server_profile} (the debug first page is slower than the release budget)")
         report["limitations"].append("Server startup timing: seeded launch, fresh connection after the ready line; the empty-database first launch is recorded but not budgeted")
         report["limitations"].append("Warm native repeats follow the first native run and query distributions, reusing the same daemon")
         warm = [r["startup"]["process_to_first_usable_ms"] for r in report["native_runs"] if r["run_label"].startswith("warm-")]
