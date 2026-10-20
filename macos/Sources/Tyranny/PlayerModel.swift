@@ -9,14 +9,15 @@ final class PlayerModel {
     var tokenPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/tyranny/token").path
     private(set) var connection = "disconnected" {
-        didSet { updateMediaControls(); updateArtwork() }
+        didSet { updateMediaControls(); updateArtwork(); updateLyrics() }
     }
     private(set) var connectionDetail = "Connecting to the local server."
     private(set) var snapshot: ControlState? {
-        didSet { updateMediaControls(); updateArtwork() }
+        didSet { updateMediaControls(); updateArtwork(); updateLyrics() }
     }
     private(set) var playbackSession: UInt64 = 0
     let artwork = ArtworkStore()
+    let lyrics = LyricsStore()
     let notifications = TrackNotifications()
     /// Transport commands and the player bar display. Owns the system media controls.
     let transport = TransportModel()
@@ -201,6 +202,16 @@ final class PlayerModel {
         )
     }
 
+    private func updateLyrics(invalidate: Bool = false) {
+        lyrics.synchronize(
+            endpoint: endpoint, tokenPath: tokenPath,
+            instance: connected ? wire.instanceID : nil,
+            revision: connected ? snapshot?.library.revision : nil,
+            entryID: connected ? snapshot?.now_playing?.entry_id : nil,
+            invalidate: invalidate
+        )
+    }
+
     func shutdown() {
         notifications.shutdown()
         transport.shutdown()
@@ -359,13 +370,14 @@ final class PlayerModel {
                 launchResumePending = true
             }
         }
-        // A rescan that changes only cover files keeps the library revision, so
-        // invalidate artwork when a scan finishes, not only on revision change.
+        // File-derived artwork or lyrics can change without a catalog revision, so
+        // invalidate both when a scan finishes, not only on revision change.
         if let previous, previous.library.revision == state.library.revision,
            (["discovering", "indexing"].contains(previous.library.scan.phase)
                 && !["discovering", "indexing"].contains(state.library.scan.phase))
             || (previous.library.scan.phase != "complete" && state.library.scan.phase == "complete") {
             updateArtwork(invalidate: true)
+            updateLyrics(invalidate: true)
         }
         guard connected else { return }
         if previous?.library.revision != state.library.revision
@@ -565,6 +577,10 @@ final class PlayerModel {
         guard !scanActive else { throw CommandLanguageError("A library scan is already running.") }
         try await performMutation {
             let _: ScanAccepted = try await request("rescan", ["root_id": .uint(rootID)])
+            // A small no-op scan can finish between state publications. File tags
+            // are read independently of indexing, so explicit rescan also refreshes
+            // visible lyrics without relying on observing an intermediate phase.
+            updateLyrics(invalidate: true)
             refresh()
         }
     }
