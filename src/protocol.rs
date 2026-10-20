@@ -1,4 +1,4 @@
-//! Version 9 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 10 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -12,7 +12,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -54,6 +54,11 @@ pub enum Command {
     Append {
         expected_revision: u64,
         path: String,
+    },
+    AppendStream {
+        expected_revision: u64,
+        url: String,
+        title: String,
     },
     Remove {
         expected_revision: u64,
@@ -450,10 +455,50 @@ pub struct ControlState {
     pub upcoming_count: usize,
 }
 
+/// A live HTTP audio source; never interpreted as a filesystem path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamSpec {
+    pub url: String,
+    pub title: String,
+}
+impl StreamSpec {
+    pub fn new(url: String, title: String) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !url.is_empty() && url.len() <= 8192 && !url.chars().any(char::is_control),
+            "stream URL must contain 1..=8192 bytes and no control characters"
+        );
+        anyhow::ensure!(
+            title.len() <= MAX_SOURCE_NAME_BYTES && !title.chars().any(char::is_control),
+            "stream title must contain at most {MAX_SOURCE_NAME_BYTES} bytes and no control characters"
+        );
+        let parsed = reqwest::Url::parse(&url)?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https")
+                && parsed.host_str().is_some_and(|host| !host.is_empty())
+                && parsed.username().is_empty()
+                && parsed.password().is_none(),
+            "stream URL requires HTTP(S), a host, and no credentials"
+        );
+        let title = if title.trim().is_empty() {
+            parsed.host_str().expect("validated host").to_owned()
+        } else {
+            title.trim().to_owned()
+        };
+        let url = parsed.to_string();
+        anyhow::ensure!(url.len() <= 8192, "canonical stream URL is too long");
+        anyhow::ensure!(
+            title.len() <= MAX_SOURCE_NAME_BYTES,
+            "stream title is too long"
+        );
+        Ok(Self { url, title })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct QueueItem {
     pub id: u64,
     pub path: String,
+    pub stream: Option<StreamSpec>,
     pub track_id: Option<u64>,
     pub source: Option<QueueSource>,
     pub run_id: Option<u64>,
@@ -496,6 +541,7 @@ pub enum SourceKind {
     Compilations,
     Drag,
     Direct,
+    Stream,
 }
 impl SourceKind {
     pub fn as_str(self) -> &'static str {
@@ -510,6 +556,7 @@ impl SourceKind {
             Self::Compilations => "compilations",
             Self::Drag => "drag",
             Self::Direct => "direct",
+            Self::Stream => "stream",
         }
     }
     /// `None` for a name this server does not know.
@@ -525,6 +572,7 @@ impl SourceKind {
             Self::Compilations,
             Self::Drag,
             Self::Direct,
+            Self::Stream,
         ]
         .into_iter()
         .find(|kind| kind.as_str() == name)
@@ -751,6 +799,48 @@ pub enum Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stream_specs_validate_without_network_and_canonicalize() {
+        let spec = StreamSpec::new("HTTPS://EXAMPLE.ORG:443/live".into(), "  ".into()).unwrap();
+        assert_eq!(spec.url, "https://example.org/live");
+        assert_eq!(spec.title, "example.org");
+        for url in [
+            "file:///music/song.mp3",
+            "ftp://example.org/live",
+            "https://",
+            "http://user:secret@example.org/live",
+            "http://user@example.org/live",
+            "http://example.org/\ntrack",
+            "",
+        ] {
+            assert!(
+                StreamSpec::new(url.into(), "Station".into()).is_err(),
+                "{url:?}"
+            );
+        }
+        assert!(StreamSpec::new("http://example.org".into(), "x".repeat(257)).is_err());
+        assert!(StreamSpec::new("http://example.org".into(), "bad\ntitle".into()).is_err());
+        assert!(
+            StreamSpec::new(
+                format!("http://example.org/{}", "x".repeat(8192)),
+                "".into()
+            )
+            .is_err()
+        );
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": 1, "command": "append_stream", "expected_revision": 2,
+            "url": spec.url, "title": spec.title
+        }))
+        .unwrap();
+        assert!(matches!(
+            request.command,
+            Command::AppendStream {
+                expected_revision: 2,
+                ..
+            }
+        ));
+        assert_eq!(SourceKind::parse("stream"), Some(SourceKind::Stream));
+    }
 
     #[test]
     fn artwork_wire_requires_revision_and_size_and_rejects_client_paths() {
@@ -811,7 +901,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 9);
+        assert_eq!(VERSION, 10);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

@@ -24,6 +24,7 @@ MINIMUM_OS = "14.0"
 LIBRARIES = {"avcodec": 63, "avformat": 63, "avutil": 61, "swresample": 7}
 DECODERS = "flac mp3 aac alac opus vorbis wavpack mpc7 mpc8 wmav1 wmav2 wmapro wmalossless wmavoice ape tta shorten png mjpeg".split()
 DEMUXERS = "flac mp3 aac mov ogg wv mpc mpc8 asf ape tta shorten wav aiff matroska".split()
+PROTOCOLS = "file http https tcp tls".split()
 
 
 def digest(path):
@@ -95,21 +96,34 @@ def configure_options(tools):
         "--disable-programs", "--disable-doc", "--disable-debug", "--disable-checkasm",
         "--disable-avdevice", "--disable-avfilter", "--disable-swscale",
         "--disable-devices", "--disable-filters", "--disable-encoders", "--disable-muxers",
-        "--disable-hwaccels", "--disable-network",
+        # Secure Transport uses macOS's system trust store and hostname checks;
+        # no Homebrew/OpenSSL runtime is added to the relocatable app bundle.
+        "--disable-hwaccels", "--enable-network", "--enable-securetransport",
+        "--disable-protocols", f"--enable-protocol={','.join(PROTOCOLS)}",
+        # These network-only demuxers otherwise select RTP/UDP implicitly.
+        "--disable-demuxer=rtp,rtsp,sap,sdp",
     ]
 
 
 def require_configuration(build):
     components = (build / "config_components.h").read_text()
     config = (build / "config.h").read_text()
-    for kind, names in (("DECODER", DECODERS), ("DEMUXER", DEMUXERS)):
+    for kind, names in (("DECODER", DECODERS), ("DEMUXER", DEMUXERS),
+                        ("PROTOCOL", PROTOCOLS)):
         for name in names:
             if f"#define CONFIG_{name.upper()}_{kind} 1" not in components:
                 raise RuntimeError(f"Required native FFmpeg {kind.lower()} missing: {name}")
+    enabled_protocols = {
+        name.lower() for name in
+        re.findall(r"^#define CONFIG_(\w+)_PROTOCOL 1$", components, re.MULTILINE)
+    }
+    if enabled_protocols != set(PROTOCOLS):
+        raise RuntimeError(f"Unexpected native FFmpeg protocols: {sorted(enabled_protocols - set(PROTOCOLS))}")
     for name in ("GPL", "NONFREE", "VERSION3"):
         if f"#define CONFIG_{name} 0" not in config:
             raise RuntimeError(f"FFmpeg licensing configuration unexpectedly enabled {name}")
-    for name in ("ZLIB", "BZLIB", "ICONV", "AVCODEC", "AVFORMAT", "AVUTIL", "SWRESAMPLE"):
+    for name in ("ZLIB", "BZLIB", "ICONV", "AVCODEC", "AVFORMAT", "AVUTIL",
+                 "SWRESAMPLE", "NETWORK", "SECURETRANSPORT"):
         if f"#define CONFIG_{name} 1" not in config:
             raise RuntimeError(f"Required FFmpeg configuration missing: {name}")
 
@@ -204,6 +218,8 @@ def build(prefix, archive, identity, options, env, root):
             },
             "required_native_decoders": DECODERS,
             "required_demuxers": DEMUXERS,
+            "required_protocols": PROTOCOLS,
+            "tls_backend": "Secure Transport (macOS system trust and hostname verification)",
             "environment": env,
         }
         (provenance / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")

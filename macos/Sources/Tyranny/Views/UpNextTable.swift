@@ -249,10 +249,10 @@ struct UpNextTable: NSViewRepresentable {
             let text: String
             switch id {
             case "number": text = String(row + 1)
-            case "title": text = Self.title(item)
-            case "artist": text = item.artist
-            case "album": text = item.album
-            case "time": text = item.duration_ms.map { DisplayFormat.clock(Double($0) / 1000) } ?? ""
+            case "title": text = item.displayTitle
+            case "artist": text = item.displayArtist
+            case "album": text = item.stream == nil ? item.album : "Live stream"
+            case "time": text = item.displayDuration
             default: text = UpNextSections.addedFrom(item.source)
             }
             let weight: NSFont.Weight = section == .nowPlaying && id == "title" ? .semibold : .regular
@@ -264,10 +264,6 @@ struct UpNextTable: NSViewRepresentable {
             return cell
         }
 
-        /// An entry the library does not know has no title: its file name stands in.
-        private static func title(_ item: QueueItem) -> String {
-            item.title.isEmpty ? (item.path as NSString).lastPathComponent : item.title
-        }
 
         // MARK: Delegate
 
