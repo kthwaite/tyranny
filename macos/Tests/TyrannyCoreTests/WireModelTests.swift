@@ -168,3 +168,25 @@ private let nowPlayingBase = #""entry_id":1,"title":"T","artist":"A","album":"B"
     #expect(playing.artistLinkID == nil)
     #expect(playing.album_id == nil)
 }
+
+@Test func stationsAppliedDecodes() throws {
+    let snapshotText = """
+        {"sequence":1,"queue_revision":4,"playlists_revision":1,"stations_revision":2,"queue_length":0,
+         "current_id":null,"can_next":false,"can_previous":false,"now_playing":null,
+         "position_frames":0,"sample_rate":48000,"transport":"paused",
+         "settings":{"gain_mode":"off","resume_on_start":false,"volume":100,"repeat":"off","shuffle":false},
+         "error":null,"underruns":0,
+         "library":{"revision":1,"roots":0,"tracks":0,"duration_ms":0,"size_bytes":0,
+                    "scan":{"root_id":null,"phase":"idle","discovered":0,"processed":0,"total":null,"updated":0,"unchanged":0,"failures":0,"skipped":0,"last_error":null}},
+         "history_revision":0,"current_index":null,"upcoming_count":0}
+        """
+    let text = #"{"kind":"stations_applied","snapshot":\#(snapshotText),"stations":[{"id":7,"name":"Jazz","url":"http://j.example/s"}]}"#
+    let applied = try JSONDecoder().decode(StationsApplied.self, from: Data(text.utf8))
+    #expect(applied.snapshot.stations_revision == 2)
+    #expect(applied.stations == [Station(id: 7, name: "Jazz", url: "http://j.example/s")])
+    let page = try JSONDecoder().decode(
+        StationsPage.self, from: Data(#"{"kind":"stations","revision":3,"stations":[]}"#.utf8))
+    #expect(page.revision == 3 && page.stations.isEmpty)
+    let input = try JSONEncoder().encode(StationInput(name: "", url: "http://a.example/s"))
+    #expect(try json(String(decoding: input, as: UTF8.self)) == .object(["name": .string(""), "url": .string("http://a.example/s")]))
+}

@@ -912,3 +912,45 @@ public struct HistoryResponse: Codable, Sendable, Equatable {
         self.entries = entries
     }
 }
+
+public struct Station: Codable, Sendable, Equatable, Identifiable {
+    public let id: UInt64
+    public let name: String
+    public let url: String
+
+    public init(id: UInt64, name: String, url: String) {
+        self.id = id
+        self.name = name
+        self.url = url
+    }
+}
+
+public struct StationInput: Codable, Sendable, Equatable {
+    public let name: String
+    public let url: String
+
+    public init(name: String, url: String) {
+        self.name = name
+        self.url = url
+    }
+}
+
+public struct StationsPage: Codable, Sendable, Equatable {
+    public let revision: UInt64
+    public let stations: [Station]
+
+    public init(revision: UInt64, stations: [Station]) {
+        self.revision = revision
+        self.stations = stations
+    }
+}
+
+public struct StationsApplied: Codable, Sendable, Equatable {
+    public let snapshot: ControlState
+    public let stations: [Station]
+
+    public init(snapshot: ControlState, stations: [Station]) {
+        self.snapshot = snapshot
+        self.stations = stations
+    }
+}
