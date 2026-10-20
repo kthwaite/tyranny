@@ -54,6 +54,7 @@ An **import session** is client state held by `PlayerModel` for this app run. It
 | Event | Result |
 |---|---|
 | `add_root` succeeds while `library.roots == 0` (the first folder) | Start a session for the new root's id (`RootAdded.root.id`). |
+| `add_root` succeeds while a session exists (after an empty first folder) | Restart the session for the new root. |
 | First authoritative snapshot of a launch: `roots > 0`, `tracks == 0`, and the scan is active (`discovering` or `indexing`) | Start a session for `scan.root_id`. This covers a relaunch during the first import. |
 | User presses **Browse Library** (while importing) or **Show Songs** (when done), or the destination changes | End the session. |
 | Connection lost | Keep the session. The disconnected screen takes priority while disconnected (see below). |
@@ -64,7 +65,7 @@ An **import session** is client state held by `PlayerModel` for this app run. It
 The main area shows, in priority order: disconnected state, then the import screen while a session
 exists, then the "Add Your Music" empty state when `roots == 0`, then the destination.
 
-The import screen has one of four stages, computed from the session's root id and the current
+The import screen has one of six stages, computed from the session's root id and the current
 `ScanStatus`:
 
 | Stage | Condition | Title | Bar | Detail line | Buttons |
@@ -72,7 +73,8 @@ The import screen has one of four stages, computed from the session's root id an
 | Preparing | `scan.root_id` is not the session root, or phase `idle` | Importing Your Music | indeterminate | the folder path | Browse Library |
 | Discovering | phase `discovering` for the session root | Importing Your Music | indeterminate | "Finding music… 1,204 files found" | Browse Library |
 | Indexing | phase `indexing` for the session root | Importing Your Music | determinate, `min(processed, total) / total` | "Reading 412 of 1,129 files" | Browse Library |
-| Done | phase `complete` for the session root | Your Music Is Ready | none; a large checkmark symbol instead | library totals, e.g. "1,129 songs · 3.4 days" | **Show Songs** (prominent, default) |
+| Done | phase `complete` for the session root, `tracks > 0` | Your Music Is Ready | none; a large checkmark symbol instead | library totals, e.g. "1,129 songs · 3.4 days · 41.7 GB" | **Show Songs** (prominent, default) |
+| Empty | phase `complete` for the session root, `tracks == 0` | No Music Found | none | "Tyranny found no audio files in this folder." | **Choose Another Folder…** (`model.chooseFolder`) |
 | Stopped | phase `failed` or `interrupted` for the session root | Import Stopped | none | `last_error`, or "The import did not finish." | **Try Again** (rescans the root), Browse Library |
 
 - Indexing with `total` nil or 0 shows the indeterminate bar and "Reading 412 files".
@@ -81,13 +83,20 @@ The import screen has one of four stages, computed from the session's root id an
 - Below the title, the folder path, abbreviated with `~` (`DisplayFormat.abbreviatedPath`).
 - The bar is about 360 pt wide, regular size. The title uses `.title2` semibold, as the other empty
   states do (`ContentUnavailableView` style). Exact layout is left to the builder.
-- Done uses the library totals format the status bar already uses
-  (`DisplayFormat.totals`). With `tracks == 0` at Done, the detail reads "No music found in this
-  folder." and the button is **Choose Another Folder…** (`model.chooseFolder`); the session
-  continues so the next folder is treated as the first.
+- Done uses the library totals format the status bar already uses (`DisplayFormat.totals` with no
+  `of:`). On Empty the session continues, so the next folder chosen restarts it.
 - **Show Songs** ends the session and sets `navigation.destination = .songs`.
 - **Try Again** sends `rescan` for the session root. The session continues and returns to
   Preparing until the scan reports for that root.
+
+### Stale status at start and retry
+
+A session records the `ScanStatus` on show when it starts or retries (its *baseline*). While the
+current status equals the baseline exactly, a terminal phase (`complete`, `failed`, `interrupted`)
+reads as Preparing, so the old result of a retried scan is not shown as the new one. Any change
+to the status ends this, so a scan that finishes between two snapshots still reaches Done. The
+launch rule starts a session with no baseline. If a retried scan fails with an identical status,
+the screen stays on Preparing; Browse Library still leaves it.
 
 ### Monotonic bar
 
@@ -111,12 +120,13 @@ fraction passes it or the stage changes. Clamp to `0...1`.
 ## Verification
 
 - TyrannyCore unit tests for every row of the stage table, the failure line (0, 1, many), nil and
-  zero `total`, clamping, the monotonic rule, a status for another root, and the empty-folder Done.
+  zero `total`, clamping, the monotonic rule, a status for another root, Empty, and the baseline
+  rule.
 - Unit tests for the session start rules (first folder only; launch rule; not on second folder).
 - `NativeShellSmoke` onboarding case: after choosing the folder, `import-progress` exists; after the
   scan completes, `import-show-songs` exists; pressing it shows `main-songs`. Update
   `NativeSmoke`'s onboarding import to dismiss the screen before it continues.
-- Renders with `scripts/render_views.py`: discovering, indexing, done, stopped. The render harness
+- Renders with `scripts/render_views.py`: discovering, indexing, done, stopped, empty. The render harness
   may inject a fixed status so images are deterministic.
 - Standard gates: `cargo fmt --check`, clippy `-D warnings`, `cargo test`, Swift debug and release
   builds with `-warnings-as-errors`, `swift test`, `client_gate.py --model-only`. Native gates remain
