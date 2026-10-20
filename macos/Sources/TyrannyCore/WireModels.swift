@@ -59,6 +59,7 @@ public struct ControlState: Codable, Sendable, Equatable {
     public let sequence: UInt64
     public let queue_revision: UInt64
     public let playlists_revision: UInt64
+    public let stations_revision: UInt64
     public let queue_length: Int
     public let current_id: UInt64?
     public let can_next: Bool
@@ -78,7 +79,7 @@ public struct ControlState: Codable, Sendable, Equatable {
     public let upcoming_count: Int
 
     public init(
-        sequence: UInt64, queue_revision: UInt64, playlists_revision: UInt64, queue_length: Int,
+        sequence: UInt64, queue_revision: UInt64, playlists_revision: UInt64, stations_revision: UInt64, queue_length: Int,
         current_id: UInt64?, can_next: Bool, can_previous: Bool, now_playing: NowPlaying?,
         position_frames: UInt64, sample_rate: UInt32, transport: String, settings: PlayerSettings,
         error: String?, underruns: UInt64, library: LibraryState, history_revision: UInt64,
@@ -87,6 +88,7 @@ public struct ControlState: Codable, Sendable, Equatable {
         self.sequence = sequence
         self.queue_revision = queue_revision
         self.playlists_revision = playlists_revision
+        self.stations_revision = stations_revision
         self.queue_length = queue_length
         self.current_id = current_id
         self.can_next = can_next
@@ -106,7 +108,7 @@ public struct ControlState: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case sequence, queue_revision, queue_length, current_id, can_next, can_previous, now_playing
-        case playlists_revision
+        case playlists_revision, stations_revision
         case position_frames, sample_rate, transport, settings, error, underruns, library
         case history_revision, current_index, upcoming_count
     }
@@ -116,6 +118,7 @@ public struct ControlState: Codable, Sendable, Equatable {
         sequence = try values.decode(UInt64.self, forKey: .sequence)
         queue_revision = try values.decode(UInt64.self, forKey: .queue_revision)
         playlists_revision = try values.decode(UInt64.self, forKey: .playlists_revision)
+        stations_revision = try values.decode(UInt64.self, forKey: .stations_revision)
         queue_length = try values.decode(Int.self, forKey: .queue_length)
         current_id = try values.decode(UInt64?.self, forKey: .current_id)
         can_next = try values.decode(Bool.self, forKey: .can_next)

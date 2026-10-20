@@ -12,7 +12,7 @@ func snapshot(currentID: UInt64?, currentIndex: Int?, upcoming: Int, shuffle: Bo
             + #""track_id":null,"album_id":null,"format":"","gain_db":null}"#
     } ?? "null"
     let text = """
-        {"sequence":1,"queue_revision":4,"playlists_revision":1,"queue_length":\(queueLength),
+        {"sequence":1,"queue_revision":4,"playlists_revision":1,"stations_revision":0,"queue_length":\(queueLength),
          "current_id":\(current),"can_next":true,"can_previous":true,"now_playing":\(playing),
          "position_frames":0,"sample_rate":48000,"transport":"paused",
          "settings":{"gain_mode":"off","resume_on_start":false,"volume":100,"repeat":"off","shuffle":\(shuffle)},

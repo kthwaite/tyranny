@@ -523,7 +523,8 @@ fn reply_sequence(message: &Message) -> Option<u64> {
                     result:
                         Response::Snapshot { snapshot }
                         | Response::Applied { snapshot, .. }
-                        | Response::PlaylistApplied { snapshot, .. },
+                        | Response::PlaylistApplied { snapshot, .. }
+                        | Response::StationsApplied { snapshot, .. },
                 },
             ..
         } => Some(snapshot.sequence),

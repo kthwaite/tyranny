@@ -28,6 +28,7 @@ pub(crate) use playlists::{
     PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule, playlist_sources,
 };
 pub(crate) use selection::resolve_selection;
+pub(crate) use stations::{StaleStationsRevision, StationEdit};
 #[cfg(test)]
 mod playlists_tests;
 #[cfg(test)]

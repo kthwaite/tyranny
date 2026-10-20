@@ -6,7 +6,7 @@ continuous CoreAudio stream. The native engine, persistent local server,
 durable library, and native SwiftUI controller are implemented and exercised;
 see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations.
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
-Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v10 requires matching client/server processes; the main database is schema 6.
+Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v11 requires matching client/server processes; the main database is schema 7.
 
 ## Development commands
 
@@ -279,6 +279,17 @@ Position updates are low-rate observations; the UI may interpolate between them 
 
 Bind only to loopback, authenticate using a per-user token stored with restrictive permissions, and reject unexpected browser origins. Do not open a LAN listener as part of this spike.
 
+### Saved radio stations
+
+Protocol v11 adds a server-owned catalog of saved internet-radio stations. It has its own `stations_revision`, published in every `ControlState`.
+
+- Commands: `stations` (replies `stations` with `revision` and `stations`), `add_stations`, `update_station` and `remove_station`. Each edit carries `expected_revision` and replies `stations_applied` with the new snapshot and the added or updated rows. A stale revision fails with `stale_stations_revision`.
+- `add_stations` takes `stations: [{name, url}]`. A blank name becomes the URL's host. Every entry passes `StreamSpec::new`, the same check as `append_stream`. If one entry is invalid, the whole command fails with `invalid_command` and the message names its 0-based index. Nothing is saved.
+- Stations are unique by canonical URL. Adding a URL that is already saved is skipped. Updating a station to a URL another station uses is `invalid_command`.
+- The catalog is sorted by name without regard to case, then by ID.
+- Limits: at most 1000 stations, and 1..=500 per `add_stations`.
+- Queue entries are independent. Appending a station copies its URL and title into the queue entry. Later station edits and removals never change a queued entry.
+
 ### Identity and persistence invariants
 
 - A **media asset** locates a file; a **track** is a playable item, potentially a segment of that file; a **queue entry** is one occurrence of a track. Repeated tracks in a queue have different entry IDs. CUE parsing is deferred, not made impossible by using paths as track IDs.
@@ -345,7 +356,7 @@ The reproducible scale gate seeds a declared metadata-only 50,000-track index an
 ## Explicitly deferred from this spike
 
 - Remaining codecs/containers, audio CD, module/BASS support, and every non-CoreAudio output. Maintain a tested capability list; broad dependency support is not a coverage claim.
-- Saved internet-radio stations and station-file imports; dynamic queue autofill; the directory-browser screen. Direct SHOUTcast/Icecast MP3/Ogg playback is implemented; see [streaming evidence](SPIKE_RESULTS.md#http-stream-playback).
+- The radio directory lookup; dynamic queue autofill; the directory-browser screen. Direct SHOUTcast/Icecast MP3/Ogg playback is implemented; see [streaming evidence](SPIKE_RESULTS.md#http-stream-playback).
 - MusicBrainz tag retrieval, additional cover providers and artist/title matching, lyrics providers, scrobbling, and tag writing. Artwork fallback uses an existing MusicBrainz release ID only; it does not search for or rewrite tags.
 - Equalizer/analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
 - CUE ingestion and sophisticated release reconciliation; preserve the identity seams now.

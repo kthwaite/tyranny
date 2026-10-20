@@ -1,5 +1,3 @@
-// The owner wires these in a later task; until then only the tests use them.
-#![allow(dead_code)]
 use super::{
     Store,
     playlists::{invalid, next_revision},

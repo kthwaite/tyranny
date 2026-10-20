@@ -128,7 +128,7 @@ import Testing
                        album_id: 2, album_artist_id: 3, compilation: false, format: "FLAC", gain_db: nil)
         }
         return ControlState(
-            sequence: 8, queue_revision: 4, playlists_revision: 1, queue_length: queueLength,
+            sequence: 8, queue_revision: 4, playlists_revision: 1, stations_revision: 0, queue_length: queueLength,
             current_id: current, can_next: canNext, can_previous: canPrevious, now_playing: playing,
             position_frames: position, sample_rate: rate, transport: "playing",
             settings: PlayerSettings(gain_mode: "off", resume_on_start: resume, volume: volume, repeat: repeatMode, shuffle: shuffle),
