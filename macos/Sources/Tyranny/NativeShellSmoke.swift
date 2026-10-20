@@ -56,11 +56,18 @@ enum NativeShellSmoke {
         try await wait("native directory picker", model) { NSApp.windows.contains { $0 is NSOpenPanel } }
         try await Task.sleep(for: .seconds(1))
         try await drive("press-title", "Add Music Folder")
+        try await drive("exists", "import-progress")
         try await wait("folder import", model, seconds: 30) {
             model.snapshot?.library.scan.phase == "complete" && model.snapshot?.library.tracks == 105
         }
+        try await drive("exists", "import-show-songs")
+        try capture("shell-import-done")
+        try await press("import-show-songs")
+        try await wait("import screen closed", model) { model.importProgress == nil }
+        try await drive("exists", "main-songs")
         try check(model.roots?.entries.first?.path == folder.path, "Picker imported the wrong folder")
         cases.append("native-onboarding-choose-folder-imports-root")
+        cases.append("native-onboarding-import-screen-fills-then-shows-songs")
 
         // Source list: every LIBRARY and PLAYING destination.
         for destination in Destination.library + Destination.playing {

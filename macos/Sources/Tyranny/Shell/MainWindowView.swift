@@ -80,6 +80,7 @@ struct MainWindowView: View {
         .sheet(item: Binding(get: { model.activation.prompt }, set: { model.activation.prompt = $0 })) { _ in
             UpNextPrompt(activation: model.activation)
         }
+        .onChange(of: navigation.destination) { _, _ in model.endImport() }
         .onChange(of: navigation.reveal) { _, target in reveal(target) }
         .onChange(of: navigation.revealPlayingRequest) { _, _ in revealPlaying() }
         .onChange(of: filterError) { _, error in if error == nil { dismissedFilterError = nil } }
@@ -126,6 +127,14 @@ struct MainWindowView: View {
 
     // MARK: - Main area
 
+    private var importScreen: ImportProgress? {
+        #if DEBUG
+        model.importOverride ?? model.importProgress
+        #else
+        model.importProgress
+        #endif
+    }
+
     @ViewBuilder private var mainArea: some View {
         if !model.connected {
             ContentUnavailableView {
@@ -140,6 +149,8 @@ struct MainWindowView: View {
                     .disabled(model.connection == "connecting" || model.serverManagementBusy)
                     .accessibilityIdentifier("disconnected-retry")
             }
+        } else if let progress = importScreen {
+            ImportProgressView(progress: progress, folder: model.importRootPath, model: model, navigation: navigation)
         } else if model.snapshot?.library.roots == 0 {
             ContentUnavailableView {
                 Label("Add Your Music", systemImage: "music.note.house")

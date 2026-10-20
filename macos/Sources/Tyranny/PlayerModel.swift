@@ -51,6 +51,18 @@ final class PlayerModel {
     @ObservationIgnored private var lastRootsRefresh = Date.distantPast
     /// Set on the first hello of this run, so a quit note is decided once, never on reconnects.
     @ObservationIgnored private var launchSuspensionChecked = false
+    /// Set on the first authoritative snapshot of this run, so a launch import is decided once.
+    @ObservationIgnored private var launchImportChecked = false
+    /// The onboarding import in progress. It outlives disconnects.
+    @ObservationIgnored private var importSession: ImportSession?
+    /// The session's root, observed so the folder line updates when roots load.
+    private(set) var importRootID: UInt64?
+    /// What the import screen shows. Nil when no import screen is wanted.
+    private(set) var importProgress: ImportProgress?
+    #if DEBUG
+    /// Shown by the import screen instead of `importProgress`.
+    var importOverride: ImportProgress?
+    #endif
     /// The hello arrives before `connected` is true, and `play` needs `connected`.
     /// So the decision waits here until the connection loop marks the connection connected.
     @ObservationIgnored private var launchResumePending = false
@@ -274,6 +286,11 @@ final class PlayerModel {
         let previous = snapshot
         snapshot = state
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
+        if newInstance, !launchImportChecked {
+            launchImportChecked = true
+            if importSession == nil { setImportSession(ImportSession.atLaunch(library: state.library)) }
+        }
+        updateImportProgress()
         if newInstance, !launchSuspensionChecked {
             launchSuspensionChecked = true
             if let note = quitSuspensions.take(),
@@ -375,12 +392,46 @@ final class PlayerModel {
             Task { @MainActor in await self?.addRoot(path) }
         }
     }
+    /// The path of the root being imported, abbreviated, once the root list has it.
+    var importRootPath: String? {
+        guard let importRootID, let root = roots?.entries.first(where: { $0.id == importRootID }) else { return nil }
+        return DisplayFormat.abbreviatedPath(root.path, home: NSHomeDirectory())
+    }
+    /// Closes the import screen.
+    func endImport() {
+        guard importSession != nil || importProgress != nil else { return }
+        setImportSession(nil)
+    }
+    /// Try Again: a fresh baseline, then a rescan of the same root.
+    func retryImport() {
+        guard let scan = snapshot?.library.scan, var session = importSession else { return }
+        session.retry(baseline: scan)
+        importSession = session
+        updateImportProgress()
+        rescan(session.rootID)
+    }
+    private func setImportSession(_ session: ImportSession?) {
+        importSession = session
+        importRootID = session?.rootID
+        importProgress = nil
+        updateImportProgress()
+    }
+    /// Recomputes the screen from the current snapshot. Call once per accepted snapshot: it remembers the shown fraction.
+    private func updateImportProgress() {
+        guard var session = importSession, let library = snapshot?.library else { return }
+        importProgress = session.progress(library: library)
+        importSession = session
+    }
     func addRoot(_ path: String) async {
         guard canMutate else { return }
         busy = true
         defer { busy = false }
+        let rootsBefore = snapshot?.library.roots ?? 0
+        let baseline = snapshot?.library.scan
         do {
-            let _: RootAdded = try await request("add_root", ["path": .string(path)])
+            let added: RootAdded = try await request("add_root", ["path": .string(path)])
+            setImportSession(ImportSession.afterAddRoot(
+                rootID: added.root.id, rootsBefore: rootsBefore, current: importSession, baseline: baseline))
             message = nil; refresh()
         } catch { message = error.localizedDescription }
     }

@@ -73,6 +73,8 @@ enum NativeSmoke {
         try await wait("native folder import", seconds: 30) {
             model.snapshot?.library.scan.phase == "complete" && model.snapshot?.library.tracks == 105
         }
+        try await press("import-show-songs")
+        try await wait("import screen closed") { model.importProgress == nil }
         try await wait("imported root") { model.roots?.entries.first?.path == folder.path }
         cases.append("native-folder-picker-import")
 
