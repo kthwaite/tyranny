@@ -9,7 +9,7 @@ final class WireClient {
     var onDisconnect: ((String) -> Void)?
     private(set) var instanceID: String?
 
-    nonisolated static let requestLimit = 16 * 1024
+    nonisolated static let requestLimit = RequestFrame.limit
     nonisolated static let responseLimit = 8 * 1024 * 1024
     private static let pendingLimit = 32
 
@@ -36,7 +36,6 @@ final class WireClient {
     private var sequence: UInt64?
     private var ready = false
     private let decoder = JSONDecoder()
-    private let encoder = JSONEncoder()
     private let requestDeadlineSeconds: UInt64
 
     init(requestDeadlineSeconds: UInt64 = 10) {
@@ -100,7 +99,7 @@ final class WireClient {
                 helloDeadline = Task { @MainActor [weak self] in
                     do { try await Task.sleep(for: .seconds(10)) } catch { return }
                     self?.endConnection(
-                        ServerFailure(code: "hello_timeout", message: "The server did not send a protocol v11 hello within 10 seconds."),
+                        ServerFailure(code: "hello_timeout", message: "The server did not send a protocol v\(WireProtocol.version) hello within 10 seconds."),
                         generation: connectionID
                     )
                 }
@@ -155,12 +154,9 @@ final class WireClient {
             throw ServerFailure(code: "request_ids_exhausted", message: "Request IDs are exhausted. Reopen the client before sending another command.")
         }
         let id = nextRequestID
-        var object = fields
-        object["id"] = .uint(id)
-        object["command"] = .string(command)
         let bytes: Data
         do {
-            bytes = try encoder.encode(object)
+            bytes = try RequestFrame.encode(command, fields: fields, id: id)
         } catch {
             throw ServerFailure(code: "invalid_request", message: "The command could not be encoded and was not sent.")
         }
@@ -227,7 +223,7 @@ final class WireClient {
             }
             data = Data(text.utf8)
         case .data:
-            throw protocolFailure("The server sent a binary message; protocol v11 requires JSON text.")
+            throw protocolFailure("The server sent a binary message; protocol v\(WireProtocol.version) requires JSON text.")
         @unknown default:
             throw protocolFailure("The server sent an unsupported WebSocket message.")
         }
@@ -235,15 +231,15 @@ final class WireClient {
         do {
             incoming = try decoder.decode(IncomingMessage.self, from: data)
         } catch {
-            throw protocolFailure("The server sent malformed or incompatible protocol v11 JSON. Upgrade the client and server together.")
+            throw protocolFailure("The server sent malformed or incompatible protocol v\(WireProtocol.version) JSON. Upgrade the client and server together.")
         }
 
         if case .hello(let version, let instance, let snapshot) = incoming {
             guard !ready, let waiter = helloWaiter else {
                 throw protocolFailure("The server sent more than one hello.")
             }
-            guard version == 11 else {
-                throw protocolFailure("The server protocol is incompatible; this client requires version 11.")
+            guard version == WireProtocol.version else {
+                throw protocolFailure("The server protocol is incompatible; this client requires version \(WireProtocol.version).")
             }
             guard !instance.isEmpty else {
                 throw protocolFailure("The server hello did not identify its instance.")
@@ -263,7 +259,7 @@ final class WireClient {
             return
         }
         guard ready else {
-            throw protocolFailure("The server sent a message before its protocol v11 hello.")
+            throw protocolFailure("The server sent a message before its protocol v\(WireProtocol.version) hello.")
         }
         switch incoming {
         case .hello:
@@ -357,6 +353,8 @@ final class WireClient {
         case "save_upcoming": return "playlist_applied"
         case "create_playlist", "create_smart_playlist", "update_smart_playlist", "snapshot_smart_playlist", "rename_playlist", "delete_playlist", "playlist_add", "playlist_add_selection", "playlist_remove", "playlist_move": return "playlist_applied"
         case "enqueue_playlist": return "applied"
+        case "stations": return "stations"
+        case "add_stations", "update_station", "remove_station": return "stations_applied"
         case "add_root": return "root_added"
         case "rescan": return "scan_accepted"
         case "append", "append_stream", "append_track", "remove", "move", "clear", "play", "pause", "toggle_play_pause", "next", "previous", "stop", "seek", "set_gain", "set_resume": return "applied"
@@ -492,13 +490,14 @@ struct ResultHeader: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         kind = try container.decode(String.self, forKey: .kind)
         switch kind {
-        case "snapshot", "applied", "playlist_applied":
+        case "snapshot", "applied", "playlist_applied", "stations_applied":
             snapshot = try container.decode(ControlState.self, forKey: .snapshot)
         case "queue_page", "root_added", "scan_accepted", "library_roots", "saved_playlists", "playlist_entries", "artwork", "lyrics",
-             "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history":
+             "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history",
+             "stations":
             snapshot = nil
         default:
-            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown protocol v11 result kind")
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown protocol v\(WireProtocol.version) result kind")
         }
     }
 }
@@ -539,7 +538,7 @@ enum IncomingMessage: Decodable {
                 throw DecodingError.dataCorruptedError(forKey: .status, in: container, debugDescription: "Unknown reply status")
             }
         default:
-            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown protocol v11 message type")
+            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown protocol v\(WireProtocol.version) message type")
         }
     }
 }

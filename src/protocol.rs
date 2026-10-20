@@ -1,4 +1,4 @@
-//! Version 11 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 12 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -13,10 +13,15 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
+/// The most saved radio stations the catalog may hold.
+pub const MAX_STATIONS: usize = 1000;
+/// The most stations one `add_stations` may carry. The Swift client's
+/// `StationCatalog.maximumBatch` must match (`tests/swift_constants.rs`).
+pub const MAX_STATION_BATCH: usize = 500;
 /// The most ranges one list selection may name.
 pub const MAX_SELECTION_RANGES: usize = 64;
 /// Played entries the queue keeps, not counting the current entry.
@@ -266,6 +271,21 @@ pub enum Command {
         playlist_id: u64,
         expected_revision: u64,
     },
+    Stations,
+    AddStations {
+        expected_revision: u64,
+        stations: Vec<StationInput>,
+    },
+    UpdateStation {
+        station_id: u64,
+        expected_revision: u64,
+        name: String,
+        url: String,
+    },
+    RemoveStation {
+        station_id: u64,
+        expected_revision: u64,
+    },
     PlaylistAdd {
         playlist_id: u64,
         expected_revision: u64,
@@ -465,6 +485,9 @@ pub struct NowPlaying {
     pub format: String,
     /// Gain the decoder applied; `None` when gain mode is off.
     pub gain_db: Option<f64>,
+    /// The saved station name of a live stream; `None` for a library entry.
+    #[serde(default)]
+    pub station: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -472,6 +495,7 @@ pub struct ControlState {
     pub sequence: u64,
     pub queue_revision: u64,
     pub playlists_revision: u64,
+    pub stations_revision: u64,
     pub queue_length: usize,
     pub current_id: Option<u64>,
     pub can_next: bool,
@@ -529,6 +553,21 @@ impl StreamSpec {
         );
         Ok(Self { url, title })
     }
+}
+
+/// A saved radio station: a canonical stream URL and its display name.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Station {
+    pub id: u64,
+    pub name: String,
+    pub url: String,
+}
+
+/// A station as a client submits it. A blank name becomes the URL's host.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StationInput {
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -756,6 +795,14 @@ pub enum Response {
         snapshot: Box<ControlState>,
         playlist: Option<Playlist>,
     },
+    Stations {
+        revision: u64,
+        stations: Vec<Station>,
+    },
+    StationsApplied {
+        snapshot: Box<ControlState>,
+        stations: Vec<Station>,
+    },
     History {
         #[serde(flatten)]
         page: Page<HistoryEntry>,
@@ -799,6 +846,7 @@ pub enum ErrorCode {
     StaleRevision,
     StaleLibraryRevision,
     StalePlaylistRevision,
+    StaleStationsRevision,
     InvalidCommand,
     InvalidFilter,
     Playback,
@@ -928,6 +976,37 @@ mod tests {
     }
 
     #[test]
+    fn station_commands_use_snake_case_wire_names() {
+        let decode = |value: serde_json::Value| serde_json::from_value::<Request>(value).unwrap();
+        assert!(matches!(
+            decode(serde_json::json!({"id":1,"command":"stations"})).command,
+            Command::Stations
+        ));
+        assert!(matches!(
+            decode(serde_json::json!({"id":1,"command":"add_stations","expected_revision":0,
+                "stations":[{"name":"","url":"https://a.example/"}]}))
+            .command,
+            Command::AddStations { expected_revision: 0, stations } if stations.len() == 1
+        ));
+        assert!(matches!(
+            decode(
+                serde_json::json!({"id":1,"command":"update_station","station_id":3,
+                "expected_revision":1,"name":"A","url":"https://a.example/"})
+            )
+            .command,
+            Command::UpdateStation { station_id: 3, .. }
+        ));
+        assert!(matches!(
+            decode(
+                serde_json::json!({"id":1,"command":"remove_station","station_id":3,
+                "expected_revision":1})
+            )
+            .command,
+            Command::RemoveStation { station_id: 3, .. }
+        ));
+    }
+
+    #[test]
     fn artwork_wire_requires_revision_and_size_and_rejects_client_paths() {
         let command = serde_json::json!({
             "id": 1, "command": "artwork", "album_id": 7, "entry_id": null,
@@ -1012,7 +1091,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 11);
+        assert_eq!(VERSION, 12);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

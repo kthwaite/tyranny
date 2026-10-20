@@ -33,7 +33,7 @@ struct CommandDispatcher {
             navigation.destination = try destination(arguments[0])
             player.endImport()
         case .filter:
-            guard navigation.destination != .history, navigation.destination != .upNext else {
+            guard ![.history, .upNext, .radio].contains(navigation.destination) else {
                 throw CommandLanguageError("This view does not have a filter.")
             }
             try requireConnection()
@@ -46,7 +46,7 @@ struct CommandDispatcher {
             currentList?.sync()
             if navigation.destination == .albums { grid.sync() }
         case .focusFilter:
-            guard navigation.destination != .history, navigation.destination != .upNext else {
+            guard ![.history, .upNext, .radio].contains(navigation.destination) else {
                 throw CommandLanguageError("This view does not have a filter.")
             }
             navigation.focusFilter()
@@ -102,12 +102,16 @@ struct CommandDispatcher {
                 try await player.upNext.execute(command.id, name: arguments.first ?? "")
             }
         case .selectionPlay, .selectionRun, .selectionNext, .selectionEnqueue:
+            try requireTrackSelection()
             try await playSelection(command.id)
         case .selectionRemove, .selectionMove:
+            try requireTrackSelection()
             try await editSelection(command)
         case .selectionAlbum, .selectionArtist:
+            try requireTrackSelection()
             try await revealSelection(artist: command.id == .selectionArtist)
         case .selectionAll, .selectionClear:
+            try requireTrackSelection()
             try await selectAll(command.id == .selectionAll)
         case .group:
             let list = try requireList()
@@ -178,6 +182,13 @@ struct CommandDispatcher {
         }
     }
 
+    /// Radio lists saved stations, not tracks, so the selection commands have nothing to act on.
+    private func requireTrackSelection() throws {
+        guard navigation.destination != .radio else { throw CommandLanguageError(Self.radioHasNoSelection) }
+    }
+
+    private static let radioHasNoSelection = "Radio has no track selection. Play or enqueue a station from its row."
+
     private func requireList() throws -> ListModel {
         try requireConnection()
         guard let list = currentList else { throw CommandLanguageError("This command requires a track list.") }
@@ -200,6 +211,7 @@ struct CommandDispatcher {
         case "recent": return .recent
         case "history": return .history
         case "up-next": return .upNext
+        case "radio": return .radio
         default: throw CommandLanguageError("Unknown destination.")
         }
     }
@@ -263,6 +275,8 @@ struct CommandDispatcher {
             }
             return Selection(request: .source(.ids(libraryRevision: revision, trackIDs: ids), player: player),
                              source: RunSource.queueSource(list: .library, name: "Up Next"), count: ids.count)
+        case .radio:
+            throw CommandLanguageError(Self.radioHasNoSelection)
         default:
             throw CommandLanguageError("Wait for the current list to load, then select tracks.")
         }

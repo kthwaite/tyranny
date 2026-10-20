@@ -43,6 +43,8 @@ Entry pages after offset zero bind both returned revisions. Playlist/queue occur
 Protocol 5 batch reorder: move/playlist_move use entry_ids (1..500 distinct occurrences) and before (null=end).\n\
 Queue copy: insert_tracks binds expected_revision/library_revision, track_ids and before; playback is unchanged.\n\
 Moves preserve source order; inserts preserve track_ids order, including duplicates. Selected anchors are no-ops.\n\
+Saved radio stations (protocol 12): stations, add_stations, update_station, remove_station. Edits bind snapshot.stations_revision.\n\
+Add: {\"id\":8,\"command\":\"add_stations\",\"expected_revision\":0,\"stations\":[{\"name\":\"\",\"url\":\"https://radio.example/live.mp3\"}]}\n\
 Control --url must use a literal loopback IP; stream URLs may use remote HTTP(S) hosts. --watch prints state events until interrupted.\n\
 Commands are never automatically retried, including when a reply is lost.";
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -214,7 +216,8 @@ async fn run() -> Result<()> {
                             result:
                                 Response::Snapshot { snapshot }
                                 | Response::Applied { snapshot, .. }
-                                | Response::PlaylistApplied { snapshot, .. },
+                                | Response::PlaylistApplied { snapshot, .. }
+                                | Response::StationsApplied { snapshot, .. },
                         } = &reply
                         {
                             ensure!(

@@ -188,3 +188,17 @@ extension DisplayFormat {
         return "\(parts.day ?? 1) \(month) \(parts.year ?? 1970), \(time)"
     }
 }
+
+/// A stream's station name, or nil when there is none or the title already is that name.
+public func distinctStation(title: String, station: String?) -> String? {
+    station.flatMap { $0 == title ? nil : $0 }
+}
+
+/// The line under the title in the player bar. A stream shows its station name unless the
+/// title already is that name; anything else shows "artist — album", leaving out an empty side.
+public func transportSubtitle(title: String, artist: String, album: String, station: String?) -> String {
+    if let station = distinctStation(title: title, station: station) {
+        return station
+    }
+    return [artist, album].filter { !$0.isEmpty }.joined(separator: " — ")
+}

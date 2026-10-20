@@ -234,7 +234,9 @@ async fn live_streams_recover_publish_icy_persist_and_keep_controls_responsive()
     );
     let first = wait_title(&mut client, "First Live Title").await;
     assert_eq!(first.current_id, Some(entry));
-    assert_eq!(first.now_playing.unwrap().duration_frames, None);
+    let first_now = first.now_playing.unwrap();
+    assert_eq!(first_now.duration_frames, None);
+    assert_eq!(first_now.station.as_deref(), Some("Fixture Radio"));
     assert!(
         radio.attempts.load(Ordering::Acquire) >= 2,
         "503 was not retried"

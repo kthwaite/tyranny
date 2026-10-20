@@ -26,6 +26,8 @@ final class PlayerModel {
     let upNext = UpNextModel()
     /// The saved playlists in the source list, and the edits made to them.
     let savedPlaylists = PlaylistsModel()
+    /// The Radio source's saved stations.
+    let stations = StationsModel()
     /// Plays and adds runs from every list, grid and table, and asks "Clear Up Next?".
     let activation = ActivationModel()
     /// The music folders for Settings. One bounded page; the server limits a page to 500.
@@ -109,6 +111,7 @@ final class PlayerModel {
         equalizer.attach(self)
         upNext.attach(self)
         savedPlaylists.attach(self)
+        stations.attach(self)
         activation.attach(self)
         updateMediaControls()
     }
@@ -193,6 +196,7 @@ final class PlayerModel {
         equalizer.stateChanged()
         upNext.sync()
         savedPlaylists.sync()
+        stations.sync()
     }
 
     private func updateArtwork(invalidate: Bool = false) {
@@ -396,6 +400,10 @@ final class PlayerModel {
     /// Sends one command on the shared connection and decodes its reply.
     func send<T: Decodable>(_ command: String, _ fields: [String: JSONValue] = [:]) async throws -> T {
         try await request(command, fields)
+    }
+    /// Sends one command and returns its reply's result object, for a TyrannyCore model to decode.
+    func sendRaw(_ request: CommandRequest) async throws -> Data {
+        try await wire.request(request.name, fields: request.fields)
     }
     /// Refetches the snapshot after a `stale_revision` reply, so a retry uses the current revisions.
     func refreshSnapshot() async throws {

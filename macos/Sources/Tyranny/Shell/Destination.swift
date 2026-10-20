@@ -3,10 +3,10 @@ import TyrannyCore
 /// A source-list destination. `key` names it in identifiers (`source-<key>`)
 /// and preferences (`group.<key>`).
 enum Destination: Hashable {
-    case songs, albums, artists, genres, recent, upNext, history, playlist(UInt64)
+    case songs, albums, artists, genres, recent, upNext, history, radio, playlist(UInt64)
 
     static let library: [Destination] = [.songs, .albums, .artists, .genres, .recent]
-    static let playing: [Destination] = [.upNext, .history]
+    static let playing: [Destination] = [.upNext, .history, .radio]
 
     var key: String {
         switch self {
@@ -17,6 +17,7 @@ enum Destination: Hashable {
         case .recent: "recent"
         case .upNext: "up-next"
         case .history: "history"
+        case .radio: "radio"
         case .playlist(let id): "playlist-\(id)"
         }
     }
@@ -32,6 +33,7 @@ enum Destination: Hashable {
         case .recent: "Recently Added"
         case .upNext: "Up Next"
         case .history: "History"
+        case .radio: "Radio"
         case .playlist: "Playlist"
         }
     }
@@ -45,6 +47,7 @@ enum Destination: Hashable {
         case .recent: "clock"
         case .upNext: "list.bullet"
         case .history: "clock.arrow.circlepath"
+        case .radio: "dot.radiowaves.left.and.right"
         case .playlist: "music.note.list"
         }
     }
@@ -54,7 +57,7 @@ enum Destination: Hashable {
     var defaultGrouping: Grouping {
         switch self {
         case .recent, .artists, .genres: .album
-        case .songs, .albums, .upNext, .history, .playlist: .none
+        case .songs, .albums, .upNext, .history, .radio, .playlist: .none
         }
     }
 

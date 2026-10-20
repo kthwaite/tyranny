@@ -117,6 +117,13 @@ import Testing
         #expect(CommandLanguage.completions("filter ").isEmpty)
     }
 
+    @Test func goRadioCompletesAndParses() throws {
+        #expect(CommandLanguage.completions("go ra") == ["go radio"])
+        let command = try CommandLanguage.parse("go radio")
+        #expect(command.id == .go)
+        #expect(command.arguments == ["radio"])
+    }
+
     @Test func incompleteQuotedPlaylistCompletionProducesParseableExactNames() throws {
         let names = ["Road Trip", "Road \"Live\"", "Road \\ Home", "Road's End", "Road Trip", "Other", ""]
         for input in [":playlist-open \"Road", ":playlist-open 'Road", ":playlist-open Road\\", ":playlist-open Road"] {

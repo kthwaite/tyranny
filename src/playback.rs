@@ -735,9 +735,16 @@ impl Player {
     }
 
     pub(crate) fn is_stream(&self, entry_id: u64) -> bool {
+        self.stream_title(entry_id).is_some()
+    }
+
+    /// The saved station title of a live stream entry.
+    pub(crate) fn stream_title(&self, entry_id: u64) -> Option<&str> {
         self.queue
             .iter()
-            .any(|entry| entry.id == entry_id && entry.stream.is_some())
+            .find(|entry| entry.id == entry_id)
+            .and_then(|entry| entry.stream.as_ref())
+            .map(|stream| stream.title.as_str())
     }
 
     /// No network work during the durable append preparation.
@@ -1589,6 +1596,7 @@ impl Player {
                 String::new()
             },
             gain_db: (mode != GainMode::Off).then(|| decoder.gain_db()),
+            station: None,
         })
     }
 

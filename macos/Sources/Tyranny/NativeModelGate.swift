@@ -112,7 +112,7 @@ enum NativeModelGate {
         }
         let encodedState = try JSONEncoder().encode(model.snapshot!)
         let stateFields = try JSONSerialization.jsonObject(with: encodedState) as! [String: Any]
-        for required in ["can_next", "can_previous", "now_playing", "playlists_revision"] {
+        for required in ["can_next", "can_previous", "now_playing", "playlists_revision", "stations_revision"] {
             var missingField = stateFields
             missingField.removeValue(forKey: required)
             do {

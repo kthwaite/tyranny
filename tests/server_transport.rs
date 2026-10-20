@@ -30,6 +30,8 @@ mod http_streams;
 mod library_lists;
 #[path = "support/saved_playlists.rs"]
 mod saved_playlists;
+#[path = "support/stations.rs"]
+mod stations;
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 struct Scratch(PathBuf);

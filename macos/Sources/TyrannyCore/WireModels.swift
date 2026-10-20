@@ -1,5 +1,11 @@
 import Foundation
 
+/// The local control protocol this client speaks. The server's hello must carry exactly this
+/// version (`src/protocol.rs` `VERSION`; `cargo test` checks that the two agree).
+public enum WireProtocol {
+    public static let version: UInt32 = 12
+}
+
 public struct PlayerSettings: Codable, Sendable, Equatable {
     public let gain_mode: String
     public let resume_on_start: Bool
@@ -33,8 +39,10 @@ public struct NowPlaying: Codable, Sendable, Equatable {
     public let compilation: Bool?
     public let format: String
     public let gain_db: Double?
+    /// The saved station name of a live stream; `nil` for a library entry.
+    public let station: String?
 
-    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, album_artist_id: UInt64?, compilation: Bool?, format: String, gain_db: Double?) {
+    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, album_artist_id: UInt64?, compilation: Bool?, format: String, gain_db: Double?, station: String? = nil) {
         self.entry_id = entry_id
         self.title = title
         self.artist = artist
@@ -47,6 +55,7 @@ public struct NowPlaying: Codable, Sendable, Equatable {
         self.compilation = compilation
         self.format = format
         self.gain_db = gain_db
+        self.station = station
     }
 
     /// The artist the artist text opens, as "Show in Artist" does: the album artist. The
@@ -61,6 +70,7 @@ public struct ControlState: Codable, Sendable, Equatable {
     public let sequence: UInt64
     public let queue_revision: UInt64
     public let playlists_revision: UInt64
+    public let stations_revision: UInt64
     public let queue_length: Int
     public let current_id: UInt64?
     public let can_next: Bool
@@ -80,7 +90,7 @@ public struct ControlState: Codable, Sendable, Equatable {
     public let upcoming_count: Int
 
     public init(
-        sequence: UInt64, queue_revision: UInt64, playlists_revision: UInt64, queue_length: Int,
+        sequence: UInt64, queue_revision: UInt64, playlists_revision: UInt64, stations_revision: UInt64, queue_length: Int,
         current_id: UInt64?, can_next: Bool, can_previous: Bool, now_playing: NowPlaying?,
         position_frames: UInt64, sample_rate: UInt32, transport: String, settings: PlayerSettings,
         error: String?, underruns: UInt64, library: LibraryState, history_revision: UInt64,
@@ -89,6 +99,7 @@ public struct ControlState: Codable, Sendable, Equatable {
         self.sequence = sequence
         self.queue_revision = queue_revision
         self.playlists_revision = playlists_revision
+        self.stations_revision = stations_revision
         self.queue_length = queue_length
         self.current_id = current_id
         self.can_next = can_next
@@ -108,7 +119,7 @@ public struct ControlState: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case sequence, queue_revision, queue_length, current_id, can_next, can_previous, now_playing
-        case playlists_revision
+        case playlists_revision, stations_revision
         case position_frames, sample_rate, transport, settings, error, underruns, library
         case history_revision, current_index, upcoming_count
     }
@@ -118,6 +129,7 @@ public struct ControlState: Codable, Sendable, Equatable {
         sequence = try values.decode(UInt64.self, forKey: .sequence)
         queue_revision = try values.decode(UInt64.self, forKey: .queue_revision)
         playlists_revision = try values.decode(UInt64.self, forKey: .playlists_revision)
+        stations_revision = try values.decode(UInt64.self, forKey: .stations_revision)
         queue_length = try values.decode(Int.self, forKey: .queue_length)
         current_id = try values.decode(UInt64?.self, forKey: .current_id)
         can_next = try values.decode(Bool.self, forKey: .can_next)
@@ -906,5 +918,47 @@ public struct HistoryResponse: Codable, Sendable, Equatable {
         self.total = total
         self.offset = offset
         self.entries = entries
+    }
+}
+
+public struct Station: Codable, Sendable, Equatable, Identifiable {
+    public let id: UInt64
+    public let name: String
+    public let url: String
+
+    public init(id: UInt64, name: String, url: String) {
+        self.id = id
+        self.name = name
+        self.url = url
+    }
+}
+
+public struct StationInput: Codable, Sendable, Equatable {
+    public let name: String
+    public let url: String
+
+    public init(name: String, url: String) {
+        self.name = name
+        self.url = url
+    }
+}
+
+public struct StationsPage: Codable, Sendable, Equatable {
+    public let revision: UInt64
+    public let stations: [Station]
+
+    public init(revision: UInt64, stations: [Station]) {
+        self.revision = revision
+        self.stations = stations
+    }
+}
+
+public struct StationsApplied: Codable, Sendable, Equatable {
+    public let snapshot: ControlState
+    public let stations: [Station]
+
+    public init(snapshot: ControlState, stations: [Station]) {
+        self.snapshot = snapshot
+        self.stations = stations
     }
 }

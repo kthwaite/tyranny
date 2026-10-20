@@ -18,7 +18,8 @@ use crate::{
     },
     store::{
         Checkpoint, Edit, EntryTrack, LoadedEntry, PendingPlays, PlayRecord, PlaylistChange,
-        PlaylistEdit, PlaylistFailure, Store, UpcomingEdit, played_overflow,
+        PlaylistEdit, PlaylistFailure, StaleStationsRevision, StationEdit, Store, UpcomingEdit,
+        played_overflow,
     },
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -419,6 +420,16 @@ impl Failure {
         }
         Self::library(error)
     }
+    fn station(error: anyhow::Error) -> Self {
+        if error.is::<StaleStationsRevision>() {
+            return Self {
+                code: ErrorCode::StaleStationsRevision,
+                error,
+                fatal: false,
+            };
+        }
+        Self::playlist(error)
+    }
     fn library(error: anyhow::Error) -> Self {
         let kind = error.downcast_ref::<LibraryError>().map(|error| error.kind);
         let code = if error.is::<StaleLibraryRevision>() {
@@ -569,6 +580,7 @@ struct Actor {
     store: Store,
     settings: Settings,
     playlists_revision: u64,
+    stations_revision: u64,
     fault: Option<String>,
     last: ControlState,
     events: broadcast::Sender<ControlState>,
@@ -628,12 +640,14 @@ impl Actor {
             }
         }
         let history_revision = store.history_revision()?;
+        let stations_revision = store.stations_revision()?;
         let library = Library::start(config.database_path)?;
         let (events, _) = broadcast::channel(32);
         let last = ControlState {
             sequence: 0,
             queue_revision: loaded.revision,
             playlists_revision: loaded.playlists_revision,
+            stations_revision,
             queue_length: player.queue_entries().len(),
             current_id: None,
             can_next: false,
@@ -655,6 +669,7 @@ impl Actor {
             store,
             settings: loaded.settings,
             playlists_revision: loaded.playlists_revision,
+            stations_revision,
             fault,
             last,
             events,
@@ -701,6 +716,7 @@ impl Actor {
             sequence: self.last.sequence,
             queue_revision: state.queue_revision,
             playlists_revision: self.playlists_revision,
+            stations_revision: self.stations_revision,
             queue_length: self.player.queue_entries().len(),
             current_id: state.current_id,
             can_next: state.next_id.is_some(),
@@ -721,8 +737,11 @@ impl Actor {
     /// Adds the indexed track, album, album artist, compilation flag and format to the
     /// player's metadata. The lookup is display-only, so a failed one leaves those fields blank.
     fn describe(&self, now: Arc<NowPlaying>, library_revision: u64) -> Arc<NowPlaying> {
-        if self.player.is_stream(now.entry_id) {
-            return now;
+        if let Some(title) = self.player.stream_title(now.entry_id) {
+            return Arc::new(NowPlaying {
+                station: Some(title.to_owned()),
+                ..(*now).clone()
+            });
         }
         let key = (now.entry_id, library_revision);
         let mut cache = self.now_track.borrow_mut();
@@ -997,6 +1016,19 @@ impl Actor {
         Ok(Response::PlaylistApplied {
             snapshot: Box::new(self.last.clone()),
             playlist: change.playlist,
+        })
+    }
+
+    fn edit_stations(&mut self, expected: u64, edit: StationEdit) -> CommandResult<Response> {
+        let change = self
+            .store
+            .edit_stations(expected, edit)
+            .map_err(Failure::station)?;
+        self.stations_revision = change.revision;
+        self.publish();
+        Ok(Response::StationsApplied {
+            snapshot: Box::new(self.last.clone()),
+            stations: change.stations,
         })
     }
 
@@ -1499,6 +1531,45 @@ impl Actor {
                 expected_revision,
                 PlaylistEdit::Rename { name },
             ),
+            Command::Stations => {
+                let (revision, stations) = self.store.stations().map_err(Failure::persistence)?;
+                Ok(Response::Stations { revision, stations })
+            }
+            Command::AddStations {
+                expected_revision,
+                stations,
+            } => {
+                let specs = stations
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, station)| {
+                        StreamSpec::new(station.url, station.name).map_err(|error| {
+                            Failure::invalid(format!("station {index}: {error:#}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.edit_stations(expected_revision, StationEdit::Add(specs))
+            }
+            Command::UpdateStation {
+                station_id,
+                expected_revision,
+                name,
+                url,
+            } => {
+                let spec = StreamSpec::new(url, name)
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                self.edit_stations(
+                    expected_revision,
+                    StationEdit::Update {
+                        id: station_id,
+                        spec,
+                    },
+                )
+            }
+            Command::RemoveStation {
+                station_id,
+                expected_revision,
+            } => self.edit_stations(expected_revision, StationEdit::Remove { id: station_id }),
             Command::DeletePlaylist {
                 playlist_id,
                 expected_revision,
