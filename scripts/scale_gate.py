@@ -29,6 +29,9 @@ TRACKS = 50_000
 QUEUE = 10_000
 PAGE = 100  # the legacy library_* page cases below
 WINDOW = 200  # the client's list and Up Next window size
+# Startup budgets (spec: faster client startup). Server: release build, 50k tracks.
+SERVER_BUDGET_MS = dict(ready_ms=300, hello_ms=50, first_page_ms=250, total_ms=500)
+NATIVE_MODEL_READY_BUDGET_MS = 1500  # warm startup.process_to_model_ready_ms, debug client
 
 
 class MeasuredWebSocket(WebSocket):
@@ -189,7 +192,10 @@ def main():
                                scan_files=args.scan_files),
                   environment=dict(platform=platform.platform(), python=sys.version, server=str(server), app=str(app)),
                   output="coreaudio" if args.coreaudio else "clocked_pcm",
-                  targets=dict(query_p95_ms=dict(operator="<", value=100), warm_native_first_usable_ms=dict(operator="<=", value=1000)),
+                  targets=dict(query_p95_ms=dict(operator="<", value=100), warm_native_first_usable_ms=dict(operator="<=", value=1000),
+                               warm_native_model_ready_ms=dict(operator="<=", value=NATIVE_MODEL_READY_BUDGET_MS),
+                               **{f"server_{name}": dict(operator="<=", value=value, release_server_only=True)
+                                  for name, value in SERVER_BUDGET_MS.items()}),
                   launches=[], query_samples=[], query_distributions={}, native_runs=[],
                   limitations=["Process-cold means newly started daemon and client before library query warmup; OS/filesystem caches remain uncontrolled, with no purge",
                                "Query latency is end-to-end authenticated WebSocket round trip, including JSON decoding, not SQLite-only time",
@@ -202,7 +208,7 @@ def main():
     control = None
     logs = []
 
-    def start():
+    def start(budgeted=False):
         nonlocal process, control
         number = len(report["launches"]) + 1
         argv = [str(server), "--state-dir", str(state_dir), "--bind", "127.0.0.1:0"]
@@ -217,11 +223,40 @@ def main():
             assert selector.select(30), "server readiness timed out"
         line = process.stdout.readline()
         assert line, f"server failed; inspect {log.name}"
+        ready_ms = (time.monotonic()-started)*1000
         ready = json.loads(line)
-        control = MeasuredWebSocket(ready["address"], Path(ready["token_path"]).read_text())
+        token = Path(ready["token_path"]).read_text()
+        # Startup timing on a fresh connection: hello, then the client's first Songs window
+        # (library source, default browser/query/sort, grouping none, revision null, offset 0,
+        # limit 200; same fields as TrackListRequest.launchSongs).
+        hello_started = time.monotonic()
+        probe = MeasuredWebSocket(ready["address"], token)
+        assert probe.status == 101
+        hello_ms = (time.monotonic()-hello_started)*1000
+        try:
+            page_started = time.monotonic()
+            page = probe.request("list_tracks", list=dict(source=dict(kind="library"),
+                browser=dict(genre_ids=[], artist_ids=[], compilations=False, album_ids=[]),
+                query="", sort=[], group="none"), revision=None, offset=0, limit=WINDOW)
+            first_page_ms = (time.monotonic()-page_started)*1000
+            total_ms = (time.monotonic()-started)*1000
+            assert page["offset"] == 0 and len(page["entries"]) <= WINDOW
+        finally:
+            probe.close()
+        control = MeasuredWebSocket(ready["address"], token)
         assert control.status == 101
-        report["launches"].append(dict(argv=argv, ready=ready, process_launch_uptime=started,
-                                       authenticated_ready_ms=(time.monotonic()-started)*1000))
+        launch = dict(argv=argv, ready=ready, process_launch_uptime=started,
+                      authenticated_ready_ms=(time.monotonic()-started)*1000,
+                      ready_ms=ready_ms, hello_ms=hello_ms, first_page_ms=first_page_ms, total_ms=total_ms,
+                      first_page_total=page["total"], first_page_returned=len(page["entries"]),
+                      server_budgets_asserted=budgeted and args.server_profile == "release")
+        report["launches"].append(launch)
+        print(f"server launch {number}: ready {ready_ms:.1f} hello {hello_ms:.1f} first_page {first_page_ms:.1f} "
+              f"total {total_ms:.1f} ms (tracks {page['total']})", flush=True)
+        if launch["server_budgets_asserted"]:
+            assert page["total"] == TRACKS, f"launch {number}: budgeted launch must serve the seeded library, got {page['total']}"
+            for name, limit in SERVER_BUDGET_MS.items():
+                assert launch[name] <= limit, f"server launch {number}: {name} {launch[name]:.1f} ms > {limit} ms budget"
         return ready
 
     def stop():
@@ -276,6 +311,14 @@ def main():
         result["process_lifetime_ms"] = (time.monotonic() - launched) * 1000
         result["report_path"] = str(result_path)
         report["native_runs"].append(result)
+        if label.startswith("warm-"):
+            # Written before the Accessibility steps, so it does not depend on them passing.
+            model_ready = result.get("startup", {}).get("process_to_model_ready_ms")
+            if model_ready is None:
+                assert not result.get("passed"), f"warm native report lacks startup.process_to_model_ready_ms: {result_path}"
+            else:
+                assert model_ready <= NATIVE_MODEL_READY_BUDGET_MS, (
+                    f"{label}: process_to_model_ready_ms {model_ready:.1f} > {NATIVE_MODEL_READY_BUDGET_MS} ms budget: {result_path}")
         assert code == 0 and result["passed"], f"native correctness failure: {result_path}"
         control = MeasuredWebSocket(ready["address"], Path(ready["token_path"]).read_text())
         assert control.status == 101
@@ -327,7 +370,7 @@ def main():
         start()  # Let the production server create/migrate its database.
         stop()
         report["fixture"]["persisted_counts"] = seed(state_dir / "state.sqlite3", root, scan_root, playing)
-        ready = start()
+        ready = start(budgeted=True)  # The seeded launch is the one the startup budgets describe.
         initial = control.state()
         assert initial["library"]["tracks"] == TRACKS and initial["queue_length"] == QUEUE
         report["initial_snapshot"] = initial
@@ -575,9 +618,15 @@ def main():
 
         # Every startup and query distribution uses exactly 50k/10k; scanning
         # adds real tracks only after the final warm native startup measurement.
+        if args.server_profile != "release":
+            report["limitations"].append(f"Server startup budgets (ready/hello/first page/total) recorded, NOT asserted: --server-profile {args.server_profile} (the debug first page is about 315 ms)")
+        report["limitations"].append("Server startup timing: seeded launch, fresh connection after the ready line; the empty-database first launch is recorded but not budgeted")
         report["limitations"].append("Warm native repeats follow the first native run and query distributions, reusing the same daemon")
         warm = [r["startup"]["process_to_first_usable_ms"] for r in report["native_runs"] if r["run_label"].startswith("warm-")]
         report["warm_startup_distribution"] = distribution(warm)
+        report["warm_model_ready_distribution"] = distribution(
+            [r["startup"]["process_to_model_ready_ms"] for r in report["native_runs"]
+             if r["run_label"].startswith("warm-") and "process_to_model_ready_ms" in r.get("startup", {})])
         report["targets_met"] = (all(s["target_met"] for s in report["query_distributions"].values())
                                  and all(sample <= 1000 for sample in warm)) if warm else None
         report["native_filter_distributions"] = {
