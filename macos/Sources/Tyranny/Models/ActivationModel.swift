@@ -23,14 +23,30 @@ struct SelectionRequest {
     }
 }
 
+extension PlayerModel {
+    /// Fetches the window of `list` around `position`, finds the row by ID and re-encodes the
+    /// selection for `list`, under the revision of that window. Throws `ListChangedError` when
+    /// the row is gone.
+    func relocated(_ selection: TrackSelection, rowID: UInt64, at position: Int,
+                   in list: ListDescription) async throws -> TrackSelection {
+        let window = RowRelocation.window(around: position, size: 200)
+        let reply: ListTracksResponse = try await send("list_tracks", [
+            "list": try JSONValue.encoding(list), "revision": .null,
+            "offset": .int(window.offset), "limit": .int(window.limit)])
+        guard let fresh = SelectionRetarget.relocate(selection, rowID: rowID, from: position,
+                                                     rowIDs: reply.entries.map(\.row_id), offset: reply.offset,
+                                                     libraryRevision: reply.revision, list: list)
+        else { throw ListChangedError() }
+        return fresh
+    }
+}
+
 /// One user request to play or add rows. Every list, grid and table builds one and hands it
 /// to `ActivationModel.start`.
 struct EnqueueJob {
     let action: ActivationAction
     let source: QueueSource
     let request: SelectionRequest
-    /// Turn shuffle on before the play, so the server starts at a shuffle pick (album Shuffle).
-    var shuffleFirst = false
     /// The status bar text after the server accepted it.
     var status: String?
 }
@@ -83,7 +99,6 @@ final class ActivationModel {
         guard let player else { return }
         var selection = job.request.selection
         var retriedQueue = false, retriedLibrary = false
-        var shuffled = false
         while true {
             guard player.connected, let state = player.snapshot else {
                 throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was queued.")
@@ -101,10 +116,6 @@ final class ActivationModel {
                     case .enqueue(let decided, let decidedPlay):
                         (placement, play) = (decided, decidedPlay)
                     }
-                }
-                if job.shuffleFirst, !shuffled {
-                    shuffled = true
-                    let _: Applied = try await player.send("set_shuffle", ["enabled": .bool(true)])
                 }
                 let request = EnqueueRequest(selection: selection, placement: placement, play: play,
                                              source: job.source)

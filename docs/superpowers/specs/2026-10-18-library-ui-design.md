@@ -143,9 +143,14 @@ Success: the user leaves the window open all day, and every view is one click aw
 - A grid of covers, sized by a slider. The title, then artist · year, appear under each cover.
 - Sort: Album Artist, Year, Date Added.
 - The filter field and the group setting do not apply to the grid's layout. The filter narrows which albums appear.
-- Clicking a cover opens a panel below its row, with a caret pointing at the cover. The panel shows a large cover, the title and artist, then the facts line: year · genre · tracks · length · format · album ReplayGain. The tracklist follows in two columns, then the actions: Play, Shuffle, Add to Up Next, Add to Playlist….
+- Clicking a cover opens a panel below its row, with a caret pointing at the cover. The panel shows a large cover, the title and artist, then the facts line: year · genre · tracks · length · format · album ReplayGain. The tracklist follows, then the actions: Add to Up Next, Add to Playlist….
+  - The tracklist is a table: one column list, no header. Columns: # (disc-track on multi-disc albums), Title, Artist (compilations only), Time. Unavailable tracks are dimmed. At most 12 rows show; a longer album scrolls inside the table. *(Builder's call recorded here: the 12-row height.)*
+  - It allows multiple selection. The selection survives a reload of the tracks and is cleared when the panel moves to another album.
+  - Double-click on a track plays the album from that track to its end, as a run (Section 5.1).
+  - Return, ⌥Return and the context menu act as in track lists (Section 5.2): Return on one selected track plays from it to the album's end; on several, it plays exactly those tracks. The context menu offers Play, Play Next, Add to Up Next and Add to Playlist. Space plays and pauses; Escape closes the panel. *(Builder's call recorded here: Return on several tracks plays only those.)*
+  - Add to Up Next and Add to Playlist… act on the selected tracks, or on the whole album when none are selected.
 - Clicking another cover moves the panel. Escape closes it.
-- Return plays the selected album. ⌥Return adds it to Up Next.
+- In the grid, Return plays the selected album. ⌥Return adds it to Up Next.
 - Covers come from the existing artwork pipeline at thumbnail size. Only visible cells request artwork. Requests for cells scrolled out of view are cancelled or ignored.
 
 ### 4.5 Artists and Genres
@@ -322,7 +327,6 @@ Decided by the user. All three are server state, persisted with settings, report
 - A server play-order mode. When on, the next entry is chosen at random from the upcoming entries in the current repeat context (below). The queue's visible order does not change.
 - Next and Previous follow the shuffled order. Previous returns to the entry that actually played before.
 - The order-choosing logic sits behind a Rust trait, for example `ShuffleStrategy`, with one naive implementation: a uniform random pick without repeats until the context is exhausted. A more sophisticated shuffle comes later as another implementation of the trait. The trait boundary is a requirement, not an option.
-- The album panel's **Shuffle** button plays the album as a run with shuffle turned on.
 - **Shuffle Upcoming** (Section 4.7) stays a separate, one-off reorder of the visible queue.
 
 **Repeat: Off, All, One.**

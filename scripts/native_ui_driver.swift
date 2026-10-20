@@ -22,7 +22,16 @@ func find(_ identifier: String, in app: AXUIElement, byTitle: Bool = false) thro
             let title = attribute(element, kAXTitleAttribute) as? String
                 ?? attribute(element, kAXDescriptionAttribute) as? String
             if title == identifier, attribute(element, kAXRoleAttribute) as? String == kAXButtonRole { return element }
-        } else if attribute(element, kAXIdentifierAttribute) as? String == identifier { return element }
+        } else if attribute(element, kAXIdentifierAttribute) as? String == identifier {
+            // NSCollectionView wraps each item's view in an AXGroup with the view's identifier
+            // and no value: return the view itself.
+            if attribute(element, kAXRoleAttribute) as? String == kAXGroupRole,
+               attribute(element, kAXValueAttribute) == nil,
+               let view = (attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []).first(where: {
+                   attribute($0, kAXIdentifierAttribute) as? String == identifier
+               }) { return view }
+            return element
+        }
         for child in attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
             if let result = visit(child, depth: depth + 1) { return result }
         }

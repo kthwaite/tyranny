@@ -32,7 +32,7 @@ def main():
                         help="core: folder import, a double-click run, the seek slider, filter, rescan, disconnect and a relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
-                             "albums: the album grid, its inline panel and album Play; "
+                             "albums: the album grid, its inline panel, a double-click run and Add to Up Next on two selected tracks; "
                              "artists: Artists with Compilations and Appears On, and Genres; "
                              "history: Recently Added, a played track in History and its Plays count; "
                              "upnext: Up Next sections and Added From labels, Clear, Save as Playlist and the drawer; "
@@ -279,7 +279,8 @@ def grouping(report, run, app, port, ready, source, controller, screenshots):
 
 def albums(report, run, app, port, ready, source, controller, screenshots):
     """Drive the album grid: scroll to the end, open the last album, check its tracks against
-    `album_summaries`, press Play, and close the panel with Escape."""
+    `album_summaries`, double-click its first track, select its first two tracks and press
+    Add to Up Next, and close the panel with Escape."""
     report["scenario"] = "albums"
     music = run / "Songs fixture"
     songs_fixture(music, source)
@@ -297,16 +298,28 @@ def albums(report, run, app, port, ready, source, controller, screenshots):
     native = json.loads((output / "report.json").read_text())
     report["albums"] = native
     assert native["passed"], native.get("error")
-    # The server, not the app, holds the album run.
+    # The server, not the app, holds the album run, then the two added tracks as a run of their own.
     expanded = native["observations"]["expanded"]
+    added = native["observations"]["added"]
     summary = controller.request("album_summaries", album_ids=[expanded["id"]], revision=None)["entries"][0]
-    page = controller.request("queue_page", revision=None, offset=0, limit=500)
-    assert page["total"] == summary["track_count"] == expanded["tracks"], (page["total"], summary, expanded)
-    assert all(entry["source"] == {"kind": "album", "name": summary["title"]} for entry in page["entries"]), page
-    assert len({entry["run_id"] for entry in page["entries"]}) == 1, page
+    count = summary["track_count"]
+    assert count == expanded["tracks"], (summary, expanded)
+    album_source = {"kind": "album", "name": summary["title"]}
+    head = controller.request("queue_page", revision=None, offset=0, limit=500)
+    assert head["total"] == count + 2 == added["total"], (head["total"], count, added)
+    run = head["entries"][0]["run_id"]
+    assert run == head["entries"][0]["id"], head["entries"][0]
+    album_entries = head["entries"][:count]
+    assert all(entry["source"] == album_source and entry["run_id"] == run for entry in album_entries), head
+    # Add to Up Next is its own run: its run ID is the ID of its first entry.
+    tail = controller.request("queue_page", revision=None, offset=count, limit=2)
+    assert [entry["track_id"] for entry in tail["entries"]] == added["track_ids"], (tail, added)
+    assert all(entry["source"] == album_source and entry["run_id"] == tail["entries"][0]["id"]
+               for entry in tail["entries"]), tail
+    assert tail["entries"][0]["run_id"] != run, tail
     # The album run was playing; the app's quit paused it.
     assert controller.state()["transport"] == "paused"
-    report["cases"].append({"name": "albums-server-holds-album-run", "total": page["total"]})
+    report["cases"].append({"name": "albums-server-holds-album-run-and-added-tracks", "total": head["total"]})
     screenshots.mkdir(parents=True, exist_ok=True)
     for image in sorted(output.glob("albums*.png")):
         shutil.copy2(image, screenshots / image.name)

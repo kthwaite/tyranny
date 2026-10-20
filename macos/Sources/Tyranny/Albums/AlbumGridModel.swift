@@ -210,27 +210,83 @@ final class AlbumGridModel {
 
     // MARK: Actions
 
-    /// Play: the whole album, placed by the Up Next policy. Shuffle turns shuffle on first, so
-    /// the server starts at a shuffle pick.
-    func play(_ album: AlbumSummary, shuffle: Bool = false) {
-        start(.play, album, shuffle: shuffle)
+    /// Grid Return: the whole album, placed by the Up Next policy.
+    func play(_ album: AlbumSummary) {
+        guard let request = wholeAlbum(album.id) else { return }
+        enqueue(.play, album: album, request: request, count: Int(clamping: album.track_count))
     }
 
-    /// ⌥Return and Add to Up Next: appends the album.
+    /// Grid ⌥Return: appends the whole album.
     func addToUpNext(_ album: AlbumSummary) {
-        start(.addToUpNext, album)
+        guard let request = wholeAlbum(album.id) else { return }
+        enqueue(.addToUpNext, album: album, request: request, count: Int(clamping: album.track_count))
     }
 
-    /// The album is a source selection, so it has no row to relocate: a stale library revision
-    /// only needs the fresh revision.
-    private func start(_ action: ActivationAction, _ album: AlbumSummary, shuffle: Bool = false) {
-        guard let player, let revision = player.snapshot?.library.revision else { return }
-        let selection = AlbumPlayback.selection(albumID: album.id, libraryRevision: revision)
-        let noun = album.track_count == 1 ? "track" : "tracks"
-        player.activation.start(EnqueueJob(
-            action: action, source: AlbumPlayback.source(title: album.title),
-            request: .source(selection, player: player), shuffleFirst: shuffle,
-            status: action == .addToUpNext ? "Added \(DisplayFormat.count(album.track_count)) \(noun) to Up Next." : nil))
+    /// Double-click, Return and the context menu on the panel's tracks. One row as a run plays
+    /// from it to the album's end; anything else plays exactly the rows at `positions`.
+    func playTracks(_ expansion: AlbumExpansion, positions: IndexSet, asRun: Bool) {
+        start(.play, expansion, positions: positions, asRun: asRun)
+    }
+
+    /// Play Next on the selected tracks, or the whole album when none are selected.
+    func playNext(_ expansion: AlbumExpansion) {
+        start(.playNext, expansion, positions: expansion.selectedPositions)
+    }
+
+    /// Add to Up Next and ⌥Return on the selected tracks, or the whole album when none are selected.
+    func addToUpNext(_ expansion: AlbumExpansion) {
+        start(.addToUpNext, expansion, positions: expansion.selectedPositions)
+    }
+
+    private func start(_ action: ActivationAction, _ expansion: AlbumExpansion, positions: IndexSet, asRun: Bool = false) {
+        guard let player else { return }
+        do {
+            let request = try selectionRequest(expansion, positions: positions, asRun: asRun)
+            enqueue(action, album: expansion.album, request: request,
+                    count: positions.isEmpty ? Int(clamping: expansion.album.track_count) : positions.count)
+        } catch {
+            player.message = (error as? LocalizedError)?.errorDescription ?? "Wait for the tracks to load, then try again."
+        }
+    }
+
+    private func enqueue(_ action: ActivationAction, album: AlbumSummary, request: SelectionRequest, count: Int) {
+        guard let player else { return }
+        let tracks = "\(DisplayFormat.count(count)) \(count == 1 ? "track" : "tracks")"
+        let status: String? = switch action {
+        case .play: nil
+        case .addToUpNext: "Added \(tracks) to Up Next."
+        case .playNext: "Added \(tracks) to play next."
+        }
+        player.activation.start(EnqueueJob(action: action, source: AlbumPlayback.source(title: album.title),
+                                           request: request, status: status))
+    }
+
+    /// The whole album is a source selection, so it has no row to relocate: a stale library
+    /// revision only needs the fresh revision.
+    private func wholeAlbum(_ albumID: UInt64) -> SelectionRequest? {
+        guard let player, let revision = player.snapshot?.library.revision else { return nil }
+        return .source(AlbumPlayback.selection(albumID: albumID, libraryRevision: revision), player: player)
+    }
+
+    /// The panel's tracks at `positions`, under the revision they were loaded at. No positions
+    /// is the whole album under the current revision. A run starts at a position, so after the
+    /// library moved on its first track is found again in the album as it is now.
+    private func selectionRequest(_ expansion: AlbumExpansion, positions: IndexSet, asRun: Bool) throws -> SelectionRequest {
+        if positions.isEmpty, let whole = wholeAlbum(expansion.albumID) { return whole }
+        guard let player, let revision = expansion.basis?.revision else { throw EmptySelection() }
+        let tracks = expansion.tracks
+        let selection = try AlbumPanel.selection(
+            albumID: expansion.albumID, revision: revision, positions: positions, asRun: asRun,
+            rowID: { tracks.indices.contains($0) ? tracks[$0].row_id : nil },
+            trackID: { tracks.indices.contains($0) ? tracks[$0].track.id : nil })
+        // Track IDs do not move with the album. The whole album has no row to find.
+        if case .ids = selection { return .source(selection, player: player) }
+        guard let first = positions.first, tracks.indices.contains(first) else { return .source(selection, player: player) }
+        let rowID = tracks[first].row_id, list = AlbumPlayback.list(albumID: expansion.albumID)
+        return SelectionRequest(selection: selection) { [weak player] in
+            guard let player else { throw ListChangedError() }
+            return try await player.relocated(selection, rowID: rowID, at: first, in: list)
+        }
     }
 
     /// Show in Album: selects the album and opens its panel.
@@ -246,29 +302,42 @@ final class AlbumGridModel {
         }
     }
 
-    /// Adds the album to the end of a regular playlist. A stale playlist revision refetches
-    /// the catalog page and retries once; a stale library revision refetches the snapshot.
-    func addToPlaylist(_ album: AlbumSummary, playlist: Playlist) {
+    /// Adds the selected tracks, or the whole album when none are selected, to the end of a
+    /// regular playlist. A stale revision of either kind retries once, under the fresh library
+    /// revision; a stale playlist revision also refetches the catalog page.
+    func addToPlaylist(_ expansion: AlbumExpansion, playlist: Playlist) {
         guard let player else { return }
+        let positions = expansion.selectedPositions
+        let request: SelectionRequest
+        do {
+            request = try selectionRequest(expansion, positions: positions, asRun: false)
+        } catch {
+            player.message = (error as? LocalizedError)?.errorDescription ?? "Wait for the tracks to load, then try again."
+            return
+        }
+        let title = expansion.album.title
+        let what = positions.isEmpty
+            ? (title.isEmpty ? "the album" : title)
+            : "\(DisplayFormat.count(positions.count)) \(positions.count == 1 ? "track" : "tracks")"
         player.mutate {
             var target = playlist
+            var selection = request.selection
             var retried = false
             while true {
-                guard player.connected, let state = player.snapshot else {
+                guard player.connected, player.snapshot != nil else {
                     throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was added.")
                 }
-                let selection = SelectionEncoder.source(list: AlbumPlayback.list(albumID: album.id),
-                                                        revision: state.library.revision)
                 do {
                     let _: PlaylistApplied = try await player.send("playlist_add_selection", [
                         "playlist_id": .uint(target.id), "expected_revision": .uint(target.revision),
                         "selection": try JSONValue.encoding(selection), "before": .null])
-                    player.message = "Added \(album.title.isEmpty ? "the album" : album.title) to \(target.name)."
+                    player.message = "Added \(what) to \(target.name)."
                     return
                 } catch let failure as ServerFailure
                     where ["stale_revision", "stale_library_revision"].contains(failure.code) && !retried {
                     retried = true
                     try await player.refreshSnapshot()
+                    selection = try await request.retarget()
                     if failure.code == "stale_revision" {
                         let page = try await player.regularPlaylistPage(query: "", offset: 0)
                         guard let fresh = page.entries.first(where: { $0.id == target.id }) else {
@@ -326,6 +395,8 @@ final class AlbumExpansion {
     /// The tracks match the current album; false while the first fetch is in flight.
     private(set) var isLoaded = false
     private(set) var failure: String?
+    /// The selected tracks, by row ID. Kept across track reloads while the rows remain.
+    var selectedRowIDs: Set<UInt64> = []
     /// What `tracks` were fetched for.
     @ObservationIgnored private(set) var basis: AlbumPanel.Loaded?
     @ObservationIgnored var fetching = false
@@ -338,6 +409,8 @@ final class AlbumExpansion {
 
     func loaded(_ rows: [ListRow], total: Int, basis: AlbumPanel.Loaded) {
         tracks = rows
+        let shown = Set(rows.map(\.row_id))
+        if !selectedRowIDs.isSubset(of: shown) { selectedRowIDs.formIntersection(shown) }
         self.total = total
         self.basis = basis
         isLoaded = true
@@ -347,6 +420,11 @@ final class AlbumExpansion {
     func failed(_ message: String) {
         // Keep the tracks shown; a later refresh replaces them.
         if !isLoaded { failure = message }
+    }
+
+    /// The selected tracks' positions in `tracks`.
+    var selectedPositions: IndexSet {
+        IndexSet(tracks.indices.filter { selectedRowIDs.contains(tracks[$0].row_id) })
     }
 
     /// "and N more…" under a tracklist cut at `AlbumPanel.trackLimit`.

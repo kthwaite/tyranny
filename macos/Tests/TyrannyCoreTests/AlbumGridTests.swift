@@ -10,6 +10,9 @@ private func album(id: UInt64 = 7, title: String = "Spirit of Eden", artist: Str
                  album_gain_db: gain, date_added: 0, musicbrainz_release_id: nil)
 }
 
+private func rowID(_ p: Int) -> UInt64? { UInt64(1000 + p) }
+private func trackID(_ p: Int) -> UInt64? { UInt64(5000 + p) }
+
 private func item(_ id: UInt64, played: Bool) -> QueueItem {
     QueueItem(id: id, path: "/m/\(id).flac", track_id: id, source: nil, run_id: nil, played: played,
               title: "", artist: "", album: "", album_id: nil, duration_ms: nil)
@@ -170,6 +173,57 @@ private func item(_ id: UInt64, played: Bool) -> QueueItem {
         #expect(AlbumPanel.moreText(total: 1024, shown: 200) == "and 824 more…")
         #expect(AlbumPanel.moreText(total: 1201, shown: 200) == "and 1,001 more…")
         #expect(AlbumPanel.moreText(total: 7, shown: 7) == nil)
+    }
+
+    @Test func noChosenRowsPlaysTheWholeAlbum() throws {
+        for asRun in [true, false] {
+            let s = try AlbumPanel.selection(albumID: 7, revision: 12, positions: IndexSet(), asRun: asRun,
+                                             rowID: rowID, trackID: trackID)
+            #expect(s == AlbumPlayback.selection(albumID: 7, libraryRevision: 12))
+        }
+    }
+
+    @Test func oneRowAsARunPlaysFromItToTheAlbumEnd() throws {
+        let s = try AlbumPanel.selection(albumID: 7, revision: 12, positions: IndexSet([2]), asRun: true,
+                                         rowID: rowID, trackID: trackID)
+        #expect(s == .list(list: AlbumPlayback.list(albumID: 7), libraryRevision: 12, ranges: [[2, UInt64.max]],
+                           excluded: [], firstRowID: 1002))
+    }
+
+    @Test func aRunFollowsItsFirstTrackAfterTheLibraryMovedOn() throws {
+        // A scan added a track before the clicked one; the panel still shows the old order.
+        let run = try AlbumPanel.selection(albumID: 7, revision: 12, positions: IndexSet([2]), asRun: true,
+                                           rowID: rowID, trackID: trackID)
+        let list = AlbumPlayback.list(albumID: 7)
+        #expect(SelectionRetarget.relocate(run, rowID: 1002, from: 2, rowIDs: [1000, 1001, 999, 1002], offset: 0,
+                                           libraryRevision: 13, list: list)
+                == .list(list: list, libraryRevision: 13, ranges: [[3, UInt64.max]], excluded: [], firstRowID: 1002))
+        #expect(SelectionRetarget.relocate(run, rowID: 1002, from: 2, rowIDs: [1000, 1001], offset: 0,
+                                           libraryRevision: 13, list: list) == nil)
+    }
+
+    @Test func otherChoicesSendExactlyTheChosenTracks() throws {
+        // Several rows, even as a run, and one row not as a run: their track IDs, in album order.
+        let several = try AlbumPanel.selection(albumID: 7, revision: 12, positions: IndexSet([3, 1]), asRun: true,
+                                               rowID: rowID, trackID: trackID)
+        #expect(several == .ids(libraryRevision: 12, trackIDs: [5001, 5003]))
+        let one = try AlbumPanel.selection(albumID: 7, revision: 12, positions: IndexSet([2]), asRun: false,
+                                           rowID: rowID, trackID: trackID)
+        #expect(one == .ids(libraryRevision: 12, trackIDs: [5002]))
+    }
+
+    @Test func tableShowsAtMostTwelveRowsAndAtLeastOne() {
+        #expect(AlbumPanel.maximumRows == 12)
+        #expect(AlbumPanel.visibleRows(trackCount: 0) == 1)
+        #expect(AlbumPanel.visibleRows(trackCount: 7) == 7)
+        #expect(AlbumPanel.visibleRows(trackCount: 12) == 12)
+        #expect(AlbumPanel.visibleRows(trackCount: 1024) == 12)
+    }
+
+    @Test func moreLineShowsOnlyPastTheTrackLimit() {
+        #expect(!AlbumPanel.showsMore(trackCount: 12))
+        #expect(!AlbumPanel.showsMore(trackCount: 200))
+        #expect(AlbumPanel.showsMore(trackCount: 201))
     }
 }
 
