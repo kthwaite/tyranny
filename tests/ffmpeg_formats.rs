@@ -219,3 +219,28 @@ async fn every_format_fixture_indexes_without_failures() {
     assert_eq!(state.tracks, files.len() as u64, "scan: {:?}", state.scan);
     library.shutdown().unwrap();
 }
+
+fn decode_to_eof(decoder: &mut Decoder) -> usize {
+    let mut buffer = vec![Frame::default(); 4096];
+    let mut total = 0;
+    loop {
+        match decoder.read(&mut buffer).unwrap() {
+            0 => return total,
+            count => total += count,
+        }
+    }
+}
+
+#[test]
+fn seeking_back_after_eof_decodes_like_a_fresh_seek() {
+    // HE-AAC in CAF only matches a frame duration on its end-trimmed final frame.
+    // That match must not carry over a seek and halve the frames decoded after it.
+    let path = fixture_root().join("formats/tone-heaac.caf");
+    let mut fresh = Decoder::open(&path, GainMode::Off).unwrap();
+    fresh.seek(0).unwrap();
+    let expected = decode_to_eof(&mut fresh);
+    let mut reused = Decoder::open(&path, GainMode::Off).unwrap();
+    decode_to_eof(&mut reused);
+    reused.seek(0).unwrap();
+    assert_eq!(decode_to_eof(&mut reused), expected);
+}
