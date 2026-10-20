@@ -46,6 +46,21 @@ cargo test --test server_transport live_streams_recover_publish_icy_persist_and_
 
 `scripts/make_test_fixtures.py` regenerates `tests/fixtures/streams/live.mp3` and `live.ogg` alongside the existing fixtures. Native and real-station smoke scripts were throwaway probes; their captured evidence is local, not a claimed fresh-checkout gate.
 
+## Saved radio stations
+
+The sidebar's PLAYING section has a **Radio** source (`go radio`, Go menu ⌘8). It lists the server's saved stations by name, with Name and URL columns. Double-click or Return plays a station. The context menu offers Play, Add to Up Next, Edit… and Remove… (with a confirmation alert). **Add Station…** takes a stream URL and an optional name; **Import…** reads one `.pls`, `.m3u` or `.m3u8` file on the client and sends its stations as one `add_stations` batch. URLs that are already saved are skipped by the server. Playing or adding a station appends a stream entry with the station's URL and name (`append_stream`, then `play`), so later station edits never touch the queue.
+
+`StationCatalog` (TyrannyCore) holds the rows and builds every request behind a send seam; the app's `StationsModel` sends them on the shared connection. It refetches `stations` only when `ControlState.stations_revision` differs from the shown revision, and a `stations_applied` reply updates the rows and revision so its own broadcast does not refetch. A `stale_stations_revision` reply refetches and shows the server's message; the edit is not retried. A station file with no HTTP(S) entries shows an error naming the file and sends nothing.
+
+Verification (2026-10-20): 302 Swift tests in 44 suites and 255 Rust tests (one ignored) passed; Swift built without warnings; Clippy and formatting passed.
+
+```sh
+swift test --package-path macos --scratch-path target/swift-client --filter "StationsModel|CommandLanguage|StationFile"
+cargo test --locked --test server_transport stations
+```
+
+**The live UI check was not done.** Driving the app (add, play, edit, remove a station; import a `.pls`) needs a visible window and Accessibility control, which this run could not use without a human. The Radio view, its sheet, the table's double-click/Return action and the open panel are compiled but not exercised in a running app.
+
 ## Album artwork
 
 Artwork is implemented and verified in Rust and SwiftUI. The matching protocol-v8 development bundle is installed at `target/Tyranny.app`; the prior protocol-v7 bundle is preserved at `target/artwork/Tyranny.app`. The directories were atomically exchanged, preserving the old executable inodes; both bundle signatures verified. The user's running daemon/database were not changed. To load matching processes: **Connection Settings → Stop…, quit the client, then reopen `target/Tyranny.app`**.

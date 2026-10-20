@@ -87,7 +87,7 @@ percentage points, clamped to `0...100` and rounded to whole percentages.
 | Action family | Commands |
 | --- | --- |
 | Playback | `play`, `pause`, `toggle`, `stop`, `next`, `previous`, `seek`, `volume`, `repeat off\|all\|one\|cycle`, `shuffle on\|off\|toggle`, `gain off\|track\|album`, `resume on\|off\|toggle` |
-| Navigation | `go songs\|albums\|artists\|genres\|recent\|history\|up-next`, `filter`, `focus-filter`, `reveal-playing`, `settings connection\|library\|playback`, `quit` |
+| Navigation | `go songs\|albums\|artists\|genres\|recent\|history\|up-next\|radio`, `filter`, `focus-filter`, `reveal-playing`, `settings connection\|library\|playback`, `quit` |
 | Connection/library | `connect`, `disconnect`, `server start\|restart\|stop`, `choose-folder`, `rescan <root-id>`, `retry-import`, `browse-library` |
 | Playlists | `playlist-open`, `playlist-create`, `playlist-rename`, `playlist-delete`, `playlist-play`, `playlist-enqueue`, `playlist-add`, `smart-create`, `smart-update`, `smart-snapshot` |
 | Queue/selection | `queue-clear`, `queue-shuffle`, `queue-save`, `selection-play`, `selection-run`, `selection-next`, `selection-enqueue`, `selection-remove`, `selection-move <entry-id\|end>`, `selection-album`, `selection-artist`, `selection-all`, `selection-clear` |

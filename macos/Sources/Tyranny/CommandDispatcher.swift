@@ -33,7 +33,7 @@ struct CommandDispatcher {
             navigation.destination = try destination(arguments[0])
             player.endImport()
         case .filter:
-            guard navigation.destination != .history, navigation.destination != .upNext else {
+            guard ![.history, .upNext, .radio].contains(navigation.destination) else {
                 throw CommandLanguageError("This view does not have a filter.")
             }
             try requireConnection()
@@ -46,7 +46,7 @@ struct CommandDispatcher {
             currentList?.sync()
             if navigation.destination == .albums { grid.sync() }
         case .focusFilter:
-            guard navigation.destination != .history, navigation.destination != .upNext else {
+            guard ![.history, .upNext, .radio].contains(navigation.destination) else {
                 throw CommandLanguageError("This view does not have a filter.")
             }
             navigation.focusFilter()
@@ -200,6 +200,7 @@ struct CommandDispatcher {
         case "recent": return .recent
         case "history": return .history
         case "up-next": return .upNext
+        case "radio": return .radio
         default: throw CommandLanguageError("Unknown destination.")
         }
     }
