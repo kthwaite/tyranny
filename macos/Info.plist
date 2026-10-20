@@ -3,6 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key><string>Tyranny</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>dev.tyranny.controller</string>
     <key>CFBundleName</key><string>Tyranny</string>
     <key>CFBundlePackageType</key><string>APPL</string>
