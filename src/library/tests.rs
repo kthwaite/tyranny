@@ -382,6 +382,644 @@ async fn album_identity_respects_compilations_release_ids_discs_and_separate_fol
     library.shutdown().unwrap();
 }
 
+#[tokio::test]
+async fn inferred_compilations_reconcile_additions_removals_and_retags_without_replacing_tracks() {
+    let scratch = Scratch::new();
+    let first = scratch.path("music/collection/one.flac");
+    let second = scratch.path("music/collection/two.flac");
+    flac(
+        &first,
+        &[
+            ("title", "One"),
+            ("artist", "Singer One"),
+            ("album", "Collection"),
+        ],
+    );
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let first_id = tracks(&library).await.entries[0].id;
+    assert_eq!(albums(&library).await.entries[0].album_artist, "Singer One");
+
+    flac(
+        &second,
+        &[
+            ("title", "Two"),
+            ("artist", "Singer Two"),
+            ("album", "Collection"),
+        ],
+    );
+    assert_eq!(rescan(&library, root).await.updated, 1);
+    let grouped = albums(&library).await;
+    assert_eq!(grouped.total, 1);
+    assert_eq!(grouped.entries[0].track_count, 2);
+    assert_eq!(grouped.entries[0].album_artist, "Various Artists");
+    assert!(grouped.entries[0].compilation);
+    let imported = tracks(&library).await.entries;
+    assert!(imported.iter().all(|track| {
+        track.metadata.compilation
+            && track.metadata.album_artist == "Various Artists"
+            && track.metadata.album_artist_tag.is_none()
+            && track.metadata.compilation_tag.is_none()
+    }));
+    assert_eq!(
+        imported
+            .iter()
+            .find(|track| track.metadata.title == "One")
+            .unwrap()
+            .id,
+        first_id
+    );
+    let second_id = imported
+        .iter()
+        .find(|track| track.metadata.title == "Two")
+        .unwrap()
+        .id;
+    let revision = library.state().revision;
+    assert_eq!(rescan(&library, root).await.updated, 0);
+    assert_eq!(library.state().revision, revision);
+    assert_eq!(tracks(&library).await.entries, imported);
+
+    // An unavailable root must not look like removal of the other artist.
+    fs::rename(scratch.path("music"), scratch.path("offline")).unwrap();
+    assert_eq!(rescan(&library, root).await.phase, ScanPhase::Failed);
+    assert_eq!(tracks(&library).await.entries, imported);
+    fs::rename(scratch.path("offline"), scratch.path("music")).unwrap();
+    fs::rename(&second, scratch.path("removed.flac")).unwrap();
+    rescan(&library, root).await;
+    let remaining = tracks(&library).await.entries.remove(0);
+    assert_eq!(remaining.id, first_id);
+    assert!(!remaining.metadata.compilation);
+    assert_eq!(remaining.metadata.album_artist, "Singer One");
+
+    fs::rename(scratch.path("removed.flac"), &second).unwrap();
+    rescan(&library, root).await;
+    let restored = tracks(&library).await.entries;
+    assert_eq!(
+        restored
+            .iter()
+            .find(|track| track.metadata.title == "Two")
+            .unwrap()
+            .id,
+        second_id
+    );
+    assert!(restored.iter().all(|track| track.metadata.compilation));
+
+    flac(
+        &second,
+        &[
+            ("title", "Two"),
+            ("artist", "Singer Two"),
+            ("album", "Collection"),
+            ("compilation", "0"),
+        ],
+    );
+    rescan(&library, root).await;
+    let protected = tracks(&library).await.entries;
+    assert_eq!(albums(&library).await.total, 2);
+    assert!(protected.iter().all(|track| !track.metadata.compilation));
+    assert_eq!(
+        protected
+            .iter()
+            .find(|track| track.metadata.title == "Two")
+            .unwrap()
+            .id,
+        second_id
+    );
+
+    flac(
+        &second,
+        &[
+            ("title", "Two"),
+            ("artist", "Singer Two"),
+            ("album", "Another Collection"),
+        ],
+    );
+    rescan(&library, root).await;
+    assert!(
+        tracks(&library)
+            .await
+            .entries
+            .iter()
+            .all(|track| !track.metadata.compilation)
+    );
+    assert_eq!(albums(&library).await.total, 2);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn compilation_inference_respects_mixed_explicit_tags_and_unknown_fallbacks() {
+    let scratch = Scratch::new();
+    type Case = (
+        &'static str,
+        &'static [(&'static str, &'static str)],
+        &'static str,
+        bool,
+        bool,
+    );
+    let cases: &[Case] = &[
+        (
+            "va",
+            &[("album_artist", "  vArIoUs ArTiStS  ")],
+            "Various Artists",
+            true,
+            true,
+        ),
+        (
+            "alias",
+            &[("album_artist", " va ")],
+            "Various Artists",
+            true,
+            true,
+        ),
+        (
+            "true",
+            &[("compilation", "1")],
+            "Various Artists",
+            true,
+            true,
+        ),
+        (
+            "owner",
+            &[("album_artist", "The Owner")],
+            "The Owner",
+            false,
+            false,
+        ),
+        ("false", &[("compilation", "0")], "Singer One", false, false),
+        (
+            "va-false",
+            &[("album_artist", "VA"), ("compilation", "0")],
+            "Various Artists",
+            false,
+            false,
+        ),
+        (
+            "owner-true",
+            &[("album_artist", "The Owner"), ("compilation", "1")],
+            "The Owner",
+            true,
+            false,
+        ),
+    ];
+    for (folder, extra, _, _, _) in cases {
+        let mut tags = vec![
+            ("title", "One"),
+            ("artist", "Singer One"),
+            ("album", *folder),
+        ];
+        tags.extend_from_slice(extra);
+        flac(&scratch.path(&format!("music/{folder}/one.flac")), &tags);
+        flac(
+            &scratch.path(&format!("music/{folder}/two.flac")),
+            &[
+                ("title", "Two"),
+                ("artist", "Singer Two"),
+                ("album", folder),
+            ],
+        );
+    }
+    for (name, artist) in [("one", "Singer One"), ("two", "Singer Two")] {
+        flac(
+            &scratch.path(&format!("music/no-album/{name}.flac")),
+            &[("title", name), ("artist", artist)],
+        );
+    }
+    flac(
+        &scratch.path("music/no-artist/one.flac"),
+        &[
+            ("title", "One"),
+            ("artist", "Singer One"),
+            ("album", "No Artist"),
+        ],
+    );
+    flac(
+        &scratch.path("music/no-artist/two.flac"),
+        &[("title", "Two"), ("album", "No Artist")],
+    );
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    assert_eq!(finished(&library).await.failures, 0);
+    let indexed = tracks(&library).await.entries;
+    for (folder, _, album_artist, explicit_compilation, inferred) in cases {
+        let first = indexed
+            .iter()
+            .find(|track| track.path.ends_with(&format!("/{folder}/one.flac")))
+            .unwrap();
+        let second = indexed
+            .iter()
+            .find(|track| track.path.ends_with(&format!("/{folder}/two.flac")))
+            .unwrap();
+        assert_eq!(first.metadata.artist, "Singer One");
+        assert_eq!(second.metadata.artist, "Singer Two");
+        assert_eq!(first.metadata.album_artist, *album_artist, "{folder}");
+        assert_eq!(
+            first.metadata.compilation, *explicit_compilation,
+            "{folder}"
+        );
+        assert_eq!(second.metadata.compilation, *inferred, "{folder}");
+        assert_eq!(first.album_id == second.album_id, *inferred, "{folder}");
+        assert_eq!(
+            second.metadata.album_artist,
+            if *inferred {
+                "Various Artists"
+            } else {
+                "Singer Two"
+            }
+        );
+    }
+    assert!(
+        indexed
+            .iter()
+            .filter(|track| track.path.contains("/no-"))
+            .all(|track| !track.metadata.compilation)
+    );
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn compilation_groups_do_not_cross_folders_or_release_ids_but_shared_releases_span_roots() {
+    let scratch = Scratch::new();
+    for (folder, artist) in [("first", "Singer One"), ("second", "Singer Two")] {
+        flac(
+            &scratch.path(&format!("music/{folder}/one.flac")),
+            &[("artist", artist), ("album", "Same Title")],
+        );
+    }
+    for (name, artist, release) in [
+        ("one", "Singer One", "release-one"),
+        ("two", "Singer Two", "release-two"),
+    ] {
+        flac(
+            &scratch.path(&format!("music/distinct/{name}.flac")),
+            &[
+                ("artist", artist),
+                ("album", "Same Title"),
+                ("MUSICBRAINZ_ALBUMID", release),
+            ],
+        );
+    }
+    let first = scratch.path("music/shared/one.flac");
+    let second = scratch.path("other/disc/two.flac");
+    flac(
+        &first,
+        &[
+            ("title", "Shared One"),
+            ("artist", "Singer One"),
+            ("album", "Shared"),
+            ("MUSICBRAINZ_ALBUMID", "shared-release"),
+        ],
+    );
+    flac(
+        &second,
+        &[
+            ("title", "Shared Two"),
+            ("artist", "Singer Two"),
+            ("album", "Shared"),
+            ("MUSICBRAINZ_ALBUMID", "shared-release"),
+        ],
+    );
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let other_root = add(&library, &scratch.path("other")).await;
+    finished(&library).await;
+    let grouped = albums(&library).await;
+    assert_eq!(grouped.total, 5);
+    let shared = grouped
+        .entries
+        .iter()
+        .find(|album| album.title == "Shared")
+        .unwrap();
+    assert_eq!(shared.track_count, 2);
+    assert_eq!(shared.album_artist, "Various Artists");
+    assert!(shared.compilation);
+    assert!(
+        grouped
+            .entries
+            .iter()
+            .filter(|album| album.title == "Same Title")
+            .all(|album| !album.compilation)
+    );
+    let before = tracks(&library).await.entries;
+    let second_id = before
+        .iter()
+        .find(|track| track.metadata.title == "Shared Two")
+        .unwrap()
+        .id;
+    // Retagging a release must reconcile the old key, including another root.
+    flac(
+        &second,
+        &[
+            ("title", "Shared Two"),
+            ("artist", "Singer Two"),
+            ("album", "Shared"),
+            ("MUSICBRAINZ_ALBUMID", "different-release"),
+        ],
+    );
+    rescan(&library, other_root).await;
+    let retagged = tracks(&library).await.entries;
+    assert_eq!(albums(&library).await.total, 6);
+    assert!(retagged.iter().all(|track| !track.metadata.compilation));
+    assert_eq!(
+        retagged
+            .iter()
+            .find(|track| track.metadata.title == "Shared Two")
+            .unwrap()
+            .id,
+        second_id
+    );
+    assert_eq!(
+        retagged
+            .iter()
+            .find(|track| track.metadata.title == "Shared One")
+            .unwrap()
+            .metadata
+            .album_artist,
+        "Singer One"
+    );
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn compilation_inference_waits_for_legacy_metadata_to_be_reprobed() {
+    let scratch = Scratch::new();
+    let first = scratch.path("music/one.flac");
+    flac(
+        &first,
+        &[
+            ("title", "One"),
+            ("artist", "Singer One"),
+            ("album", "Collection"),
+            ("album_artist", "Explicit Owner"),
+        ],
+    );
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let id = tracks(&library).await.entries[0].id;
+    database(&scratch).execute_batch(
+        "UPDATE library_assets SET metadata_version=2;
+        UPDATE library_tracks SET metadata=json_remove(metadata,'$.album_artist_tag','$.compilation_tag');",
+    ).unwrap();
+    fs::write(&first, b"temporarily unreadable audio").unwrap();
+    flac(
+        &scratch.path("music/two.flac"),
+        &[
+            ("title", "Two"),
+            ("artist", "Singer Two"),
+            ("album", "Collection"),
+        ],
+    );
+    assert_eq!(rescan(&library, root).await.failures, 1);
+    assert!(
+        tracks(&library)
+            .await
+            .entries
+            .iter()
+            .all(|track| !track.metadata.compilation)
+    );
+    flac(
+        &first,
+        &[
+            ("title", "One"),
+            ("artist", "Singer One"),
+            ("album", "Collection"),
+        ],
+    );
+    assert_eq!(rescan(&library, root).await.updated, 1);
+    let reprobed = tracks(&library).await.entries;
+    assert_eq!(albums(&library).await.total, 1);
+    assert!(reprobed.iter().all(|track| track.metadata.compilation));
+    assert_eq!(
+        reprobed
+            .iter()
+            .find(|track| track.metadata.title == "One")
+            .unwrap()
+            .id,
+        id
+    );
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn compilation_reconciliation_crosses_probe_batches_and_checks_late_explicit_conflicts() {
+    let scratch = Scratch::new();
+    for (name, artist) in [("one", "Singer One"), ("two", "Singer Two")] {
+        flac(
+            &scratch.path(&format!("{name}.flac")),
+            &[("artist", artist), ("album", "Large Collection")],
+        );
+    }
+    fs::create_dir_all(scratch.path("music")).unwrap();
+    for index in 0..129 {
+        fs::copy(
+            scratch.path(if index % 2 == 0 {
+                "one.flac"
+            } else {
+                "two.flac"
+            }),
+            scratch.path(&format!("music/{index:03}.flac")),
+        )
+        .unwrap();
+    }
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    assert_eq!(finished(&library).await.updated, 129);
+    let grouped = albums(&library).await;
+    assert_eq!(grouped.total, 1);
+    assert_eq!(grouped.entries[0].track_count, 129);
+    assert!(grouped.entries[0].compilation);
+    let before = tracks(&library).await.entries;
+    flac(
+        &scratch.path("music/z-explicit.flac"),
+        &[
+            ("artist", "Singer Three"),
+            ("album", "Large Collection"),
+            ("compilation", "0"),
+        ],
+    );
+    assert_eq!(rescan(&library, root).await.updated, 1);
+    let protected = tracks(&library).await.entries;
+    assert_eq!(protected.len(), 130);
+    assert!(protected.iter().all(|track| !track.metadata.compilation));
+    for old in before {
+        assert_eq!(
+            protected
+                .iter()
+                .find(|track| track.path == old.path)
+                .unwrap()
+                .id,
+            old.id
+        );
+    }
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn partial_release_ids_join_unambiguous_folder_peers_and_detach_on_conflicts() {
+    let scratch = Scratch::new();
+    let tagged = scratch.path("music/mixed/tagged.flac");
+    let untagged = scratch.path("music/mixed/untagged.flac");
+    let conflict = scratch.path("music/mixed/conflict.flac");
+    let tagged_tags = |release: &'static str| {
+        [
+            ("title", "Tagged"),
+            ("artist", "Singer One"),
+            ("album", "Mixed"),
+            ("MUSICBRAINZ_ALBUMID", release),
+        ]
+    };
+    flac(&tagged, &tagged_tags("release-a"));
+    flac(
+        &untagged,
+        &[
+            ("title", "Untagged"),
+            ("artist", "Singer Two"),
+            ("album", "Mixed"),
+        ],
+    );
+    flac(
+        &scratch.path("other/tagged.flac"),
+        &[
+            ("title", "Other"),
+            ("artist", "Singer One"),
+            ("album", "Mixed"),
+            ("MUSICBRAINZ_ALBUMID", "release-a"),
+        ],
+    );
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let initial = tracks(&library).await.entries;
+    let untagged_id = initial
+        .iter()
+        .find(|track| track.metadata.title == "Untagged")
+        .unwrap()
+        .id;
+    let tagged_id = initial
+        .iter()
+        .find(|track| track.metadata.title == "Tagged")
+        .unwrap()
+        .id;
+    assert_eq!(albums(&library).await.total, 1);
+    assert!(initial.iter().all(|track| track.metadata.compilation));
+    assert!(
+        initial
+            .iter()
+            .find(|track| track.id == untagged_id)
+            .unwrap()
+            .metadata
+            .musicbrainz_release_id
+            .is_none()
+    );
+    let other_root = add(&library, &scratch.path("other")).await;
+    finished(&library).await;
+    assert_eq!(albums(&library).await.entries[0].track_count, 3);
+    library.shutdown().unwrap();
+
+    // TEMP bookkeeping is gone; the effective album association must still
+    // include the missing-ID track when only the other root is rescanned.
+    let library = scratch.library();
+    rescan(&library, other_root).await;
+    assert_eq!(albums(&library).await.total, 1);
+    assert_eq!(albums(&library).await.entries[0].track_count, 3);
+    assert!(
+        tracks(&library)
+            .await
+            .entries
+            .iter()
+            .all(|track| track.metadata.compilation)
+    );
+
+    // The old release sorts first. Its inference must not count a companion
+    // which this scan has assigned to the newly tagged release.
+    flac(&tagged, &tagged_tags("release-z"));
+    rescan(&library, root).await;
+    let retagged = tracks(&library).await.entries;
+    assert_eq!(albums(&library).await.total, 2);
+    let other = retagged
+        .iter()
+        .find(|track| track.metadata.title == "Other")
+        .unwrap();
+    assert!(!other.metadata.compilation);
+    assert_eq!(other.metadata.album_artist, "Singer One");
+    let companion = retagged
+        .iter()
+        .find(|track| track.id == untagged_id)
+        .unwrap();
+    assert!(companion.metadata.compilation);
+    assert!(companion.metadata.musicbrainz_release_id.is_none());
+    assert_eq!(
+        companion.album_id,
+        retagged
+            .iter()
+            .find(|track| track.id == tagged_id)
+            .unwrap()
+            .album_id
+    );
+
+    fs::rename(&tagged, scratch.path("saved.flac")).unwrap();
+    rescan(&library, root).await;
+    let detached = tracks(&library).await.entries;
+    let companion = detached
+        .iter()
+        .find(|track| track.id == untagged_id)
+        .unwrap();
+    assert!(!companion.metadata.compilation);
+    assert_eq!(companion.metadata.album_artist, "Singer Two");
+    assert!(companion.metadata.musicbrainz_release_id.is_none());
+    fs::rename(scratch.path("saved.flac"), &tagged).unwrap();
+    rescan(&library, root).await;
+    assert!(
+        tracks(&library)
+            .await
+            .entries
+            .iter()
+            .find(|track| track.id == untagged_id)
+            .unwrap()
+            .metadata
+            .compilation
+    );
+
+    flac(
+        &conflict,
+        &[
+            ("title", "Conflicting"),
+            ("artist", "Singer Three"),
+            ("album", "Mixed"),
+            ("MUSICBRAINZ_ALBUMID", "release-conflicting"),
+        ],
+    );
+    rescan(&library, root).await;
+    let ambiguous = tracks(&library).await.entries;
+    assert_eq!(albums(&library).await.total, 4);
+    assert!(ambiguous.iter().all(|track| !track.metadata.compilation));
+    assert!(
+        ambiguous
+            .iter()
+            .find(|track| track.id == untagged_id)
+            .unwrap()
+            .metadata
+            .musicbrainz_release_id
+            .is_none()
+    );
+    fs::remove_file(&conflict).unwrap();
+    rescan(&library, root).await;
+    let restored = tracks(&library).await.entries;
+    assert_eq!(albums(&library).await.total, 2);
+    assert!(
+        restored
+            .iter()
+            .find(|track| track.id == untagged_id)
+            .unwrap()
+            .metadata
+            .compilation
+    );
+    assert!(restored.iter().any(|track| track.id == tagged_id));
+    library.shutdown().unwrap();
+}
+
 fn page_request(revision: Option<u64>, offset: usize, limit: usize, query: &str) -> PageRequest {
     PageRequest {
         revision,
@@ -1070,7 +1708,7 @@ async fn rescan_reextracts_assets_with_old_metadata_version() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!((year, version), (Some(1959), 2));
+    assert_eq!((year, version), (Some(1959), 3));
     let scan = rescan(&library, root).await;
     assert_eq!((scan.updated, scan.unchanged), (0, 1));
     library.shutdown().unwrap();

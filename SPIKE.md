@@ -42,6 +42,27 @@ with a debug client. `scripts/build_macos.sh release` instead builds both
 components in release mode and assembles a self-contained
 `target/release/Tyranny.app`. An optional second argument selects the app destination.
 
+### Compilation detection
+
+After upgrading, **rescan existing music roots** in Settings → Library. Metadata
+version 3 re-probes unchanged files once to distinguish explicit tags from
+fallback display values; SQLite schema 6 and protocol v11 are unchanged.
+
+Albums with different known track artists and no conflicting explicit tags are
+grouped as Various Artists when they share an album title and directory, or a
+MusicBrainz release ID. `VA` and `Various Artists` album-artist tags are recognized
+case-insensitively. Explicit non-VA album artists and explicit compilation flags
+win; track artists and media files are never rewritten. Missing album/artist
+fallbacks are not evidence of a compilation.
+
+A missing release ID can join a folder/title's single unambiguous tagged release;
+the association does not invent a MusicBrainz ID in track metadata. Conflicting
+release IDs and unrelated same-title directories stay separate. Additions,
+removals and retags reconcile after probing, preserving track IDs and reversing
+stale inference. Unavailable roots retain their last-known records. Reconciliation
+uses temporary coordinator worklists and 64-track update batches, not playback
+thread work. Interrupted scans require the existing manual rescan recovery.
+
 ### Audio equalizer
 
 Open **Playback → Equalizer…** (`⌥⌘E`), or use **Settings → Playback → Open

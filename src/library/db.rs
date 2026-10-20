@@ -4,11 +4,14 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub(super) const BATCH: usize = 64;
 /// Bump when extraction learns new fields so unchanged files are re-read once.
-pub(super) const METADATA_VERSION: i64 = 2;
+pub(super) const METADATA_VERSION: i64 = 3;
 pub(super) const ERROR_LIMIT: usize = 1024;
 
 /// The completed-scan watermark is an atomic tombstone set: discovery may mark
@@ -222,7 +225,7 @@ pub(super) fn state(
 /// The revision is the content revision: it changes only when rows visible to
 /// list queries change, so clients may cache windows keyed by it. Call once per
 /// transaction that makes such a change.
-fn bump_revision(transaction: &Transaction<'_>) -> Result<()> {
+pub(super) fn bump_revision(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(
         "UPDATE library_state SET revision=revision+1 WHERE singleton=1",
         [],
@@ -415,6 +418,81 @@ fn artist(transaction: &Transaction<'_>, name: &str, musicbrainz_id: Option<&str
     )?)
 }
 
+fn album_identity(
+    path: &Path,
+    metadata: &TrackMetadata,
+    release_id: Option<&str>,
+) -> Result<String> {
+    Ok(match release_id.filter(|value| filled(value)) {
+        Some(id) => {
+            serde_json::to_string(&("mb", id, &metadata.album_artist, metadata.compilation))?
+        }
+        None => serde_json::to_string(&(
+            "folder",
+            &metadata.album_artist,
+            &metadata.album,
+            path.parent()
+                .and_then(|parent| parent.to_str())
+                .context("track has no UTF-8 source directory")?,
+            metadata.compilation,
+        ))?,
+    })
+}
+
+pub(super) fn album(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    metadata: &TrackMetadata,
+) -> Result<u64> {
+    album_for_release(
+        transaction,
+        path,
+        metadata,
+        metadata.musicbrainz_release_id.as_deref(),
+    )
+}
+
+/// The effective release association may come from unambiguous folder peers;
+/// it changes album identity, never the track's extracted MusicBrainz metadata.
+pub(super) fn album_for_release(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    metadata: &TrackMetadata,
+    release_id: Option<&str>,
+) -> Result<u64> {
+    let album_artist_id = artist(
+        transaction,
+        &metadata.album_artist,
+        metadata.musicbrainz_album_artist_id.as_deref(),
+    )?;
+    let release_id = release_id.filter(|value| filled(value));
+    let identity = album_identity(path, metadata, release_id)?;
+    transaction.execute("INSERT INTO library_albums(identity,artist_id,title,album_artist,search,title_sort,musicbrainz_release_id,compilation)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(identity) DO UPDATE SET
+        artist_id=excluded.artist_id,title=excluded.title,album_artist=excluded.album_artist,
+        search=excluded.search,title_sort=excluded.title_sort,musicbrainz_release_id=excluded.musicbrainz_release_id,
+        compilation=excluded.compilation",
+        params![identity,album_artist_id,metadata.album,metadata.album_artist,
+            format!("{}\n{}",metadata.album,metadata.album_artist).to_lowercase(),metadata.album.to_lowercase(),release_id,metadata.compilation])?;
+    Ok(transaction.query_row(
+        "SELECT id FROM library_albums WHERE identity=?1",
+        [identity],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) fn track_search(path: &str, metadata: &TrackMetadata) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{path}",
+        metadata.title,
+        metadata.artist,
+        metadata.album,
+        metadata.album_artist,
+        metadata.genres.join("\n")
+    )
+    .to_lowercase()
+}
+
 fn install(
     transaction: &Transaction<'_>,
     candidate: &Candidate,
@@ -426,40 +504,8 @@ fn install(
         &metadata.artist,
         metadata.musicbrainz_artist_id.as_deref(),
     )?;
-    let album_artist_id = artist(
-        transaction,
-        &metadata.album_artist,
-        metadata.musicbrainz_album_artist_id.as_deref(),
-    )?;
-    let release_id = metadata
-        .musicbrainz_release_id
-        .as_deref()
-        .filter(|value| filled(value));
-    let identity = match release_id {
-        Some(id) => serde_json::to_string(&("mb", id))?,
-        None => serde_json::to_string(&(
-            "folder",
-            &metadata.album_artist,
-            &metadata.album,
-            candidate
-                .path
-                .parent()
-                .and_then(|parent| parent.to_str())
-                .context("track has no UTF-8 source directory")?,
-        ))?,
-    };
-    transaction.execute("INSERT INTO library_albums(identity,artist_id,title,album_artist,search,title_sort,musicbrainz_release_id,compilation)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(identity) DO UPDATE SET
-        artist_id=excluded.artist_id,title=excluded.title,album_artist=excluded.album_artist,
-        search=excluded.search,title_sort=excluded.title_sort,musicbrainz_release_id=excluded.musicbrainz_release_id,
-        compilation=excluded.compilation",
-        params![identity,album_artist_id,metadata.album,metadata.album_artist,
-            format!("{}\n{}",metadata.album,metadata.album_artist).to_lowercase(),metadata.album.to_lowercase(),release_id,metadata.compilation])?;
-    let album_id: u64 = transaction.query_row(
-        "SELECT id FROM library_albums WHERE identity=?1",
-        [identity],
-        |row| row.get(0),
-    )?;
+    let album_id = album(transaction, &candidate.path, &metadata)?;
+    super::grouping::remember(transaction, path, &metadata)?;
     let (asset_id, indexed): (u64, bool) = transaction.query_row(
         "SELECT id,indexed FROM library_assets WHERE path=?1",
         [path],
@@ -469,7 +515,6 @@ fn install(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64);
     let added = (candidate.created_ns.unwrap_or(candidate.modified_ns) / 1_000_000_000).min(now);
-    let genres = metadata.genres.join("\n");
     transaction.execute("INSERT INTO library_tracks(asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number,
         year,codec,bit_depth,bitrate_kbps,file_size,date_added)
         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(asset_id) DO UPDATE SET
@@ -478,7 +523,7 @@ fn install(
         year=excluded.year,codec=excluded.codec,bit_depth=excluded.bit_depth,bitrate_kbps=excluded.bitrate_kbps,file_size=excluded.file_size,
         date_added=CASE WHEN library_tracks.date_added=0 THEN excluded.date_added ELSE library_tracks.date_added END",
         params![asset_id,artist_id,album_id,serde_json::to_string(&metadata)?,
-            format!("{}\n{}\n{}\n{}\n{genres}\n{path}",metadata.title,metadata.artist,metadata.album,metadata.album_artist).to_lowercase(),
+            track_search(path, &metadata),
             metadata.title.to_lowercase(),metadata.disc_number.unwrap_or(1),metadata.disc_total.unwrap_or(1),metadata.track_number.unwrap_or(0),
             metadata.year,metadata.codec,metadata.bit_depth,metadata.bitrate_kbps,candidate.size,added])?;
     let track_id: u64 = transaction.query_row(
