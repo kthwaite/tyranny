@@ -56,7 +56,7 @@ enum LaunchPrefetch {
     private static func exchange(on socket: URLSessionWebSocketTask,
                                  request: [String: JSONValue]) async throws -> LaunchPrefetchReply? {
         guard case (.hello(let version, let instance, let snapshot), _)? = try await receive(on: socket),
-              version == 9, !instance.isEmpty else { return nil }
+              version == WireProtocol.version, !instance.isEmpty else { return nil }
         var history = snapshot.history_revision
         var sequence = snapshot.sequence
         var object = request
@@ -85,7 +85,7 @@ enum LaunchPrefetch {
     }
 
     /// The next message and its bytes, decoded as `WireClient` decodes them. Nil when it is not
-    /// protocol v9 JSON text within the size limit.
+    /// `WireProtocol.version` JSON text within the size limit.
     private static func receive(on socket: URLSessionWebSocketTask) async throws -> (IncomingMessage, Data)? {
         guard case .string(let text) = try await socket.receive(),
               text.utf8.count <= WireClient.responseLimit else { return nil }

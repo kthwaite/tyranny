@@ -1,5 +1,11 @@
 import Foundation
 
+/// The local control protocol this client speaks. The server's hello must carry exactly this
+/// version (`src/protocol.rs` `VERSION`; `cargo test` checks that the two agree).
+public enum WireProtocol {
+    public static let version: UInt32 = 12
+}
+
 public struct PlayerSettings: Codable, Sendable, Equatable {
     public let gain_mode: String
     public let resume_on_start: Bool

@@ -87,7 +87,7 @@ enum NativeShellSmoke {
             try await drive("expect-text", "status-totals", expected)
             observations["status_totals"] = expected
         }
-        try await drive("expect-text", "status-connection", "Server · local · protocol v11")
+        try await drive("expect-text", "status-connection", "Server · local · protocol v\(WireProtocol.version)")
         cases.append("native-status-bar-connection-and-library-totals")
 
         // Setup only: fill the queue (the enqueueing list views arrive in Tasks 6 and 13).

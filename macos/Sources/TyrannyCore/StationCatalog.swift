@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// The saved radio stations, and the commands that read and edit them (protocol v11).
+/// The saved radio stations, and the commands that read and edit them (protocol v12).
 ///
 /// The catalog has one revision, `ControlState.stations_revision`. `observe` notes each
 /// snapshot's revision; when the shown catalog lags it, `sync` fetches the whole catalog
