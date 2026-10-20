@@ -172,8 +172,8 @@ def main():
             payload = json.loads((folder / 'report.json').read_text())
             report['native'] = payload
             assert payload['passed'], payload.get('error')
-            assert client.state()['transport'] == 'playing'
-            record('native-filter-edits-and-controller-exit-preserve-daemon-playback')
+            assert client.state()['transport'] == 'paused'
+            record('native-filter-edits-and-controller-quit-pauses-daemon-playback')
         report['passed'] = True
     except Exception as error:
         report['passed'] = False

@@ -279,6 +279,12 @@ def main():
         assert code == 0 and result["passed"], f"native correctness failure: {result_path}"
         control = MeasuredWebSocket(ready["address"], Path(ready["token_path"]).read_text())
         assert control.status == 101
+        # The client's quit paused playback. Resume it, so later stages still measure under playback.
+        quit_state = control.state()
+        result["quit_transport"] = quit_state["transport"]
+        assert quit_state["transport"] == "paused", f"client quit did not pause playback: {quit_state['transport']}"
+        control.request("play")
+        control.wait(lambda state: state["transport"] == "playing")
 
     def measure(name, command, iteration, **fields):
         before = control.frame_bytes

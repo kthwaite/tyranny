@@ -112,6 +112,7 @@ def main():
                 runs(report, run, app, port, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
+            paused_at = None
             for mode in ["initial", "relaunch"]:
                 output = run / mode
                 command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"], "--ui-smoke-output", str(output)]
@@ -125,12 +126,16 @@ def main():
                 assert native["passed"], native.get("error")
                 state = controller.state()
                 # The double-click played the Songs run: all 105 tracks, queued before the rescan added files.
-                assert state["transport"] == "playing" and state["queue_length"] == 105, state
-                before = state["position_frames"]
+                # Quit paused it. The relaunch resumed it, and its own quit paused it again.
+                assert state["transport"] == "paused" and state["queue_length"] == 105, state
+                if paused_at is not None:
+                    assert (state["current_id"] != paused_at["current_id"]
+                            or state["position_frames"] > paused_at["position_frames"]), (paused_at, state)
                 time.sleep(0.3)
                 state = controller.state()
-                assert state["position_frames"] > before and state["underruns"] == 0, state
-                report["cases"].append({"name": f"{mode}-client-exit-preserves-server-playback", "snapshot": state})
+                assert state["transport"] == "paused" and state["underruns"] == 0, state
+                paused_at = state
+                report["cases"].append({"name": f"{mode}-client-quit-pauses-server-playback", "snapshot": state})
             report["passed"] = True
     except Exception as error:
         report["passed"] = False
@@ -165,7 +170,8 @@ def shell(report, run, app, port, ready, root, controller, screenshots):
     settings = state["settings"]
     # The server, not the app, must hold the modes the toolbar set.
     assert settings["volume"] == 45 and settings["repeat"] == "off" and settings["shuffle"] is False, settings
-    assert state["library"]["tracks"] == 1129 and state["transport"] == "playing", state
+    # The smoke left playback running; its quit paused it.
+    assert state["library"]["tracks"] == 1129 and state["transport"] == "paused", state
     report["cases"].append({"name": "shell-server-holds-toolbar-settings", "settings": settings})
     screenshots.mkdir(parents=True, exist_ok=True)
     for image in sorted(output.glob("shell*.png")):
@@ -298,7 +304,8 @@ def albums(report, run, app, port, ready, source, controller, screenshots):
     assert page["total"] == summary["track_count"] == expanded["tracks"], (page["total"], summary, expanded)
     assert all(entry["source"] == {"kind": "album", "name": summary["title"]} for entry in page["entries"]), page
     assert len({entry["run_id"] for entry in page["entries"]}) == 1, page
-    assert controller.state()["transport"] == "playing"
+    # The album run was playing; the app's quit paused it.
+    assert controller.state()["transport"] == "paused"
     report["cases"].append({"name": "albums-server-holds-album-run", "total": page["total"]})
     screenshots.mkdir(parents=True, exist_ok=True)
     for image in sorted(output.glob("albums*.png")):

@@ -241,7 +241,8 @@ def main():
             native('exercise')
             before = client.state()
             native_queue = queue()
-            assert before['transport'] == 'playing' and before['queue_length'] == 1013
+            # The smoke left Play All running; the app's quit paused it.
+            assert before['transport'] == 'paused' and before['queue_length'] == 1013
             assert all(Path(row['path']).name != 'native-arrival.flac' for row in native_queue)
             named = {p['name']: p for p in catalog()['entries']}
             assert entries(named['Miles without Blue'])['total'] == 507

@@ -9,8 +9,11 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
     private var keyGuard: Any?
     private enum QuitState { case idle, suspending, suspended }
     private var quitState = QuitState.idle
-    /// True once AppKit waits for `reply(toApplicationShouldTerminate:)`.
-    private var quitReplyPending = false
+    /// Whether AppKit waits for `reply(toApplicationShouldTerminate:)`, and whether it got it.
+    private enum QuitReply { case none, pending, replied }
+    private var quitReply = QuitReply.none
+    /// The backstop for a `.terminateLater` wait. It is longer than the pause's 1 s deadline.
+    private static let quitWatchdog = 1.5
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -57,10 +60,10 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
             Task {
                 await model.suspendForQuit()
                 quitState = .suspended
-                if quitReplyPending {
-                    NSApp.reply(toApplicationShouldTerminate: true)
-                } else {
-                    NSApp.terminate(nil)
+                switch quitReply {
+                case .none: NSApp.terminate(nil)
+                case .pending: replyToQuit()
+                case .replied: break
                 }
             }
             return deferQuit()
@@ -76,8 +79,31 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
         guard let event = NSAppleEventManager.shared().currentAppleEvent,
               event.eventClass == AEEventClass(kCoreEventClass),
               event.eventID == AEEventID(kAEQuitApplication) else { return .terminateCancel }
-        quitReplyPending = true
+        if quitReply == .none {
+            quitReply = .pending
+            startQuitWatchdog()
+        }
         return .terminateLater
+    }
+
+    /// Replies once, whether the pause task or the watchdog gets here first.
+    private func replyToQuit() {
+        guard quitReply == .pending else { return }
+        quitReply = .replied
+        NSApp.reply(toApplicationShouldTerminate: true)
+    }
+
+    /// Quit must never hang, even if the pause task cannot run on the main queue.
+    /// The timer runs on a global queue. Its reply goes to the main run loop as a run-loop block
+    /// in the common modes. AppKit's modal wait runs those blocks without draining the main queue.
+    private func startQuitWatchdog() {
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.quitWatchdog) { [weak self] in
+            let main = CFRunLoopGetMain()
+            CFRunLoopPerformBlock(main, CFRunLoopMode.commonModes.rawValue) {
+                MainActor.assumeIsolated { self?.replyToQuit() }
+            }
+            CFRunLoopWakeUp(main)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
