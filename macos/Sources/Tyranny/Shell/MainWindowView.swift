@@ -1,7 +1,7 @@
 import SwiftUI
 import TyrannyCore
 
-/// The library window: source list, toolbar transport and filter, main view,
+/// The library window: toolbar filter, source list, main view, the full-width player bar,
 /// and the status bar.
 struct MainWindowView: View {
     let model: PlayerModel
@@ -10,8 +10,8 @@ struct MainWindowView: View {
     @FocusState private var filterFocused: Bool
     @State private var dismissedFilterError: String?
     @State private var lists = TrackLists()
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
-    private var transport: TransportModel { model.transport }
     /// Set by the shown track list from `list_tracks` `invalid_filter` replies.
     private var filterError: String? { navigation.filterError }
 
@@ -48,10 +48,13 @@ struct MainWindowView: View {
         navigation.upNextDrawerVisible && model.connected && navigation.destination != .upNext
     }
 
+    /// Expanded art moves into the sidebar only while the sidebar shows.
+    private var sidebarVisible: Bool { columnVisibility != .detailOnly }
+
     var body: some View {
         VStack(spacing: 0) {
-            NavigationSplitView {
-                SourceList(model: model, navigation: navigation)
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                SourceList(model: model, navigation: navigation, sidebarVisible: sidebarVisible)
                     .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 300)
             } detail: {
                 HStack(spacing: 0) {
@@ -62,6 +65,8 @@ struct MainWindowView: View {
                     }
                 }
             }
+            Divider()
+            PlayerBar(model: model, navigation: navigation, sidebarVisible: sidebarVisible)
             Divider()
             StatusBar(model: model, totals: currentList?.totals, filteredFrom: currentList?.filteredFrom) {
                 showSettings(.connection)
@@ -85,68 +90,12 @@ struct MainWindowView: View {
 
     // MARK: - Toolbar
 
+    /// The split view supplies the sidebar toggle; the toolbar holds only the filter. macOS puts
+    /// primary actions at the leading edge, so a flexible space pushes the filter to the trailing edge.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button(action: transport.previous) {
-                Label("Previous", systemImage: "backward.fill")
-            }
-            .disabled(!transport.canPrevious)
-            .help("Previous")
-            .accessibilityIdentifier("transport-previous")
-            Button(action: transport.playPause) {
-                Label(transport.isPlaying ? "Pause" : "Play",
-                      systemImage: transport.isPlaying ? "pause.fill" : "play.fill")
-            }
-            .disabled(!transport.canPlayPause)
-            .help(transport.isPlaying ? "Pause" : "Play")
-            .accessibilityIdentifier("transport-play-pause")
-            Button(action: transport.next) {
-                Label("Next", systemImage: "forward.fill")
-            }
-            .disabled(!transport.canNext)
-            .help("Next")
-            .accessibilityIdentifier("transport-next")
-            HStack(spacing: 4) {
-                Image(systemName: "speaker.fill").font(.system(size: 9)).foregroundStyle(.secondary)
-                VolumeSlider(transport: transport).frame(width: 84)
-                Image(systemName: "speaker.wave.3.fill").font(.system(size: 9)).foregroundStyle(.secondary)
-            }
-            .padding(.leading, 6)
-        }
-        ToolbarItem(placement: .principal) {
-            TransportDisplay(transport: transport, artwork: model.artwork)
-        }
         ToolbarItemGroup(placement: .primaryAction) {
-            Toggle(isOn: Binding(get: { transport.shuffle }, set: { transport.setShuffle($0) })) {
-                Label("Shuffle", systemImage: "shuffle")
-            }
-            .disabled(!transport.canChangeModes)
-            .help(transport.shuffle ? "Shuffle on" : "Shuffle off")
-            .accessibilityValue(transport.shuffle ? "on" : "off")
-            .accessibilityIdentifier("transport-shuffle")
-            Button(action: transport.cycleRepeat) {
-                Label(repeatTitle, systemImage: transport.repeat == .one ? "repeat.1" : "repeat")
-                    .foregroundStyle(transport.repeat == .off ? Color.secondary : Color.accentColor)
-            }
-            .disabled(!transport.canChangeModes)
-            .help(repeatTitle)
-            .accessibilityValue(transport.repeat.rawValue)
-            .accessibilityIdentifier("transport-repeat")
-            Toggle(isOn: $navigation.upNextDrawerVisible) {
-                Label("Up Next Drawer", systemImage: "sidebar.right")
-            }
-            .help("Show or hide the Up Next drawer (⌥⌘U)")
-            .accessibilityValue(navigation.upNextDrawerVisible ? "shown" : "hidden")
-            .accessibilityIdentifier("up-next-drawer-toggle")
+            Spacer()
             filterField
-        }
-    }
-
-    private var repeatTitle: String {
-        switch transport.repeat {
-        case .off: "Repeat Off"
-        case .all: "Repeat All"
-        case .one: "Repeat One"
         }
     }
 

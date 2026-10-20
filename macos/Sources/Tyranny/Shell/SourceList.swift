@@ -1,7 +1,8 @@
 import SwiftUI
 import TyrannyCore
 
-/// The native sidebar: LIBRARY, PLAYING and PLAYLISTS.
+/// The native sidebar: LIBRARY, PLAYING and PLAYLISTS. While the player bar's art is
+/// expanded, a sidebar-width square of it sits at the foot, below the scrolling list.
 ///
 /// Tracks dropped on Up Next are appended to the queue. Tracks dropped on a regular playlist
 /// are appended to it; hovering a playlist during a drag opens it, to choose an insertion
@@ -9,9 +10,17 @@ import TyrannyCore
 struct SourceList: View {
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
+    /// Always true while the sidebar renders; passed so placement is decided in one place.
+    let sidebarVisible: Bool
     @State private var counts = SourceCounts()
     @State private var sheet: PlaylistSheet?
     @State private var deleting: Playlist?
+    @State private var width: CGFloat = 200
+    @State private var hoveringArt = false
+
+    private var artInSidebar: Bool {
+        NowPlayingArt.placement(expanded: navigation.nowPlayingArtExpanded, sidebarVisible: sidebarVisible) == .sidebar
+    }
 
     private var playlists: PlaylistsModel { model.savedPlaylists }
 
@@ -46,7 +55,13 @@ struct SourceList: View {
         }
         .listStyle(.sidebar)
         .accessibilityIdentifier("source-list")
-        .safeAreaInset(edge: .bottom, spacing: 0) { addBar }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                if artInSidebar { largeArt }
+                addBar
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .task(id: CountKey(connection: model.playlistConnectionGeneration,
                            connected: model.connected, revision: model.snapshot?.library.revision)) {
             await counts.refresh(model)
@@ -126,6 +141,32 @@ struct SourceList: View {
                 Button("Delete…", role: .destructive) { deleting = playlist }
                     .accessibilityIdentifier("source-playlist-delete")
             }
+    }
+
+    /// The expanded now-playing art. Hover shows ⤡; clicking returns it to the player bar.
+    private var largeArt: some View {
+        let dimension = max(width - 16, 1)
+        return ZStack {
+            ArtworkView(store: model.artwork, request: model.artwork.nowPlayingRequest,
+                        identifier: "now-playing-art-large", dimension: dimension)
+            Button { navigation.nowPlayingArtExpanded = false } label: {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .topTrailing) {
+                        if hoveringArt { ArtBadge(systemImage: "arrow.down.right.and.arrow.up.left") }
+                    }
+            }
+            .buttonStyle(.plain)
+            .help("Show the artwork in the player bar")
+            .accessibilityLabel("Collapse Artwork")
+            .accessibilityIdentifier("now-playing-art-collapse")
+        }
+        .frame(width: dimension, height: dimension)
+        .onHover { hoveringArt = $0 }
+        .padding(8)
+        .frame(maxWidth: .infinity)
+        // The list scrolls under the inset; the footer's material keeps rows from showing through.
+        .background(.bar)
     }
 
     private var addBar: some View {

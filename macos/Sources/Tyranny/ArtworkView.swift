@@ -41,7 +41,7 @@ struct ArtworkView: View {
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isImage)
-        .accessibilityLabel(identifier == "now-playing-art" ? "Now Playing artwork" : "Album artwork")
+        .accessibilityLabel(identifier.hasPrefix("now-playing-art") ? "Now Playing artwork" : "Album artwork")
         .accessibilityValue(artwork.state)
         .accessibilityIdentifier(identifier)
         .help(artwork.image == nil ? placeholder : "Artwork: \(artwork.state.replacingOccurrences(of: "_", with: " "))")

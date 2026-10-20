@@ -34,6 +34,10 @@ final class NavigationModel {
     var upNextDrawerVisible: Bool {
         didSet { defaults.set(upNextDrawerVisible, forKey: "upNextDrawerVisible") }
     }
+    /// The player bar's art is expanded into the foot of the sidebar.
+    var nowPlayingArtExpanded: Bool {
+        didSet { defaults.set(nowPlayingArtExpanded, forKey: "nowPlayingArtExpanded") }
+    }
 
     @ObservationIgnored private let defaults: UserDefaults
     /// Makes `grouping(for:)` observable; the values live in `defaults`.
@@ -43,6 +47,7 @@ final class NavigationModel {
         self.defaults = defaults
         columnBrowserVisible = defaults.bool(forKey: "columnBrowserVisible")
         upNextDrawerVisible = defaults.bool(forKey: "upNextDrawerVisible")
+        nowPlayingArtExpanded = defaults.bool(forKey: "nowPlayingArtExpanded")
     }
 
     func grouping(for destination: Destination) -> Grouping {

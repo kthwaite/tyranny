@@ -41,7 +41,9 @@ enum NativeRenderViews {
                 }
                 // These are the user's real preferences; restore them when done.
                 let saved = (browser: navigation.columnBrowserVisible,
-                             drawer: navigation.upNextDrawerVisible)
+                             drawer: navigation.upNextDrawerVisible,
+                             art: navigation.nowPlayingArtExpanded)
+                navigation.nowPlayingArtExpanded = false
                 navigation.columnBrowserVisible = false
                 navigation.setGrouping(.none, for: .songs)
                 navigation.destination = .songs
@@ -76,10 +78,23 @@ enum NativeRenderViews {
                     navigation.destination = .playlist(playlist.id)
                     await shot("11-playlist-regular")
                 } else { log.append("playlist: none") }
+                // The player bar: thumbnail in the bar, art expanded into the sidebar, minimum width.
+                navigation.destination = .songs
+                navigation.nowPlayingArtExpanded = false
+                await shot("15-player-bar-collapsed")
+                navigation.nowPlayingArtExpanded = true
+                await shot("16-player-bar-art-expanded")
+                navigation.nowPlayingArtExpanded = false
+                if let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) {
+                    window.setContentSize(NSSize(width: 940, height: 560))
+                    await shot("17-player-bar-min-width")
+                    window.setContentSize(NSSize(width: 1180, height: 740))
+                } else { log.append("player bar min width: no window") }
                 log.append(renderSettings(model, navigation, into: output))
                 navigation.setGrouping(.none, for: .songs) // the Songs default; earlier runs may have left another value
                 navigation.columnBrowserVisible = saved.browser
                 navigation.upNextDrawerVisible = saved.drawer
+                navigation.nowPlayingArtExpanded = saved.art
             } catch {
                 log.append("error: \(error.localizedDescription)")
             }

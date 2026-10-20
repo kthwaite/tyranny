@@ -2,100 +2,7 @@ import AppKit
 import SwiftUI
 import TyrannyCore
 
-/// The centred toolbar display, as in iTunes: thumbnail, title, "artist — album",
-/// a scrubber with elapsed and remaining time, and the format and gain on the right.
-/// A playback error replaces the text; clicking it shows the full message.
-struct TransportDisplay: View {
-    let transport: TransportModel
-    let artwork: ArtworkStore
-    @State private var seekPreview: Double?
-    @State private var showingError = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ArtworkView(store: artwork, request: artwork.nowPlayingRequest,
-                        identifier: "now-playing-art", dimension: 38)
-            if let error = transport.error {
-                errorSummary(error)
-            } else {
-                VStack(spacing: 1) {
-                    HStack(spacing: 4) {
-                        Text(transport.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                            .accessibilityIdentifier("now-playing-title")
-                        if let warning = transport.metadataError {
-                            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
-                                .foregroundStyle(.orange).help("Track metadata: \(warning)")
-                                .accessibilityIdentifier("now-playing-metadata-warning")
-                        }
-                    }
-                    Text(transport.artistAlbum).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                        .accessibilityIdentifier("now-playing-subtitle")
-                    HStack(spacing: 6) {
-                        Text(seekPreview.map(DisplayFormat.clock) ?? transport.elapsedText)
-                            .frame(width: 38, alignment: .trailing)
-                            .accessibilityIdentifier("now-playing-elapsed")
-                        NativeSeekSlider(transport: transport, preview: $seekPreview,
-                                         identifier: "now-playing-scrubber", small: true)
-                            .frame(height: 12)
-                        Text(seekPreview.map { DisplayFormat.remaining(elapsed: $0, duration: transport.duration) }
-                             ?? transport.remainingText)
-                            .frame(width: 42, alignment: .leading)
-                            .accessibilityIdentifier("now-playing-remaining")
-                    }
-                    .font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                // "FLAC 16/44.1 · RG album −6.2 dB", broken at the separator when narrow.
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(transport.nowPlaying == nil ? "" : transport.format)
-                    if transport.nowPlaying != nil, let gain = transport.gainLabel { Text(gain) }
-                }
-                .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                .frame(width: 104, alignment: .trailing)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(transport.formatLine)
-                .accessibilityIdentifier("now-playing-format")
-            }
-        }
-        .padding(.horizontal, 5).padding(.vertical, 3)
-        .frame(minWidth: 320, idealWidth: 380, maxWidth: 560)
-        .frame(height: 46)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.background.opacity(0.6)))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("now-playing-display")
-        .onChange(of: transport.currentID) { _, _ in seekPreview = nil }
-        .onChange(of: transport.playbackSession) { _, _ in seekPreview = nil }
-        .onChange(of: transport.canMutate) { _, enabled in if !enabled { seekPreview = nil } }
-        .onChange(of: transport.error) { _, error in if error == nil { showingError = false } }
-    }
-
-    private func errorSummary(_ error: String) -> some View {
-        Button { showingError = true } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Playback Error").font(.system(size: 12, weight: .semibold))
-                    Text(error).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Show the playback error")
-        .accessibilityIdentifier("now-playing-error-summary")
-        .popover(isPresented: $showingError, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Playback Error").font(.headline)
-                Text(error).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(14).frame(width: 360)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("now-playing-error")
-        }
-    }
-}
+// The player bar's native sliders: the seek scrubber and volume.
 
 /// AppKit owns native mouse tracking, keyboard focus and accessibility. Continuous
 /// mouse actions only preview; the tracking loop's return commits one occurrence-bound seek.
@@ -103,7 +10,6 @@ struct NativeSeekSlider: NSViewRepresentable {
     var transport: TransportModel
     @Binding var preview: Double?
     var identifier = "seek-slider"
-    var small = false
 
     func makeCoordinator() -> Coordinator { Coordinator(transport: transport, preview: $preview) }
 
@@ -111,7 +17,6 @@ struct NativeSeekSlider: NSViewRepresentable {
         let slider = SeekSlider()
         slider.minValue = 0
         slider.isContinuous = true
-        if small { slider.controlSize = .mini }
         slider.target = context.coordinator
         slider.action = #selector(Coordinator.changed(_:))
         slider.setAccessibilityIdentifier(identifier)
