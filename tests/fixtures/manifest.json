@@ -447,6 +447,24 @@
         "encoder": "ffmpeg libopus 160k"
       },
       {
+        "name": "mp4opus48",
+        "rate": 48000,
+        "lossless": false,
+        "files": [
+          "gapless/mp4opus48/t1.mp4",
+          "gapless/mp4opus48/t2.mp4",
+          "gapless/mp4opus48/t3.mp4",
+          "gapless/mp4opus48/t4.mp4"
+        ],
+        "lengths": [
+          24011,
+          26003,
+          25013,
+          24989
+        ],
+        "encoder": "ffmpeg libopus 64k in mp4"
+      },
+      {
         "name": "mp3notag48",
         "rate": 48000,
         "lossless": false,

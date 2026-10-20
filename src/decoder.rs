@@ -2,11 +2,12 @@
 //!
 //! libavcodec applies AV_PKT_DATA_SKIP_SAMPLES itself (SKIP_MANUAL is deliberately
 //! not enabled). Its returned sample count and adjusted timestamps already exclude
-//! that padding. Sample-exact frame durations additionally delimit container edits,
-//! including the short final AAC/MP4 packet, when one container tick is no longer
-//! than one sample; this is a fallback for demuxers that send no end-trim side
-//! data (FFmpeg 9's mov demuxer does send it). Neither stream duration estimates nor
-//! codec-specific delay constants are used to trim the decoded audio.
+//! that padding. Sample-exact frame durations additionally delimit container edits
+//! when one container tick is no longer than one sample. This cuts a short final
+//! packet that has no end-trim side data. FFmpeg 9's mov demuxer sends that trim
+//! only for unfragmented files whose codec has a fixed frame size, so Opus in MP4
+//! and fragmented MP4 rely on the cut, as does Ogg Speex. Neither stream duration
+//! estimates nor codec-specific delay constants are used to trim the decoded audio.
 
 use std::{path::Path, ptr, sync::LazyLock};
 

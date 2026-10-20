@@ -92,6 +92,7 @@ At 44.1 kHz they are 22063, 23887, 22979 and 22961 frames.
 | `aac48` | 48k | `.m4a` (elst) | ffmpeg native aac |
 | `aacapple48` | 48k | `.m4a` (iTunSMPB) | `afconvert -f m4af -d aac -b 192000` |
 | `opus48` | 48k | `.opus` | ffmpeg libopus 160k |
+| `mp4opus48` | 48k | `.mp4` (elst, short final stts; no end-trim side data) | ffmpeg libopus 64k |
 | `mp3notag48` | 48k | `.mp3`, no Xing/LAME tag | ffmpeg libmp3lame `-write_xing 0` |
 | `wav44`, `flac44` | 44.1k | `.wav`, `.flac` | ffmpeg |
 | `mp3lame44` | 44.1k | `.mp3` | `lame` CLI |
@@ -137,7 +138,7 @@ Engine rate is 48 kHz (`tyranny::SAMPLE_RATE`). For each set:
   `OutputConfig::Capture { clocked: false }` and `GainMode::Off`, pumped to completion, writes a
   capture that is bit-identical to the four per-track decodes laid end to end. This is the
   property that makes playback gapless: the player adds and drops nothing at a track switch.
-  - Exact for all 14 sets, 44.1k included: the per-track decode restarts the resampler per track
+  - Exact for all 15 sets, 44.1k included: the per-track decode restarts the resampler per track
     just as the player does, so the two match byte for byte (measured). The ±1-frame difference
     applies only against a continuous decode; a comment points at the deferred swr-carry task.
 

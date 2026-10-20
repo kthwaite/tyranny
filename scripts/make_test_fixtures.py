@@ -80,6 +80,9 @@ GAPLESS_SETS = [
     ("aac48", 48000, False, "m4a", "ffmpeg aac 192k", "ffmpeg", ["-c:a", "aac", "-b:a", "192k"]),
     ("aacapple48", 48000, False, "m4a", "afconvert -f m4af -d aac -b 192000", "afconvert", None),
     ("opus48", 48000, False, "opus", "ffmpeg libopus 160k", "ffmpeg", ["-c:a", "libopus", "-b:a", "160k"]),
+    # Opus has no fixed frame size, so the mov demuxer sends no end trim; only the
+    # short final stts duration ends these tracks at their source length.
+    ("mp4opus48", 48000, False, "mp4", "ffmpeg libopus 64k in mp4", "ffmpeg", ["-c:a", "libopus", "-b:a", "64k"]),
     ("mp3notag48", 48000, False, "mp3", "ffmpeg libmp3lame 192k -write_xing 0", "ffmpeg",
      ["-c:a", LAME, "-b:a", "192k", "-write_xing", "0"]),
     ("wav44", 44100, True, "wav", "ffmpeg pcm_s16le", "ffmpeg", ["-c:a", "pcm_s16le"]),
