@@ -17,6 +17,7 @@ final class PlayerModel {
     }
     private(set) var playbackSession: UInt64 = 0
     let artwork = ArtworkStore()
+    let notifications = TrackNotifications()
     /// Transport commands and the player bar display. Owns the system media controls.
     let transport = TransportModel()
     /// The Up Next view's and drawer's queue windows.
@@ -142,6 +143,7 @@ final class PlayerModel {
     }
 
     func shutdown() {
+        notifications.shutdown()
         transport.shutdown()
         disconnect()
     }
@@ -199,6 +201,7 @@ final class PlayerModel {
         if busy { message = "Disconnected during a command. Its outcome is uncertain; reconnect and inspect state before repeating it." }
     }
     private func clearRemoteState() {
+        notifications.disconnected()
         rootsTimer?.cancel(); rootsTimer = nil
         needsRoots = false
         activeDrag = nil
@@ -280,6 +283,7 @@ final class PlayerModel {
         if !newInstance, let previous = snapshot, state.sequence < previous.sequence { return }
         let previous = snapshot
         snapshot = state
+        notifications.receive(state, newSession: newInstance, artwork: artwork)
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
         if newInstance, !launchImportChecked {
             launchImportChecked = true

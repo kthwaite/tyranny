@@ -2,6 +2,14 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Native track notifications
+
+Settings → Playback now offers opt-in track-change notifications and an option to show them while Tyranny is frontmost. Notification authorization is requested only on opt-in; permission status and delivery errors remain visible in Settings. Notifications carry title, artist, album and available current artwork. Artwork waits at most one second on the existing artwork demand and never blocks playback.
+
+Initial/reconnected snapshots establish a quiet baseline. Buffering waits for actual playback; position ticks, pause/resume and preference/focus changes do not replay an already-considered occurrence. Pending deliveries are cancelled when their occurrence changes or the connection ends. Generation-specific request identifiers prevent a late obsolete delivery from removing a newer notification.
+
+Verification: `swift test --package-path macos -Xswiftc -warnings-as-errors` passed, including three notification-transition regressions. A throwaway bundled native probe connected to a real isolated server with clocked PCM output, reached the actual settings controls through Accessibility, and self-rendered the settings pane. Its notification authorization status was denied, with no delivered notifications. **Banner delivery and artwork attachment require an authorized native run; they are not claimed verified.** The probe used a separate bundle identifier and never changed the user's daemon, database or normal notification preferences.
+
 ## Album artwork
 
 Artwork is implemented and verified in Rust and SwiftUI. The matching protocol-v8 development bundle is installed at `target/Tyranny.app`; the prior protocol-v7 bundle is preserved at `target/artwork/Tyranny.app`. The directories were atomically exchanged, preserving the old executable inodes; both bundle signatures verified. The user's running daemon/database were not changed. To load matching processes: **Connection Settings → Stop…, quit the client, then reopen `target/Tyranny.app`**.
