@@ -273,6 +273,40 @@ final class UpNextModel {
         }
     }
 
+    /// Append is revision-checked; play is sent only after a durable append succeeds.
+    /// A play failure never invites retrying the already successful append.
+    func addStream(url: String, title: String, play: Bool) async -> String? {
+        guard let player, player.canMutate else { return "Wait for the current command to finish." }
+        return await withCheckedContinuation { continuation in
+            player.mutate { [weak self] in
+                do {
+                    guard let self else { throw CancellationError() }
+                    let connection = player.playlistConnectionGeneration
+                    let added: Applied = try await self.edit("append_stream", fields: { state in
+                        ["expected_revision": .uint(state.queue_revision),
+                         "url": .string(url), "title": .string(title)] })
+                    player.message = "Added stream to Up Next."
+                    if play {
+                        do {
+                            guard player.connected, player.playlistConnectionGeneration == connection else {
+                                throw ServerFailure(code: "connection_changed", message: "Connection changed. Select the stream in Up Next to play it.")
+                            }
+                            guard let id = added.entry_id else {
+                                throw ServerFailure(code: "missing_entry", message: "The server did not return the stream entry.")
+                            }
+                            try await self.run("play", fields: { _ in ["entry_id": .uint(id)] })
+                        } catch {
+                            player.message = "Stream added, but playback could not start: \(error.localizedDescription)"
+                        }
+                    }
+                    continuation.resume(returning: nil)
+                } catch {
+                    continuation.resume(returning: error.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func run(_ command: String, fields: (ControlState) -> [String: JSONValue]) async throws {
         let _: Applied = try await edit(command, fields: fields)
     }
@@ -281,9 +315,10 @@ final class UpNextModel {
     /// snapshot and retries once.
     private func edit<T: Decodable>(_ command: String, fields: (ControlState) -> [String: JSONValue]) async throws -> T {
         guard let player else { throw CancellationError() }
+        let connection = player.playlistConnectionGeneration
         var retried = false
         while true {
-            guard player.connected, let state = player.snapshot else {
+            guard player.connected, player.playlistConnectionGeneration == connection, let state = player.snapshot else {
                 throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was changed.")
             }
             do {

@@ -573,6 +573,7 @@ mod tests {
         let loaded = |id: u64, run_id: u64, scope: RepeatScope| LoadedEntry {
             id,
             path: PathBuf::from(format!("/music/{id}.flac")),
+            stream: None,
             run: Some(RunInfo { run_id, scope }),
             played_seq: Some(id),
         };
@@ -612,6 +613,7 @@ mod tests {
         let loaded = |id: u64, run_id: u64, scope: RepeatScope| LoadedEntry {
             id,
             path: PathBuf::from(format!("/music/{id}.flac")),
+            stream: None,
             run: Some(RunInfo { run_id, scope }),
             played_seq: None,
         };

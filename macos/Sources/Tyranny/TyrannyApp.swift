@@ -167,6 +167,7 @@ struct TyrannyApp: App {
                 Divider()
                 Button("Show Playing Track") { navigation.revealPlaying() }
                     .keyboardShortcut("l")
+                    .disabled(model.transport.nowPlaying?.track_id == nil)
             }
             CommandMenu("Go") {
                 ForEach(Array((Destination.library + Destination.playing).enumerated()), id: \.offset) { index, destination in

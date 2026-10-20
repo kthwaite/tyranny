@@ -24,6 +24,8 @@ use uuid::Uuid;
 
 const DEADLINE: Duration = Duration::from_secs(5);
 
+#[path = "support/http_streams.rs"]
+mod http_streams;
 #[path = "support/library_lists.rs"]
 mod library_lists;
 #[path = "support/saved_playlists.rs"]

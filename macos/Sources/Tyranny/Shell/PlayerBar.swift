@@ -55,7 +55,7 @@ struct PlayerBar: View {
                         }
                         .buttonStyle(.plain)
                         .font(.system(size: 13, weight: .semibold))
-                        .disabled(nowPlaying == nil)
+                        .disabled(nowPlaying?.track_id == nil)
                         .help("Show the playing track (⌘L)")
                         .accessibilityIdentifier("now-playing-title")
                         if let warning = transport.metadataError {
