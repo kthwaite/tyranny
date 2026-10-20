@@ -208,6 +208,7 @@ private struct MainWindow: View {
                 NativeScale.startIfRequested(model, navigation: navigation)
                 NativeFilterSmoke.startIfRequested(model, navigation: navigation)
                 NativeArtworkSmoke.startIfRequested(model, navigation: navigation)
+                NativeLyricsSmoke.startIfRequested(model)
                 NativeShellSmoke.startIfRequested(model, navigation: navigation)
                 NativeSongsSmoke.startIfRequested(model, navigation: navigation)
                 NativeAlbumsSmoke.startIfRequested(model, navigation: navigation)

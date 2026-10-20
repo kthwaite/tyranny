@@ -8,6 +8,7 @@ mod filter;
 pub mod library;
 pub mod library_types;
 pub mod listing;
+mod lyrics;
 mod metadata;
 pub mod output;
 pub mod owner;
