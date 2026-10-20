@@ -131,7 +131,7 @@ import Testing
             sequence: 8, queue_revision: 4, playlists_revision: 1, stations_revision: 0, queue_length: queueLength,
             current_id: current, can_next: canNext, can_previous: canPrevious, now_playing: playing,
             position_frames: position, sample_rate: rate, transport: "playing",
-            settings: PlayerSettings(gain_mode: "off", resume_on_start: resume, volume: volume, repeat: repeatMode, shuffle: shuffle),
+            settings: PlayerSettings(gain_mode: "off", resume_on_start: resume, volume: volume, repeat: repeatMode, shuffle: shuffle, equalizer: EqualizerSettings()),
             error: nil, underruns: 0,
             library: LibraryState(revision: 1, roots: 0, tracks: 0, duration_ms: 0, size_bytes: 0,
                                   scan: ScanStatus(root_id: nil, phase: "idle", discovered: 0, processed: 0,

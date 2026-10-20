@@ -42,6 +42,70 @@ with a debug client. `scripts/build_macos.sh release` instead builds both
 components in release mode and assembles a self-contained
 `target/release/Tyranny.app`. An optional second argument selects the app destination.
 
+### Compilation detection
+
+After upgrading, **rescan existing music roots** in Settings → Library. Metadata
+version 3 re-probes unchanged files once to distinguish explicit tags from
+fallback display values; SQLite schema 6 and protocol v11 are unchanged.
+
+Albums with different known track artists and no conflicting explicit tags are
+grouped as Various Artists when they share an album title and directory, or a
+MusicBrainz release ID. `VA` and `Various Artists` album-artist tags are recognized
+case-insensitively. Explicit non-VA album artists and explicit compilation flags
+win; track artists and media files are never rewritten. Missing album/artist
+fallbacks are not evidence of a compilation.
+
+A missing release ID can join a folder/title's single unambiguous tagged release;
+the association does not invent a MusicBrainz ID in track metadata. Conflicting
+release IDs and unrelated same-title directories stay separate. Additions,
+removals and retags reconcile after probing, preserving track IDs and reversing
+stale inference. Unavailable roots retain their last-known records. Reconciliation
+uses temporary coordinator worklists and 64-track update batches, not playback
+thread work. Interrupted scans require the existing manual rescan recovery.
+
+### Audio equalizer
+
+Open **Playback → Equalizer…** (`⌥⌘E`), or use **Settings → Playback → Open
+Equalizer…**. The separate window controls ten octave bands from 31.25 Hz to
+16 kHz (−12…+12 dB), a −24…+12 dB preamp, and enable/bypass. Flat, Bass Boost,
+Treble Boost and Vocal presets replace the whole curve; manual changes show
+Custom. Bypass retains the gains. Settings belong to the server and survive
+client reconnection and daemon restart.
+
+The allocation-free stereo biquad bank runs after decoding/ReplayGain and before
+the output ring, for both local files and live streams. Disabled EQ and an enabled
+all-zero curve leave every PCM sample bit-identical. Filter history spans natural
+gapless track boundaries, but resets on seek, stop, explicit reselection and
+stream reconnection. Changed settings start clean histories; identical settings
+do not reset the filters.
+
+Edits affect newly processed PCM, not samples already buffered: allow roughly
+1.4 seconds plus decoder/device buffering. Editing while paused does not discard
+the old buffer; it plays before the new settings become audible. There is no
+limiter or transition smoothing. Boosts can clip, so reduce preamp for headroom;
+the preset attenuation is not a guarantee against clipping.
+
+Protocol **v11** requires matching client/server builds. `set_equalizer` accepts
+one complete `equalizer` object, also published in `snapshot.settings.equalizer`:
+
+```json
+{"id":1,"command":"set_equalizer","equalizer":{"enabled":true,"preamp_db":-6,"bands_db":[5,5,3,1,0,0,0,0,0,0]}}
+```
+
+The ten gains must be finite and within range. Invalid changes are rejected before
+settings or audio mutation. The server persists accepted settings before applying
+them; older databases default to disabled EQ without changing SQLite schema 6.
+Preset names are derived client-side from the persisted gains, not stored separately.
+
+Regression checks: `cargo test --locked equalizer` and
+`swift test --package-path macos --scratch-path target/swift-client --filter EqualizerTests`.
+The debug client's `--equalizer-smoke-output <directory>` hook exercises native
+controls against an explicitly supplied isolated loopback daemon with empty
+library/queue. Supply `--url`, `--token-file` and `--ui-driver`; add
+`--equalizer-smoke-restore` after restarting that daemon to verify restored state.
+Build the Accessibility driver from current source:
+`swiftc scripts/native_ui_driver.swift -o target/native-ui-driver`.
+
 ### Client command language
 
 `TyrannyCore.CommandLanguage` defines the client-only grammar, command registry,
@@ -139,6 +203,38 @@ underlying library row tree; the previous traversal stalled at the playlist
 picker in this large-selection run. Passing reports:
 `target/command-gate/run-gs_2x3bj/commands.json` and
 `target/command-ui-modal/run-mxy6r54o/runs/report.json`.
+
+### Lyrics
+
+The player-bar **Lyrics** button (**⌥⌘L**) opens a pane for the current queue
+occurrence. Embedded `USLT`/`LYRICS` tags take precedence. Without embedded
+lyrics, the server requests an exact title/artist/album/duration match from
+[LRCLIB](https://lrclib.net/docs); it never falls back to fuzzy search or uses
+radio station titles as song metadata. The pane distinguishes loading, missing,
+unavailable and instrumental results, displays plain lyrics or highlights LRC
+lines using the server playhead, and credits the provider with a record link.
+Pausing and seeking retain the authoritative position rather than extrapolating
+a separate lyrics clock.
+
+Only an open, mounted pane creates lyrics demand. A separate client connection
+and two bounded server workers keep file probing and HTTPS requests off playback
+controls. Track, library revision, connection and completed-scan changes
+invalidate client results. Closing the pane cancels its request.
+
+The additive protocol-v10 request is
+`{"id":1,"command":"lyrics","entry_id":7,"library_revision":2}`; its result has
+`kind:"lyrics"` and a `lyrics` payload. Queue IDs and library revisions are
+validated before and after discovery; clients cannot supply paths or provider
+URLs. The main database schema stays unchanged.
+
+The private `state.lyrics.sqlite` cache is disposable: up to 16 MiB of payload
+and 2,048 records. Online successes survive restart/rescan until eviction;
+misses expire after 24 hours and transient failures after 60 seconds. Embedded
+discovery uses file fingerprints and scan watermarks; remote results use track
+metadata, so an unrelated scan does not discard offline lyrics. Requests are
+sequential with a 500 ms delay and honor provider backoff. No credentials or
+additional provider scrapers are configured. See the cited
+[provider assessment](docs/lyrics-providers.md) for access and licensing limits.
 
 ### Release disk image
 
@@ -358,7 +454,7 @@ The reproducible scale gate seeds a declared metadata-only 50,000-track index an
 - Remaining codecs/containers, audio CD, module/BASS support, and every non-CoreAudio output. Maintain a tested capability list; broad dependency support is not a coverage claim.
 - The radio directory lookup; dynamic queue autofill; the directory-browser screen. Direct SHOUTcast/Icecast MP3/Ogg playback is implemented; see [streaming evidence](SPIKE_RESULTS.md#http-stream-playback).
 - MusicBrainz tag retrieval, additional cover providers and artist/title matching, lyrics providers, scrobbling, and tag writing. Artwork fallback uses an existing MusicBrainz release ID only; it does not search for or rewrite tags.
-- Equalizer/analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
+- Audio analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
 - CUE ingestion and sophisticated release reconciliation; preserve the identity seams now.
 - MPRIS remains a later Linux integration; macOS media keys/Now Playing route the same Rust commands without a second player. Native track notifications are implemented; authorized banner/artwork delivery verification awaits macOS permission (see [SPIKE_RESULTS.md](SPIKE_RESULTS.md)).
 - Remote networking, multiple users/zones, MPD wire compatibility, client-local streaming, App Store sandboxing, and a production installer.

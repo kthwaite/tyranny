@@ -3,6 +3,7 @@
 use crate::{
     BLOCK_FRAMES, Frame, SAMPLE_RATE,
     decoder::{Decoder, GainMode},
+    equalizer::{Equalizer, EqualizerSettings},
     output::{Output, OutputConfig, OutputSnapshot, TrackToken},
     play_order::{PlayOrder, RepeatMode, RepeatScope, RunInfo, ShuffleStrategy},
     protocol::{NowPlaying, Placement, StreamSpec},
@@ -52,9 +53,9 @@ impl SourceDecoder {
         }
     }
 
-    fn read(&mut self, destination: &mut [Frame]) -> Result<Option<usize>> {
+    fn read(&mut self, destination: &mut [Frame]) -> Result<Option<(usize, bool)>> {
         match &mut self.file {
-            Some(decoder) => decoder.read(destination).map(Some),
+            Some(decoder) => decoder.read(destination).map(|count| Some((count, false))),
             None => self
                 .stream
                 .as_mut()
@@ -273,6 +274,7 @@ pub struct Player {
     revision: u64,
     next_id: u64,
     mode: GainMode,
+    equalizer: Equalizer,
     cursor: usize,
     decoder: Option<SourceDecoder>,
     stream_buffering: bool,
@@ -398,6 +400,7 @@ impl Player {
             revision,
             next_id,
             mode,
+            equalizer: Equalizer::default(),
             cursor: 0,
             decoder: None,
             stream_buffering: false,
@@ -445,6 +448,13 @@ impl Player {
         self.output.set_volume(percent);
     }
 
+    /// Apply validated EQ to newly decoded PCM, retaining the pending block and
+    /// output pool. At 48 kHz those buffers can delay the change by about 1.4 s,
+    /// plus device buffering; when paused, that audio plays first on resume.
+    pub fn set_equalizer(&mut self, settings: &EqualizerSettings) {
+        self.equalizer.set_settings(settings);
+    }
+
     pub fn stop(&mut self) {
         self.playing = false;
         self.stopped = true;
@@ -462,6 +472,7 @@ impl Player {
 
     fn invalidate_buffer(&mut self) {
         self.drop_passes();
+        self.equalizer.reset();
         self.started = false;
         self.stream_buffering = false;
         self.prefilled_frames = 0;
@@ -490,6 +501,7 @@ impl Player {
             self.failure = Some(format!("{error:#}"));
             self.decoder = None;
             self.pending = 0;
+            self.equalizer.reset();
             self.finished = true;
             self.output.mark_end(true);
         }
@@ -525,7 +537,7 @@ impl Player {
                     self.mode,
                 ));
             }
-            let Some(count) = read else {
+            let Some((count, discontinuity)) = read else {
                 // Rebuffer before a live source empties the ring. Keep the same
                 // token/position: silence during a stall is not end-of-track.
                 if self.output.snapshot().buffered_frames < BLOCK_FRAMES * 2 {
@@ -541,6 +553,12 @@ impl Player {
                 self.end_pass();
                 return Ok(());
             }
+            if discontinuity {
+                self.equalizer.reset();
+            }
+            // Both local and live PCM pass here once. A full output pool keeps
+            // this processed block pending; enqueue retries must not filter it.
+            self.equalizer.process(&mut self.block[..count]);
         }
         if self.output.try_submit(
             &self.queue[self.cursor].token,
@@ -704,6 +722,11 @@ impl Player {
     /// New entries follow the queue. Decoding resumes if it had ended, and
     /// the next entry is decided again.
     fn resume_after_append(&mut self) {
+        if self.completed() {
+            // Appending before output drains remains gapless; appending after
+            // it drains starts a new audible sequence, not an old filter tail.
+            self.equalizer.reset();
+        }
         if self.failure.is_none() {
             self.finished = false;
             self.output.mark_end(false);
@@ -821,6 +844,7 @@ impl Player {
     /// Plays a selection prepared by `prepare_first`. Every token was already
     /// replaced, so no old PCM can play.
     fn adopt_first(&mut self, selection: PreparedSelection) {
+        self.equalizer.reset();
         self.started = false;
         self.stream_buffering = false;
         self.prefilled_frames = 0;
@@ -1800,6 +1824,164 @@ mod batch_tests {
         player.pump()
     }
 
+    fn assert_filtered_pcm(pcm: &[u8], expected: &[Frame]) {
+        assert_eq!(pcm.len(), expected.len() * 8);
+        for (index, (bytes, frame)) in pcm.as_chunks::<8>().0.iter().zip(expected).enumerate() {
+            for (channel, expected) in frame.iter().enumerate() {
+                let start = channel * 4;
+                let actual = f32::from_le_bytes(bytes[start..start + 4].try_into().unwrap());
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "frame {index}, channel {channel}"
+                );
+            }
+        }
+    }
+
+    fn equalizer_curve() -> EqualizerSettings {
+        EqualizerSettings {
+            enabled: true,
+            preamp_db: -6.0,
+            bands_db: [12.0, 6.0, 0.0, -2.0, 0.0, 3.0, 0.0, 0.0, 0.0, -4.0],
+        }
+    }
+
+    #[test]
+    fn equalizer_processes_pending_pcm_once_and_changes_do_not_discard_buffers() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-eq-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let total = BLOCK_FRAMES * 70 + 137;
+        let source = source(&scratch.0, "source.wav", total as u32, 1000);
+        let capture = scratch.0.join("capture.f32");
+        let mut player = Player::new(
+            vec![source],
+            OutputConfig::Capture {
+                path: capture.clone(),
+                clocked: false,
+            },
+            GainMode::Off,
+        )?;
+        let original = equalizer_curve();
+        player.set_equalizer(&original);
+        player.play();
+        player.pause();
+        for _ in 0..128 {
+            player.pump()?;
+            if player.pending != 0 {
+                break;
+            }
+        }
+        assert_eq!(player.pending, BLOCK_FRAMES, "output pool must be full");
+        let pending = player.block.clone();
+        let submitted = player.decoded_position;
+        let cutoff = submitted as usize + player.pending;
+        let buffered = player.output.snapshot().buffered_frames;
+        for _ in 0..5 {
+            player.pump()?;
+            assert_eq!(&player.block[..], &pending[..]);
+            assert_eq!(player.decoded_position, submitted);
+        }
+        let changed = EqualizerSettings {
+            preamp_db: -12.0,
+            bands_db: [-6.0; 10],
+            ..original.clone()
+        };
+        player.set_equalizer(&changed);
+        for _ in 0..5 {
+            player.pump()?;
+            assert_eq!(&player.block[..], &pending[..]);
+            assert_eq!(player.pending, BLOCK_FRAMES);
+            assert_eq!(player.decoded_position, submitted);
+            assert_eq!(player.output.snapshot().buffered_frames, buffered);
+        }
+        player.play();
+        finish(&mut player, Instant::now() + Duration::from_secs(5))?;
+        assert!(player.error().is_none(), "{:?}", player.error());
+        assert_eq!(player.started_entries(), &[1]);
+        drop(player);
+        let mut expected = vec![[1000.0 / 32768.0; 2]; total];
+        let mut equalizer = Equalizer::default();
+        equalizer.set_settings(&original);
+        equalizer.process(&mut expected[..cutoff]);
+        equalizer.set_settings(&changed);
+        equalizer.process(&mut expected[cutoff..]);
+        assert_filtered_pcm(&fs::read(capture)?, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn equalizer_history_survives_natural_gapless_track_boundaries() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-eq-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let first = source(&scratch.0, "first.wav", 137, 1000);
+        let second = source(&scratch.0, "second.wav", 311, -2000);
+        let capture = scratch.0.join("capture.f32");
+        let mut player = Player::new(
+            vec![first, second],
+            OutputConfig::Capture {
+                path: capture.clone(),
+                clocked: false,
+            },
+            GainMode::Off,
+        )?;
+        let settings = equalizer_curve();
+        player.set_equalizer(&settings);
+        player.play();
+        finish(&mut player, Instant::now() + Duration::from_secs(5))?;
+        assert!(player.error().is_none(), "{:?}", player.error());
+        assert_eq!(player.started_entries(), &[1, 2]);
+        drop(player);
+        let mut expected = vec![[1000.0 / 32768.0; 2]; 137];
+        expected.extend_from_slice(&[[-2000.0 / 32768.0; 2]; 311]);
+        let mut equalizer = Equalizer::default();
+        equalizer.set_settings(&settings);
+        equalizer.process(&mut expected);
+        assert_filtered_pcm(&fs::read(capture)?, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn equalizer_history_resets_on_stop_seek_and_reselection() -> Result<()> {
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("tyranny-eq-{}", uuid::Uuid::new_v4())));
+        fs::create_dir(&scratch.0)?;
+        let source = source(&scratch.0, "source.wav", 10_000, 1000);
+        for transition in 0..3 {
+            let mut player = Player::new(
+                vec![source.clone(), source.clone()],
+                OutputConfig::Capture {
+                    path: scratch.0.join(format!("capture-{transition}.f32")),
+                    clocked: false,
+                },
+                GainMode::Off,
+            )?;
+            player.set_equalizer(&equalizer_curve());
+            let selection = player.prepare_selection(1, 0, GainMode::Off)?;
+            player.commit_selection(selection);
+            player.play();
+            player.pause();
+            player.pump()?;
+            let mut tail = [[0.0; 2]; 16];
+            player.equalizer.process(&mut tail);
+            assert!(tail.iter().any(|frame| frame[0] != 0.0));
+            match transition {
+                0 => player.stop(),
+                1 => player.seek(211)?,
+                _ => {
+                    let selection = player.prepare_selection(2, 0, GainMode::Off)?;
+                    player.commit_selection(selection);
+                }
+            }
+            let mut silence = [[0.0; 2]; 16];
+            player.equalizer.process(&mut silence);
+            assert_eq!(silence, [[0.0; 2]; 16]);
+        }
+        Ok(())
+    }
+
     #[test]
     fn replace_upcoming_keeps_current_pcm_and_played_entries() -> Result<()> {
         let scratch =
@@ -2244,10 +2426,17 @@ mod batch_tests {
             GainMode::Off,
         )?;
         player.play();
+        player.pause();
         let deadline = Instant::now() + Duration::from_secs(5);
+        // Fill the transition while paused: selecting entry 1 alone does not
+        // guarantee that a later pump has decoded entry 2.
+        while player.snapshot().output.buffered_frames < PREBUFFER_FRAMES {
+            assert!(Instant::now() < deadline, "transition did not prebuffer");
+            player.pump()?;
+        }
+        player.play();
         while player.snapshot().current_id != Some(1) {
             assert!(Instant::now() < deadline, "playback did not start");
-            player.pump()?;
             thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(player.snapshot().prepared_id, Some(2));
@@ -2301,11 +2490,17 @@ mod batch_tests {
             GainMode::Off,
         )?;
         player.play();
+        player.pause();
         let deadline = Instant::now() + Duration::from_secs(5);
-        // The prebuffer holds all of entry 1 and the start of entry 2.
+        // Fill entry 1 and the beginning of entry 2 before allowing output to
+        // consume the transition. Current identity is not a prebuffer barrier.
+        while player.snapshot().output.buffered_frames < PREBUFFER_FRAMES {
+            assert!(Instant::now() < deadline, "transition did not prebuffer");
+            player.pump()?;
+        }
+        player.play();
         while player.snapshot().current_id != Some(1) {
             assert!(Instant::now() < deadline, "playback did not start");
-            player.pump()?;
             thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(player.snapshot().prepared_id, Some(2));

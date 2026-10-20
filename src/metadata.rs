@@ -1,6 +1,7 @@
 //! Native, read-only metadata probing; never launches a process or decodes a track.
 //!
-//! Stream tags override container tags. Display strings remain verbatim UTF-8;
+//! Stream tags override container tags. Display strings remain verbatim UTF-8
+//! except trimmed album artists and normalized VA aliases;
 //! invalid UTF-8 and excessive tags fail the probe rather than silently changing
 //! identity. FFmpeg probing is limited to 2 MiB, 256 packets and 2 s of analysis,
 //! with a 10 s wall-clock interrupt deadline. Blocking OS filesystem calls cannot
@@ -373,8 +374,6 @@ impl Tags {
             Some(&mut metadata.title)
         } else if key_is(key, "artist") {
             Some(&mut metadata.artist)
-        } else if key_is(key, "albumartist") {
-            Some(&mut metadata.album_artist)
         } else if key_is(key, "album") {
             Some(&mut metadata.album)
         } else {
@@ -383,6 +382,10 @@ impl Tags {
         if let Some(text) = text {
             text.clear();
             text.push_str(value);
+            return;
+        }
+        if key_is(key, "albumartist") {
+            metadata.album_artist_tag = Some(value.trim().to_owned());
             return;
         }
         if let Some(rank) = YEAR_KEYS.iter().position(|name| key_is(key, name)) {
@@ -419,7 +422,7 @@ impl Tags {
             }
         } else if key_is(key, "compilation") || key_is(key, "tcmp") {
             if let Some(compilation) = compilation(value) {
-                metadata.compilation = compilation;
+                metadata.compilation_tag = Some(compilation);
             }
         } else {
             let field = if key_is(key, "musicbrainzalbumid") || key_is(key, "musicbrainzreleaseid")
@@ -466,13 +469,20 @@ impl Tags {
 
     fn finish(mut self, path: &Path) -> Result<TrackMetadata> {
         self.finish_display(path)?;
-        if self.metadata.album_artist.is_empty() {
-            self.metadata.album_artist = if self.metadata.compilation {
-                "Various Artists".to_owned()
-            } else {
-                self.metadata.artist.clone()
-            };
-        }
+        let various_artists = self
+            .metadata
+            .album_artist_tag
+            .as_deref()
+            .is_some_and(|artist| {
+                artist.eq_ignore_ascii_case("Various Artists") || artist.eq_ignore_ascii_case("VA")
+            });
+        self.metadata.compilation = self.metadata.compilation_tag.unwrap_or(various_artists);
+        self.metadata.album_artist = match self.metadata.album_artist_tag.as_deref() {
+            Some(_) if various_artists => "Various Artists".to_owned(),
+            Some(artist) => artist.to_owned(),
+            None if self.metadata.compilation => "Various Artists".to_owned(),
+            None => self.metadata.artist.clone(),
+        };
         self.metadata.track_gain_db = self.gain.track_gain;
         self.metadata.album_gain_db = self.gain.album_gain;
         self.metadata.track_peak = self.gain.track_peak;
@@ -529,6 +539,9 @@ mod tests {
         assert_eq!(metadata.title, "  夜の音楽  ");
         assert_eq!(metadata.artist, "Björk");
         assert_eq!(metadata.album_artist, "Björk");
+        assert_eq!(metadata.album_artist_tag, None);
+        assert_eq!(metadata.compilation_tag, None);
+        assert!(!metadata.compilation);
         assert_eq!(metadata.album, "Ágætis byrjun");
     }
 
@@ -544,6 +557,8 @@ mod tests {
         let metadata = tags.finish(Path::new("/music/track.wav")).unwrap();
         assert_eq!(metadata.artist, "Performer");
         assert_eq!(metadata.album_artist, "Various Artists");
+        assert_eq!(metadata.album_artist_tag, None);
+        assert_eq!(metadata.compilation_tag, Some(true));
         assert!(metadata.compilation);
     }
 
@@ -553,7 +568,7 @@ mod tests {
         dictionary.set("TOTALTRACKS", "15");
         dictionary.set("track", "03/12");
         dictionary.set("disc", "2/3");
-        dictionary.set("album_artist", "Release Artist");
+        dictionary.set("album_artist", "  Release Artist  ");
         dictionary.set("compilation", "1");
         let mut tags = Tags::default();
         tags.dictionary(&dictionary, &mut TagBudget::default())
@@ -564,6 +579,74 @@ mod tests {
         assert_eq!(metadata.disc_number, Some(2));
         assert_eq!(metadata.disc_total, Some(3));
         assert_eq!(metadata.album_artist, "Release Artist");
+        assert_eq!(metadata.album_artist_tag.as_deref(), Some("Release Artist"));
+        assert_eq!(metadata.compilation_tag, Some(true));
+        assert!(metadata.compilation);
+    }
+
+    #[test]
+    fn various_artist_aliases_preserve_provenance_and_respect_explicit_flags() {
+        for artist in ["Various Artists", "  vArIoUs ArTiStS\t", "VA", " va "] {
+            for flag in [None, Some("false"), Some("true")] {
+                let mut tags = Tags::default();
+                tags.tag("artist", "  Performer  ");
+                tags.tag("ALBUM ARTIST", artist);
+                if let Some(flag) = flag {
+                    tags.tag("TCMP", flag);
+                }
+                let metadata = tags.finish(Path::new("/music/track.flac")).unwrap();
+                assert_eq!(metadata.artist, "  Performer  ");
+                assert_eq!(metadata.album_artist, "Various Artists");
+                assert_eq!(metadata.album_artist_tag.as_deref(), Some(artist.trim()));
+                assert_eq!(metadata.compilation_tag, flag.and_then(compilation));
+                assert_eq!(metadata.compilation, flag != Some("false"));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_artist_equal_to_fallback_remains_distinguishable() {
+        let mut tags = Tags::default();
+        tags.tag("artist", "Performer");
+        tags.tag("album_artist", "Performer");
+        tags.tag("compilation", "0");
+        let metadata = tags.finish(Path::new("/music/track.flac")).unwrap();
+        assert_eq!(metadata.artist, "Performer");
+        assert_eq!(metadata.album_artist, "Performer");
+        assert_eq!(metadata.album_artist_tag.as_deref(), Some("Performer"));
+        assert_eq!(metadata.compilation_tag, Some(false));
+        assert!(!metadata.compilation);
+    }
+
+    #[test]
+    fn stream_provenance_overrides_container_without_accepting_invalid_values() {
+        let mut container = ffmpeg::Dictionary::new();
+        container.set("album_artist", "VA");
+        container.set("compilation", "yes");
+        let mut stream = ffmpeg::Dictionary::new();
+        stream.set("ALBUMARTIST", "  Release Artist  ");
+        stream.set("TCMP", "no");
+        let mut tags = Tags::default();
+        let mut budget = TagBudget::default();
+        tags.dictionary(&container, &mut budget).unwrap();
+        tags.dictionary(&stream, &mut budget).unwrap();
+        tags.tag("album_artist", " \t");
+        tags.tag("compilation", "invalid");
+        let metadata = tags.finish(Path::new("/music/track.flac")).unwrap();
+        assert_eq!(metadata.album_artist_tag.as_deref(), Some("Release Artist"));
+        assert_eq!(metadata.album_artist, "Release Artist");
+        assert_eq!(metadata.compilation_tag, Some(false));
+        assert!(!metadata.compilation);
+
+        let mut tags = Tags::default();
+        tags.tag("artist", "Performer");
+        tags.tag("album_artist", " \t");
+        tags.tag("compilation", "invalid");
+        let metadata = tags.finish(Path::new("/music/track.flac")).unwrap();
+        assert_eq!(metadata.album_artist_tag, None);
+        assert_eq!(metadata.compilation_tag, None);
+        assert_eq!(metadata.album_artist, "Performer");
+        assert!(!metadata.compilation);
     }
 
     #[test]

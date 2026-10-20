@@ -147,6 +147,7 @@ struct PlaybackSettingsPane: View {
     let transport: TransportModel
     @Bindable var notifications: TrackNotifications
     @AppStorage("upNextOnPlay") private var upNextOnPlay = UpNextPolicy.ask.rawValue
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Form {
@@ -161,6 +162,8 @@ struct PlaybackSettingsPane: View {
                 get: { transport.resumeOnStart }, set: { transport.setResume($0) }))
                 .disabled(!transport.canMutate)
                 .accessibilityIdentifier("resume-on-start")
+            Button("Open Equalizer…") { openWindow(id: "equalizer") }
+                .accessibilityIdentifier("settings-open-equalizer")
             Picker("When playing from a list with Up Next not empty", selection: $upNextOnPlay) {
                 Text("Ask").tag(UpNextPolicy.ask.rawValue)
                 Text("Replace Up Next").tag(UpNextPolicy.replace.rawValue)

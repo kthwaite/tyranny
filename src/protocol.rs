@@ -7,6 +7,7 @@ use crate::library_types::{
 use crate::listing::ListDescription;
 use crate::{
     decoder::GainMode,
+    equalizer::EqualizerSettings,
     play_order::{RepeatMode, RepeatScope},
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -47,6 +48,10 @@ pub enum Command {
         entry_id: Option<u64>,
         library_revision: u64,
         size: ArtworkSize,
+    },
+    Lyrics {
+        entry_id: u64,
+        library_revision: u64,
     },
     QueuePage {
         revision: Option<u64>,
@@ -108,6 +113,9 @@ pub enum Command {
     },
     SetGain {
         mode: GainMode,
+    },
+    SetEqualizer {
+        equalizer: EqualizerSettings,
     },
     SetResume {
         enabled: bool,
@@ -387,6 +395,32 @@ pub struct Artwork {
     pub message: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LyricsStatus {
+    Ready,
+    Missing,
+    Unavailable,
+    Instrumental,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LyricsSource {
+    Embedded,
+    Lrclib,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Lyrics {
+    pub status: LyricsStatus,
+    pub source: Option<LyricsSource>,
+    pub plain_text: Option<String>,
+    pub synced_lrc: Option<String>,
+    pub attribution_url: Option<String>,
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Settings {
     pub gain_mode: GainMode,
@@ -397,6 +431,8 @@ pub struct Settings {
     pub shuffle: bool,
     #[serde(default = "full")]
     pub volume: u8,
+    #[serde(default)]
+    pub equalizer: EqualizerSettings,
 }
 
 fn full() -> u8 {
@@ -410,6 +446,7 @@ impl Default for Settings {
             repeat: RepeatMode::Off,
             shuffle: false,
             volume: full(),
+            equalizer: EqualizerSettings::default(),
         }
     }
 }
@@ -676,6 +713,9 @@ pub enum Response {
     Artwork {
         artwork: Artwork,
     },
+    Lyrics {
+        lyrics: Lyrics,
+    },
     Snapshot {
         snapshot: Box<ControlState>,
     },
@@ -845,6 +885,51 @@ pub enum Message {
 mod tests {
     use super::*;
     #[test]
+    fn equalizer_wire_requires_a_complete_ten_band_configuration() {
+        let equalizer = EqualizerSettings {
+            enabled: true,
+            preamp_db: -6.0,
+            bands_db: [3.0; 10],
+        };
+        let value = serde_json::to_value(Request {
+            id: 1,
+            command: Command::SetEqualizer {
+                equalizer: equalizer.clone(),
+            },
+        })
+        .unwrap();
+        assert_eq!(value["command"], "set_equalizer");
+        assert_eq!(value["equalizer"]["preamp_db"], -6.0);
+        match serde_json::from_value::<Request>(value.clone())
+            .unwrap()
+            .command
+        {
+            Command::SetEqualizer { equalizer: decoded } => assert_eq!(decoded, equalizer),
+            command => panic!("unexpected command: {command:?}"),
+        }
+        for field in ["enabled", "preamp_db", "bands_db"] {
+            let mut missing = value.clone();
+            missing["equalizer"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
+        }
+        for count in [0, 9, 11] {
+            let mut malformed = value.clone();
+            malformed["equalizer"]["bands_db"] = serde_json::json!(vec![0.0; count]);
+            assert!(serde_json::from_value::<Request>(malformed).is_err());
+        }
+        let mut missing = value;
+        missing.as_object_mut().unwrap().remove("equalizer");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+        let settings = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(
+            settings["equalizer"],
+            serde_json::json!({
+                "enabled": false, "preamp_db": 0.0, "bands_db": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            })
+        );
+    }
+
+    #[test]
     fn stream_specs_validate_without_network_and_canonicalize() {
         let spec = StreamSpec::new("HTTPS://EXAMPLE.ORG:443/live".into(), "  ".into()).unwrap();
         assert_eq!(spec.url, "https://example.org/live");
@@ -948,6 +1033,32 @@ mod tests {
         let mut invalid = command;
         invalid["size"] = serde_json::json!("original");
         assert!(serde_json::from_value::<Request>(invalid).is_err());
+    }
+
+    #[test]
+    fn lyrics_wire_requires_identity_and_rejects_paths() {
+        let command = serde_json::json!({
+            "id": 1, "command": "lyrics", "entry_id": 7, "library_revision": 2
+        });
+        assert!(matches!(
+            serde_json::from_value::<Request>(command.clone())
+                .unwrap()
+                .command,
+            Command::Lyrics {
+                entry_id: 7,
+                library_revision: 2
+            }
+        ));
+        for field in ["entry_id", "library_revision"] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
+        }
+        for field in ["path", "url", "title", "artist"] {
+            let mut unsafe_target = command.clone();
+            unsafe_target[field] = serde_json::json!("untrusted");
+            assert!(serde_json::from_value::<Request>(unsafe_target).is_err());
+        }
     }
 
     #[test]

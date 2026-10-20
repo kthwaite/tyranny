@@ -156,8 +156,11 @@ def main():
             a = start(args.server)
             migrated = a.state()
             assert queue(a) == old['queue']
-            for field in ['queue_revision', 'current_id', 'position_frames', 'settings']:
+            for field in ['queue_revision', 'current_id', 'position_frames']:
                 assert migrated[field] == old['snapshot'][field], field
+            for field, value in old['snapshot']['settings'].items():
+                assert migrated['settings'][field] == value, field
+            assert not migrated['settings']['equalizer']['enabled']
             assert migrated['transport'] == 'paused' and migrated['library']['tracks'] == 105
             with sqlite3.connect(state / 'state.sqlite3') as database:
                 assert database.execute('PRAGMA user_version').fetchone()[0] == 7

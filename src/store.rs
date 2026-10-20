@@ -320,6 +320,12 @@ impl Store {
         let (revision, next_id, current_id, position_frames, playing, settings): (u64,u64,Option<u64>,u64,bool,String) = self.connection.query_row(
             "SELECT revision,next_id,current_id,position_frames,playing,settings FROM control WHERE singleton=1", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?;
+        let settings: Settings =
+            serde_json::from_str(&settings).context("reading persisted settings")?;
+        settings
+            .equalizer
+            .validate()
+            .context("reading persisted equalizer settings")?;
         let mut query = self.connection.prepare(
             "SELECT id,path,ordinal,source_kind,run_id,played_seq,stream_title FROM queue ORDER BY ordinal",
         )?;
@@ -384,7 +390,7 @@ impl Store {
                 position_frames,
                 playing,
             },
-            settings: serde_json::from_str(&settings).context("reading persisted settings")?,
+            settings,
         })
     }
 
@@ -723,6 +729,75 @@ mod tests {
         play_order::{RepeatScope, RunInfo},
         protocol::{QueueSource, SourceKind},
     };
+    #[test]
+    fn equalizer_defaults_for_existing_database_and_round_trips() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let store = Store::open(&path)?;
+            // A current-schema database written before EQ needs no schema migration.
+            store.connection.execute(
+                "UPDATE control SET settings=?1 WHERE singleton=1",
+                [r#"{"gain_mode":"off","resume_on_start":true,"repeat":"off","shuffle":false,"volume":37}"#],
+            )?;
+            let loaded = store.load()?;
+            assert_eq!(
+                loaded.settings.equalizer,
+                crate::equalizer::EqualizerSettings::default()
+            );
+            assert_eq!(loaded.settings.volume, 37);
+            assert!(loaded.settings.resume_on_start);
+            let mut settings = loaded.settings;
+            settings.equalizer = crate::equalizer::EqualizerSettings {
+                enabled: true,
+                preamp_db: -6.0,
+                bands_db: [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
+            };
+            store.checkpoint(loaded.checkpoint, &settings)?;
+            drop(store);
+            let store = Store::open(&path)?;
+            assert_eq!(store.load()?.settings, settings);
+            assert_eq!(user_version(&path), 6);
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+
+    #[test]
+    fn invalid_persisted_equalizer_is_rejected() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let store = Store::open(&path)?;
+            let valid = serde_json::to_value(Settings::default())?;
+            let mut invalid = Vec::new();
+            for preamp in [-24.01, 12.01] {
+                let mut settings = valid.clone();
+                settings["equalizer"]["preamp_db"] = serde_json::json!(preamp);
+                invalid.push(settings);
+            }
+            for band in [-12.01, 12.01] {
+                let mut settings = valid.clone();
+                settings["equalizer"]["bands_db"][9] = serde_json::json!(band);
+                invalid.push(settings);
+            }
+            for bands in [serde_json::to_value([0.0; 9])?, serde_json::Value::Null] {
+                let mut settings = valid.clone();
+                settings["equalizer"]["bands_db"] = bands;
+                invalid.push(settings);
+            }
+            for settings in invalid {
+                store.connection.execute(
+                    "UPDATE control SET settings=?1 WHERE singleton=1",
+                    [settings.to_string()],
+                )?;
+                assert!(store.load().is_err(), "accepted {settings}");
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+
     #[test]
     fn schema_six_preserves_files_and_round_trips_streams() -> Result<()> {
         let path = temp_path();

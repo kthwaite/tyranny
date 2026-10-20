@@ -124,6 +124,7 @@ struct TyrannyApp: App {
         importNotes: .forLaunch(arguments: CommandLine.arguments))
     @State private var navigation = NavigationModel()
     @State private var started = false
+    @Environment(\.openWindow) private var openWindow
 
     init() {
         #if DEBUG
@@ -168,6 +169,9 @@ struct TyrannyApp: App {
                 Button("Show Playing Track") { navigation.revealPlaying() }
                     .keyboardShortcut("l")
                     .disabled(model.transport.nowPlaying?.track_id == nil)
+                Divider()
+                Button("Equalizer…") { openWindow(id: "equalizer") }
+                    .keyboardShortcut("e", modifiers: [.command, .option])
             }
             CommandMenu("Go") {
                 ForEach(Array((Destination.library + Destination.playing).enumerated()), id: \.offset) { index, destination in
@@ -179,6 +183,10 @@ struct TyrannyApp: App {
                 }
             }
         }
+        Window("Equalizer", id: "equalizer") {
+            EqualizerView(model: model.equalizer)
+        }
+        .windowResizability(.contentSize)
         Settings {
             SettingsView(model: model, navigation: navigation)
         }
@@ -208,6 +216,7 @@ private struct MainWindow: View {
                 NativeScale.startIfRequested(model, navigation: navigation)
                 NativeFilterSmoke.startIfRequested(model, navigation: navigation)
                 NativeArtworkSmoke.startIfRequested(model, navigation: navigation)
+                NativeLyricsSmoke.startIfRequested(model)
                 NativeShellSmoke.startIfRequested(model, navigation: navigation)
                 NativeSongsSmoke.startIfRequested(model, navigation: navigation)
                 NativeAlbumsSmoke.startIfRequested(model, navigation: navigation)
@@ -217,6 +226,7 @@ private struct MainWindow: View {
                 NativePlaylistSmoke.startIfRequested(model, navigation: navigation)
                 NativeSmartPlaylistSmoke.startIfRequested(model, navigation: navigation)
                 NativeRunsSmoke.startIfRequested(model, navigation: navigation)
+                NativeEqualizerSmoke.startIfRequested(model, navigation: navigation, openWindow: { openWindow(id: "equalizer") })
                 NativeRenderViews.startIfRequested(model, navigation: navigation)
                 #endif
             }

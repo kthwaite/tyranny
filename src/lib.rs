@@ -4,10 +4,12 @@ pub const BLOCK_FRAMES: usize = 1024;
 
 mod artwork;
 pub mod decoder;
+pub mod equalizer;
 mod filter;
 pub mod library;
 pub mod library_types;
 pub mod listing;
+mod lyrics;
 mod metadata;
 pub mod output;
 pub mod owner;

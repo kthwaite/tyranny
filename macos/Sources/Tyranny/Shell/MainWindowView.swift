@@ -52,6 +52,10 @@ struct MainWindowView: View {
                         Divider()
                         UpNextDrawer(model: model.upNext, player: model)
                     }
+                    if model.lyrics.isVisible {
+                        Divider()
+                        LyricsPane(store: model.lyrics, transport: model.transport)
+                    }
                 }
                 // In the detail column: the split view always loads it, even with the sidebar collapsed.
                 .background(SidebarVisibilityProbe { sidebarOnScreen = $0 })

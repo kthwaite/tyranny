@@ -102,6 +102,10 @@ last 0.0625 s, not 0.25 s, to keep each file near one WAV fixture's size; the le
 in a partial DSF block. A swapped bit order still correlates with the source, so the identical
 DSF and DSDIFF decodes are what pin it.
 
+A named variant may add a second file for an extension when its container or codec path
+differs: `formats/tone-heaac.caf` (afconvert `-d aach`) pins CAF's core-rate HE-AAC
+durations (added 2026-10-20, TSK-lucid-kelp).
+
 ### `tests/fixtures/gapless/`
 
 The signal split into 4 tracks at sample-exact boundaries that are not codec-frame multiples.

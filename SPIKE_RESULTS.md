@@ -2,6 +2,154 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Compilation inference (2026-10-20)
+
+`TSK-jolly-dingo-6x70y` adds explicit album-artist/compilation provenance and
+bounded post-probe reconciliation. Same-folder/title and shared-release
+compilations group without losing per-track artists or durable track IDs.
+Explicit non-VA album artists, explicit false flags, conflicting release IDs,
+and unknown metadata fallbacks prevent speculative merging. Partial release IDs
+join only an unambiguous folder peer; raw MusicBrainz metadata remains unchanged.
+
+Final verification: **288 Rust tests passed, one ignored**; Clippy with warnings
+denied and formatting checks passed. The full run exposed two playback race
+fixtures that assumed current-track identity implied next-track prebuffering.
+Their setup now fills the buffer while paused, then waits for audible entry 1
+before preparing the edit; the transition/PCM assertions remain unchanged.
+
+Real-daemon verification in `../tyranny-jolly-dingo`:
+
+- Twenty generated FLAC fixtures passed untagged/mixed-tag grouping, VA aliases,
+  explicit-tag protection, distinct-release isolation, cross-folder release
+  grouping, partial MusicBrainz association, unchanged rescans, removal/re-add,
+  retag reversal, and restart persistence. Every surviving/restored track kept
+  its ID.
+- A separate 512-directory/512-track import completed in **0.367 s**; its
+  unchanged rescan completed in **0.198 s**. These are local fixture timings,
+  not production-library latency guarantees.
+- The existing library process gate passed all **13 scenarios** with **2,056
+  tracks**, including import during clocked PCM playback, migrations, bounded
+  queries, retags, missing/unreadable roots, crash recovery and indexed playback.
+  Maximum observed control-request latency during import was **1.57 ms** with
+  **zero underruns**.
+
+Reports: `target/compilations-smoke-1jop8gkk/report.json` and
+`target/compilation-library-gate/run-2buyt_2v/report.json` in that worktree.
+Existing roots need a manual rescan to extract provenance (metadata version 3);
+no database-schema or protocol-version change. Verification used isolated state,
+not the user's daemon/library. No new native UI or acoustic-listening claim.
+
+## Audio equalizer (2026-10-20)
+
+Implemented `TSK-sunlit-egret-jywzq` in the isolated
+`../tyranny-sunlit-egret` worktree on `feature/sunlit-egret-equalizer`, branched
+from `dev`. Playback → Equalizer… opens the native ten-band/preamp window.
+The allocation-free stereo biquad bank handles both local and streaming PCM;
+Flat, Bass Boost, Treble Boost and Vocal presets, retained bypass curves,
+server-owned persistence, and reconnect-authoritative edits are implemented.
+Protocol **v11**, SQLite **schema 6 unchanged**. Existing databases start with
+disabled EQ; client and server must be upgraded together.
+
+Integration verification with the decoder and lyrics changes: **279 Rust tests
+passed, one ignored; 296 Swift tests passed in 44 suites** with warnings as
+errors. Clippy, formatting, and binary builds passed. Independent standards and
+specification reviews found no actionable issues. Native controls passed again;
+the rebuilt integrated client/server restored the persisted Bass Boost curve
+after daemon restart. Screenshots were inspected. Evidence:
+`../tyranny-sunlit-egret/target/equalizer-ui/integration-cf4w4vdz/`.
+
+### Exercised evidence
+
+- `cargo test --locked --all-targets`: **263 passed, one ignored**. Coverage
+  includes exact flat/bypass sample bits, frequency/bandwidth response, stereo
+  isolation, chunk invariance, bounded finite decay, pending-buffer retries,
+  gapless history continuity, explicit discontinuity resets, stream-reconnect
+  alignment, malformed/range/nonfinite settings, persistence failure, existing
+  database defaults, durable restart and two-controller state publication.
+- `cargo clippy --locked --all-targets -- -D warnings` passed; Rust formatting
+  and `cargo build --locked --bins` completed.
+- `swift test --package-path macos --scratch-path target/swift-client
+  -Xswiftc -warnings-as-errors`: **290 passed in 43 suites**, including EQ
+  decoding, validation, preset and bypass behavior; the native executable built.
+- A throwaway real-daemon smoke rendered a three-second stereo fixture through
+  the production PCM consumer. Enabled flat and disabled nonflat EQ produced
+  **1,152,000 identical bytes / 144,000 frames**. A +6 dB 1 kHz band measured
+  **+5.9999998 dB** at 1 kHz and **+0.2215682 dB** at 250 Hz. A −6 dB preamp
+  measured **−6.0000001 dB**. A live edit preserved all frames, left the early
+  buffered samples unchanged, and reached the requested gain after the ring
+  delay. There were no reported underruns. Restart restored the curve; rejected
+  out-of-range input left settings unchanged.
+- Native Accessibility exercised all four presets, all ten bands, preamp,
+  Custom recognition, retained bypass, enabled/disabled editing, queued-edit
+  cancellation on disconnect, authoritative reconnect and daemon/app restart.
+  Both initial and restored windows were captured and visually inspected.
+  Four consecutive complete edit/restart runs passed after fixing the native
+  driver's menu-dismissal race: selecting an already-selected preset does not
+  change model state, so the driver now waits for the actual menu to close before
+  allowing another invocation to press it.
+
+PCM evidence: `target/equalizer-smoke/run-5flchrsq/report.json`. Native evidence:
+`target/equalizer-ui/run-4nt3y0wd/`, with three additional successful race checks
+at `run-ak8gz63s`, `run-u4eeqcc4` and `run-uerj_bpm`. Paths are local to the
+equalizer worktree. The native debug smoke hook and regression tests remain
+reproducible; throwaway orchestration/diagnostic scripts were removed.
+
+Limitations: capture output, not acoustic listening or hardware loopback. No
+release packaging claim. Settings edits retain buffered audio (about 1.4 seconds
+plus decoder/device buffering), reset changed-filter histories, and do not add
+a limiter or transition smoothing. Boosts require preamp headroom. The user's
+running app, daemon and database were not replaced or edited.
+
+## Lyrics retrieval and display (2026-10-20)
+
+TSK-smart-gale-rqmwc implements embedded-first lyrics, cached LRCLIB lookup,
+and the native Lyrics pane (**⌥⌘L**). Protocol v10 gains an additive `lyrics`
+request; the main database schema remains unchanged. Source/access decisions
+for all eight requested providers are documented in
+[docs/lyrics-providers.md](docs/lyrics-providers.md). Only LRCLIB is enabled
+remotely; no third-party lyrics scrapers or credentials were added.
+
+Verification in the isolated `../tyranny-smart-gale` worktree:
+
+- Full Rust suite: **256 passed, one ignored**. Clippy with warnings denied and
+  formatting checks passed. The 13 lyrics-focused tests cover real embedded
+  tags, exact metadata matching, instrumental/missing/error outcomes, bounded
+  responses/cache, expiry, offline persistence, rescan/duplicate-file cache
+  reuse, cancellation, and removal during slow lookup.
+- Swift: **291 tests in 43 suites passed** with warnings as errors; the final
+  native build also passed with warnings as errors. LRC tests cover fractions,
+  multiple timestamps, offsets, duplicate-time lines, invalid input, backward
+  seeks and provider-link restrictions.
+- Ten real-daemon smoke scenarios passed, including genuine ID3v2.4 **USLT**
+  and FLAC **LYRICS**, a live LRCLIB HTTPS request, embedded precedence,
+  invalid/stale/removed entries, stream exclusion, persisted online lyrics
+  after offline restart, and unavailable—not missing—on an uncached outage.
+  Deterministic loopback tests separately verify HTTP 404 negative caching.
+- Nine native scenarios passed using actual Accessibility toggle, pause,
+  scrubber and close controls. Fixture selection and disconnect use the normal
+  model commands. The mounted pane followed playback, paused at the second
+  line, sought backward to the opening line, released hidden demand, rendered
+  plain lyrics, rejected superseded occurrences, refreshed on explicit rescan,
+  recovered after reconnect, and displayed missing/online states and attribution.
+  Screen-window captures were visually inspected; no model-driven fallback was
+  used.
+
+The native smoke caught two integration defects before delivery: the existing
+wire reply-kind allowlist needed `lyrics`, and a tiny no-op rescan could complete
+without an observable state change. Accepted explicit rescans now refresh
+visible lyrics directly; observed scan completion still invalidates them.
+Remote cache identity excludes unrelated library revisions and file paths, so
+rescans and duplicate files do not defeat offline reuse.
+
+Local evidence: `target/lyrics-smoke/report.json` and
+`target/lyrics-smoke/native/{report.json,*.png}`. The orchestration script was
+a throwaway probe; `NativeLyricsSmoke` remains the opt-in native entrypoint.
+Generated silent audio and clock-paced capture do not constitute an acoustic
+listening test. The user's daemon, database and installed app were not changed.
+An exploratory unknown-track request received LRCLIB's temporary backoff;
+the integration retained `unavailable` and honored the delay rather than
+converting it into a permanent miss or bypassing throttling.
+
 ## Development integration (2026-10-20)
 
 Notifications and HTTP streaming were integrated with the current command-language, decoder-component coverage and packet-duration changes. Conflict resolution preserves both native queue-command methods, the expanded required decoder/demuxer sets, and the network/TLS restrictions. Configuration tests exercise rejection of missing audio components instead of copying component lists or inspecting source text.

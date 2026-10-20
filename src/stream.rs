@@ -37,6 +37,7 @@ static WORKERS: AtomicUsize = AtomicUsize::new(0);
 struct PcmBlock {
     frames: [Frame; BLOCK_FRAMES],
     length: usize,
+    discontinuity: bool,
 }
 
 #[derive(Default)]
@@ -120,6 +121,7 @@ impl StreamDecoder {
                 .push(Box::new(PcmBlock {
                     frames: [[0.0; 2]; BLOCK_FRAMES],
                     length: 0,
+                    discontinuity: false,
                 }))
                 .expect("new stream block pool has room");
         }
@@ -158,7 +160,9 @@ impl StreamDecoder {
 
     /// Pending is not EOF. Live-source disconnects (even clean HTTP EOF) retry
     /// on the worker and eventually fail, rather than advancing the queue.
-    pub(crate) fn poll(&mut self, destination: &mut [Frame]) -> Result<Option<usize>> {
+    /// The boolean marks the first PCM after a decoder reconnect, aligned with
+    /// the block rather than a worker notification that could overtake old PCM.
+    pub(crate) fn poll(&mut self, destination: &mut [Frame]) -> Result<Option<(usize, bool)>> {
         ensure!(
             !destination.is_empty(),
             "stream destination must be nonempty"
@@ -169,6 +173,7 @@ impl StreamDecoder {
         }
         if let Some(block) = &self.current {
             let count = (block.length - self.offset).min(destination.len());
+            let discontinuity = self.offset == 0 && block.discontinuity;
             destination[..count].copy_from_slice(&block.frames[self.offset..self.offset + count]);
             self.offset += count;
             if self.offset == block.length {
@@ -177,7 +182,7 @@ impl StreamDecoder {
                     .expect("consumed block has a free recycle slot");
                 self.worker.unpark();
             }
-            return Ok(Some(count));
+            return Ok(Some((count, discontinuity)));
         }
         if self.shared.finished.load(Ordering::Acquire) {
             // The worker may have queued its final block between our empty pop
@@ -226,6 +231,7 @@ fn run(
     let mut failures = 0;
     let mut last_metadata: Option<PlaybackMetadata> = None;
     let mut spare = None;
+    let mut opened_once = false;
     loop {
         if shared.cancelled.load(Ordering::Acquire) {
             return Ok(());
@@ -238,6 +244,8 @@ fn run(
         let error = match opened {
             Err(error) => error,
             Ok(mut decoder) => {
+                let mut discontinuity = opened_once;
+                opened_once = true;
                 shared
                     .gain_bits
                     .store(decoder.gain_db().to_bits(), Ordering::Release);
@@ -266,6 +274,7 @@ fn run(
                     match result {
                         Ok(length) if length > 0 => {
                             block.length = length;
+                            block.discontinuity = std::mem::take(&mut discontinuity);
                             ready
                                 .push(block)
                                 .expect("recycled block has a free ready slot");
@@ -417,15 +426,27 @@ mod tests {
         assert_eq!(decoder.take_metadata().unwrap().title, "Live title");
         assert!(decoder.take_metadata().is_none());
 
+        // A reconnect queued behind old PCM must not reset the old block, and
+        // a split read emits the marker only on the new connection's first PCM.
+        writer
+            .push(Box::new(PcmBlock {
+                frames: [[0.125, -0.125]; BLOCK_FRAMES],
+                length: 1,
+                discontinuity: false,
+            }))
+            .unwrap();
         let mut block = Box::new(PcmBlock {
             frames: [[0.25, -0.25]; BLOCK_FRAMES],
             length: 3,
+            discontinuity: true,
         });
         block.frames[2] = [0.5, -0.5];
         writer.push(block).unwrap();
-        assert_eq!(decoder.poll(&mut output).unwrap(), Some(2));
+        assert_eq!(decoder.poll(&mut output).unwrap(), Some((1, false)));
+        assert_eq!(output[0], [0.125, -0.125]);
+        assert_eq!(decoder.poll(&mut output).unwrap(), Some((2, true)));
         assert_eq!(output, [[0.25, -0.25]; 2]);
-        assert_eq!(decoder.poll(&mut output).unwrap(), Some(1));
+        assert_eq!(decoder.poll(&mut output).unwrap(), Some((1, false)));
         assert_eq!(output[0], [0.5, -0.5]);
         assert_eq!(decoder.poll(&mut output).unwrap(), None);
         drop(decoder);
