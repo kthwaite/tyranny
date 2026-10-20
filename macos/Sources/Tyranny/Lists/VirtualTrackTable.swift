@@ -191,6 +191,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             let layoutChanged = parent.layoutToken != shownLayout
             /// A full `reloadData` already refreshed every row view.
             var reloadedAll = false
+            var rowsWereCreated = false
             if layoutChanged {
                 let wasGrouped = layout.grouping != .none
                 layout = parent.list.layout
@@ -202,13 +203,16 @@ struct VirtualTrackTable: NSViewRepresentable {
                     reloadedAll = true
                 } else {
                     // Ungrouped, a refresh pass changes the total and the rows together.
+                    let rowsBefore = table.numberOfRows
                     table.noteNumberOfRowsChanged()
+                    // First rows were just created from current data; reloading them again is redundant.
+                    rowsWereCreated = rowsBefore == 0 && table.numberOfRows > 0
                 }
             }
             if parent.generation != shownGeneration || epochChanged || layoutChanged {
                 shownGeneration = parent.generation
                 restoreAnchor()
-                if !reloadedAll { reloadVisible() }
+                if !reloadedAll && !rowsWereCreated { reloadVisible() }
                 let rows = layout.displayIndexes(ofPositions: parent.list.rowsChanged())
                 if table.selectedRowIndexes != rows { table.selectRowIndexes(rows, byExtendingSelection: false) }
             } else if parent.playingTrackID != shownPlaying, let status = columnIndex(TrackColumns.status) {
@@ -577,6 +581,8 @@ final class TrackCellView: NSTableCellView {
     private let field = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let icon = NSImageView()
+    /// Built once: creating a symbol image per cell was a measurable part of first-row cost.
+    private static let playingImage = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Playing")
     private var fieldToEdge: NSLayoutConstraint!
     private var fieldToDetail: NSLayoutConstraint!
 
@@ -592,7 +598,6 @@ final class TrackCellView: NSTableCellView {
         detail.textColor = .secondaryLabelColor
         detail.isHidden = true
         icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Playing")
         icon.contentTintColor = .controlAccentColor
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
         addSubview(icon)
@@ -617,6 +622,7 @@ final class TrackCellView: NSTableCellView {
     func show(text: String, font: NSFont, alignment: NSTextAlignment, secondary: Bool, identifier: String?,
               detail detailText: String? = nil) {
         icon.isHidden = true
+        icon.image = nil
         field.isHidden = false
         field.stringValue = text
         field.font = font
@@ -643,6 +649,7 @@ final class TrackCellView: NSTableCellView {
         field.stringValue = ""
         detail.isHidden = true
         icon.isHidden = !playing
+        icon.image = playing ? Self.playingImage : nil
         icon.setAccessibilityIdentifier(identifier)
         field.setAccessibilityIdentifier(nil)
     }
