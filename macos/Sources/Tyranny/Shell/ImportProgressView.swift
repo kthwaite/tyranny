@@ -30,6 +30,7 @@ struct ImportProgressView: View {
             Image(systemName: symbol)
                 .font(.system(size: 56))
                 .foregroundStyle(progress.stage == .done ? Color.green : Color.secondary)
+                .accessibilityHidden(true)
             Text(progress.title).font(.title2.weight(.semibold))
             if let folder {
                 Text(folder).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
@@ -53,9 +54,15 @@ struct ImportProgressView: View {
 
     @ViewBuilder private var bar: some View {
         if let fraction = progress.fraction {
-            ProgressView(value: fraction).accessibilityIdentifier("import-progress-bar")
+            ProgressView(value: fraction)
+                .accessibilityLabel("Import progress")
+                .accessibilityValue(progress.detail ?? "")
+                .accessibilityIdentifier("import-progress-bar")
         } else {
-            ProgressView().progressViewStyle(.linear).accessibilityIdentifier("import-progress-bar")
+            ProgressView().progressViewStyle(.linear)
+                .accessibilityLabel("Import progress")
+                .accessibilityValue(progress.detail ?? "")
+                .accessibilityIdentifier("import-progress-bar")
         }
     }
 

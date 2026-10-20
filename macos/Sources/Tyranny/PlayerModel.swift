@@ -62,18 +62,23 @@ final class PlayerModel {
     #if DEBUG
     /// Shown by the import screen instead of `importProgress`.
     var importOverride: ImportProgress?
+    /// Shown as the folder line while `importOverride` is set.
+    var importFolderOverride: String?
     #endif
     /// The hello arrives before `connected` is true, and `play` needs `connected`.
     /// So the decision waits here until the connection loop marks the connection connected.
     @ObservationIgnored private var launchResumePending = false
     /// Where quit notes live. The app picks it from the launch arguments.
     @ObservationIgnored private let quitSuspensions: QuitSuspensionStore
+    /// Where the live import's note lives. It shares the quit note's defaults suite.
+    @ObservationIgnored private let importNotes: ImportNoteStore
     /// The server's page limit.
     private static let catalogLimit = 500
     @ObservationIgnored var activeDrag: TrackDrag?
 
-    init(quitSuspensions: QuitSuspensionStore) {
+    init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore) {
         self.quitSuspensions = quitSuspensions
+        self.importNotes = importNotes
         let arguments = CommandLine.arguments
         for (index, argument) in arguments.enumerated() where index + 1 < arguments.count {
             if argument == "--url" { endpoint = arguments[index + 1] }
@@ -288,7 +293,10 @@ final class PlayerModel {
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
         if newInstance, !launchImportChecked {
             launchImportChecked = true
-            if importSession == nil { setImportSession(ImportSession.atLaunch(library: state.library)) }
+            let note = importNotes.take()
+            if importSession == nil {
+                setImportSession(ImportSession.atLaunch(library: state.library, note: note, endpoint: endpoint))
+            }
         }
         updateImportProgress()
         if newInstance, !launchSuspensionChecked {
@@ -394,6 +402,9 @@ final class PlayerModel {
     }
     /// The path of the root being imported, abbreviated, once the root list has it.
     var importRootPath: String? {
+        #if DEBUG
+        if importOverride != nil, let importFolderOverride { return importFolderOverride }
+        #endif
         guard let importRootID, let root = roots?.entries.first(where: { $0.id == importRootID }) else { return nil }
         return DisplayFormat.abbreviatedPath(root.path, home: NSHomeDirectory())
     }
@@ -404,15 +415,36 @@ final class PlayerModel {
     }
     /// Try Again: a fresh baseline, then a rescan of the same root.
     func retryImport() {
-        guard let scan = snapshot?.library.scan, var session = importSession else { return }
+        guard canMutate, let scan = snapshot?.library.scan, var session = importSession else { return }
         session.retry(baseline: scan)
         importSession = session
         updateImportProgress()
-        rescan(session.rootID)
+        busy = true; message = nil
+        let rootID = session.rootID
+        Task {
+            defer { busy = false }
+            do {
+                let _: ScanAccepted = try await request("rescan", ["root_id": .uint(rootID)])
+                refresh()
+            } catch {
+                // The rescan never started, so the old Stopped screen comes back.
+                if var current = importSession, current.rootID == rootID {
+                    current.cancelRetry()
+                    importSession = current
+                    updateImportProgress()
+                }
+                message = error.localizedDescription
+            }
+        }
     }
     private func setImportSession(_ session: ImportSession?) {
         importSession = session
         importRootID = session?.rootID
+        if let session {
+            importNotes.save(ImportNote(endpoint: endpoint, rootID: session.rootID))
+        } else {
+            importNotes.clear()
+        }
         importProgress = nil
         updateImportProgress()
     }

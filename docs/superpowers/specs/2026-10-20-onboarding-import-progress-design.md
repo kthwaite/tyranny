@@ -49,13 +49,13 @@ Today the first two steps work. The third and fourth do not:
 
 ### When the import screen shows
 
-An **import session** is client state held by `PlayerModel` for this app run. It is not persisted.
+An **import session** is client state held by `PlayerModel`. While it is live, the client also keeps a small note (`endpoint`, `rootID`) in the same defaults suite as the quit note, so a relaunch can restore it. Ending the session clears the note.
 
 | Event | Result |
 |---|---|
 | `add_root` succeeds while `library.roots == 0` (the first folder) | Start a session for the new root's id (`RootAdded.root.id`). |
-| `add_root` succeeds while a session exists (after an empty first folder) | Restart the session for the new root. |
-| First authoritative snapshot of a launch: `roots > 0`, `tracks == 0`, and the scan is active (`discovering` or `indexing`) | Start a session for `scan.root_id`. This covers a relaunch during the first import. |
+| `add_root` succeeds while the session's last shown stage is Empty (an empty first folder) | Restart the session for the new root. Any other session stage starts no session. |
+| First authoritative snapshot of a launch | Take the note. If its endpoint is the current endpoint, `scan.root_id` equals its root, and the scan is active (`discovering` or `indexing`), start a session for that root, whatever the track count. Otherwise, with `roots > 0`, `tracks == 0`, and an active scan, start a session for `scan.root_id`. This covers a relaunch during the first import. Relaunching after the import finished while the app was closed shows no Done screen. |
 | User presses **Browse Library** (while importing) or **Show Songs** (when done), or the destination changes | End the session. |
 | Connection lost | Keep the session. The disconnected screen takes priority while disconnected (see below). |
 | `add_root` fails | No session. The existing error message path is unchanged. |

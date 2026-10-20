@@ -41,7 +41,11 @@ struct SourceList: View {
     var body: some View {
         List(selection: Binding<Destination?>(
             get: { navigation.destination },
-            set: { if let next = $0 { navigation.destination = next } }
+            set: {
+                guard let next = $0 else { return }
+                model.endImport()
+                navigation.destination = next
+            }
         )) {
             Section("Library") {
                 ForEach(Destination.library, id: \.self) { row($0) }

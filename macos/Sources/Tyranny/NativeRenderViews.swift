@@ -141,6 +141,7 @@ enum NativeRenderViews {
                         revision: 1, roots: 1, tracks: tracks, duration_ms: durationMs,
                         size_bytes: sizeBytes, scan: scan))
                 }
+                model.importFolderOverride = "~/Music"
                 model.importOverride = importProgress("discovering", discovered: 1_204)
                 await shot("21-import-discovering")
                 model.importOverride = importProgress("indexing", discovered: 1_129, processed: 412,
@@ -154,11 +155,13 @@ enum NativeRenderViews {
                 model.importOverride = importProgress("complete")
                 await shot("25-import-empty")
                 model.importOverride = nil
+                model.importFolderOverride = nil
                 log.append(renderSettings(model, navigation, into: output))
             } catch {
                 log.append("error: \(error.localizedDescription)")
             }
             model.importOverride = nil
+            model.importFolderOverride = nil
             navigation.setGrouping(saved.grouping, for: .songs)
             navigation.columnBrowserVisible = saved.browser
             navigation.upNextDrawerVisible = saved.drawer

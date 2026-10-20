@@ -22,16 +22,37 @@ public struct ImportSession: Equatable, Sendable {
     private var lastStage: ImportProgress.Stage?
     private var shownFraction: Double?
 
+    /// The state `retry` replaced, kept for `cancelRetry`.
+    private struct Previous: Equatable, Sendable {
+        let baseline: ScanStatus?
+        let lastStage: ImportProgress.Stage?
+        let shownFraction: Double?
+    }
+    private var previous: Previous?
+
     public init(rootID: UInt64, baseline: ScanStatus?) {
         self.rootID = rootID
         self.baseline = baseline
     }
 
+    /// The stage of the last screen this session produced. Nil before the first one.
+    public var stage: ImportProgress.Stage? { lastStage }
+
     /// Starts a fresh baseline after Try Again; resets the shown fraction.
     public mutating func retry(baseline: ScanStatus) {
+        previous = Previous(baseline: self.baseline, lastStage: lastStage, shownFraction: shownFraction)
         self.baseline = baseline
         lastStage = nil
         shownFraction = nil
+    }
+
+    /// Undoes `retry` when the rescan request failed, so the previous screen comes back.
+    public mutating func cancelRetry() {
+        guard let previous else { return }
+        baseline = previous.baseline
+        lastStage = previous.lastStage
+        shownFraction = previous.shownFraction
+        self.previous = nil
     }
 
     /// The screen for this status. Updates the remembered fraction (monotonic rule).
@@ -84,11 +105,22 @@ public struct ImportSession: Equatable, Sendable {
     /// before the request; `current` is the existing session, if any.
     public static func afterAddRoot(rootID: UInt64, rootsBefore: Int, current: ImportSession?,
                                     baseline: ScanStatus?) -> ImportSession? {
-        guard rootsBefore == 0 || current != nil else { return nil }
+        guard rootsBefore == 0 || current?.stage == .empty else { return nil }
         return ImportSession(rootID: rootID, baseline: baseline)
     }
 
-    /// Session for the first authoritative snapshot of a launch, or nil.
+    /// Session for the first authoritative snapshot of a launch, or nil. A note for the same
+    /// endpoint and root restores the session while that root's scan is active. Without a
+    /// matching note, only an import that has no tracks yet counts.
+    public static func atLaunch(library: LibraryState, note: ImportNote?, endpoint: String) -> ImportSession? {
+        let active = library.scan.phase == "discovering" || library.scan.phase == "indexing"
+        if let note, note.endpoint == endpoint, library.scan.root_id == note.rootID, active {
+            return ImportSession(rootID: note.rootID, baseline: nil)
+        }
+        return atLaunch(library: library)
+    }
+
+    /// The no-note rule: the first import, seen before any track is indexed.
     public static func atLaunch(library: LibraryState) -> ImportSession? {
         guard library.roots > 0, library.tracks == 0,
               library.scan.phase == "discovering" || library.scan.phase == "indexing",
