@@ -12,6 +12,9 @@ final class ActivatingTableView: NSTableView {
     var onCancel: (() -> Void)?
     /// Builds the menu for the row under the pointer, selecting it first when it is not selected.
     var contextMenu: ((Int) -> NSMenu?)?
+    /// Left and Right do nothing. The album panel's table sits inside the grid, and the grid would
+    /// move its selection. Other tables pass them on.
+    var ignoresLeftRight = false
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -30,6 +33,8 @@ final class ActivatingTableView: NSTableView {
             onPlayPause?()
         case 53 where flags.isEmpty && onCancel != nil:
             onCancel?()
+        case 123 where ignoresLeftRight, 124 where ignoresLeftRight:
+            break
         default:
             super.keyDown(with: event)
         }

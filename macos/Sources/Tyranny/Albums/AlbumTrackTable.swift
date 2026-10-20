@@ -8,7 +8,8 @@ import TyrannyCore
 ///
 /// Double-click plays the album from the row to its end. Return plays the selection: one row
 /// as a run, several as exactly those rows. ⌥Return adds the selection to Up Next. Space
-/// toggles play/pause. Escape closes the panel and gives focus back to the grid.
+/// toggles play/pause. Escape closes the panel and gives focus back to the grid. Left and
+/// Right do nothing, so they do not reach the grid.
 struct AlbumTrackTable: NSViewRepresentable {
     let expansion: AlbumExpansion
     let grid: AlbumGridModel
@@ -31,6 +32,7 @@ struct AlbumTrackTable: NSViewRepresentable {
         scroll.automaticallyAdjustsContentInsets = false
         let table = ActivatingTableView()
         table.setAccessibilityIdentifier(Self.identifier)
+        table.ignoresLeftRight = true
         table.style = .plain
         table.headerView = nil
         table.backgroundColor = .clear
