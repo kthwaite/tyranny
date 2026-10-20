@@ -188,3 +188,12 @@ extension DisplayFormat {
         return "\(parts.day ?? 1) \(month) \(parts.year ?? 1970), \(time)"
     }
 }
+
+/// The line under the title in the player bar. A stream shows its station name unless the
+/// title already is that name; anything else shows "artist — album", leaving out an empty side.
+public func transportSubtitle(title: String, artist: String, album: String, station: String?) -> String {
+    if let station {
+        return station == title ? "" : station
+    }
+    return [artist, album].filter { !$0.isEmpty }.joined(separator: " — ")
+}

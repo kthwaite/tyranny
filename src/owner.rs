@@ -715,8 +715,11 @@ impl Actor {
     /// Adds the indexed track, album, album artist, compilation flag and format to the
     /// player's metadata. The lookup is display-only, so a failed one leaves those fields blank.
     fn describe(&self, now: Arc<NowPlaying>, library_revision: u64) -> Arc<NowPlaying> {
-        if self.player.is_stream(now.entry_id) {
-            return now;
+        if let Some(title) = self.player.stream_title(now.entry_id) {
+            return Arc::new(NowPlaying {
+                station: Some(title.to_owned()),
+                ..(*now).clone()
+            });
         }
         let key = (now.entry_id, library_revision);
         let mut cache = self.now_track.borrow_mut();

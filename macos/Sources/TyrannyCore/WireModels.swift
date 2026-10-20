@@ -31,8 +31,10 @@ public struct NowPlaying: Codable, Sendable, Equatable {
     public let compilation: Bool?
     public let format: String
     public let gain_db: Double?
+    /// The saved station name of a live stream; `nil` for a library entry.
+    public let station: String?
 
-    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, album_artist_id: UInt64?, compilation: Bool?, format: String, gain_db: Double?) {
+    public init(entry_id: UInt64, title: String, artist: String, album: String, duration_frames: UInt64?, metadata_error: String?, track_id: UInt64?, album_id: UInt64?, album_artist_id: UInt64?, compilation: Bool?, format: String, gain_db: Double?, station: String? = nil) {
         self.entry_id = entry_id
         self.title = title
         self.artist = artist
@@ -45,6 +47,7 @@ public struct NowPlaying: Codable, Sendable, Equatable {
         self.compilation = compilation
         self.format = format
         self.gain_db = gain_db
+        self.station = station
     }
 
     /// The artist the artist text opens, as "Show in Artist" does: the album artist. The

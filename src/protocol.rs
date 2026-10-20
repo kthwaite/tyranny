@@ -445,6 +445,9 @@ pub struct NowPlaying {
     pub format: String,
     /// Gain the decoder applied; `None` when gain mode is off.
     pub gain_db: Option<f64>,
+    /// The saved station name of a live stream; `None` for a library entry.
+    #[serde(default)]
+    pub station: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

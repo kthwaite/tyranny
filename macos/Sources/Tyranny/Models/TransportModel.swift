@@ -58,9 +58,10 @@ final class TransportModel {
 
     var artist: String { nowPlaying?.artist ?? "" }
     var album: String { nowPlaying?.album ?? "" }
-    /// "artist — album", leaving out an empty side.
+    /// The station name for a stream, otherwise "artist — album" without an empty side.
     var artistAlbum: String {
-        [artist, album].filter { !$0.isEmpty }.joined(separator: " — ")
+        transportSubtitle(title: nowPlaying?.title ?? "", artist: artist, album: album,
+                          station: nowPlaying?.station)
     }
     var elapsed: Double { player?.positionSeconds ?? 0 }
     var duration: Double? { player?.durationSeconds }
