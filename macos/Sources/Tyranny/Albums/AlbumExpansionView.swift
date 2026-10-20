@@ -8,18 +8,25 @@ enum AlbumExpansionMetrics {
     static let caretHeight: CGFloat = 10
     static let padding: CGFloat = 16
     static let cover: CGFloat = 150
-    static let trackRowHeight: CGFloat = 18
-    /// Longer tracklists scroll inside the panel.
-    static let maximumTrackRows = 12
+    static let trackRowHeight: CGFloat = 20
+    /// "and N more…" under the track table.
+    static let moreHeight: CGFloat = 20
     /// Title 22 + artist 18 + facts 16 + gap 10 + gap 12 + buttons 24.
     static let fixedTextHeight: CGFloat = 102
 
-    static func trackRows(_ count: Int) -> Int { max(1, (count + 1) / 2) }
+    /// `AlbumPanel.visibleRows` rows. Longer tracklists scroll inside the table.
+    static func tableHeight(trackCount: UInt64) -> CGFloat {
+        CGFloat(AlbumPanel.visibleRows(trackCount: Int(clamping: trackCount))) * trackRowHeight
+    }
+
+    /// The table, and the "and N more…" line when `AlbumPanel.showsMore`.
+    static func tracksHeight(trackCount: UInt64) -> CGFloat {
+        tableHeight(trackCount: trackCount)
+            + (AlbumPanel.showsMore(trackCount: Int(clamping: trackCount)) ? moreHeight : 0)
+    }
 
     static func height(trackCount: UInt64) -> CGFloat {
-        let shown = min(Int(clamping: trackCount), AlbumPanel.trackLimit)
-        let rows = min(trackRows(shown), maximumTrackRows)
-        let text = fixedTextHeight + CGFloat(rows) * trackRowHeight
+        let text = fixedTextHeight + tracksHeight(trackCount: trackCount)
         return caretHeight + 2 * padding + max(cover, text)
     }
 }
@@ -114,8 +121,8 @@ final class AlbumExpansionContainer: NSView {
     override func mouseDown(with event: NSEvent) {}
 }
 
-/// The panel's content: the cover, the title, artist and facts, the tracks in two columns,
-/// and the album actions.
+/// The panel's content: the cover, the title, artist and facts, the track table, and the
+/// album actions.
 struct AlbumExpansionContent: View {
     let expansion: AlbumExpansion
     let grid: AlbumGridModel
@@ -170,11 +177,20 @@ struct AlbumExpansionContent: View {
 
     // MARK: Tracks
 
+    /// Sized from the album's track count, as the grid sizes the item.
     @ViewBuilder private var tracks: some View {
-        let rows = expansion.tracks
-        let shown = min(AlbumExpansionMetrics.trackRows(Int(clamping: album.track_count)),
-                        AlbumExpansionMetrics.maximumTrackRows)
-        let height = CGFloat(shown) * AlbumExpansionMetrics.trackRowHeight
+        VStack(alignment: .leading, spacing: 0) {
+            table
+            if AlbumPanel.showsMore(trackCount: Int(clamping: album.track_count)) {
+                Text(expansion.moreText ?? "").font(.system(size: 12)).foregroundStyle(.secondary)
+                    .padding(.leading, 6)
+                    .frame(height: AlbumExpansionMetrics.moreHeight, alignment: .bottomLeading)
+                    .accessibilityIdentifier("album-expansion-more")
+            }
+        }
+    }
+
+    @ViewBuilder private var table: some View {
         Group {
             if let failure = expansion.failure {
                 Text(failure).font(.callout).foregroundStyle(.secondary)
@@ -183,69 +199,23 @@ struct AlbumExpansionContent: View {
                 ProgressView().controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
-                let split = (rows.count + 1) / 2
-                let columns = VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .top, spacing: 24) {
-                        column(rows[0..<split])
-                        column(rows[split...])
-                    }
-                    if let more = expansion.moreText {
-                        Text(more).font(.system(size: 12)).foregroundStyle(.secondary)
-                            .padding(.leading, 36)
-                            .accessibilityIdentifier("album-expansion-more")
-                    }
-                }
-                if AlbumExpansionMetrics.trackRows(rows.count) > AlbumExpansionMetrics.maximumTrackRows
-                    || expansion.moreText != nil {
-                    ScrollView(.vertical) { columns }
-                } else {
-                    columns.frame(maxHeight: .infinity, alignment: .top)
-                }
+                AlbumTrackTable(expansion: expansion, grid: grid, player: player,
+                                tracks: expansion.tracks, selected: expansion.selectedRowIDs)
             }
         }
-        .frame(height: height)
+        .frame(height: AlbumExpansionMetrics.tableHeight(trackCount: album.track_count))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Tracks")
         .accessibilityValue(expansion.isLoaded ? String(expansion.total) : "loading")
         .accessibilityIdentifier("album-expansion-tracks")
     }
 
-    private func column(_ rows: ArraySlice<ListRow>) -> some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(rows) { row in
-                HStack(spacing: 6) {
-                    Text(number(row.track)).monospacedDigit().foregroundStyle(.secondary)
-                        .frame(width: 30, alignment: .trailing)
-                    Text(row.track.title).lineLimit(1)
-                        .foregroundStyle(row.available ? .primary : .secondary)
-                    Spacer(minLength: 8)
-                    Text(row.track.duration_ms.map { DisplayFormat.clock(Double($0) / 1000) } ?? "")
-                        .monospacedDigit().foregroundStyle(.secondary)
-                }
-                .font(.system(size: 12))
-                .frame(height: AlbumExpansionMetrics.trackRowHeight)
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("album-track-\(row.row_id)")
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    private func number(_ track: TrackSummary) -> String {
-        let number = track.track_number > 0 ? String(track.track_number) : ""
-        return album.disc_count > 1 && track.disc_number > 0 ? "\(track.disc_number)-\(number)" : number
-    }
-
     // MARK: Actions
 
+    /// Each acts on the selected tracks, or the whole album when none are selected.
     private var actions: some View {
         HStack(spacing: 8) {
-            Button { grid.play(album) } label: { Label("Play", systemImage: "play.fill") }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("album-play")
-            Button { grid.play(album, shuffle: true) } label: { Label("Shuffle", systemImage: "shuffle") }
-                .accessibilityIdentifier("album-shuffle")
-            Button { grid.addToUpNext(album) } label: { Label("Add to Up Next", systemImage: "text.append") }
+            Button { grid.addToUpNext(expansion) } label: { Label("Add to Up Next", systemImage: "text.append") }
                 .accessibilityIdentifier("album-add-up-next")
             Menu("Add to Playlist…") {
                 let playlists = grid.regularPlaylists
@@ -253,7 +223,7 @@ struct AlbumExpansionContent: View {
                     Text("No Playlists")
                 } else {
                     ForEach(playlists) { playlist in
-                        Button(playlist.name) { grid.addToPlaylist(album, playlist: playlist) }
+                        Button(playlist.name) { grid.addToPlaylist(expansion, playlist: playlist) }
                     }
                 }
             }

@@ -29,8 +29,6 @@ struct EnqueueJob {
     let action: ActivationAction
     let source: QueueSource
     let request: SelectionRequest
-    /// Turn shuffle on before the play, so the server starts at a shuffle pick (album Shuffle).
-    var shuffleFirst = false
     /// The status bar text after the server accepted it.
     var status: String?
 }
@@ -83,7 +81,6 @@ final class ActivationModel {
         guard let player else { return }
         var selection = job.request.selection
         var retriedQueue = false, retriedLibrary = false
-        var shuffled = false
         while true {
             guard player.connected, let state = player.snapshot else {
                 throw ServerFailure(code: "connection_changed", message: "Disconnected. Nothing was queued.")
@@ -101,10 +98,6 @@ final class ActivationModel {
                     case .enqueue(let decided, let decidedPlay):
                         (placement, play) = (decided, decidedPlay)
                     }
-                }
-                if job.shuffleFirst, !shuffled {
-                    shuffled = true
-                    let _: Applied = try await player.send("set_shuffle", ["enabled": .bool(true)])
                 }
                 let request = EnqueueRequest(selection: selection, placement: placement, play: play,
                                              source: job.source)

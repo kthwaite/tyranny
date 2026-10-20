@@ -8,6 +8,8 @@ final class ActivatingTableView: NSTableView {
     var onPlayPause: (() -> Void)?
     /// Delete and ⌘Delete. Nil in lists that cannot remove rows.
     var onRemove: (() -> Void)?
+    /// Escape. Nil in tables that pass it on.
+    var onCancel: (() -> Void)?
     /// Builds the menu for the row under the pointer, selecting it first when it is not selected.
     var contextMenu: ((Int) -> NSMenu?)?
 
@@ -26,6 +28,8 @@ final class ActivatingTableView: NSTableView {
             onRemove?()
         case 49 where flags.isEmpty && onPlayPause != nil:
             onPlayPause?()
+        case 53 where flags.isEmpty && onCancel != nil:
+            onCancel?()
         default:
             super.keyDown(with: event)
         }
