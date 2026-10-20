@@ -97,8 +97,8 @@ enum NativeAlbumsSmoke {
         try await Task.sleep(for: .milliseconds(400))
         try capture("albums")
 
-        // Play: the queue holds the album as one run with an album source.
-        try await drive("press", "album-play")
+        // Double-click the first track: a run from row 0 is the whole album, one run, album source.
+        try await drive("double-click-row", AlbumTrackTable.identifier, "0,0.5")
         try await wait("album queued", model, seconds: 20) {
             model.snapshot?.queue_length == Int(summary.track_count) && model.snapshot?.transport == "playing"
                 && !model.busy
@@ -107,7 +107,8 @@ enum NativeAlbumsSmoke {
             "revision": .null, "offset": .int(0), "limit": .int(500)])
         let expected = QueueSource(kind: .album, name: summary.title)
         try check(queue.entries.allSatisfy { $0.source == expected }, "Queued entries lack the album source")
-        try check(Set(queue.entries.compactMap(\.run_id)).count == 1, "Album entries are not one run")
+        let albumRuns = Set(queue.entries.compactMap(\.run_id))
+        try check(albumRuns.count == 1, "Album entries are not one run")
         // The album may be longer than one queue page and the panel's list: compare the common prefix.
         let tracks = grid.expansion?.tracks.map(\.track.id) ?? []
         try check(queue.total == Int(summary.track_count), "Queue holds \(queue.total) entries")
@@ -115,7 +116,31 @@ enum NativeAlbumsSmoke {
         try check(queue.entries.prefix(compared).map(\.track_id) == Array(tracks.prefix(compared)),
                   "Queue order differs from the album's tracks")
         observations["queued"] = ["total": queue.total, "source": ["kind": "album", "name": summary.title]]
-        cases.append("native-albums-play-queues-album-run")
+        cases.append("native-albums-double-click-queues-album-run")
+
+        // Select the first two tracks, then Add to Up Next: exactly those two at the queue's end.
+        try check(tracks.count >= 2, "The album lists \(tracks.count) tracks; the selection needs two")
+        try await drive("select", AlbumTrackTable.identifier, "0,1")
+        let picked = Set(grid.expansion?.tracks.prefix(2).map(\.row_id) ?? [])
+        try await wait("two tracks selected", model) { grid.expansion?.selectedRowIDs == picked }
+        try await drive("press", "album-add-up-next")
+        let grown = Int(summary.track_count) + 2
+        try await wait("selection added", model, seconds: 20) {
+            model.snapshot?.queue_length == grown && !model.busy && model.message == "Added 2 tracks to Up Next."
+        }
+        let tail: Page<QueueItem> = try await model.send("queue_page", [
+            "revision": .null, "offset": .int(grown - 2), "limit": .int(2)])
+        try check(tail.total == grown, "Queue holds \(tail.total) entries after Add to Up Next; expected \(grown)")
+        try check(tail.entries.map(\.track_id) == tracks.prefix(2).map(Optional.some),
+                  "Queue ends with \(tail.entries.map(\.track_id)); expected the panel's first two tracks")
+        try check(tail.entries.allSatisfy { $0.source == expected }, "Added entries lack the album source")
+        let addedRuns = Set(tail.entries.compactMap(\.run_id))
+        try check(addedRuns.count == 1 && addedRuns.isDisjoint(with: albumRuns),
+                  "Added entries are not one run of their own: \(tail.entries.map(\.run_id))")
+        observations["added"] = ["total": tail.total, "track_ids": tail.entries.compactMap(\.track_id),
+                                 "message": model.message ?? ""]
+        cases.append("native-albums-add-selected-to-up-next")
+        try capture("albums-added")
 
         // Escape closes the panel.
         try await drive("key", collection, "escape")
@@ -168,7 +193,7 @@ enum NativeAlbumsSmoke {
     }
     private static func finish(_ model: PlayerModel, error: String?) throws {
         var report: [String: Any] = ["passed": error == nil, "cases": cases, "observations": observations,
-            "automation": "External Accessibility source-list click, grid scroll, a CGEvent click on the last cover, the Play button press and an Escape key; server reads only for expected values.",
+            "automation": "External Accessibility source-list click, grid scroll, a CGEvent click on the last cover, a CGEvent double-click on its first track, a two-row selection, the Add to Up Next button press and an Escape key; server reads only for expected values.",
             "scenario": "albums"]
         if let error { report["error"] = error }
         if let state = model.snapshot {
