@@ -41,9 +41,13 @@ def main():
             control.request("add_root", path=str(music))
             control.wait(lambda s: s["library"]["scan"]["phase"] == "complete" and s["library"]["tracks"] == 1129, seconds=180)
             prepare(control)
+            # Outside the library root. The harness queues and plays it to show a playback error.
+            undecodable = run / "Undecodable.wav"
+            undecodable.write_bytes(b"not audio " * 64)
             out = run / "png"
             app = [str(Path(args.app).resolve()), "--url", f"ws://127.0.0.1:{port}/ws",
-                   "--token-file", ready["token_path"], "--render-views", str(out)]
+                   "--token-file", ready["token_path"], "--render-views", str(out),
+                   "--render-error-source", str(undecodable)]
             result = subprocess.run(app, timeout=120, capture_output=True, text=True)
             print(result.returncode, result.stderr[-3000:])
             print((out / "render.log").read_text())
