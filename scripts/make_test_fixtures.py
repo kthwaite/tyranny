@@ -562,9 +562,15 @@ def main():
                    lambda path: cli_frames(ff, path)) for ext, codec, args in FORMATS]
         makers += [(ext, None, seconds, make, frames)
                    for ext, seconds, make, frames in external_makers(ff, tools, tmp, fpcm)]
+        # Named variants: a second file for an extension whose container or codec path
+        # differs. HE-AAC in CAF reports packet durations at the SBR core rate.
+        variants = {len(makers): "tone-heaac"}
+        makers.append(("caf", None, FORMAT_SECONDS,
+                       lambda dst: run([af, "-f", "caff", "-d", "aach", "-b", "64000", fsrc, dst]),
+                       lambda path: cli_frames(ff, path)))
         missing = []
-        for ext, codec, seconds, make, count_frames in makers:
-            rel = "formats/tone.%s" % ext
+        for index, (ext, codec, seconds, make, count_frames) in enumerate(makers):
+            rel = "formats/%s.%s" % (variants.get(index, "tone"), ext)
             dst = os.path.join(fixtures, rel)
             try:
                 make(dst)
