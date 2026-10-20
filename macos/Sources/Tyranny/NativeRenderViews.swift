@@ -128,10 +128,37 @@ enum NativeRenderViews {
                         await shot("20-player-bar-error")
                     }
                 } else { log.append("player bar error: no --render-error-source") }
+                // Onboarding import screen, one shot per stage. Each value goes through a real
+                // ImportSession, so the renders show the real copy.
+                func importProgress(_ phase: String, discovered: Int = 0, processed: Int = 0, total: Int? = nil,
+                                    failures: Int = 0, lastError: String? = nil, tracks: Int = 0,
+                                    durationMs: UInt64 = 0, sizeBytes: UInt64 = 0) -> ImportProgress {
+                    var session = ImportSession(rootID: 1, baseline: nil)
+                    let scan = ScanStatus(root_id: 1, phase: phase, discovered: discovered, processed: processed,
+                                          total: total, updated: 0, unchanged: 0, failures: failures,
+                                          skipped: 0, last_error: lastError)
+                    return session.progress(library: LibraryState(
+                        revision: 1, roots: 1, tracks: tracks, duration_ms: durationMs,
+                        size_bytes: sizeBytes, scan: scan))
+                }
+                model.importOverride = importProgress("discovering", discovered: 1_204)
+                await shot("21-import-discovering")
+                model.importOverride = importProgress("indexing", discovered: 1_129, processed: 412,
+                                                      total: 1_129, failures: 3)
+                await shot("22-import-indexing")
+                model.importOverride = importProgress("complete", tracks: 1_129, durationMs: 293_760_000,
+                                                      sizeBytes: 41_700_000_000)
+                await shot("23-import-done")
+                model.importOverride = importProgress("failed", lastError: "The music folder is no longer available.")
+                await shot("24-import-stopped")
+                model.importOverride = importProgress("complete")
+                await shot("25-import-empty")
+                model.importOverride = nil
                 log.append(renderSettings(model, navigation, into: output))
             } catch {
                 log.append("error: \(error.localizedDescription)")
             }
+            model.importOverride = nil
             navigation.setGrouping(saved.grouping, for: .songs)
             navigation.columnBrowserVisible = saved.browser
             navigation.upNextDrawerVisible = saved.drawer
