@@ -23,8 +23,8 @@ switch, or to the FFmpeg build fails loudly instead of silently adding gaps or l
 ## Goals
 
 - `tests/ffmpeg_formats.rs`: one short fixture per encodable scanner extension. Each one indexes
-  through the real library path with zero failures, and decodes through `Decoder` to at least
-  90 % of its expected frame count with no error.
+  through the real library path with zero failures, and decodes through `Decoder` with no error
+  to exactly the frame count the ffmpeg CLI gives (amended 2026-10-20, TSK-august-pad).
 - The format test also fails when someone adds an extension to the scanner without a fixture or
   an entry in an explicit "no local encoder" list.
 - `tests/gapless.rs`: per-track decoded lengths equal the source lengths for every tagged format,
@@ -109,7 +109,9 @@ For each fixture in `tests/fixtures/formats/`:
 1. Index the directory through `tyranny::library::Library` (the same scanner + metadata probe the
    server uses). The scan completes with `failures == 0`, and every fixture is a visible track.
 2. Open it with `Decoder::open(path, GainMode::Off)` and read until EOF. No error, and the frame
-   count is at least 90 % of `0.25 s × 48000` (the engine rate; the decoder resamples).
+   count equals the ffmpeg CLI's count at the engine rate, recorded per fixture as `frames` in
+   the manifest. (Amended 2026-10-20: a 90 % floor of the nominal 0.25 s could not hold for WMA
+   and hid a per-packet trimming bug in millisecond-timebase containers; TSK-august-pad.)
 3. The set of scanner extensions equals the fixture extensions plus the "no local encoder" list
    (amr, awb, ape, dff, dsf, mpc, shn, spx, tak). To make this checkable, move the scanner's
    private `EXTENSIONS` list (`src/scanner.rs:376`) to a public constant that the scanner keeps

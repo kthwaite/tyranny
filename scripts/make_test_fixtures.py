@@ -146,6 +146,15 @@ def ffmpeg(ff, src, dst, args):
          "-map_metadata", "-1", "-bitexact", *args, dst])
 
 
+def cli_frames(ff, path):
+    """Stereo frames the ffmpeg CLI decodes at the engine rate: the reference count."""
+    r = subprocess.run([ff, "-v", "error", "-i", path, "-f", "f32le", "-ac", "2", "-ar", "48000", "-"],
+                       capture_output=True)
+    if r.returncode:
+        raise RuntimeError("decoding %s failed: %s" % (path, r.stderr.decode(errors="replace")[-400:]))
+    return len(r.stdout) // 8
+
+
 def probe(path):
     out = run(["ffprobe", "-v", "error", "-select_streams", "a:0",
                "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", path])
@@ -184,13 +193,14 @@ def main():
                 info = probe(dst)
                 if not os.path.getsize(dst):
                     raise RuntimeError("empty output")
+                frames = cli_frames(ff, dst)
             except (RuntimeError, KeyError, IndexError) as e:
                 missing.append("%s (%s)" % (ext, e))
                 continue
             manifest["formats"]["files"].append({
                 "extension": ext, "file": rel, "codec": codec,
                 "rate": int(info["sample_rate"]), "channels": info["channels"],
-                "seconds": FORMAT_SECONDS})
+                "seconds": FORMAT_SECONDS, "frames": frames})
         if missing:
             die("cannot produce extensions: " + "; ".join(missing))
 

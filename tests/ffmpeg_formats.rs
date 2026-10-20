@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tyranny::{
-    Frame, SAMPLE_RATE,
+    Frame,
     decoder::{Decoder, GainMode},
     library::Library,
     library_types::{AUDIO_EXTENSIONS, LibraryCommand, ScanPhase},
@@ -31,6 +31,8 @@ use tyranny::{
 struct Fixture {
     extension: String,
     file: String,
+    /// Stereo frames the ffmpeg CLI decodes at the engine rate.
+    frames: usize,
 }
 
 fn fixture_root() -> PathBuf {
@@ -48,6 +50,7 @@ fn manifest() -> (Vec<Fixture>, Vec<String>) {
         .map(|entry| Fixture {
             extension: entry["extension"].as_str().unwrap().to_owned(),
             file: entry["file"].as_str().unwrap().to_owned(),
+            frames: entry["frames"].as_u64().unwrap() as usize,
         })
         .collect();
     let missing = formats["no_local_encoder"]
@@ -97,14 +100,11 @@ fn scanner_extensions_are_all_covered() {
 #[test]
 fn every_format_fixture_decodes_to_eof() {
     let (files, _) = manifest();
-    // Fixtures are 0.25 s. tone.wma is only 10240 of 12000 frames even in the
-    // ffmpeg CLI, so a 90% floor is unachievable. Our decoder loses more: 10080
-    // frames, because `valid_samples` trims each 2048-sample WMA frame to the
-    // container's 42 ms packet duration (2016 frames at 48 kHz), 32 frames per
-    // packet, for millisecond-timebase containers at 48 kHz. That is a known
-    // decoder bug tracked separately. The 80% floor guards only against gross
-    // truncation.
-    let floor = (0.8 * 0.25 * f64::from(SAMPLE_RATE)) as usize;
+    // Each fixture must decode to exactly the frame count the ffmpeg CLI gives
+    // at the engine rate (recorded by scripts/make_test_fixtures.py). The CLI,
+    // not the nominal 0.25 s, is the reference: tone.wma is 10240 of 12000
+    // frames even there. Exact counts catch a decoder that trims or pads every
+    // packet, as millisecond container durations once did for ASF and Matroska.
     let mut failures = Vec::new();
     let mut buffer = vec![Frame::default(); 4096];
     for fixture in &files {
@@ -128,10 +128,10 @@ fn every_format_fixture_decodes_to_eof() {
                 }
             }
         }
-        if total != usize::MAX && total < floor {
+        if total != usize::MAX && total != fixture.frames {
             failures.push(format!(
-                "{}: decoded {total} frames, expected at least {floor}",
-                fixture.file
+                "{}: decoded {total} frames, the ffmpeg CLI decodes {}",
+                fixture.file, fixture.frames
             ));
         }
     }

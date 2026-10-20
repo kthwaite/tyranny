@@ -625,9 +625,13 @@ fn valid_samples(decoded: usize, duration: i64, time_base: Rational, rate: u32) 
     }
     let numerator = i128::from(duration) * i128::from(time_base.0) * i128::from(rate);
     let denominator = i128::from(time_base.1);
-    // Coarse container ticks cannot define exact sample cuts. Do not round a
-    // duration down and silently lose a sample on every ordinary packet.
-    if numerator <= 0 || numerator % denominator != 0 {
+    // Coarse container ticks cannot define exact sample cuts. A tick longer
+    // than a sample (ASF and Matroska use milliseconds) means the duration was
+    // rounded, even when it happens to be a whole number of samples: at 48 kHz
+    // every millisecond is. Do not round a duration down and silently lose
+    // samples on every ordinary packet.
+    let tick_exceeds_sample = i128::from(time_base.0) * i128::from(rate) > denominator;
+    if numerator <= 0 || tick_exceeds_sample || numerator % denominator != 0 {
         return decoded;
     }
     decoded.min((numerator / denominator).min(usize::MAX as i128) as usize)
@@ -685,6 +689,17 @@ mod tests {
         assert_eq!(valid_samples(1024, 2048, Rational(1, 48_000), 48_000), 1024);
         assert_eq!(valid_samples(1024, 23, Rational(1, 1000), 44_100), 1024);
         assert_eq!(valid_samples(1024, 0, Rational(1, 48_000), 48_000), 1024);
+    }
+
+    #[test]
+    fn millisecond_ticks_never_shorten_a_frame() {
+        // ASF and Matroska round packet durations to whole milliseconds. At
+        // 48 kHz every millisecond is a whole number of samples, so a rounded
+        // duration looks exact but is not: WMA 2048 samples is 42.67 ms -> 42.
+        assert_eq!(valid_samples(2048, 42, Rational(1, 1000), 48_000), 2048);
+        assert_eq!(valid_samples(4096, 85, Rational(1, 1000), 48_000), 4096);
+        assert_eq!(valid_samples(960, 17, Rational(1, 1000), 48_000), 960);
+        assert_eq!(valid_samples(160, 20, Rational(1, 1000), 8_000), 160);
     }
 
     #[test]
