@@ -17,7 +17,7 @@ final class PlayerModel {
     }
     private(set) var playbackSession: UInt64 = 0
     let artwork = ArtworkStore()
-    /// Transport commands and the toolbar display. Owns the system media controls.
+    /// Transport commands and the player bar display. Owns the system media controls.
     let transport = TransportModel()
     /// The Up Next view's and drawer's queue windows.
     let upNext = UpNextModel()

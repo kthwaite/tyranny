@@ -156,7 +156,7 @@ final class SystemMediaControls {
         registrations.append((command, command.addTarget(handler: callback)))
     }
 
-    /// Shuffle and repeat go to the server's play-order modes, as the toolbar toggles do.
+    /// Shuffle and repeat go to the server's play-order modes, as the player bar toggles do.
     private func registerModes() {
         let gate = gate
         let repeatCallback: @Sendable (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self, gate] event in

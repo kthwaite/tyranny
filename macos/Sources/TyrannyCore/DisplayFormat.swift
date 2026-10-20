@@ -1,6 +1,6 @@
 import Foundation
 
-/// Text for the toolbar display and the status bar. Locale-independent, so the
+/// Text for the player bar display and the status bar. Locale-independent, so the
 /// strings match the spec examples exactly.
 public enum DisplayFormat {
     static let minus = "\u{2212}"
@@ -160,7 +160,7 @@ extension DisplayFormat {
 }
 
 extension RepeatMode {
-    /// The toolbar toggle order: off → all → one → off.
+    /// The player bar toggle order: off → all → one → off.
     public var cycled: RepeatMode {
         switch self {
         case .off: .all

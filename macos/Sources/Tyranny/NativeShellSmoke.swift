@@ -105,7 +105,7 @@ enum NativeShellSmoke {
         try await wait("paused", model) { !model.busy && model.snapshot?.transport == "paused" }
         try await drive("slider-value", "now-playing-scrubber", "2")
         try await wait("scrubber seek", model) { !model.busy && abs(model.positionSeconds - 2) < 0.05 }
-        cases.append("native-toolbar-play-pause-next-previous-and-scrubber")
+        cases.append("native-player-bar-play-pause-next-previous-and-scrubber")
 
         // Volume.
         try await drive("slider-value", "transport-volume", "40")

@@ -153,7 +153,7 @@ def main():
 
 
 def shell(report, run, app, port, ready, root, controller, screenshots):
-    """Drive the library window shell: source list, toolbar transport, status bar, Settings."""
+    """Drive the library window shell: source list, player bar transport, status bar, Settings."""
     report["scenario"] = "shell"
     output = run / "shell"
     command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
@@ -168,11 +168,11 @@ def shell(report, run, app, port, ready, root, controller, screenshots):
     assert native["passed"], native.get("error")
     state = controller.state()
     settings = state["settings"]
-    # The server, not the app, must hold the modes the toolbar set.
+    # The server, not the app, must hold the modes the player bar set.
     assert settings["volume"] == 45 and settings["repeat"] == "off" and settings["shuffle"] is False, settings
     # The smoke left playback running; its quit paused it.
     assert state["library"]["tracks"] == 1129 and state["transport"] == "paused", state
-    report["cases"].append({"name": "shell-server-holds-toolbar-settings", "settings": settings})
+    report["cases"].append({"name": "shell-server-holds-player-bar-settings", "settings": settings})
     screenshots.mkdir(parents=True, exist_ok=True)
     for image in sorted(output.glob("shell*.png")):
         shutil.copy2(image, screenshots / image.name)

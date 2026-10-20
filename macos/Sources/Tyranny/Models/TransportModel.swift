@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import TyrannyCore
 
-/// Transport state for the toolbar, read from the server snapshot, and the
+/// Transport state for the player bar, read from the server snapshot, and the
 /// transport commands. The server decides `can_next` and `can_previous`
 /// (Repeat All wraps Previous; Repeat One lets Next move on), so the client
 /// adds no rules of its own.
@@ -56,10 +56,6 @@ final class TransportModel {
     var playbackSession: UInt64 { player?.playbackSession ?? 0 }
     var currentID: UInt64? { snapshot?.current_id }
 
-    var title: String {
-        guard player?.connected == true else { return "Not Connected" }
-        return nowPlaying?.title ?? "Not Playing"
-    }
     var artist: String { nowPlaying?.artist ?? "" }
     var album: String { nowPlaying?.album ?? "" }
     /// "artist — album", leaving out an empty side.
@@ -152,7 +148,7 @@ final class TransportModel {
     }
 
     func setRepeat(_ mode: RepeatMode) { apply("set_repeat", ["mode": .string(mode.rawValue)]) }
-    /// The toolbar toggle: off → all → one → off.
+    /// The player bar toggle: off → all → one → off.
     func cycleRepeat() { setRepeat(self.repeat.cycled) }
     func setShuffle(_ enabled: Bool) { apply("set_shuffle", ["enabled": .bool(enabled)]) }
     func setGain(_ mode: String) { apply("set_gain", ["mode": .string(mode)]) }
