@@ -5,8 +5,12 @@ import Testing
 @Suite struct QuitSuspensionTests {
     private let note = QuitSuspension(endpoint: "ws://a", entryID: 4)
 
-    private func freshDefaults() -> UserDefaults {
-        UserDefaults(suiteName: "QuitSuspensionTests.\(UUID())")!
+    /// A per-test preference domain; `body` runs with it, then the domain is removed.
+    private func withFreshDefaults(_ body: (UserDefaults) -> Void) {
+        let name = "QuitSuspensionTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        body(defaults)
     }
 
     @Test func noteWhenPlaying() {
@@ -43,18 +47,48 @@ import Testing
     }
 
     @Test func storeTakeReturnsTheNoteOnce() {
-        let store = QuitSuspensionStore(defaults: freshDefaults())
-        store.save(note)
-        #expect(store.take() == note)
-        #expect(store.take() == nil)
+        withFreshDefaults { defaults in
+            let store = QuitSuspensionStore(defaults: defaults)
+            store.save(note)
+            #expect(store.take() == note)
+            #expect(store.take() == nil)
+        }
     }
 
     @Test func storeTakeDropsUndecodableData() {
-        let defaults = freshDefaults()
-        defaults.set(Data("x".utf8), forKey: QuitSuspensionStore.key)
-        let store = QuitSuspensionStore(defaults: defaults)
-        #expect(store.take() == nil)
-        #expect(defaults.object(forKey: QuitSuspensionStore.key) == nil)
+        withFreshDefaults { defaults in
+            defaults.set(Data("x".utf8), forKey: QuitSuspensionStore.key)
+            let store = QuitSuspensionStore(defaults: defaults)
+            #expect(store.take() == nil)
+            #expect(defaults.object(forKey: QuitSuspensionStore.key) == nil)
+        }
+    }
+
+    @Test func normalLaunchUsesStandardDefaults() {
+        #expect(QuitSuspensionStore.suiteName(forArguments: ["/Applications/Tyranny.app/Contents/MacOS/Tyranny"]) == nil)
+        #expect(QuitSuspensionStore.suiteName(forArguments: ["Tyranny", "--url", "ws://x", "--token-file", "/t"]) == nil)
+    }
+
+    @Test func harnessLaunchesUseTheHarnessSuite() {
+        let launches: [[String]] = [
+            ["--render-views", "/out"],
+            ["--ui-smoke-output", "/r.json", "--ui-smoke-folder", "/m"],
+            ["--ui-smoke-relaunch"],
+            ["--shell-smoke-output", "/r.json"],
+            ["--lifecycle-output", "/r.json", "--lifecycle-action", "observe"],
+            ["--managed-state-dir", "/s", "--managed-bind", "127.0.0.1:0"],
+            ["--model-gate-output", "/r.json"],
+            ["--scale-output", "/r.json"],
+        ]
+        for arguments in launches {
+            #expect(QuitSuspensionStore.suiteName(forArguments: ["Tyranny"] + arguments)
+                    == QuitSuspensionStore.harnessSuiteName)
+        }
+    }
+
+    /// The first argument is the executable path, never a flag.
+    @Test func theExecutablePathIsNotAFlag() {
+        #expect(QuitSuspensionStore.suiteName(forArguments: ["--render-views"]) == nil)
     }
 
     @Test func deadlineReturnsTheOperationResult() async {

@@ -24,6 +24,26 @@ public struct QuitSuspension: Codable, Equatable, Sendable {
 
 public struct QuitSuspensionStore: Sendable {
     public static let key = "quitSuspension"
+    /// The defaults suite for gate and render runs, so they never read or write the user's note.
+    public static let harnessSuiteName = "dev.tyranny.controller.harness"
+
+    /// `harnessSuiteName` for a gate, smoke, render or isolated-management launch; nil (the
+    /// standard defaults) for a normal launch. Every launch of one harness run shares the suite,
+    /// so a note written by one launch is read by the next.
+    public static func suiteName(forArguments arguments: [String]) -> String? {
+        let harness = arguments.dropFirst().contains { argument in
+            ["--render-views", "--lifecycle-output", "--managed-state-dir", "--model-gate-output",
+             "--scale-output"].contains(argument)
+                || (argument.hasPrefix("--") && argument.contains("smoke"))
+        }
+        return harness ? harnessSuiteName : nil
+    }
+
+    /// The store for a launch with `arguments`; see `suiteName(forArguments:)`.
+    public static func forLaunch(arguments: [String]) -> QuitSuspensionStore {
+        let defaults = suiteName(forArguments: arguments).flatMap(UserDefaults.init(suiteName:)) ?? .standard
+        return QuitSuspensionStore(defaults: defaults)
+    }
 
     // UserDefaults is documented thread-safe, so sharing it across isolation domains is sound.
     nonisolated(unsafe) private let defaults: UserDefaults

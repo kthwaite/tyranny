@@ -96,6 +96,9 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
     /// Quit must never hang, even if the pause task cannot run on the main queue.
     /// The timer runs on a global queue. Its reply goes to the main run loop as a run-loop block
     /// in the common modes. AppKit's modal wait runs those blocks without draining the main queue.
+    /// If the watchdog wins while the pause is still in flight, the app exits before it writes
+    /// the quit note. The pause may still reach the server, which is then left paused with no
+    /// note, so the next launch does not resume it.
     private func startQuitWatchdog() {
         DispatchQueue.global().asyncAfter(deadline: .now() + Self.quitWatchdog) { [weak self] in
             let main = CFRunLoopGetMain()
@@ -116,7 +119,8 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 struct TyrannyApp: App {
     @NSApplicationDelegateAdaptor(TyrannyAppDelegate.self) private var appDelegate
-    @State private var model = PlayerModel()
+    @State private var model = PlayerModel(
+        quitSuspensions: .forLaunch(arguments: CommandLine.arguments))
     @State private var navigation = NavigationModel()
     @State private var started = false
 

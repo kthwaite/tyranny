@@ -54,11 +54,14 @@ final class PlayerModel {
     /// The hello arrives before `connected` is true, and `play` needs `connected`.
     /// So the decision waits here until the connection loop marks the connection connected.
     @ObservationIgnored private var launchResumePending = false
+    /// Where quit notes live. The app picks it from the launch arguments.
+    @ObservationIgnored private let quitSuspensions: QuitSuspensionStore
     /// The server's page limit.
     private static let catalogLimit = 500
     @ObservationIgnored var activeDrag: TrackDrag?
 
-    init() {
+    init(quitSuspensions: QuitSuspensionStore) {
+        self.quitSuspensions = quitSuspensions
         let arguments = CommandLine.arguments
         for (index, argument) in arguments.enumerated() where index + 1 < arguments.count {
             if argument == "--url" { endpoint = arguments[index + 1] }
@@ -134,7 +137,7 @@ final class PlayerModel {
                                              currentID: state.current_id) else { return }
         let reply = await Deadline.race(.seconds(1)) { try await self.send("pause") as Applied }
         guard reply != nil else { return }
-        QuitSuspensionStore(defaults: .standard).save(note)
+        quitSuspensions.save(note)
     }
 
     func start() {
@@ -273,7 +276,7 @@ final class PlayerModel {
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
         if newInstance, !launchSuspensionChecked {
             launchSuspensionChecked = true
-            if let note = QuitSuspensionStore(defaults: .standard).take(),
+            if let note = quitSuspensions.take(),
                note.shouldResume(endpoint: endpoint, transport: state.transport, currentID: state.current_id) {
                 launchResumePending = true
             }

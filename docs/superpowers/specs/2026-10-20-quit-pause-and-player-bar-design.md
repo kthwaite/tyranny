@@ -64,7 +64,10 @@ the daemon still outlives the client, but the client pauses it on quit. Update t
 "Suspended" note: `UserDefaults` key, value = the `current_id` (queue entry id) at the moment of
 pause, plus the endpoint it applies to so a different `--url`/managed endpoint never resumes the
 wrong server. Clearing it on first decision means a crash between launch and decision at worst
-skips one resume.
+skips one resume. Gate, smoke, render and isolated-management launches keep the note in the
+`dev.tyranny.controller.harness` defaults suite instead of the standard defaults
+(`QuitSuspensionStore.suiteName(forArguments:)`), so they never touch the user's note; all
+launches of one harness run share that suite.
 
 ### Mechanism
 
