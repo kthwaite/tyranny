@@ -102,12 +102,16 @@ struct CommandDispatcher {
                 try await player.upNext.execute(command.id, name: arguments.first ?? "")
             }
         case .selectionPlay, .selectionRun, .selectionNext, .selectionEnqueue:
+            try requireTrackSelection()
             try await playSelection(command.id)
         case .selectionRemove, .selectionMove:
+            try requireTrackSelection()
             try await editSelection(command)
         case .selectionAlbum, .selectionArtist:
+            try requireTrackSelection()
             try await revealSelection(artist: command.id == .selectionArtist)
         case .selectionAll, .selectionClear:
+            try requireTrackSelection()
             try await selectAll(command.id == .selectionAll)
         case .group:
             let list = try requireList()
@@ -177,6 +181,13 @@ struct CommandDispatcher {
             throw CommandLanguageError("Disconnected. Connect before running this command.")
         }
     }
+
+    /// Radio lists saved stations, not tracks, so the selection commands have nothing to act on.
+    private func requireTrackSelection() throws {
+        guard navigation.destination != .radio else { throw CommandLanguageError(Self.radioHasNoSelection) }
+    }
+
+    private static let radioHasNoSelection = "Radio has no track selection. Play or enqueue a station from its row."
 
     private func requireList() throws -> ListModel {
         try requireConnection()
@@ -264,6 +275,8 @@ struct CommandDispatcher {
             }
             return Selection(request: .source(.ids(libraryRevision: revision, trackIDs: ids), player: player),
                              source: RunSource.queueSource(list: .library, name: "Up Next"), count: ids.count)
+        case .radio:
+            throw CommandLanguageError(Self.radioHasNoSelection)
         default:
             throw CommandLanguageError("Wait for the current list to load, then select tracks.")
         }
