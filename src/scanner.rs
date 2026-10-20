@@ -2,9 +2,7 @@
 //! event, then accepts at most 64 metadata probes per command. There are two event
 //! slots and one command slot; no collection-sized in-memory worklist exists.
 //!
-//! Candidates are case-insensitive extensions: aac, ac3, aif, aiff, aifc, alac,
-//! amr, ape, au, awb, caf, dff, dsf, dts, flac, m4a, m4b, mka, mov, mp2, mp3,
-//! mp4, mpc, oga, ogg, opus, ra, shn, spx, tak, tta, wav, wave, webm, wma, wv.
+//! Candidates are case-insensitive extensions; see `AUDIO_EXTENSIONS`.
 //! Other extensions, symlinks and nonregular entries count as skipped. There is
 //! no extensionless sniffing, playlist/CUE expansion, or symlink recursion.
 //! Root + descendant directory handles are capped at 64. Any traversal error,
@@ -25,7 +23,10 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
-use crate::{library_types::TrackMetadata, metadata};
+use crate::{
+    library_types::{AUDIO_EXTENSIONS, TrackMetadata},
+    metadata,
+};
 
 const ENUMERATION_BATCH: usize = 128;
 const PROBE_BATCH: usize = 64;
@@ -373,12 +374,7 @@ fn is_candidate(path: &Path) -> bool {
     let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
         return false;
     };
-    const EXTENSIONS: &[&str] = &[
-        "aac", "ac3", "aif", "aiff", "aifc", "alac", "amr", "ape", "au", "awb", "caf", "dff",
-        "dsf", "dts", "flac", "m4a", "m4b", "mka", "mov", "mp2", "mp3", "mp4", "mpc", "oga", "ogg",
-        "opus", "ra", "shn", "spx", "tak", "tta", "wav", "wave", "webm", "wma", "wv",
-    ];
-    EXTENSIONS
+    AUDIO_EXTENSIONS
         .iter()
         .any(|candidate| extension.eq_ignore_ascii_case(candidate))
 }

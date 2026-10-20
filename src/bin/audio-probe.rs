@@ -1,5 +1,5 @@
 //! Native FFmpeg/CoreAudio gate. Capture and device playback share the same
-//! bounded output consumer; no gapless claim is made without measuring PCM.
+//! bounded output consumer. Gapless is pinned by PCM comparison in tests/gapless.rs.
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::{
