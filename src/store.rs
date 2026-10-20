@@ -756,7 +756,7 @@ mod tests {
             drop(store);
             let store = Store::open(&path)?;
             assert_eq!(store.load()?.settings, settings);
-            assert_eq!(user_version(&path), 6);
+            assert_eq!(user_version(&path), 7);
             Ok(())
         })();
         let _ = fs::remove_file(&path);
