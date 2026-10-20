@@ -28,13 +28,23 @@ async fn catalog(client: &mut PlaybackClient) -> (u64, Vec<Station>) {
         response => panic!("expected stations: {response:?}"),
     }
 }
-/// Runs a station edit, then checks the broadcast state agrees with the reply.
-async fn edit(client: &mut PlaybackClient, command: Value) -> Vec<Station> {
+/// Runs a station edit. A second client, which only listens, must see the
+/// broadcast state carry the same `stations_revision` as the reply snapshot.
+async fn edit(
+    client: &mut PlaybackClient,
+    observer: &mut PlaybackClient,
+    command: Value,
+) -> Vec<Station> {
     let Response::StationsApplied { snapshot, stations } = ok(client, command).await else {
         panic!("expected a stations change");
     };
     let revision = snapshot.stations_revision;
-    assert_eq!(client.state.stations_revision, revision);
+    observer
+        .until(|state| state.stations_revision == revision)
+        .await;
+    assert_eq!(observer.state.stations_revision, revision);
+    // The reply carries the very state that was broadcast, not a later one.
+    assert_eq!(observer.state.sequence, snapshot.sequence);
     stations
 }
 fn add_command(client: &PlaybackClient, stations: Value) -> Value {
@@ -46,6 +56,7 @@ async fn station_catalog_round_trips_and_survives_restart() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
     let mut client = PlaybackClient::connect(&running).await;
+    let mut observer = PlaybackClient::connect(&running).await;
     assert_eq!(client.state.stations_revision, 0);
     assert_eq!(catalog(&mut client).await, (0, vec![]));
 
@@ -56,7 +67,7 @@ async fn station_catalog_round_trips_and_survives_restart() {
             {"name":"","url":"https://alpha.example/live"},
         ]),
     );
-    let added = edit(&mut client, command).await;
+    let added = edit(&mut client, &mut observer, command).await;
     assert_eq!(added.len(), 2);
     assert_eq!(client.state.stations_revision, 1);
     let (revision, listed) = catalog(&mut client).await;
@@ -69,6 +80,7 @@ async fn station_catalog_round_trips_and_survives_restart() {
     let zeta = listed[1].id;
     let updated = edit(
         &mut client,
+        &mut observer,
         json!({"command":"update_station","station_id":zeta,"expected_revision":1,
             "name":"Zeta Radio","url":"https://zeta.example/other"}),
     )
@@ -79,6 +91,7 @@ async fn station_catalog_round_trips_and_survives_restart() {
     let alpha = listed[0].id;
     let removed = edit(
         &mut client,
+        &mut observer,
         json!({"command":"remove_station","station_id":alpha,"expected_revision":2}),
     )
     .await;
@@ -101,8 +114,9 @@ async fn stale_station_revision_is_rejected() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
     let mut client = PlaybackClient::connect(&running).await;
+    let mut observer = PlaybackClient::connect(&running).await;
     let command = add_command(&client, json!([{"name":"A","url":"https://a.example/"}]));
-    edit(&mut client, command.clone()).await;
+    edit(&mut client, &mut observer, command).await;
     let reply = client
         .request(json!({"command":"add_stations","expected_revision":0,
             "stations":[{"name":"B","url":"https://b.example/"}]}))
@@ -149,9 +163,10 @@ async fn station_edits_do_not_touch_queue_entries() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
     let mut client = PlaybackClient::connect(&running).await;
+    let mut observer = PlaybackClient::connect(&running).await;
     let (url, name) = ("https://radio.example/live", "Radio One");
     let command = add_command(&client, json!([{"name":name,"url":url}]));
-    let station = edit(&mut client, command).await.remove(0);
+    let station = edit(&mut client, &mut observer, command).await.remove(0);
     let queue_revision = client.state.queue_revision;
     ok(
         &mut client,
@@ -167,6 +182,7 @@ async fn station_edits_do_not_touch_queue_entries() {
     let revision = client.state.stations_revision;
     edit(
         &mut client,
+        &mut observer,
         json!({"command":"update_station","station_id":station.id,
             "expected_revision":revision,
             "name":"Renamed","url":"https://elsewhere.example/live"}),
@@ -175,6 +191,7 @@ async fn station_edits_do_not_touch_queue_entries() {
     let revision = client.state.stations_revision;
     edit(
         &mut client,
+        &mut observer,
         json!({"command":"remove_station","station_id":station.id,
             "expected_revision":revision}),
     )
