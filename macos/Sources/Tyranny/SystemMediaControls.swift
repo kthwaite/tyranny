@@ -66,7 +66,7 @@ final class SystemMediaControls {
         let metadata = Metadata(
             entryID: item.entry_id,
             title: item.title,
-            artist: item.station ?? item.artist,
+            artist: distinctStation(title: item.title, station: item.station) ?? item.artist,
             album: item.album,
             duration: availability.duration
         )
