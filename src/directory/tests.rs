@@ -208,13 +208,21 @@ fn search_gives_up_after_deadline() {
 
 #[test]
 fn cancelled_search_stops_before_any_request() {
-    let (origin, _server) = serve(json("[]"));
+    let (first, _first_server) = serve(json("[]"));
+    let (second, _second_server) = serve(json("[]"));
     let cancel = Cancellation::idle();
     cancel
         .abandoned
         .store(true, std::sync::atomic::Ordering::Release);
-    let provider = Provider::for_test(vec![origin]).unwrap();
-    assert!(provider.search("jazz", &cancel).is_err());
+    let provider = Provider::for_test(vec![first.clone(), second.clone()]).unwrap();
+    let error = provider.search("jazz", &cancel).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("cancelled"), "{message}");
+    assert!(!message.contains("unavailable"), "{message}");
+    let order = provider
+        .origins(&cancel, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(order, [first, second]);
 }
 
 #[test]

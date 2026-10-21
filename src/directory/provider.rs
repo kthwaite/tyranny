@@ -115,6 +115,8 @@ impl Provider {
             match self.search_one(&origin, query, cancel, deadline) {
                 Ok(stations) => return Ok(stations),
                 Err(error) => {
+                    // Cancellation and the deadline are not the host's fault.
+                    cancel.check(deadline)?;
                     self.demote(&origin);
                     last = Some(error);
                 }
@@ -203,6 +205,7 @@ impl Provider {
             let mut mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
             mirrors.origins = origins;
             mirrors.resolved_at = Instant::now();
+            return Ok(mirrors.origins.iter().take(MAX_HOSTS).cloned().collect());
         }
         let mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
         Ok(mirrors.origins.iter().take(MAX_HOSTS).cloned().collect())
@@ -231,7 +234,8 @@ fn is_safe_uuid(uuid: &str) -> bool {
 }
 
 // DNS has no timeout of its own, so it runs on a helper thread the search can abandon.
-// The thread can outlive the deadline: at most one per search, bounded by the resolver's own timeout.
+// A hung resolver leaves its thread behind, one per search that had to resolve; a failed
+// search forgets the cache, so that can be one per failed search.
 fn resolve_within(deadline: Instant) -> Result<Vec<String>> {
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()
