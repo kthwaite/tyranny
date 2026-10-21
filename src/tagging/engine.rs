@@ -1,25 +1,30 @@
-//! The worker's state, and the lookup that turns an album into a stored proposal.
+//! The worker's state, the lookup that turns an album into a stored proposal,
+//! and the apply and revert that write tags.
 use super::{
-    Failure, LOOKUP_DEADLINE, LookupError, LookupRequest, MAX_ALBUM_TRACKS,
+    ApplyRequest, Failure, LOOKUP_DEADLINE, LookupError, LookupRequest, MAX_ALBUM_TRACKS,
     acoustid::{AcoustId, rank_releases},
     fingerprint::fingerprint,
-    journal::Journal,
+    journal::{FileStatus, Journal, JournalFile},
     matching::{
         AlbumFacts, AlbumTrack, Evidence, TrackRef, changes, match_files, most_common_release,
         proposed, score,
     },
     musicbrainz::{MusicBrainz, Release, SearchQuery, is_mbid},
     proposal::{Proposal, Proposals, ProposedFile, ReleaseCache},
-    safe_write::stamp,
-    tags::{read_tags, unwritable_fields_in, writable_format},
+    safe_write::{FileStamp, WriteError, stamp, write_safely},
+    tags::{FileTags, TagEdit, TagKind, read_tags, unwritable_fields_in, writable_format},
 };
 use crate::cancel::Cancellation;
 use crate::library_types::TrackMetadata;
-use crate::protocol::{ErrorCode, TagCandidate, TagField, TagProposal, TrackProposal};
+use crate::protocol::{
+    ErrorCode, TagApplyResult, TagCandidate, TagEditSummary, TagField, TagFileOutcome,
+    TagFileResult, TagProposal, TrackProposal,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -27,6 +32,26 @@ const CANT_WRITE_FORMAT: &str = "Tyranny can't write tags to this format";
 const NO_MATCHING_TRACK: &str = "No matching track on this release";
 const NO_RELEASE: &str = "MusicBrainz has no matching release";
 const NO_FINGERPRINT_MATCH: &str = "AcoustID has no match for these files";
+const LOOKUP_EXPIRED: &str = "lookup expired, look the album up again";
+const NOTHING_TO_WRITE: &str = "nothing to write";
+const CHANGED_SINCE_LOOKUP: &str = "changed since the lookup";
+const CHANGED_SINCE_EDIT: &str = "changed since the edit";
+const STOPPED: &str = "the server stopped before writing this file";
+/// `tag_edits` lists this many edits.
+const LISTED_EDITS: usize = 50;
+/// Each number field with its total, and why the total can't be written alone.
+const PAIRS: [(TagField, TagField, &str); 2] = [
+    (
+        TagField::TrackNumber,
+        TagField::TrackTotal,
+        "can't write the track total without the track number",
+    ),
+    (
+        TagField::DiscNumber,
+        TagField::DiscTotal,
+        "can't write the disc total without the disc number",
+    ),
+];
 
 pub(super) struct Providers {
     pub musicbrainz: Result<MusicBrainz, String>,
@@ -74,6 +99,13 @@ impl From<LookupError> for Refusal {
         Self::lookup(error.to_string())
     }
 }
+/// The journal failed to open, read or record.
+fn unavailable(error: anyhow::Error) -> Refusal {
+    Refusal::new(
+        ErrorCode::Persistence,
+        format!("tag journal unavailable: {error:#}"),
+    )
+}
 impl From<rusqlite::Error> for Refusal {
     fn from(error: rusqlite::Error) -> Self {
         Self::new(
@@ -109,6 +141,211 @@ impl Engine {
         let deadline = Instant::now() + LOOKUP_DEADLINE;
         self.find(request, cancel, deadline)
             .map_err(|refusal| self.failure(refusal))
+    }
+
+    /// Writes the proposal's values to the requested files, in proposal order.
+    /// `stop` is checked only between files, so a file once started is
+    /// finished and journaled.
+    pub(super) fn apply(
+        &mut self,
+        request: &ApplyRequest,
+        stop: &AtomicBool,
+    ) -> Result<(TagApplyResult, Vec<PathBuf>), Failure> {
+        self.write_proposal(request, stop)
+            .map_err(|refusal| self.failure(refusal))
+    }
+
+    /// Writes each file's "before" values back, if it still holds the "after"
+    /// values. `stop` is checked only between files.
+    pub(super) fn revert(
+        &mut self,
+        edit_id: u64,
+        stop: &AtomicBool,
+    ) -> Result<(TagApplyResult, Vec<PathBuf>), Failure> {
+        self.revert_edit(edit_id, stop)
+            .map_err(|refusal| self.failure(refusal))
+    }
+
+    /// The latest journaled edits, newest first.
+    pub(super) fn edits(&mut self) -> Result<Vec<TagEditSummary>, Failure> {
+        let listed = self
+            .journal()
+            .and_then(|journal| journal.recent(LISTED_EDITS).map_err(unavailable));
+        listed.map_err(|refusal| self.failure(refusal))
+    }
+
+    /// The journal, opened now if it was unavailable before.
+    fn journal(&mut self) -> Result<&mut Journal, Refusal> {
+        let journal = match self.journal.take() {
+            Some(journal) => journal,
+            None => Journal::open(&self.journal_path).map_err(unavailable)?,
+        };
+        Ok(self.journal.insert(journal))
+    }
+
+    fn write_proposal(
+        &mut self,
+        request: &ApplyRequest,
+        stop: &AtomicBool,
+    ) -> Result<(TagApplyResult, Vec<PathBuf>), Refusal> {
+        if request.track_ids.is_empty() {
+            return Err(Refusal::invalid("choose at least one file"));
+        }
+        // The journal keys file statuses on the track ID.
+        let mut requested = HashSet::with_capacity(request.track_ids.len());
+        for id in &request.track_ids {
+            if !requested.insert(*id) {
+                return Err(Refusal::invalid(format!("track {id} is listed twice")));
+            }
+        }
+        // Decision 10: from here on, a refused request has used up the proposal.
+        let proposal = self
+            .proposals
+            .take(Instant::now(), &request.proposal_id)
+            .ok_or_else(|| Refusal::invalid(LOOKUP_EXPIRED))?;
+        if let Some(id) = request
+            .track_ids
+            .iter()
+            .find(|id| !proposal.files.iter().any(|file| file.track_id == **id))
+        {
+            return Err(Refusal::invalid(format!(
+                "track {id} is not part of this lookup"
+            )));
+        }
+        let omitted: BTreeSet<TagField> = request.omit_fields.iter().copied().collect();
+        let steps: Vec<Step> = proposal
+            .files
+            .iter()
+            .filter(|file| requested.contains(&file.track_id))
+            .map(|file| prepare(file, &omitted))
+            .collect();
+        let journaled: Vec<JournalFile> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Write { file, .. } => Some(file.clone()),
+                Step::Done(_) => None,
+            })
+            .collect();
+        if journaled.is_empty() || stop.load(Ordering::Acquire) {
+            let files = steps
+                .into_iter()
+                .map(|step| match step {
+                    Step::Done(result) => result,
+                    Step::Write { file, .. } => stopped(&file),
+                })
+                .collect();
+            return Ok((
+                TagApplyResult {
+                    edit_id: None,
+                    files,
+                },
+                Vec::new(),
+            ));
+        }
+        let journal = self.journal()?;
+        let edit_id = journal
+            .begin(&proposal.release_id, &proposal.release_title, &journaled)
+            .map_err(unavailable)?;
+        let mut files = Vec::with_capacity(steps.len());
+        let mut written = Vec::new();
+        for step in steps {
+            let (file, expected) = match step {
+                Step::Done(result) => {
+                    files.push(result);
+                    continue;
+                }
+                Step::Write { file, stamp } => (file, stamp),
+            };
+            if stop.load(Ordering::Acquire) {
+                let _ = journal.set_status(edit_id, file.track_id, FileStatus::Failed);
+                files.push(stopped(&file));
+                continue;
+            }
+            let edit = TagEdit {
+                set: file.after.clone(),
+                restore: Vec::new(),
+            };
+            let (outcome, message, status) = match write_safely(&file.path, expected, &edit) {
+                Ok(_) => (TagFileOutcome::Written, None, FileStatus::Written),
+                // Preflight ruling 17a: not written, so not counted and not revertible.
+                Err(WriteError::Changed) => (
+                    TagFileOutcome::Skipped,
+                    Some(CHANGED_SINCE_LOOKUP.to_owned()),
+                    FileStatus::Failed,
+                ),
+                Err(WriteError::Failed(message)) => {
+                    (TagFileOutcome::Failed, Some(message), FileStatus::Failed)
+                }
+            };
+            // A file left `pending` is still checked by revert, so a failed
+            // status update loses nothing.
+            let _ = journal.set_status(edit_id, file.track_id, status);
+            if outcome == TagFileOutcome::Written {
+                written.push(file.path.clone());
+            }
+            files.push(file_result(file.track_id, &file.path, outcome, message));
+        }
+        Ok((
+            TagApplyResult {
+                edit_id: Some(edit_id),
+                files,
+            },
+            written,
+        ))
+    }
+
+    fn revert_edit(
+        &mut self,
+        edit_id: u64,
+        stop: &AtomicBool,
+    ) -> Result<(TagApplyResult, Vec<PathBuf>), Refusal> {
+        let journal = self.journal()?;
+        let record = journal
+            .load(edit_id)
+            .map_err(unavailable)?
+            .ok_or_else(|| Refusal::invalid("unknown tag edit"))?;
+        if record.reverted {
+            return Err(Refusal::invalid("this tag edit was already reverted"));
+        }
+        let mut files = Vec::with_capacity(record.files.len());
+        let mut written = Vec::new();
+        let mut finished = true;
+        for (file, status) in record.files {
+            // A `pending` file may have been written before a crash.
+            if !matches!(status, FileStatus::Written | FileStatus::Pending) {
+                continue;
+            }
+            if stop.load(Ordering::Acquire) {
+                finished = false;
+                files.push(stopped(&file));
+                continue;
+            }
+            let (outcome, message) = match revert_file(&file) {
+                Ok(()) => {
+                    let _ = journal.set_status(edit_id, file.track_id, FileStatus::Reverted);
+                    written.push(file.path.clone());
+                    (TagFileOutcome::Written, None)
+                }
+                Err(WriteError::Changed) => {
+                    (TagFileOutcome::Skipped, Some(CHANGED_SINCE_EDIT.to_owned()))
+                }
+                Err(WriteError::Failed(message)) => (TagFileOutcome::Failed, Some(message)),
+            };
+            files.push(file_result(file.track_id, &file.path, outcome, message));
+        }
+        // A stopped revert stays open, so a second revert finishes it. If the
+        // mark fails, the files are reverted already, and a second revert
+        // skips them: `reverted`, or no longer holding the "after" values.
+        if finished {
+            let _ = journal.mark_reverted(edit_id);
+        }
+        Ok((
+            TagApplyResult {
+                edit_id: Some(edit_id),
+                files,
+            },
+            written,
+        ))
     }
 
     fn failure(&self, refusal: Refusal) -> Failure {
@@ -413,11 +650,7 @@ fn propose_file(
 ) -> (TrackProposal, Option<ProposedFile>) {
     let mut row = TrackProposal {
         track_id: track.track_id,
-        file_name: track
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        file_name: file_name(&track.path),
         track_number: at
             .map(|at| release.media[at.medium].tracks[at.track].position)
             .or(track.track_number),
@@ -428,9 +661,7 @@ fn propose_file(
         unwritable_fields: Vec::new(),
         changes: Vec::new(),
     };
-    let unreadable = |error: &dyn std::fmt::Display| {
-        Some(format!("Tyranny couldn't read this file's tags: {error}"))
-    };
+    let unreadable = |error: &dyn std::fmt::Display| Some(unreadable(error));
     // A symlink or a non-regular file is refused here, not at apply.
     let stamp = match stamp(&track.path) {
         Ok(stamp) => stamp,
@@ -486,4 +717,129 @@ fn propose_file(
             .collect(),
     });
     (row, file)
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn unreadable(error: &dyn std::fmt::Display) -> String {
+    format!("Tyranny couldn't read this file's tags: {error}")
+}
+
+fn file_result(
+    track_id: u64,
+    path: &Path,
+    outcome: TagFileOutcome,
+    message: Option<String>,
+) -> TagFileResult {
+    TagFileResult {
+        track_id,
+        file_name: file_name(path),
+        outcome,
+        message,
+    }
+}
+
+fn stopped(file: &JournalFile) -> TagFileResult {
+    file_result(
+        file.track_id,
+        &file.path,
+        TagFileOutcome::Skipped,
+        Some(STOPPED.to_owned()),
+    )
+}
+
+/// One requested file of an apply: already decided, or ready to write.
+enum Step {
+    Done(TagFileResult),
+    Write { file: JournalFile, stamp: FileStamp },
+}
+
+/// Checks one proposed file and reads its current values for the journal.
+fn prepare(file: &ProposedFile, omitted: &BTreeSet<TagField>) -> Step {
+    let done = |outcome, message: &str| {
+        Step::Done(file_result(
+            file.track_id,
+            &file.path,
+            outcome,
+            Some(message.to_owned()),
+        ))
+    };
+    let values: BTreeMap<TagField, String> = file
+        .values
+        .iter()
+        .filter(|(field, _)| !omitted.contains(field))
+        .map(|(field, value)| (*field, value.clone()))
+        .collect();
+    if values.is_empty() {
+        return done(TagFileOutcome::Skipped, NOTHING_TO_WRITE);
+    }
+    if stamp(&file.path).ok() != Some(file.stamp) {
+        return done(TagFileOutcome::Skipped, CHANGED_SINCE_LOOKUP);
+    }
+    let tags = match read_tags(&file.path) {
+        Ok(tags) => tags,
+        Err(error) => return done(TagFileOutcome::Failed, &unreadable(&format!("{error:#}"))),
+    };
+    if let Some(reason) = unpaired_total(&tags, &values) {
+        return done(TagFileOutcome::Failed, reason);
+    }
+    let fields: BTreeSet<TagField> = values.keys().copied().collect();
+    Step::Write {
+        file: JournalFile {
+            track_id: file.track_id,
+            path: file.path.clone(),
+            before: fields
+                .iter()
+                .map(|field| (*field, tags.primary.get(field).cloned()))
+                .collect(),
+            removed: tags.copies_of(&fields),
+            after: values
+                .into_iter()
+                .map(|(field, value)| (field, Some(value)))
+                .collect(),
+        },
+        stamp: file.stamp,
+    }
+}
+
+/// Why a total would be written without its number, where the tag holds both
+/// in one frame (ID3v2 `TRCK`) or atom (MP4 `trkn`). lofty would write the
+/// number as 0 ("0/12").
+fn unpaired_total(tags: &FileTags, values: &BTreeMap<TagField, String>) -> Option<&'static str> {
+    if !matches!(tags.primary_kind, TagKind::Id3v2 | TagKind::Mp4Ilst) {
+        return None;
+    }
+    PAIRS
+        .iter()
+        .find(|(number, total, _)| {
+            values.contains_key(total)
+                && !values.contains_key(number)
+                && !tags.primary.contains_key(number)
+        })
+        .map(|(_, _, reason)| *reason)
+}
+
+/// Writes a journaled file's "before" values back, if every "after" value is
+/// still its primary value.
+fn revert_file(file: &JournalFile) -> Result<(), WriteError> {
+    // The stamp comes first, so a change after the check fails the write.
+    let expected = stamp(&file.path).map_err(|_| WriteError::Changed)?;
+    let tags = read_tags(&file.path)
+        .map_err(|error| WriteError::Failed(unreadable(&format!("{error:#}"))))?;
+    let unchanged = file
+        .after
+        .iter()
+        .all(|(field, value)| tags.primary.get(field) == value.as_ref());
+    if !unchanged {
+        return Err(WriteError::Changed);
+    }
+    let edit = TagEdit {
+        set: file.before.clone(),
+        restore: file.removed.clone(),
+    };
+    write_safely(&file.path, expected, &edit).map(drop)
 }

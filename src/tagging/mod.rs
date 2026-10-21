@@ -18,7 +18,7 @@ mod tests;
 
 use crate::cancel::{CancelOnDrop, Cancellation, Stop};
 use crate::library::LibraryHandle;
-use crate::protocol::{ErrorCode, TagProposal};
+use crate::protocol::{ErrorCode, TagApplyResult, TagEditSummary, TagField, TagProposal};
 use std::{
     fmt,
     path::PathBuf,
@@ -43,11 +43,26 @@ pub(crate) struct LookupRequest {
     pub fingerprint: bool,
     pub acoustid_key: Option<String>,
 }
+/// Writes a stored proposal's values. Only the proposal's values are written.
+pub(crate) struct ApplyRequest {
+    pub proposal_id: String,
+    pub track_ids: Vec<u64>,
+    pub omit_fields: Vec<TagField>,
+}
 pub(crate) enum TagRequest {
     Lookup(LookupRequest),
+    Apply(ApplyRequest),
+    Edits,
+    Revert { edit_id: u64 },
 }
 pub(crate) enum TagOutcome {
     Proposal(TagProposal),
+    /// `written` holds the paths of the files that were written, to re-index.
+    Applied {
+        result: TagApplyResult,
+        written: Vec<PathBuf>,
+    },
+    Edits(Vec<TagEditSummary>),
 }
 #[derive(Debug)]
 pub(crate) struct Failure {
@@ -72,10 +87,11 @@ struct Work {
 }
 impl Work {
     /// Only a lookup is dropped when its requester has left (F2). Other work
-    /// runs to the end once it is queued.
+    /// runs to the end once it is queued, and its reply may go nowhere.
     fn abandoned(&self) -> bool {
         match self.request {
             TagRequest::Lookup(_) => self.reply.is_closed() || self.cancel.cancelled(),
+            TagRequest::Apply(_) | TagRequest::Edits | TagRequest::Revert { .. } => false,
         }
     }
 }
@@ -165,6 +181,14 @@ fn run(
                 TagRequest::Lookup(request) => engine
                     .lookup(request, &work.cancel)
                     .map(TagOutcome::Proposal),
+                // Writes check only `stop`, and only between files.
+                TagRequest::Apply(request) => engine
+                    .apply(request, stop)
+                    .map(|(result, written)| TagOutcome::Applied { result, written }),
+                TagRequest::Revert { edit_id } => engine
+                    .revert(*edit_id, stop)
+                    .map(|(result, written)| TagOutcome::Applied { result, written }),
+                TagRequest::Edits => engine.edits().map(TagOutcome::Edits),
             },
             Err(message) => Err(Failure::new(ErrorCode::Persistence, message.clone())),
         };

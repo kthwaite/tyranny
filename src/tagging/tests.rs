@@ -1,16 +1,21 @@
 //! Lookups against scanned fixture albums and loopback providers. Tests never
 //! touch the network.
 use super::{
-    Failure, LookupRequest, TagOutcome, TagRequest, TaggingWorkers,
+    ApplyRequest, Failure, LookupRequest, TagOutcome, TagRequest, TaggingWorkers,
     acoustid::AcoustId,
     engine::{Engine, Providers},
+    journal::{FileStatus, Journal},
     musicbrainz::MusicBrainz,
     proposal::{PROPOSAL_TTL, Proposal, Proposals},
+    tags::{CopyKey, FileTags, TagCopy, TagEdit, TagKind, edit_tags, read_tags},
     test_support::{HttpFixture, LibraryFixture, Reply, fixture, json},
 };
 use crate::cancel::Cancellation;
-use crate::protocol::{ErrorCode, FieldChange, TagCandidate, TagField, TagProposal};
+use crate::protocol::{
+    ErrorCode, FieldChange, TagApplyResult, TagCandidate, TagField, TagFileOutcome, TagProposal,
+};
 use std::{
+    os::unix::fs::PermissionsExt,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -532,7 +537,9 @@ fn abandoned_lookup_stops_the_worker() {
         };
         handle.request(TagRequest::Lookup(explicit)).await
     });
-    let TagOutcome::Proposal(proposal) = proposal.unwrap();
+    let Ok(TagOutcome::Proposal(proposal)) = proposal else {
+        panic!("lookup failed");
+    };
     assert_eq!(proposal.release_id, B);
     let seen = targets(&server);
     assert_eq!(seen.len(), 2, "{seen:?}");
@@ -593,4 +600,629 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .build()
         .unwrap()
         .block_on(future)
+}
+
+// Apply, revert and the edit list.
+
+fn engine(album: &LibraryFixture, server: &HttpFixture) -> Engine {
+    Engine::open(&album.database, providers(server, None)).unwrap()
+}
+fn journal(album: &LibraryFixture) -> Journal {
+    Journal::open(&album.database.with_extension("tagging.sqlite")).unwrap()
+}
+/// The tracks a proposal would write.
+fn writes(proposal: &TagProposal) -> Vec<u64> {
+    proposal
+        .tracks
+        .iter()
+        .filter(|t| t.writable && !t.changes.is_empty())
+        .map(|t| t.track_id)
+        .collect()
+}
+fn apply_request(proposal: &TagProposal, omit_fields: &[TagField]) -> ApplyRequest {
+    ApplyRequest {
+        proposal_id: proposal.proposal_id.clone(),
+        track_ids: writes(proposal),
+        omit_fields: omit_fields.to_vec(),
+    }
+}
+fn running() -> AtomicBool {
+    AtomicBool::new(false)
+}
+fn outcomes(result: &TagApplyResult) -> Vec<(TagFileOutcome, Option<&str>)> {
+    result
+        .files
+        .iter()
+        .map(|f| (f.outcome, f.message.as_deref()))
+        .collect()
+}
+fn bytes(album: &LibraryFixture) -> Vec<Vec<u8>> {
+    album
+        .files
+        .iter()
+        .map(|p| std::fs::read(p).unwrap())
+        .collect()
+}
+fn refused_apply<T>(result: Result<T, Failure>) -> (ErrorCode, String) {
+    let failure = result.err().expect("request should fail");
+    (failure.code, failure.message)
+}
+fn expired() -> (ErrorCode, String) {
+    (
+        ErrorCode::InvalidCommand,
+        "lookup expired, look the album up again".into(),
+    )
+}
+const WRITTEN: (TagFileOutcome, Option<&str>) = (TagFileOutcome::Written, None);
+const CHANGED: (TagFileOutcome, Option<&str>) =
+    (TagFileOutcome::Skipped, Some("changed since the lookup"));
+const MB_IDS: [TagField; 6] = [
+    TagField::MusicbrainzRecordingId,
+    TagField::MusicbrainzTrackId,
+    TagField::MusicbrainzReleaseId,
+    TagField::MusicbrainzReleaseGroupId,
+    TagField::MusicbrainzArtistId,
+    TagField::MusicbrainzAlbumArtistId,
+];
+
+#[test]
+fn apply_writes_proposal_values_and_journals_before_and_after() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let before: Vec<FileTags> = album.files.iter().map(|p| read_tags(p).unwrap()).collect();
+    let apply = apply_request(&proposal, &[]);
+    assert_eq!(apply.track_ids.len(), 3);
+    let (result, written) = engine.apply(&apply, &running()).unwrap();
+    assert_eq!(written, album.files);
+    assert_eq!(outcomes(&result), [WRITTEN; 3]);
+    let edit_id = result.edit_id.expect("the edit is journaled");
+    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    assert_eq!(
+        (record.release_id.as_str(), record.release_title.as_str()),
+        (A, "Fixture Album")
+    );
+    assert!(!record.reverted);
+    assert_eq!(record.files.len(), 3);
+    for (index, (track, (file, status))) in proposal.tracks.iter().zip(&record.files).enumerate() {
+        assert_eq!(*status, FileStatus::Written);
+        assert_eq!(result.files[index].track_id, track.track_id);
+        assert_eq!(result.files[index].file_name, track.file_name);
+        assert_eq!(
+            (file.track_id, &file.path),
+            (track.track_id, &album.files[index])
+        );
+        let now = read_tags(&album.files[index]).unwrap();
+        assert_eq!(file.after.len(), track.changes.len());
+        for change in &track.changes {
+            assert_eq!(
+                now.primary.get(&change.field),
+                Some(&change.new),
+                "{change:?}"
+            );
+            assert_eq!(file.after[&change.field].as_ref(), Some(&change.new));
+            assert_eq!(
+                file.before[&change.field].as_ref(),
+                before[index].primary.get(&change.field)
+            );
+        }
+    }
+    assert_eq!(refused_apply(engine.apply(&apply, &running())), expired());
+}
+
+#[test]
+fn omitted_fields_are_left_unchanged_and_the_rest_written() {
+    let tagged = |number: &'static str| -> Vec<(TagField, &'static str)> {
+        vec![
+            (TagField::MusicbrainzReleaseId, A),
+            (TagField::TrackNumber, number),
+            (TagField::Title, "Old Title"),
+        ]
+    };
+    let (one, two, three) = (tagged("1"), tagged("2"), tagged("3"));
+    let album = LibraryFixture::new(&[
+        ("tone.flac", &one),
+        ("tone.flac", &two),
+        ("tone.flac", &three),
+    ]);
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    for track in &proposal.tracks {
+        let fields: Vec<_> = track.changes.iter().map(|c| c.field).collect();
+        assert!(
+            fields.contains(&TagField::Title) && fields.contains(&TagField::Album),
+            "{track:?}"
+        );
+    }
+    let (result, written) = engine
+        .apply(&apply_request(&proposal, &[TagField::Title]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&result), [WRITTEN; 3]);
+    assert_eq!(written, album.files);
+    for path in &album.files {
+        let tags = read_tags(path).unwrap();
+        assert_eq!(tags.current(TagField::Title), Some("Old Title"));
+        assert_eq!(tags.current(TagField::Album), Some("Fixture Album"));
+    }
+    let record = journal(&album)
+        .load(result.edit_id.unwrap())
+        .unwrap()
+        .unwrap();
+    for (file, _) in &record.files {
+        assert!(!file.before.contains_key(&TagField::Title), "{file:?}");
+        assert!(!file.after.contains_key(&TagField::Title), "{file:?}");
+        assert!(file.after.contains_key(&TagField::Album), "{file:?}");
+    }
+}
+
+#[test]
+fn unknown_track_rejects_the_whole_apply() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let original = bytes(&album);
+    let mut apply = apply_request(&proposal, &[]);
+    apply.track_ids.push(999_999);
+    assert_eq!(
+        refused_apply(engine.apply(&apply, &running())),
+        (
+            ErrorCode::InvalidCommand,
+            "track 999999 is not part of this lookup".into()
+        )
+    );
+    assert_eq!(bytes(&album), original);
+    // Decision 10: the proposal is consumed.
+    assert_eq!(
+        refused_apply(engine.apply(&apply_request(&proposal, &[]), &running())),
+        expired()
+    );
+    assert!(journal(&album).recent(50).unwrap().is_empty());
+}
+
+#[test]
+fn empty_and_repeated_track_lists_are_refused() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let mut apply = apply_request(&proposal, &[]);
+    apply.track_ids.clear();
+    assert_eq!(
+        refused_apply(engine.apply(&apply, &running())),
+        (ErrorCode::InvalidCommand, "choose at least one file".into())
+    );
+    let first = proposal.tracks[0].track_id;
+    apply.track_ids = vec![first, first];
+    assert_eq!(
+        refused_apply(engine.apply(&apply, &running())),
+        (
+            ErrorCode::InvalidCommand,
+            format!("track {first} is listed twice")
+        )
+    );
+    let (result, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&result), [WRITTEN; 3]);
+}
+
+#[test]
+fn apply_skips_a_file_changed_since_the_lookup() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let mut changed = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&album.files[1])
+        .unwrap();
+    std::io::Write::write_all(&mut changed, b"x").unwrap();
+    drop(changed);
+    let kept = std::fs::read(&album.files[1]).unwrap();
+    let (result, written) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&result), [WRITTEN, CHANGED, WRITTEN]);
+    assert_eq!(written, [album.files[0].clone(), album.files[2].clone()]);
+    assert_eq!(std::fs::read(&album.files[1]).unwrap(), kept);
+    let record = journal(&album)
+        .load(result.edit_id.unwrap())
+        .unwrap()
+        .unwrap();
+    let journaled: Vec<_> = record.files.iter().map(|(f, s)| (f.track_id, *s)).collect();
+    assert_eq!(
+        journaled,
+        [
+            (proposal.tracks[0].track_id, FileStatus::Written),
+            (proposal.tracks[2].track_id, FileStatus::Written),
+        ]
+    );
+}
+
+#[test]
+fn deleted_file_between_lookup_and_apply_is_skipped() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    std::fs::remove_file(&album.files[0]).unwrap();
+    let (result, written) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&result), [CHANGED, WRITTEN, WRITTEN]);
+    assert_eq!(written, album.files[1..]);
+    assert!(!album.files[0].exists());
+}
+
+/// Makes a directory writable again when dropped.
+struct Writable(std::path::PathBuf);
+impl Drop for Writable {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn unwritable_directory_fails_every_file_and_leaves_originals() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let original = bytes(&album);
+    let folder = album.files[0].parent().unwrap().to_owned();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let _restore = Writable(folder.clone());
+    let (result, written) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert!(written.is_empty());
+    assert_eq!(result.files.len(), 3);
+    for file in &result.files {
+        assert_eq!(file.outcome, TagFileOutcome::Failed, "{file:?}");
+        assert!(file.message.as_deref().is_some_and(|m| !m.is_empty()));
+    }
+    assert_eq!(bytes(&album), original);
+    let names: Vec<_> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names.len(), 3, "no temporary file is left: {names:?}");
+    let record = journal(&album)
+        .load(result.edit_id.unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(record.files.iter().all(|(_, s)| *s == FileStatus::Failed));
+}
+
+#[test]
+fn a_stopped_worker_writes_nothing() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let original = bytes(&album);
+    let (result, written) = engine
+        .apply(&apply_request(&proposal, &[]), &AtomicBool::new(true))
+        .unwrap();
+    let stopped = (
+        TagFileOutcome::Skipped,
+        Some("the server stopped before writing this file"),
+    );
+    assert_eq!(outcomes(&result), [stopped; 3]);
+    assert_eq!((result.edit_id, written.len()), (None, 0));
+    assert_eq!(bytes(&album), original);
+}
+
+#[test]
+fn an_unavailable_journal_writes_nothing() {
+    let album = stored_a();
+    std::fs::create_dir(album.database.with_extension("tagging.sqlite")).unwrap();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let original = bytes(&album);
+    let (code, message) = refused_apply(engine.apply(&apply_request(&proposal, &[]), &running()));
+    assert_eq!(code, ErrorCode::Persistence);
+    assert!(
+        message.starts_with("tag journal unavailable: "),
+        "{message}"
+    );
+    assert_eq!(bytes(&album), original);
+    assert_eq!(refused_apply(engine.edits()).0, ErrorCode::Persistence);
+}
+
+#[test]
+fn a_track_total_without_its_number_is_not_written_to_id3v2() {
+    let album = LibraryFixture::new(&[("tone.mp3", &[(TagField::MusicbrainzReleaseId, A)])]);
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let fields: Vec<_> = proposal.tracks[0].changes.iter().map(|c| c.field).collect();
+    assert!(
+        fields.contains(&TagField::TrackNumber) && fields.contains(&TagField::TrackTotal),
+        "{fields:?}"
+    );
+    let original = bytes(&album);
+    let (result, written) = engine
+        .apply(
+            &apply_request(&proposal, &[TagField::TrackNumber]),
+            &running(),
+        )
+        .unwrap();
+    assert_eq!(
+        outcomes(&result),
+        [(
+            TagFileOutcome::Failed,
+            Some("can't write the track total without the track number")
+        )]
+    );
+    assert_eq!((result.edit_id, written.len()), (None, 0));
+    assert_eq!(bytes(&album), original);
+}
+
+#[test]
+fn revert_restores_before_values_and_removes_added_fields() {
+    use lofty::{
+        config::WriteOptions,
+        id3::v1::Id3v1Tag,
+        tag::{Accessor, TagExt},
+    };
+    let album = LibraryFixture::new(&[
+        ("tone.mp3", &[(TagField::TrackNumber, "1")]),
+        ("tone.mp3", &[(TagField::TrackNumber, "2")]),
+        ("tone.mp3", &[(TagField::TrackNumber, "3")]),
+    ]);
+    for path in &album.files {
+        let mut id3v1 = Id3v1Tag::new();
+        id3v1.set_title("Old Title".to_owned());
+        id3v1.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+    let old_title = TagCopy {
+        tag: TagKind::Id3v1,
+        field: TagField::Title,
+        key: CopyKey::Field,
+        value: "Old Title".into(),
+        read_only: false,
+    };
+    let before: Vec<FileTags> = album.files.iter().map(|p| read_tags(p).unwrap()).collect();
+    for tags in &before {
+        assert_eq!(tags.current(TagField::Title), Some("Old Title"));
+        assert!(tags.copies.contains(&old_title), "{tags:?}");
+        assert!(MB_IDS.iter().all(|f| tags.current(*f).is_none()));
+    }
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    assert!(proposal.tracks.iter().all(|t| t.removes_other_copies));
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN; 3]);
+    for path in &album.files {
+        let tags = read_tags(path).unwrap();
+        assert_eq!(
+            tags.current(TagField::Title),
+            Some(tags.primary[&TagField::Title].as_str())
+        );
+        assert!(!tags.copies.contains(&old_title));
+        assert!(MB_IDS.iter().all(|f| tags.current(*f).is_some()));
+    }
+    let edit_id = applied.edit_id.unwrap();
+    let (reverted, written) = engine.revert(edit_id, &running()).unwrap();
+    assert_eq!(reverted.edit_id, Some(edit_id));
+    assert_eq!(outcomes(&reverted), [WRITTEN; 3]);
+    assert_eq!(written, album.files);
+    for (path, before) in album.files.iter().zip(&before) {
+        let tags = read_tags(path).unwrap();
+        assert!(
+            MB_IDS.iter().all(|f| tags.current(*f).is_none()),
+            "{tags:?}"
+        );
+        assert_eq!(tags.current(TagField::Title), Some("Old Title"));
+        assert!(tags.copies.contains(&old_title), "{tags:?}");
+        assert_eq!(tags.primary, before.primary);
+    }
+    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    assert!(record.reverted);
+    assert!(record.files.iter().all(|(_, s)| *s == FileStatus::Reverted));
+}
+
+#[test]
+fn double_revert_is_refused() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    let edit_id = applied.edit_id.unwrap();
+    engine.revert(edit_id, &running()).unwrap();
+    let reverted = bytes(&album);
+    assert_eq!(
+        refused_apply(engine.revert(edit_id, &running())),
+        (
+            ErrorCode::InvalidCommand,
+            "this tag edit was already reverted".into()
+        )
+    );
+    assert_eq!(
+        refused_apply(engine.revert(edit_id + 1, &running())),
+        (ErrorCode::InvalidCommand, "unknown tag edit".into())
+    );
+    assert_eq!(bytes(&album), reverted);
+}
+
+#[test]
+fn revert_skips_files_changed_since_the_edit() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    let edit = TagEdit {
+        set: [(TagField::Title, Some("Changed".to_owned()))].into(),
+        restore: Vec::new(),
+    };
+    edit_tags(&album.files[1], &edit).unwrap();
+    let edit_id = applied.edit_id.unwrap();
+    let (reverted, written) = engine.revert(edit_id, &running()).unwrap();
+    assert_eq!(
+        outcomes(&reverted),
+        [
+            WRITTEN,
+            (TagFileOutcome::Skipped, Some("changed since the edit")),
+            WRITTEN
+        ]
+    );
+    assert_eq!(written, [album.files[0].clone(), album.files[2].clone()]);
+    let album_of = |index: usize| {
+        read_tags(&album.files[index])
+            .unwrap()
+            .current(TagField::Album)
+            .map(str::to_owned)
+    };
+    assert_eq!(album_of(0).as_deref(), Some("Old Album"));
+    assert_eq!(album_of(1).as_deref(), Some("Fixture Album"));
+    assert_eq!(album_of(2).as_deref(), Some("Old Album"));
+    let changed = read_tags(&album.files[1]).unwrap();
+    assert_eq!(changed.current(TagField::Title), Some("Changed"));
+    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    assert!(record.reverted);
+    let statuses: Vec<_> = record.files.iter().map(|(_, s)| *s).collect();
+    assert_eq!(
+        statuses,
+        [
+            FileStatus::Reverted,
+            FileStatus::Written,
+            FileStatus::Reverted
+        ]
+    );
+}
+
+#[test]
+fn edits_lists_latest_first_with_counts() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    assert!(engine.edits().unwrap().is_empty());
+    let first = engine
+        .lookup(&request(&album), &Cancellation::new())
+        .unwrap();
+    let (first, _) = engine
+        .apply(&apply_request(&first, &[]), &running())
+        .unwrap();
+    let explicit = LookupRequest {
+        release_id: Some(B.into()),
+        ..request(&album)
+    };
+    let second = engine.lookup(&explicit, &Cancellation::new()).unwrap();
+    let mut apply = apply_request(&second, &[]);
+    apply.track_ids.truncate(2);
+    let (second, _) = engine.apply(&apply, &running()).unwrap();
+    let second_id = second.edit_id.unwrap();
+    engine.revert(second_id, &running()).unwrap();
+    let listed: Vec<_> = engine
+        .edits()
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.edit_id, e.release_title, e.file_count, e.reverted))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (second_id, "Fixture Album".to_owned(), 2, true),
+            (first.edit_id.unwrap(), "Fixture Album".to_owned(), 3, false),
+        ]
+    );
+}
+
+#[test]
+fn apply_is_not_cancelled_when_the_requester_goes_away() {
+    let album = stored_a();
+    // Release B is slow, so a lookup of it keeps the worker busy.
+    let server = HttpFixture::new(|target| {
+        let mut reply = releases_or(target, "search.json");
+        if target.contains(B) {
+            reply.delay = Duration::from_millis(500);
+        }
+        reply
+    });
+    let workers =
+        TaggingWorkers::with_providers(album.database.clone(), providers(&server, None), None);
+    let handle = workers.handle();
+    let proposal = block_on(async {
+        let Ok(TagOutcome::Proposal(proposal)) =
+            handle.request(TagRequest::Lookup(request(&album))).await
+        else {
+            panic!("lookup failed");
+        };
+        let busy = {
+            let handle = handle.clone();
+            let explicit = LookupRequest {
+                release_id: Some(B.into()),
+                ..request(&album)
+            };
+            tokio::spawn(async move { handle.request(TagRequest::Lookup(explicit)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // One poll queues the apply behind the slow lookup; the future is
+        // then dropped, so the apply's reply is closed before it runs.
+        let apply = handle.request(TagRequest::Apply(apply_request(&proposal, &[])));
+        let gone = tokio::time::timeout(Duration::ZERO, apply).await;
+        assert!(gone.is_err(), "the apply is still waiting");
+        assert!(matches!(busy.await, Ok(Ok(TagOutcome::Proposal(_)))));
+        proposal
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let written = || {
+        proposal
+            .tracks
+            .iter()
+            .zip(&album.files)
+            .all(|(track, path)| {
+                read_tags(path).is_ok_and(|tags| {
+                    track
+                        .changes
+                        .iter()
+                        .all(|c| tags.primary.get(&c.field) == Some(&c.new))
+                })
+            })
+    };
+    while !written() {
+        assert!(Instant::now() < deadline, "the apply never finished");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    workers.shutdown();
 }

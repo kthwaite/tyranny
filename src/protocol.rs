@@ -532,6 +532,32 @@ pub struct TagProposal {
     pub tracks: Vec<TrackProposal>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TagFileOutcome {
+    Written,
+    Skipped,
+    Failed,
+}
+
+/// What `apply_tags` or `revert_tag_edit` did to one file. `message` says why
+/// a file was skipped or failed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagFileResult {
+    pub track_id: u64,
+    pub file_name: String,
+    pub outcome: TagFileOutcome,
+    pub message: Option<String>,
+}
+
+/// The reply to `apply_tags` and `revert_tag_edit`. `edit_id` is `None` when
+/// no file reached the journal.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagApplyResult {
+    pub edit_id: Option<u64>,
+    pub files: Vec<TagFileResult>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Settings {
     pub gain_mode: GainMode,
