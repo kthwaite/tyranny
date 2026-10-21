@@ -1934,6 +1934,79 @@ impl Actor {
                 self.settings = settings;
                 self.published(None)
             }
+            Command::SaveEqualizerPreset { name, equalizer } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .and_then(|()| equalizer.validate())
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                if let Some(preset) = settings
+                    .equalizer_presets
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                {
+                    preset.equalizer = equalizer;
+                } else {
+                    if settings.equalizer_presets.len() >= 64 {
+                        return Err(Failure::invalid("at most 64 equalizer presets are allowed"));
+                    }
+                    settings
+                        .equalizer_presets
+                        .push(crate::protocol::EqualizerUserPreset { name, equalizer });
+                }
+                settings
+                    .equalizer_presets
+                    .sort_by(|a, b| a.name.cmp(&b.name));
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
+            Command::RenameEqualizerPreset { name, new_name } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .and_then(|()| crate::protocol::validate_equalizer_preset_name(&new_name))
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                if settings
+                    .equalizer_presets
+                    .iter()
+                    .any(|p| p.name == new_name)
+                {
+                    return Err(Failure::invalid(
+                        "destination equalizer preset already exists",
+                    ));
+                }
+                let preset = settings
+                    .equalizer_presets
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                    .ok_or_else(|| Failure::invalid("equalizer preset does not exist"))?;
+                preset.name = new_name;
+                settings
+                    .equalizer_presets
+                    .sort_by(|a, b| a.name.cmp(&b.name));
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
+            Command::RemoveEqualizerPreset { name } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                let index = settings
+                    .equalizer_presets
+                    .iter()
+                    .position(|p| p.name == name)
+                    .ok_or_else(|| Failure::invalid("equalizer preset does not exist"))?;
+                settings.equalizer_presets.remove(index);
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
             Command::SetGain { mode } => {
                 let checkpoint = self.checkpoint();
                 let prepared = checkpoint

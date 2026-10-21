@@ -99,46 +99,87 @@ thread work. Interrupted scans require the existing manual rescan recovery.
 
 ### Audio equalizer
 
-Open **Playback → Equalizer…** (`⌥⌘E`), or use **Settings → Playback → Open
-Equalizer…**. The separate window controls ten octave bands from 31.25 Hz to
-16 kHz (−12…+12 dB), a −24…+12 dB preamp, and enable/bypass. Flat, Bass Boost,
-Treble Boost and Vocal presets replace the whole curve; manual changes show
-Custom. Bypass retains the gains. Settings belong to the server and survive
-client reconnection and daemon restart.
+Open **Playback → Equalizer…** (`⌥⌘E`), or **Settings → Playback → Open
+Equalizer…**. The parametric editor supports up to 16 independently bypassable
+bands: bell, low shelf, high shelf, high-pass, low-pass and notch. Select a band
+to edit its numeric controls, or drag its point on the logarithmic response
+graph to change frequency and gain. Numeric edits apply on Return; steppers
+support incremental keyboard/Accessibility adjustments.
 
-The allocation-free stereo biquad bank runs after decoding/ReplayGain and before
-the output ring, for both local files and live streams. Disabled EQ and an enabled
-all-zero curve leave every PCM sample bit-identical. Filter history spans natural
-gapless track boundaries, but resets on seek, stop, explicit reselection and
-stream reconnection. Changed settings start clean histories; identical settings
-do not reset the filters.
+| Parameter | Range / meaning |
+|---|---|
+| Frequency | 20–20,000 Hz at the 48 kHz engine rate |
+| Bell/shelf gain | −24…+24 dB |
+| Bell/notch Q | 0.1–18 |
+| Pass Q | 0.1–18; scales only the highest-Q section relative to Butterworth Q = 1/√2 |
+| Pass slope | 12, 24, 36 or 48 dB/octave |
+| Shelf slope S | 0.1–1, RBJ shelf slope |
+| Preamp | −96…+12 dB |
+
+Higher-order pass filters use Butterworth section Q values; only the most
+resonant section is adjusted. Their Q control is not the total filter bandwidth.
+Controls irrelevant to a filter type are hidden, but their retained values
+remain validated.
+
+The graph previews the retained curve during global bypass. The combined curve
+includes preamp; the selected-band curve does not. Headroom guidance estimates
+the maximum combined filter boost over 20 Hz–20 kHz, refining narrow peaks.
+**Compensate Preamp** applies the suggested attenuation, bounded at −96 dB;
+an excessive-boost warning explains when that cannot compensate the curve.
+This is not a transient/inter-sample clipping guarantee. There is no limiter.
+
+Flat, Bass Boost, Treble Boost and Vocal retain their original responses.
+Reset removes all bands and restores zero preamp while preserving global bypass.
+Named user presets live on the server (up to 64); save overwrites an exact
+matching name, rename rejects an existing destination, and delete removes only
+the preset. Recall preserves the current global bypass choice. Names contain
+1–80 Unicode scalars, without surrounding whitespace or control characters;
+identity is byte-exact, not case-folded or Unicode-normalized.
+
+The fixed-capacity stereo biquad bank runs after decoding/ReplayGain and before
+the output ring for local files and live streams. A live edit warms an incoming
+bank for 10 ms and crossfades for 20 ms. Rapid edits retain only the newest
+pending bank; the final configuration settles within 60 ms of processed audio
+after the last edit. Coefficients are prepared outside the sample loop. Settled
+bypass and flat curves preserve PCM bits; identical updates preserve histories.
+History spans natural gapless boundaries and resets on seek, stop, explicit
+reselection and stream reconnection.
 
 Edits affect newly processed PCM, not samples already buffered: allow roughly
-1.4 seconds plus decoder/device buffering. Editing while paused does not discard
-the old buffer; it plays before the new settings become audible. There is no
-limiter or transition smoothing. Boosts can clip, so reduce preamp for headroom;
-the preset attenuation is not a guarantee against clipping.
+1.4 seconds plus decoder/device buffering. Pausing does not flush old audio.
+Settings are persisted before applying/publishing; invalid input or a failed
+write does not change audio/settings. Reconnection fetches authoritative server
+state rather than replaying abandoned client edits.
 
-The equalizer arrived in protocol **v11**; client and server builds must match
-(currently v12). `set_equalizer` accepts
-one complete `equalizer` object, also published in `snapshot.settings.equalizer`:
+This feature branch retains protocol **v14**; its changed wire shape requires
+the matching feature client/server and a version bump when merging into `dev`.
+`set_equalizer` takes a complete object, also returned in
+`snapshot.settings.equalizer`:
 
 ```json
-{"id":1,"command":"set_equalizer","equalizer":{"enabled":true,"preamp_db":-6,"bands_db":[5,5,3,1,0,0,0,0,0,0]}}
+{"id":1,"command":"set_equalizer","equalizer":{"enabled":true,"preamp_db":-6,"bands":[{"enabled":true,"kind":"bell","frequency_hz":1000,"gain_db":6,"q":1,"shelf_slope":1,"slope_db":12}]}}
 ```
 
-The ten gains must be finite and within range. Invalid changes are rejected before
-settings or audio mutation. The server persists accepted settings before applying
-them; older databases default to disabled EQ without changing SQLite schema 6.
-Preset names are derived client-side from the persisted gains, not stored separately.
+All EQ fields are required; unknown fields and the old `bands_db` wire shape
+are rejected. Numeric values, including inactive parameters, must be finite
+and within range. Saved graphic settings migrate only when reading storage:
+their frequency-specific Q preserves the original one-octave bandwidth
+correction, including at 16 kHz. No parallel legacy wire interface remains.
+
+`snapshot.settings.equalizer_presets` contains `{name, equalizer}` objects.
+`save_equalizer_preset` takes `name` and `equalizer`;
+`rename_equalizer_preset` takes `name` and `new_name`;
+`remove_equalizer_preset` takes `name`. These return `Applied` without changing
+the active EQ. Use `set_equalizer` to recall a saved curve.
 
 Regression checks: `cargo test --locked equalizer` and
 `swift test --package-path macos --scratch-path target/swift-client --filter EqualizerTests`.
+Use the repository's pinned FFmpeg prefix for Rust builds (see `justfile`).
 The debug client's `--equalizer-smoke-output <directory>` hook exercises native
 controls against an explicitly supplied isolated loopback daemon with empty
 library/queue. Supply `--url`, `--token-file` and `--ui-driver`; add
-`--equalizer-smoke-restore` after restarting that daemon to verify restored state.
-Build the Accessibility driver from current source:
+`--equalizer-smoke-restore` after restarting that daemon to verify settings and
+saved presets. Build the driver from current source:
 `swiftc scripts/native_ui_driver.swift -o target/native-ui-driver`.
 
 ### Client command language

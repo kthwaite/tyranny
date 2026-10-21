@@ -126,6 +126,17 @@ pub enum Command {
     SetEqualizer {
         equalizer: EqualizerSettings,
     },
+    SaveEqualizerPreset {
+        name: String,
+        equalizer: EqualizerSettings,
+    },
+    RenameEqualizerPreset {
+        name: String,
+        new_name: String,
+    },
+    RemoveEqualizerPreset {
+        name: String,
+    },
     SetResume {
         enabled: bool,
     },
@@ -430,6 +441,25 @@ pub struct Lyrics {
     pub message: Option<String>,
 }
 
+/// A server-owned named parametric EQ configuration.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EqualizerUserPreset {
+    pub name: String,
+    pub equalizer: EqualizerSettings,
+}
+
+pub fn validate_equalizer_preset_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !name.is_empty()
+            && name.trim() == name
+            && name.chars().count() <= 80
+            && !name.chars().any(char::is_control),
+        "preset name must be trimmed, nonempty, at most 80 characters, and contain no controls"
+    );
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Settings {
     pub gain_mode: GainMode,
@@ -442,6 +472,8 @@ pub struct Settings {
     pub volume: u8,
     #[serde(default)]
     pub equalizer: EqualizerSettings,
+    #[serde(default)]
+    pub equalizer_presets: Vec<EqualizerUserPreset>,
 }
 
 fn full() -> u8 {
@@ -456,6 +488,7 @@ impl Default for Settings {
             shuffle: false,
             volume: full(),
             equalizer: EqualizerSettings::default(),
+            equalizer_presets: Vec::new(),
         }
     }
 }
@@ -911,12 +944,8 @@ pub enum Message {
 mod tests {
     use super::*;
     #[test]
-    fn equalizer_wire_requires_a_complete_ten_band_configuration() {
-        let equalizer = EqualizerSettings {
-            enabled: true,
-            preamp_db: -6.0,
-            bands_db: [3.0; 10],
-        };
+    fn equalizer_wire_requires_a_complete_parametric_configuration() {
+        let equalizer = EqualizerSettings::from_graphic(true, -6.0, [3.0; 10]);
         let value = serde_json::to_value(Request {
             id: 1,
             command: Command::SetEqualizer {
@@ -933,15 +962,29 @@ mod tests {
             Command::SetEqualizer { equalizer: decoded } => assert_eq!(decoded, equalizer),
             command => panic!("unexpected command: {command:?}"),
         }
-        for field in ["enabled", "preamp_db", "bands_db"] {
+        for field in ["enabled", "preamp_db", "bands"] {
             let mut missing = value.clone();
             missing["equalizer"].as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<Request>(missing).is_err());
         }
-        for count in [0, 9, 11] {
-            let mut malformed = value.clone();
-            malformed["equalizer"]["bands_db"] = serde_json::json!(vec![0.0; count]);
-            assert!(serde_json::from_value::<Request>(malformed).is_err());
+        let mut legacy = value.clone();
+        legacy["equalizer"]["bands_db"] = serde_json::json!(vec![0.0; 10]);
+        assert!(serde_json::from_value::<Request>(legacy).is_err());
+        for field in [
+            "enabled",
+            "kind",
+            "frequency_hz",
+            "gain_db",
+            "q",
+            "shelf_slope",
+            "slope_db",
+        ] {
+            let mut missing = value.clone();
+            missing["equalizer"]["bands"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
         }
         let mut missing = value;
         missing.as_object_mut().unwrap().remove("equalizer");
@@ -950,7 +993,7 @@ mod tests {
         assert_eq!(
             settings["equalizer"],
             serde_json::json!({
-                "enabled": false, "preamp_db": 0.0, "bands_db": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "enabled": false, "preamp_db": 0.0, "bands": [],
             })
         );
     }

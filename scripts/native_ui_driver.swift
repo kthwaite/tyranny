@@ -259,6 +259,48 @@ do {
             try mouse(.leftMouseUp, at: cursor)
             pressed = false
             Thread.sleep(forTimeInterval: 0.2)
+        case "drag-point":
+            guard arguments.count >= 5,
+                  let data = arguments[4].data(using: .utf8),
+                  let fractions = try JSONSerialization.jsonObject(with: data) as? [Double],
+                  fractions.count == 4,
+                  fractions.allSatisfy({ $0.isFinite && (0...1).contains($0) }),
+                  let position = attribute(control, kAXPositionAttribute),
+                  let size = attribute(control, kAXSizeAttribute),
+                  CFGetTypeID(position) == AXValueGetTypeID(),
+                  CFGetTypeID(size) == AXValueGetTypeID() else {
+                throw DriverFailure(message: "Drag point requires control geometry and [startX,startY,endX,endY] fractions")
+            }
+            var origin = CGPoint.zero
+            var dimensions = CGSize.zero
+            guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+                  AXValueGetValue(size as! AXValue, .cgSize, &dimensions),
+                  dimensions.width > 0, dimensions.height > 0 else {
+                throw DriverFailure(message: "Invalid point drag geometry")
+            }
+            func mouse(_ type: CGEventType, fraction: Double) throws {
+                let point = CGPoint(
+                    x: origin.x + dimensions.width * (fractions[0] + (fractions[2] - fractions[0]) * fraction),
+                    y: origin.y + dimensions.height * (fractions[1] + (fractions[3] - fractions[1]) * fraction))
+                guard let event = CGEvent(mouseEventSource: nil, mouseType: type,
+                                          mouseCursorPosition: point, mouseButton: .left) else {
+                    throw DriverFailure(message: "Cannot create point drag event")
+                }
+                event.flags = []
+                event.setIntegerValueField(.mouseEventClickState, value: 1)
+                event.post(tap: .cghidEventTap)
+            }
+            try mouse(.mouseMoved, fraction: 0)
+            try mouse(.leftMouseDown, fraction: 0)
+            var pressed = true
+            defer { if pressed { try? mouse(.leftMouseUp, fraction: 1) } }
+            for step in 1...10 {
+                Thread.sleep(forTimeInterval: 0.05)
+                try mouse(.leftMouseDragged, fraction: Double(step) / 10)
+            }
+            try mouse(.leftMouseUp, fraction: 1)
+            pressed = false
+            Thread.sleep(forTimeInterval: 0.1)
         case "drag":
             guard arguments.count >= 5,
                   attribute(control, kAXRoleAttribute) as? String == kAXSliderRole,
@@ -321,7 +363,8 @@ do {
             func item(_ element: AXUIElement, depth: Int) -> AXUIElement? {
                 guard depth < 8 else { return nil }
                 if attribute(element, kAXRoleAttribute) as? String == kAXMenuItemRole,
-                   attribute(element, kAXTitleAttribute) as? String == arguments[4] { return element }
+                   let title = attribute(element, kAXTitleAttribute) as? String,
+                   title.utf8.elementsEqual(arguments[4].utf8) { return element }
                 for child in attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
                     if let found = item(child, depth: depth + 1) { return found }
                 }
