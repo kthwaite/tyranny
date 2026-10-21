@@ -5,7 +5,10 @@ use super::{
     tags::FileTags,
 };
 use crate::protocol::{FieldChange, TagField};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
 
 /// How far a file's duration may differ from a release track's length.
 const DURATION_TOLERANCE_MS: u64 = 3000;
@@ -110,7 +113,7 @@ pub(super) fn most_common_release(tracks: &[AlbumTrack]) -> Option<String> {
 }
 
 /// A track of a release: indexes into `media` and its `tracks`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct TrackRef {
     pub medium: usize,
     pub track: usize,
@@ -128,17 +131,23 @@ fn release_tracks(release: &Release) -> impl Iterator<Item = TrackRef> + '_ {
 /// most once.
 pub(super) fn match_files(files: &[AlbumTrack], release: &Release) -> Vec<Option<TrackRef>> {
     let mut matched: Vec<Option<TrackRef>> = vec![None; files.len()];
-    let mut used: Vec<TrackRef> = Vec::new();
+    let mut used: HashSet<TrackRef> = HashSet::new();
     let refs: Vec<TrackRef> = release_tracks(release).collect();
     let track_at = |at: TrackRef| &release.media[at.medium].tracks[at.track];
 
-    // Pass 1: release track ID or recording ID.
+    // Pass 1a: release track ID, which names one track.
     pass(files, &mut matched, &mut used, |file, _| {
-        refs.iter().copied().find(|&at| {
-            let track = track_at(at);
-            file.release_track_id.as_deref() == Some(track.id.as_str())
-                || file.recording_id.as_deref() == Some(track.recording.id.as_str())
-        })
+        let id = file.release_track_id.as_deref()?;
+        refs.iter().copied().find(|&at| track_at(at).id == id)
+    });
+
+    // Pass 1b: recording ID. A recording can repeat on a release, so the
+    // first occurrence still free wins.
+    pass(files, &mut matched, &mut used, |file, used| {
+        let id = file.recording_id.as_deref()?;
+        refs.iter()
+            .copied()
+            .find(|&at| !used.contains(&at) && track_at(at).recording.id == id)
     });
 
     // Pass 2: disc and track number. A missing disc number is disc 1.
@@ -174,14 +183,15 @@ pub(super) fn match_files(files: &[AlbumTrack], release: &Release) -> Vec<Option
     matched
 }
 
-/// Gives each still-unmatched file the track `pick` finds for it. `pick` sees
-/// the tracks used so far (it must skip them itself where it can tell them
-/// apart; pass 1 is checked here).
+/// Gives each still-unmatched file, in order, the track `pick` finds for it.
+/// `pick` sees the tracks used so far. A pick that skips them can fall back to
+/// another track; a pick that does not (an ID naming one track) leaves the
+/// file unmatched when its track is used.
 fn pass(
     files: &[AlbumTrack],
     matched: &mut [Option<TrackRef>],
-    used: &mut Vec<TrackRef>,
-    pick: impl Fn(&AlbumTrack, &[TrackRef]) -> Option<TrackRef>,
+    used: &mut HashSet<TrackRef>,
+    pick: impl Fn(&AlbumTrack, &HashSet<TrackRef>) -> Option<TrackRef>,
 ) {
     for (file, slot) in files.iter().zip(matched.iter_mut()) {
         if slot.is_some() {
@@ -189,7 +199,7 @@ fn pass(
         }
         if let Some(at) = pick(file, used).filter(|at| !used.contains(at)) {
             *slot = Some(at);
-            used.push(at);
+            used.insert(at);
         }
     }
 }
@@ -385,6 +395,36 @@ mod tests {
         let mut f = file(None, None, None);
         f.recording_id = Some("b1000000-0000-4000-8000-000000000002".into());
         assert_eq!(match_files(&[f], &release), [at(0, 1)]);
+    }
+
+    #[test]
+    fn a_repeated_recording_matches_by_release_track_id_first() {
+        let mut release = release("release-a.json");
+        let repeated = release.media[0].tracks[0].recording.id.clone();
+        release.media[0].tracks[2].recording.id = repeated.clone();
+        let track_id = |index: usize| release.media[0].tracks[index].id.clone();
+        let with = |track: Option<String>| AlbumTrack {
+            release_track_id: track,
+            recording_id: Some(repeated.clone()),
+            ..file(None, None, None)
+        };
+        // Each file's release track ID points at its own occurrence.
+        assert_eq!(
+            match_files(
+                &[with(Some(track_id(2))), with(Some(track_id(0)))],
+                &release
+            ),
+            [at(0, 2), at(0, 0)]
+        );
+        // A file with only the recording ID takes the occurrence still free.
+        assert_eq!(
+            match_files(&[with(Some(track_id(0))), with(None)], &release),
+            [at(0, 0), at(0, 2)]
+        );
+        assert_eq!(
+            match_files(&[with(None), with(Some(track_id(0)))], &release),
+            [at(0, 2), at(0, 0)]
+        );
     }
 
     #[test]
