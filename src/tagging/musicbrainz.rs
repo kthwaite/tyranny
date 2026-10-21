@@ -118,7 +118,7 @@ fn empty_is_none<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::E
     Ok(Option::<String>::deserialize(d)?.filter(|s| !s.is_empty()))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Release {
     pub id: String,
     pub title: String,
@@ -133,18 +133,18 @@ pub(super) struct Release {
     #[serde(default)]
     pub media: Vec<Medium>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Credit {
     pub name: String,
     #[serde(default)]
     pub joinphrase: String,
     pub artist: CreditArtist,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct CreditArtist {
     pub id: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct ReleaseGroup {
     pub id: String,
     #[serde(
@@ -154,7 +154,7 @@ pub(super) struct ReleaseGroup {
     )]
     pub first_release_date: Option<String>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Medium {
     pub position: u32,
     #[serde(rename = "track-count")]
@@ -162,7 +162,7 @@ pub(super) struct Medium {
     #[serde(default)]
     pub tracks: Vec<ReleaseTrack>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct ReleaseTrack {
     pub id: String,
     pub position: u32,
@@ -173,7 +173,7 @@ pub(super) struct ReleaseTrack {
     pub artist_credit: Vec<Credit>,
     pub recording: Recording,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Recording {
     pub id: String,
     pub title: String,

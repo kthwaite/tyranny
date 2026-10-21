@@ -496,6 +496,42 @@ pub struct FieldChange {
     pub new: String,
 }
 
+/// A release a lookup considered, with its score.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagCandidate {
+    pub release_id: String,
+    pub title: String,
+    pub artist: String,
+    pub date: Option<String>,
+    pub country: Option<String>,
+    pub track_count: u32,
+    pub score: u32,
+}
+
+/// What a lookup proposes for one file of the album.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TrackProposal {
+    pub track_id: u64,
+    pub file_name: String,
+    /// The matched release position, else the stored track number.
+    pub track_number: Option<u32>,
+    pub matched: bool,
+    pub writable: bool,
+    pub reason: Option<String>,
+    pub removes_other_copies: bool,
+    pub unwritable_fields: Vec<TagField>,
+    pub changes: Vec<FieldChange>,
+}
+
+/// The reply to `musicbrainz_lookup`. `candidates` is sorted by score, best first.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagProposal {
+    pub proposal_id: String,
+    pub release_id: String,
+    pub candidates: Vec<TagCandidate>,
+    pub tracks: Vec<TrackProposal>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Settings {
     pub gain_mode: GainMode,
@@ -923,6 +959,7 @@ pub enum ErrorCode {
     InvalidFilter,
     Playback,
     Persistence,
+    Lookup,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

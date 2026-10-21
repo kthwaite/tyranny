@@ -1,5 +1,11 @@
-//! Loopback HTTP fixture for provider tests. Tests never touch the network.
+//! Loopback HTTP fixture for provider tests, and a scanned album of tagged
+//! files. Tests never touch the network.
+use super::tags::{TagEdit, edit_tags};
+use crate::library::Library;
+use crate::library_types::{LibraryCommand, LibraryReply, ScanPhase};
+use crate::protocol::TagField;
 use std::{
+    collections::BTreeMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
@@ -165,4 +171,168 @@ pub(super) fn write_tone_wav(path: &std::path::Path, seconds: u32) {
         out.extend_from_slice(&sample.to_le_bytes());
     }
     std::fs::write(path, out).unwrap();
+}
+
+/// An album of tagged copies of format fixtures, indexed by a real `Library`.
+pub(super) struct LibraryFixture {
+    pub root: PathBuf,
+    pub database: PathBuf,
+    pub album_id: u64,
+    pub revision: u64,
+    pub files: Vec<PathBuf>,
+}
+impl LibraryFixture {
+    /// Each entry is a fixture name in `tests/fixtures/formats` (or `"tone10.wav"`,
+    /// a 10 s generated tone) and the tags to give its copy. Every copy also
+    /// gets album "Old Album" and album artist "Old Artist" unless the entry
+    /// sets them. All copies must form one album.
+    pub(super) fn new(files: &[(&str, &[(TagField, &str)])]) -> Self {
+        let root = std::env::temp_dir().join(format!("tyranny-tagging-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let folder = root.join("Album");
+        std::fs::create_dir(&folder).unwrap();
+        let mut paths = Vec::with_capacity(files.len());
+        for (index, (name, values)) in files.iter().enumerate() {
+            let path = folder.join(format!("{:02} {name}", index + 1));
+            let mut tags = BTreeMap::from([
+                (TagField::Album, "Old Album".to_owned()),
+                (TagField::AlbumArtist, "Old Artist".to_owned()),
+            ]);
+            tags.extend(
+                values
+                    .iter()
+                    .map(|(field, value)| (*field, value.to_string())),
+            );
+            if name.ends_with(".mka") {
+                ffmpeg_tagged(&formats(name), &path, &tags);
+            } else {
+                if *name == "tone10.wav" {
+                    write_tone_wav(&path, 10);
+                } else {
+                    std::fs::copy(formats(name), &path).unwrap();
+                }
+                let edit = TagEdit {
+                    set: tags.into_iter().map(|(f, v)| (f, Some(v))).collect(),
+                    restore: Vec::new(),
+                };
+                edit_tags(&path, &edit).unwrap();
+            }
+            paths.push(path);
+        }
+        let database = root.join("state.sqlite");
+        drop(crate::store::Store::open(&database).unwrap());
+        let library = Library::start(database.clone()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let reply = library
+                .handle()
+                .request(LibraryCommand::AddRoot {
+                    path: folder.to_str().unwrap().into(),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(reply, LibraryReply::RootAdded(_)), "{reply:?}");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let scan = library.state().scan;
+                if !matches!(scan.phase, ScanPhase::Discovering | ScanPhase::Indexing) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "scan did not finish: {scan:?}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        library.shutdown().unwrap();
+        let db = rusqlite::Connection::open(&database).unwrap();
+        let count: usize = db
+            .query_row("SELECT COUNT(*) FROM library_tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, files.len(), "every copy is indexed");
+        let albums: Vec<u64> = db
+            .prepare("SELECT DISTINCT album_id FROM library_tracks")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(albums.len(), 1, "the copies form one album: {albums:?}");
+        let revision = db
+            .query_row(
+                "SELECT revision FROM library_state WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        Self {
+            root,
+            database,
+            album_id: albums[0],
+            revision,
+            files: paths,
+        }
+    }
+}
+impl Drop for LibraryFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn formats(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/formats")
+        .join(name)
+}
+
+/// Copies `source`'s streams to `path` with FFmpeg, tagged with `tags`. For
+/// formats lofty cannot write.
+fn ffmpeg_tagged(
+    source: &std::path::Path,
+    path: &std::path::Path,
+    tags: &BTreeMap<TagField, String>,
+) {
+    let mut command = std::process::Command::new("ffmpeg");
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(source)
+        .args(["-c", "copy"]);
+    for (field, value) in tags {
+        command
+            .arg("-metadata")
+            .arg(format!("{}={value}", ffmpeg_key(*field)));
+    }
+    let output = command
+        .arg(path)
+        .output()
+        .expect("FFmpeg is required to create tagged test media");
+    assert!(
+        output.status.success(),
+        "fixture FFmpeg failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn ffmpeg_key(field: TagField) -> &'static str {
+    match field {
+        TagField::Title => "title",
+        TagField::Artist => "artist",
+        TagField::Album => "album",
+        TagField::AlbumArtist => "album_artist",
+        TagField::TrackNumber => "track",
+        TagField::TrackTotal => "TRACKTOTAL",
+        TagField::DiscNumber => "disc",
+        TagField::DiscTotal => "DISCTOTAL",
+        TagField::Date => "date",
+        TagField::OriginalDate => "ORIGINALDATE",
+        TagField::MusicbrainzRecordingId => "MUSICBRAINZ_TRACKID",
+        TagField::MusicbrainzTrackId => "MUSICBRAINZ_RELEASETRACKID",
+        TagField::MusicbrainzReleaseId => "MUSICBRAINZ_ALBUMID",
+        TagField::MusicbrainzReleaseGroupId => "MUSICBRAINZ_RELEASEGROUPID",
+        TagField::MusicbrainzArtistId => "MUSICBRAINZ_ARTISTID",
+        TagField::MusicbrainzAlbumArtistId => "MUSICBRAINZ_ALBUMARTISTID",
+    }
 }
