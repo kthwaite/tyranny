@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inventory development Mach-O dependencies or bundle source-built FFmpeg."""
+"""Inventory development Mach-O dependencies or bundle pinned native libraries."""
 import argparse
 import json
 import os
@@ -74,8 +74,9 @@ def inventory(executables, approve=None):
                             "No redistribution or codec-license clearance is asserted."]}
 
 
-# No external codec libraries are licensed or supplied by the release builder.
-FFMPEG_DYLIB = re.compile(r"lib(?:avcodec|avformat|avutil|swresample)(?:\.\d+)*\.dylib")
+# Only these source-built libraries are approved for release redistribution.
+# libopenmpt uses Apple's system libc++; no external C++ runtime is permitted.
+NATIVE_DYLIB = re.compile(r"lib(?:avcodec|avformat|avutil|swresample|openmpt)(?:\.\d+)*\.dylib")
 
 
 def within(path, directory):
@@ -112,7 +113,7 @@ def bundle(app, prefix):
         raise ValueError("Contents/MacOS must contain regular executable files")
     existing = sorted(frameworks.iterdir()) if frameworks.exists() else []
     for path in existing:
-        if not path.is_file() or path.is_symlink() or not FFMPEG_DYLIB.fullmatch(path.name):
+        if not path.is_file() or path.is_symlink() or not NATIVE_DYLIB.fullmatch(path.name):
             raise ValueError(f"Unapproved existing Frameworks entry: {path}")
     roots = executables + existing
     executable_set = set(executables)
@@ -121,8 +122,8 @@ def bundle(app, prefix):
     def approve_source(path):
         if path in executable_set or path in existing_set:
             return
-        if not within(path, library_root) or not FFMPEG_DYLIB.fullmatch(path.name):
-            raise ValueError(f"Unapproved non-system dependency (expected FFmpeg under {library_root}): {path}")
+        if not within(path, library_root) or not NATIVE_DYLIB.fullmatch(path.name):
+            raise ValueError(f"Unapproved non-system dependency (expected pinned FFmpeg/libopenmpt under {library_root}): {path}")
 
     original = inventory(roots, approve=approve_source)
     if original["unresolved"]:

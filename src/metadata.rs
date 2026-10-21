@@ -72,6 +72,8 @@ pub(crate) fn probe_before(
     options.set("skip_estimate_duration_from_pts", "1");
     options.set("protocol_whitelist", "file");
     options.set("err_detect", "crccheck+bitstream+buffer+explode");
+    // Match local playback's duration across all tracker subsongs.
+    options.set("subsong", "all");
     let input = ffmpeg::format::input_with_interrupt_and_dictionary(
         path,
         move || interrupt.load(Ordering::Acquire) || Instant::now() >= deadline,
@@ -295,6 +297,9 @@ pub(crate) fn split_genres(value: &str) -> impl Iterator<Item = &str> {
 
 pub(crate) fn codec_label(codec: ffmpeg::codec::Id, container: &str) -> &'static str {
     use ffmpeg::codec::Id;
+    if container == "libopenmpt" {
+        return "Tracker";
+    }
     match codec {
         Id::FLAC => "FLAC",
         Id::MP3 => "MP3",

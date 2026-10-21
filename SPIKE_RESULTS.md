@@ -2,6 +2,56 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Tracker modules (2026-10-21)
+
+Implemented `TSK-blithe-vat-1f8b1` on `feature/blithe-vat-trackers`, branched from
+`dev`, in `../tyranny-blithe-vat`. MOD/XM/IT/S3M scanning and playback use pinned
+libopenmpt 0.8.9 through FFmpeg 9.0.2. Module titles are preserved; one file plays
+all subsongs once, with libopenmpt's normal end fade. Queue repeats are separate.
+The feature kept protocol 13; integration into `dev` bumps it to **14** under
+the merge-time version policy. Client and server must be upgraded together.
+No wire-shape or database-schema migration was needed.
+Integration verification on `dev`: **332 Rust tests passed, 2 ignored**, and
+**384 Swift tests passed**. The rebuilt protocol-14 server accepted the updated
+gate, indexed all four tracker formats with their titles and no failures, and
+the rebuilt audio probe played entries [1, 2, 3, 4] to EOF without errors or
+underruns. Feature commit: `345661f`.
+
+Verification against the newly source-built runtime:
+
+- `cargo test --locked --target-dir target/portable-rust --all-targets` with
+  `FFMPEG_DIR` set to the new prefix: **332 passed, 2 ignored**.
+- Final focused format suite: **6 passed**. Clippy with warnings denied, Rust
+  formatting checks, and `just --list` passed.
+- Self-authored fixtures contain backward song jumps and looping samples; IT
+  has two distinct-note subsongs. Tests cover exact independently measured EOF
+  frame counts, audible finite PCM, persistent EOF, restart, interior and
+  cross-subsong seeks, embedded titles/durations, and queue advancement.
+- Independent libopenmpt C API references at 48 kHz: MOD/XM/S3M each **50,880
+  frames**, two-subsong IT **96,960 frames**. Reported song durations are 960 ms
+  and 1,920 ms respectively; the extra 100 ms is the normal end fade.
+- Actual isolated server/WebSocket import from a Unicode directory with
+  uppercase extensions: **4 discovered, 4 indexed, 0 failures, 0 skipped**;
+  all four embedded titles and `Tracker` labels returned correctly.
+- Actual `audio-probe` queue: entries **[1, 2, 3, 4]**, EOF true, zero errors,
+  zero underruns, **249,600 captured stereo frames**, peak approximately
+  **0.28093**. The capture contained only finite samples.
+- Copied the real probe into a temporary app-shaped bundle, ran the native
+  dependency packager, moved it to a path containing spaces/Unicode, signed and
+  executed it: all four modules reached EOF again with no errors/underruns.
+  Dependency inventory contained the four FFmpeg dylibs plus libopenmpt, with
+  no unresolved edges or non-system dependencies outside the bundle.
+- Build safeguards: **7 Python configuration/cache/checksum tests passed**;
+  dependency packaging: **8 tests passed**, including libopenmpt relocation and
+  rejection of an external C++ runtime.
+
+All runtime state/captures were temporary and removed. The user's running app,
+daemon, database, and other worktrees were not replaced. No native UI or acoustic
+listening claim; no full DMG build in this verification. Seeking/duration are
+approximate, and compressed containers or MP3/Vorbis-compressed module samples
+are outside the minimal build's support claim. See `SPIKE.md` for build and
+fixture-regeneration commands.
+
 ## Compilation inference (2026-10-20)
 
 `TSK-jolly-dingo-6x70y` adds explicit album-artist/compilation provenance and

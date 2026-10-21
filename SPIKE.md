@@ -11,9 +11,9 @@ Playback controls include server-owned Next/Previous and toggle, occurrence-boun
 ## Development commands
 
 Install Rust, Xcode command-line tools, Python 3.9+, and optionally `just`
-(`brew install just`). Debug builds also need Homebrew FFmpeg and pkg-config
-(`brew install ffmpeg pkg-config`). Release builds compile pinned FFmpeg from
-source and do not require Homebrew FFmpeg or pkg-config.
+(`brew install just`). Server build/test recipes compile pinned FFmpeg and
+libopenmpt from source; Homebrew FFmpeg and pkg-config are not required. The first
+build needs network access; subsequent builds reuse the verified native cache.
 
 | Command | Action |
 | --- | --- |
@@ -29,18 +29,52 @@ source and do not require Homebrew FFmpeg or pkg-config.
 | `just test` | Test both components. |
 | `just dmg` | Build a self-contained release app and package `target/Tyranny.dmg`. |
 
-Debug Cargo builds use `target/debug` unless overridden by `CARGO_TARGET_DIR`.
-Release recipes isolate their Rust artifacts in `target/portable-rust/release`
-so development headers/libraries cannot be reused accidentally. Swift uses
-`target/swift-client/debug` and `target/swift-client/release`.
+Server recipes isolate both debug and release artifacts in
+`target/portable-rust/{debug,release}` so unrelated FFmpeg headers/libraries cannot
+be reused accidentally. Swift uses `target/swift-client/debug` and
+`target/swift-client/release`.
 The build recipes do not replace `target/Tyranny.app`. Unbundled release Rust
 binaries still reference the pinned build cache; use the app/DMG for relocation.
 
 To package the development app, stop the app/daemon before running
-`scripts/build_macos.sh`; by default it bundles a Homebrew-linked release server
-with a debug client. `scripts/build_macos.sh release` instead builds both
+`scripts/build_macos.sh`; by default it bundles the pinned release server and
+native libraries with a debug client. `scripts/build_macos.sh release` builds both
 components in release mode and assembles a self-contained
 `target/release/Tyranny.app`. An optional second argument selects the app destination.
+
+### Tracker modules
+
+The scanner accepts `.mod`, `.xm`, `.it`, and `.s3m`, case-insensitively. Rescan
+existing music roots to discover these files. Native libopenmpt decoding through
+FFmpeg preserves embedded module titles and shows the format as `Tracker`.
+No BASS runtime or decoder subprocess is used.
+The `dev` integration uses protocol **14**; upgrade client and server together.
+The version bump follows the merge policy; the wire shape and database schema
+are unchanged by tracker support.
+
+Each file is one library item: all subsongs play once, in order. Tracker pattern
+and sample loops remain audible, but a song's backward jump does not repeat
+forever. Queue repeat remains independent. libopenmpt supplies a brief end fade;
+its reported duration and row-aligned seeking are approximate, not sample-exact.
+Uncomputable durations remain unknown. These semantics follow the
+[libopenmpt API](https://lib.openmpt.org/doc/group__libopenmpt__c.html) and FFmpeg's
+[`libopenmpt` demuxer](https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavformat/libopenmpt.c).
+The pinned minimal build supports ordinary MOD/XM/IT/S3M; compressed containers
+and unusual MP3/Vorbis-compressed sample variants are not claimed.
+
+For direct Cargo commands, select the same runtime explicitly:
+
+```sh
+prefix="$(python3 scripts/build_ffmpeg.py)"
+FFMPEG_DIR="$prefix" MACOSX_DEPLOYMENT_TARGET=14.0 \
+  cargo test --locked --target-dir target/portable-rust --test ffmpeg_formats
+```
+
+`scripts/make_tracker_fixtures.py --libopenmpt "$prefix/lib/libopenmpt.dylib"`
+regenerates the four self-authored module fixtures and measures independent
+48 kHz stereo frame references. Full fixture regeneration requires
+`TYRANNY_LIBOPENMPT="$prefix/lib/libopenmpt.dylib"` as well as its encoder tools.
+
 
 ### Compilation detection
 
@@ -248,11 +282,14 @@ managed server from the mounted image.
 
 The source builder currently supports native **arm64 macOS**, with a deployment
 target of macOS 14. It downloads [FFmpeg 9.0.2](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz)
-and verifies the pinned SHA256 before extraction. The pin was established by
-verifying the upstream detached signature against FFmpeg's published signing
-fingerprint. The first build needs network access; subsequent builds reuse a
-checksum-verified cache under `target/native`, keyed by source, configuration,
-architecture, builder, compiler, and SDK. Interrupted installs are not reused.
+and verifies the pinned SHA256 before extraction. The FFmpeg pin was established
+by verifying its upstream detached signature against the published signing
+fingerprint. It also verifies pinned official release archives for
+[libopenmpt 0.8.9](https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.8.9+release.autotools.tar.gz)
+and build-only [pkgconf 3.0.10](https://distfiles.ariadne.space/pkgconf/pkgconf-3.0.10.tar.gz).
+The first build needs network access; subsequent builds reuse a checksum-verified
+cache under `target/native`, keyed by dependency sources/options, architecture,
+builder, compiler, and SDK. Interrupted installs are not reused.
 FFmpeg's build system requires a checkout/toolchain path without whitespace or
 shell/make metacharacters; the builder rejects these paths early. The packaged
 app itself supports spaces and Unicode in its installation path.
@@ -263,10 +300,11 @@ nonfree, version-3-only code, external-library autodetection, encoders, muxers,
 devices, filters, and hardware acceleration. It uses macOS system zlib, bzlib,
 iconv and Secure Transport. The only enabled protocols are file, HTTP, HTTPS,
 TCP and TLS; stream entries use verified HTTPS and an MP3/Ogg demuxer whitelist,
-while local playback keeps its file-only protocol whitelist. External decoder
-engines remain outside this configuration.
+while local playback keeps its file-only protocol whitelist. libopenmpt is the
+only external decoder engine; its optional external codec/output dependencies
+are disabled, and its C++ runtime is Apple's system libc++.
 
-Packaging copies the four dylibs to `Contents/Frameworks`, rewrites their
+Packaging copies the five dylibs to `Contents/Frameworks`, rewrites their
 transitive dependencies and install IDs to `@loader_path`, and removes runpaths.
 Unresolved libraries, non-system dependencies outside the pinned prefix,
 unapproved libraries, symlink escapes, and basename collisions fail packaging.
@@ -282,6 +320,9 @@ arguments, and toolchain provenance. The standard About panel's `Credits.rtf`
 points to those resources. Keep these artifacts when distributing the app and
 include FFmpeg attribution/source access on any download page; see
 [FFmpeg's compliance checklist](https://ffmpeg.org/legal.html).
+`FFmpeg/dependencies/libopenmpt` also includes the exact source archive and
+BSD-3-Clause/BSL-1.0 notices; `dependencies/pkgconf` records its build-only ISC
+dependency. pkgconf is not bundled as a runtime executable.
 Dynamic linking and source inclusion are not a blanket codec-patent or legal clearance.
 
 The DMG no longer needs Homebrew at runtime. It is still **ad-hoc signed, not

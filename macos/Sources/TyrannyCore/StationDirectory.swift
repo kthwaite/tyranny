@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// Searches the radio-browser directory through the server, and saves or plays what it finds
-/// (protocol v13 `search_directory` and `count_directory_click`).
+/// (protocol v14 `search_directory` and `count_directory_click`).
 ///
 /// Each search has a token. Only the latest search may set `results` and `error`; a reply to an
 /// older search, or one that arrives after `reset`, is dropped. After a station is saved or
