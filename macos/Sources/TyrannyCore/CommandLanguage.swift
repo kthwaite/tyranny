@@ -122,7 +122,7 @@ public enum CommandLanguage {
         .init(.browser, "Show, hide or toggle the browser.", [.init("on|off|toggle", .choices(toggleValues))]),
         .init(.drawer, "Show, hide or toggle Up Next.", [.init("on|off|toggle", .choices(toggleValues))]),
         .init(.artwork, "Expand, collapse or toggle Now Playing artwork.", [.init("on|off|toggle", .choices(toggleValues))]),
-        .init(.settings, "Open a settings pane.", [.init("pane", .choices(["connection", "library", "playback"]))]),
+        .init(.settings, "Open a settings pane.", [.init("pane", .choices(["connection", "library", "playback", "artwork"]))]),
         .init(.connect, "Connect to the server."),
         .init(.disconnect, "Disconnect from the server."),
         .init(.server, "Control the local server.", [.init("start|restart|stop", .choices(["start", "restart", "stop"]))]),

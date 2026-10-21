@@ -2,6 +2,71 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Configurable artwork providers (2026-10-20)
+
+Implemented on `feature/extra-stream-artwork` in `../tyranny-extra-stream`, from
+`dev`, for `TSK-extra-stream-f7xrq`. Protocol **v11** requires matching client/server;
+main SQLite schema remains **6**. The user's running app, daemon and database were
+not replaced. Last.fm was explicitly deferred by the user after reviewing its
+artwork exclusion; the other four requested providers were assessed, not implemented.
+
+Settings → Artwork persists provider order/enablement locally and stores the
+Discogs token only in Keychain. Embedded/folder precedence remains fixed. Remote
+lookup uses CAA release IDs or conservative Deezer/Discogs artist/title matching.
+Ambiguous editions are skipped. The server retains bounded HTTP/image work,
+allowlisted HTTPS destinations, credential-redacted diagnostics and a 26-second
+active-load budget; each provider has a six-second deadline.
+
+Deezer images bypass server image persistence and client reusable caching once
+demand ends. Discogs images carry their original six-hour expiry through caches
+and active views; stale images disappear before refresh. Adjacent provider links
+and authentic Deezer branding appear in album grids, expanded albums, grouped
+lists and Now Playing. Neither new provider's artwork enters notification
+attachments. Disabling a source revokes its currently held image handles.
+
+Verification:
+
+- `cargo test --locked --all-targets`: **259 passed, one ignored**. After replacing
+  the large private cache enum with `Result<Option<Images>, String>` and fixing
+  lint issues, `cargo test --locked artwork`: **44 passed**. Clippy with warnings
+  denied passed; Rust formatting and server binary build passed.
+- `swift test --package-path macos --scratch-path target/swift-client -Xswiftc
+  -warnings-as-errors`: **291 passed in 43 suites**. Subsequent native presentation
+  fixes rebuilt with warnings denied and passed the actual native workflow.
+- Existing server artwork gate: **six scenarios passed**, including real CAA
+  retrieval, local precedence, unindexed entries, stale/removed targets, rescan
+  refresh and offline persistent-cache reuse.
+  Report: `target/extra-stream/artwork-gate/run-i1o7xi2n/report.json`.
+- Isolated real-daemon Deezer smoke: unique Daft Punk / Discovery match (album
+  302127), decoded 500×500 JPEG, CAA miss → Deezer success, disabled-provider
+  non-reuse, missing-token/duplicate rejection, and no Deezer image after offline
+  daemon restart. Report: `target/extra-stream-b9xs4u7l/report.json`.
+- Native AX smoke passed settings enable/reorder/persistence/local-only mode,
+  missing/empty-token rejection, and actual Keychain save/reload/delete using an
+  isolated synthetic token with every provider disabled. The token was removed.
+  Live Deezer covers rendered with linked official branding in the grid and
+  expanded album, then disappeared on disable without cached redisplay.
+  Report and inspected screenshots:
+  `target/extra-stream/native-5lg3nc2p/{report.json,settings/,providers/}`.
+
+The native run used a separate bundle/preferences/Keychain domain and an isolated
+clocked-PCM daemon. It exposed and fixed an undersized Artwork settings pane and
+missing image accessibility semantics in the expanded cover. A wording-dependent
+smoke assertion was removed in favor of checking rejected credential state.
+
+**Limits:** no real Discogs token was supplied; its authentication, header
+isolation, primary-image parsing, matching, fallback, rate limits and expiry are
+exercised through local HTTP fixtures, not a live account. Native Discogs image
+display and a six-hour wall-clock soak were not exercised. No release DMG,
+clean-Mac, acoustic-output or notification-delivery claim is made by this work.
+
+Native reproduction: build a debug bundle with `DeezerLogo.png`, use a fresh
+isolated bundle ID and an isolated daemon, then launch with `--url`,
+`--token-file`, `--ui-driver target/native-ui-driver`, and
+`--artwork-smoke-output <directory> --artwork-smoke-mode settings` against an
+empty library. Mode `providers` needs a scanned track tagged album artist
+`Daft Punk`, album `Discovery`, title `One More Time`, with no local cover or MBID.
+
 ## Development integration (2026-10-20)
 
 Notifications and HTTP streaming were integrated with the current command-language, decoder-component coverage and packet-duration changes. Conflict resolution preserves both native queue-command methods, the expanded required decoder/demuxer sets, and the network/TLS restrictions. Configuration tests exercise rejection of missing audio components instead of copying component lists or inspecting source text.

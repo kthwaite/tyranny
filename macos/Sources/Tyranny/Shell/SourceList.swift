@@ -150,23 +150,26 @@ struct SourceList: View {
     /// The expanded now-playing art. Hover shows ⤡; clicking returns it to the player bar.
     private var largeArt: some View {
         let dimension = max(width - 16, 1)
-        return ZStack {
-            ArtworkView(store: model.artwork, request: model.artwork.nowPlayingRequest,
-                        identifier: "now-playing-art-large", dimension: dimension)
-            Button { navigation.nowPlayingArtExpanded = false } label: {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .overlay(alignment: .topTrailing) {
-                        if hoveringArt { ArtBadge(systemImage: "arrow.down.right.and.arrow.up.left") }
-                    }
+        return VStack(spacing: 4) {
+            ZStack {
+                ArtworkView(store: model.artwork, request: model.artwork.nowPlayingRequest,
+                            identifier: "now-playing-art-large", dimension: dimension)
+                Button { navigation.nowPlayingArtExpanded = false } label: {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .overlay(alignment: .topTrailing) {
+                            if hoveringArt { ArtBadge(systemImage: "arrow.down.right.and.arrow.up.left") }
+                        }
+                }
+                .buttonStyle(.plain)
+                .help("Show the artwork in the player bar")
+                .accessibilityLabel("Collapse Artwork")
+                .accessibilityIdentifier("now-playing-art-collapse")
             }
-            .buttonStyle(.plain)
-            .help("Show the artwork in the player bar")
-            .accessibilityLabel("Collapse Artwork")
-            .accessibilityIdentifier("now-playing-art-collapse")
+            .frame(width: dimension, height: dimension)
+            .onHover { hoveringArt = $0 }
+            ArtworkAttributionView(artwork: model.artwork.nowPlaying)
         }
-        .frame(width: dimension, height: dimension)
-        .onHover { hoveringArt = $0 }
         .padding(8)
         .frame(maxWidth: .infinity)
         // The list scrolls under the inset; the footer's material keeps rows from showing through.

@@ -35,6 +35,7 @@ cp "$ROOT/target/swift-client/$CONFIGURATION/Tyranny" "$APP/Contents/MacOS/Tyran
 cp "$SERVER" "$APP/Contents/MacOS/tyranny-server"
 cp "$ROOT/macos/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/macos/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ROOT/macos/Resources/DeezerLogo.png" "$APP/Contents/Resources/DeezerLogo.png"
 if [ "$CONFIGURATION" = release ]; then
     python3 "$ROOT/scripts/macos_dependencies.py" --bundle "$APP" --prefix "$FFMPEG_PREFIX"
     /usr/bin/ditto "$FFMPEG_PREFIX/share/tyranny-ffmpeg" "$APP/Contents/Resources/FFmpeg"

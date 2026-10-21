@@ -10,7 +10,7 @@ use crate::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Write},
     net::TcpListener,
     process::Command,
     sync::atomic::AtomicUsize,
@@ -202,6 +202,8 @@ fn album_request(album: u64, revision: u64, size: ArtworkSize) -> Request {
         entry_id: None,
         library_revision: revision,
         size,
+        providers: vec![ArtworkProvider::CoverArtArchive],
+        discogs_token: None,
     }
 }
 async fn artwork(handle: &Handle, request: Request) -> Artwork {
@@ -325,12 +327,12 @@ async fn local_missing_is_cached_and_no_cover_does_not_change_queue() {
     let workers = fixture.workers();
     let request = album_request(album, revision, ArtworkSize::Display);
     assert_eq!(
-        artwork(&workers.handle(), request).await.status,
+        artwork(&workers.handle(), request.clone()).await.status,
         ArtworkStatus::Missing
     );
     fs::write(fixture.music("cover.png"), png(10, 10, [0, 0, 230])).unwrap();
     assert_eq!(
-        artwork(&workers.handle(), request).await.status,
+        artwork(&workers.handle(), request.clone()).await.status,
         ArtworkStatus::Missing
     );
     shutdown(workers).await;
@@ -376,6 +378,8 @@ async fn live_queue_occurrences_have_neutral_artwork_without_local_discovery() {
             entry_id: Some(7),
             library_revision: 1,
             size: ArtworkSize::Display,
+            providers: vec![ArtworkProvider::CoverArtArchive],
+            discogs_token: None,
         },
     )
     .await;
@@ -404,21 +408,23 @@ async fn durable_direct_queue_occurrence_is_authoritative_and_invalid_targets_ar
         entry_id: Some(7),
         library_revision: 1,
         size: ArtworkSize::Display,
+        providers: vec![ArtworkProvider::CoverArtArchive],
+        discogs_token: None,
     };
-    let art = artwork(&workers.handle(), request).await;
+    let art = artwork(&workers.handle(), request.clone()).await;
     assert_eq!(art.source, Some(ArtworkSource::Folder));
     for invalid in [
         Request {
             album_id: Some(1),
-            ..request
+            ..request.clone()
         },
         Request {
             entry_id: None,
-            ..request
+            ..request.clone()
         },
         Request {
             entry_id: Some(8),
-            ..request
+            ..request.clone()
         },
     ] {
         assert!(matches!(
@@ -468,6 +474,7 @@ async fn oversized_and_malformed_folder_sources_do_not_hide_a_valid_lower_priori
 struct HttpFixture {
     origin: String,
     count: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -476,6 +483,13 @@ impl HttpFixture {
         Self::delayed(status, body, Duration::ZERO)
     }
     fn delayed(status: u16, body: Vec<u8>, delay: Duration) -> Self {
+        Self::routed(move |request, _| {
+            assert!(request.starts_with(&format!("GET /release/{RELEASE}/front-500 ")));
+            thread::sleep(delay);
+            (status, body.clone())
+        })
+    }
+    fn routed(handler: impl Fn(&str, &str) -> (u16, Vec<u8>) + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}/", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -483,6 +497,9 @@ impl HttpFixture {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_count = Arc::clone(&count);
         let thread_stop = Arc::clone(&stop);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let fixture_origin = origin.clone();
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -495,17 +512,18 @@ impl HttpFixture {
                         socket
                             .set_write_timeout(Some(Duration::from_secs(1)))
                             .unwrap();
-                        let mut request = [0; 4096];
-                        let read = socket.read(&mut request).unwrap_or(0);
-                        if read == 0 {
-                            continue;
+                        let mut reader = BufReader::new(&mut socket);
+                        let mut request = String::new();
+                        loop {
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                                break;
+                            }
+                            request.push_str(&line);
                         }
-                        assert!(
-                            String::from_utf8_lossy(&request[..read])
-                                .starts_with(&format!("GET /release/{RELEASE}/front-500 "))
-                        );
+                        recorded.lock().unwrap().push(request.clone());
                         thread_count.fetch_add(1, Ordering::AcqRel);
-                        thread::sleep(delay);
+                        let (status, body) = handler(&request, &fixture_origin);
                         let header = format!(
                             "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n",
                             body.len()
@@ -524,6 +542,7 @@ impl HttpFixture {
         Self {
             origin,
             count,
+            requests,
             stop,
             thread: Some(thread),
         }
@@ -606,8 +625,14 @@ async fn provider_missing_and_transient_failure_are_persistent_but_expiring() {
         let provider = server.provider();
         let workers = fixture.provider_workers(provider.clone());
         let request = album_request(album, revision, ArtworkSize::Display);
-        assert_eq!(artwork(&workers.handle(), request).await.status, expected);
-        assert_eq!(artwork(&workers.handle(), request).await.status, expected);
+        assert_eq!(
+            artwork(&workers.handle(), request.clone()).await.status,
+            expected
+        );
+        assert_eq!(
+            artwork(&workers.handle(), request.clone()).await.status,
+            expected
+        );
         assert_eq!(server.count.load(Ordering::Acquire), 1);
         shutdown(workers).await;
         // Move the persisted expiry into the past rather than sleeping 24h. The
@@ -615,19 +640,22 @@ async fn provider_missing_and_transient_failure_are_persistent_but_expiring() {
         let cache = Connection::open(fixture.database.with_extension("artwork.sqlite")).unwrap();
         let expires: u64 = cache
             .query_row(
-                "SELECT expires FROM artwork_cache WHERE key=?1",
-                [format!("release:{RELEASE}")],
+                "SELECT expires FROM artwork_cache WHERE key LIKE 'remote:%'",
+                [],
                 |row| row.get(0),
             )
             .unwrap();
         assert!(expires > unix_time() && expires <= unix_time() + ttl);
         let workers = fixture.provider_workers(provider.clone());
-        assert_eq!(artwork(&workers.handle(), request).await.status, expected);
+        assert_eq!(
+            artwork(&workers.handle(), request.clone()).await.status,
+            expected
+        );
         assert_eq!(server.count.load(Ordering::Acquire), 1);
         cache
             .execute(
-                "UPDATE artwork_cache SET expires=0 WHERE key=?1",
-                [format!("release:{RELEASE}")],
+                "UPDATE artwork_cache SET expires=0 WHERE key LIKE 'remote:%'",
+                [],
             )
             .unwrap();
         assert_eq!(artwork(&workers.handle(), request).await.status, expected);
@@ -671,6 +699,8 @@ async fn delayed_provider_does_not_block_main_controls_or_mutate_playback() {
                     entry_id: None,
                     library_revision: revision,
                     size: ArtworkSize::Display,
+                    providers: vec![ArtworkProvider::CoverArtArchive],
+                    discogs_token: None,
                 },
             })
             .await
@@ -806,5 +836,332 @@ async fn concurrent_thumbnail_and_display_share_one_cold_provider_download() {
     assert_eq!((thumbnail.width, thumbnail.height), (128, 64));
     assert_eq!((display.width, display.height), (512, 256));
     assert_eq!(server.count.load(Ordering::Acquire), 1);
+    shutdown(workers).await;
+}
+
+fn provider_request(album: u64, revision: u64, providers: Vec<ArtworkProvider>) -> Request {
+    let discogs_token = providers
+        .contains(&ArtworkProvider::Discogs)
+        .then(|| serde_json::from_value(serde_json::json!("fixture-secret-token")).unwrap());
+    Request {
+        providers,
+        discogs_token,
+        ..album_request(album, revision, ArtworkSize::Display)
+    }
+}
+
+fn catalogue_response(request: &str, origin: &str) -> (u16, Vec<u8>) {
+    let json = if request.starts_with("GET /search/album?") {
+        serde_json::json!({"total":2,"data":[
+            {"id":8,"title":"Artwork Fixture","artist":{"name":"Wrong Artist"},"cover_big":format!("{origin}wrong")},
+            {"id":9,"title":"Artwork Fixture","artist":{"name":"Artwork Artist"},"cover_big":format!("{origin}deezer-image")}
+        ]})
+    } else if request.starts_with("GET /database/search?") {
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: discogs token=fixture-secret-token")
+        );
+        serde_json::json!({"pagination":{"items":1},"results":[{"id":42}]})
+    } else if request.starts_with("GET /releases/42 ") {
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: discogs token=fixture-secret-token")
+        );
+        serde_json::json!({"id":42,"title":"Artwork Fixture","artists":[{"name":"Artwork Artist"}],
+            "images":[{"type":"secondary","uri":format!("{origin}wrong")},
+                {"type":"primary","uri":format!("{origin}discogs-image")}]})
+    } else if request.starts_with("GET /deezer-image ")
+        || request.starts_with("GET /discogs-image ")
+    {
+        assert!(!request.to_lowercase().contains("authorization:"));
+        return (200, png(64, 32, [10, 150, 230]));
+    } else {
+        panic!("unexpected provider request: {request}");
+    };
+    (200, serde_json::to_vec(&json).unwrap())
+}
+
+#[tokio::test]
+async fn deezer_exact_match_has_provenance_and_never_reuses_image_cache() {
+    let fixture = Fixture::new();
+    tagged(&fixture.music("deezer.flac"), None, false);
+    let (_, album, revision) = fixture.scan().await;
+    let server = HttpFixture::routed(catalogue_response);
+    let provider = server.provider();
+    let workers = fixture.provider_workers(provider.clone());
+    let request = provider_request(album, revision, vec![ArtworkProvider::Deezer]);
+    let first = artwork(&workers.handle(), request.clone()).await;
+    assert_eq!(first.source, Some(ArtworkSource::Deezer));
+    assert_eq!(
+        first.source_url.as_deref(),
+        Some("https://www.deezer.com/album/9")
+    );
+    assert_eq!(first.cache_policy, ArtworkCachePolicy::DisplayOnly);
+    assert_eq!(first.expires_at, None);
+    let second = artwork(&workers.handle(), request.clone()).await;
+    assert_eq!(second.cache_key, first.cache_key);
+    assert_eq!(
+        server.count.load(Ordering::Acquire),
+        4,
+        "active requests do not reuse Deezer images"
+    );
+    let local_only = artwork(&workers.handle(), provider_request(album, revision, vec![])).await;
+    assert_eq!(local_only.status, ArtworkStatus::Missing);
+    assert_eq!(server.count.load(Ordering::Acquire), 4);
+    let cache = Connection::open(fixture.database.with_extension("artwork.sqlite")).unwrap();
+    let images: u64 = cache
+        .query_row(
+            "SELECT COUNT(*) FROM artwork_cache WHERE value LIKE '%deezer%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(images, 0);
+    shutdown(workers).await;
+    drop(server);
+    let workers = fixture.provider_workers(provider);
+    assert_eq!(
+        artwork(&workers.handle(), request).await.status,
+        ArtworkStatus::Unavailable
+    );
+    shutdown(workers).await;
+}
+
+#[tokio::test]
+async fn discogs_primary_image_expires_and_credentials_never_enter_cache() {
+    let fixture = Fixture::new();
+    tagged(&fixture.music("discogs.flac"), None, false);
+    let (_, album, revision) = fixture.scan().await;
+    let server = HttpFixture::routed(catalogue_response);
+    let provider = server.provider();
+    let workers = fixture.provider_workers(provider.clone());
+    let request = provider_request(album, revision, vec![ArtworkProvider::Discogs]);
+    let before = unix_time();
+    let first = artwork(&workers.handle(), request.clone()).await;
+    assert_eq!(first.source, Some(ArtworkSource::Discogs));
+    assert_eq!(
+        first.source_url.as_deref(),
+        Some("https://www.discogs.com/release/42")
+    );
+    assert_eq!(first.cache_policy, ArtworkCachePolicy::Persistent);
+    assert!(
+        first.expires_at.unwrap() > before
+            && first.expires_at.unwrap() <= unix_time() + 6 * 60 * 60
+    );
+    assert_eq!(
+        artwork(&workers.handle(), request.clone()).await.cache_key,
+        first.cache_key
+    );
+    assert_eq!(server.count.load(Ordering::Acquire), 3);
+    {
+        let requests = server.requests.lock().unwrap();
+        assert!(requests.iter().all(|request| {
+            !request
+                .lines()
+                .next()
+                .unwrap()
+                .contains("fixture-secret-token")
+        }));
+    }
+    let cache = Connection::open(fixture.database.with_extension("artwork.sqlite")).unwrap();
+    let leaks: u64 = cache.query_row("SELECT COUNT(*) FROM artwork_cache WHERE key LIKE '%fixture-secret-token%' OR value LIKE '%fixture-secret-token%'", [], |row| row.get(0)).unwrap();
+    assert_eq!(leaks, 0);
+    shutdown(workers).await;
+    drop(server);
+    let workers = fixture.provider_workers(provider);
+    assert_eq!(
+        artwork(&workers.handle(), request.clone()).await.source,
+        Some(ArtworkSource::Discogs)
+    );
+    cache
+        .execute(
+            "UPDATE artwork_cache SET expires=0 WHERE key LIKE 'remote:%'",
+            [],
+        )
+        .unwrap();
+    let expired = artwork(&workers.handle(), request).await;
+    assert_eq!(expired.status, ArtworkStatus::Unavailable);
+    assert!(expired.data.is_none() && expired.source.is_none() && expired.expires_at.is_none());
+    shutdown(workers).await;
+}
+
+#[tokio::test]
+async fn remote_order_disabling_credentials_and_local_precedence_are_authoritative() {
+    let fixture = Fixture::new();
+    tagged(&fixture.music("order.flac"), None, false);
+    let (root, album, revision) = fixture.scan().await;
+    let server = HttpFixture::routed(catalogue_response);
+    let workers = fixture.provider_workers(server.provider());
+    let discogs_first = provider_request(
+        album,
+        revision,
+        vec![ArtworkProvider::Discogs, ArtworkProvider::Deezer],
+    );
+    let first = artwork(&workers.handle(), discogs_first.clone()).await;
+    assert_eq!(first.source, Some(ArtworkSource::Discogs));
+    let deezer_first = provider_request(
+        album,
+        revision,
+        vec![ArtworkProvider::Deezer, ArtworkProvider::Discogs],
+    );
+    let reordered = artwork(&workers.handle(), deezer_first).await;
+    assert_eq!(reordered.source, Some(ArtworkSource::Deezer));
+    assert_ne!(
+        first.cache_key, reordered.cache_key,
+        "same pixels retain distinct source/policy identities"
+    );
+    let disabled = artwork(&workers.handle(), provider_request(album, revision, vec![])).await;
+    assert_eq!(disabled.status, ArtworkStatus::Missing);
+    assert_eq!(server.count.load(Ordering::Acquire), 5);
+    for invalid in [
+        Request {
+            discogs_token: None,
+            ..discogs_first.clone()
+        },
+        provider_request(
+            album,
+            revision,
+            vec![ArtworkProvider::Deezer, ArtworkProvider::Deezer],
+        ),
+        Request {
+            providers: vec![],
+            ..discogs_first.clone()
+        },
+    ] {
+        assert!(matches!(
+            workers.handle().request(invalid).await,
+            Reply::Error {
+                code: ErrorCode::InvalidCommand,
+                ..
+            }
+        ));
+    }
+    assert_eq!(server.count.load(Ordering::Acquire), 5);
+    fs::write(fixture.music("cover.png"), png(30, 30, [200, 0, 0])).unwrap();
+    fixture.rescan(root).await;
+    let (_, revision) = fixture.album().await;
+    let local = artwork(
+        &workers.handle(),
+        Request {
+            library_revision: revision,
+            ..discogs_first
+        },
+    )
+    .await;
+    assert_eq!(local.source, Some(ArtworkSource::Folder));
+    assert_eq!(server.count.load(Ordering::Acquire), 5);
+    shutdown(workers).await;
+}
+
+#[tokio::test]
+async fn provider_authentication_failure_and_invalid_images_fall_through() {
+    for reject_credentials in [true, false] {
+        let fixture = Fixture::new();
+        tagged(&fixture.music("fallback.flac"), None, true);
+        let (_, album, revision) = fixture.scan().await;
+        let server = HttpFixture::routed(move |request, origin| {
+            if reject_credentials && request.starts_with("GET /database/search?") {
+                (401, b"fixture-secret-token must not be reflected".to_vec())
+            } else if request.starts_with("GET /release/")
+                || request.starts_with("GET /discogs-image ")
+            {
+                (200, b"invalid image".to_vec())
+            } else {
+                catalogue_response(request, origin)
+            }
+        });
+        let workers = fixture.provider_workers(server.provider());
+        let art = artwork(
+            &workers.handle(),
+            provider_request(
+                album,
+                revision,
+                vec![
+                    ArtworkProvider::CoverArtArchive,
+                    ArtworkProvider::Discogs,
+                    ArtworkProvider::Deezer,
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(art.source, Some(ArtworkSource::Deezer));
+        if reject_credentials {
+            assert_eq!(
+                art.message.as_deref(),
+                Some("Discogs rejected credentials or access")
+            );
+        }
+        assert!(
+            !art.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("fixture-secret-token")
+        );
+        shutdown(workers).await;
+    }
+}
+
+#[tokio::test]
+async fn direct_queue_metadata_can_resolve_deezer_without_library_album() {
+    let fixture = Fixture::new();
+    let path = fixture.music("direct.flac");
+    tagged(&path, None, false);
+    let db = Connection::open(&fixture.database).unwrap();
+    db.execute(
+        "INSERT INTO queue(id,ordinal,path) VALUES(7,0,?1)",
+        [path.to_str().unwrap()],
+    )
+    .unwrap();
+    let server = HttpFixture::routed(catalogue_response);
+    let workers = fixture.provider_workers(server.provider());
+    let art = artwork(
+        &workers.handle(),
+        Request {
+            album_id: None,
+            entry_id: Some(7),
+            library_revision: 1,
+            size: ArtworkSize::Display,
+            providers: vec![ArtworkProvider::Deezer],
+            discogs_token: None,
+        },
+    )
+    .await;
+    assert_eq!(art.source, Some(ArtworkSource::Deezer));
+    shutdown(workers).await;
+}
+
+#[tokio::test]
+async fn changed_discogs_credentials_cannot_reuse_previously_authorized_images() {
+    let fixture = Fixture::new();
+    tagged(&fixture.music("credentials.flac"), None, false);
+    let (_, album, revision) = fixture.scan().await;
+    let server = HttpFixture::routed(|request, origin| {
+        if request
+            .to_lowercase()
+            .contains("authorization: discogs token=changed-token")
+        {
+            (403, b"changed-token".to_vec())
+        } else {
+            catalogue_response(request, origin)
+        }
+    });
+    let workers = fixture.provider_workers(server.provider());
+    let mut request = provider_request(album, revision, vec![ArtworkProvider::Discogs]);
+    assert_eq!(
+        artwork(&workers.handle(), request.clone()).await.source,
+        Some(ArtworkSource::Discogs)
+    );
+    request.discogs_token =
+        Some(serde_json::from_value(serde_json::json!("changed-token")).unwrap());
+    let rejected = artwork(&workers.handle(), request).await;
+    assert_eq!(rejected.status, ArtworkStatus::Unavailable);
+    assert_eq!(
+        rejected.message.as_deref(),
+        Some("Discogs rejected credentials or access")
+    );
+    assert!(rejected.data.is_none());
+    assert_eq!(server.count.load(Ordering::Acquire), 4);
     shutdown(workers).await;
 }

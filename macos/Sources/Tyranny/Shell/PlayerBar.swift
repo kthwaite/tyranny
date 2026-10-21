@@ -76,6 +76,7 @@ struct PlayerBar: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel(transport.artistAlbum)
                     .accessibilityIdentifier("now-playing-subtitle")
+                    if artInBar { ArtworkAttributionView(artwork: model.artwork.nowPlaying) }
                 }
                 Spacer(minLength: 0)
             }

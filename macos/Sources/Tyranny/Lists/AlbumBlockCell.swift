@@ -25,7 +25,7 @@ final class AlbumBlockCell: NSTableCellView {
 
     private var slice = 0
     private var rowHeight: CGFloat = 20
-    private var image: CGImage?
+    private var artwork: ArtworkImage = .missing
     private var lines: [String] = []
 
     init() {
@@ -42,12 +42,17 @@ final class AlbumBlockCell: NSTableCellView {
     func show(albumKey: UInt64?, slice: Int, rowHeight: CGFloat, artwork: ArtworkImage, facts: [String]) {
         self.slice = slice
         self.rowHeight = rowHeight
-        image = artwork.image
+        self.artwork = artwork
         lines = facts
         needsDisplay = true
         let coverRow = slice == 0, factsRow = slice == 5
-        setAccessibilityElement(albumKey != nil && (coverRow || factsRow))
-        if let albumKey, coverRow {
+        let attributionRow = artwork.requiresAttribution && artwork.image != nil && slice == 4
+        setAccessibilityElement(albumKey != nil && (coverRow || factsRow || attributionRow))
+        if attributionRow {
+            setAccessibilityRole(.link)
+            setAccessibilityLabel(artwork.state == "discogs" ? "Data provided by Discogs." : "Artwork from Deezer")
+            setAccessibilityIdentifier("album-artwork-provider-\(albumKey ?? 0)")
+        } else if let albumKey, coverRow {
             setAccessibilityRole(.image)
             setAccessibilityLabel("Album artwork")
             setAccessibilityValue(artwork.state)
@@ -68,8 +73,24 @@ final class AlbumBlockCell: NSTableCellView {
         bounds.fill()
         guard slice < Self.contentRows else { return }
         let shift = -CGFloat(slice) * rowHeight
-        let cover = NSRect(x: Self.inset, y: Self.coverTop + shift, width: Self.coverSize, height: Self.coverSize)
+        let size = artwork.requiresAttribution ? Self.coverSize - 28 : Self.coverSize
+        let cover = NSRect(x: Self.inset + (Self.coverSize - size) / 2, y: Self.coverTop + shift, width: size, height: size)
         if cover.intersects(bounds) { drawCover(in: cover) }
+        if artwork.requiresAttribution, artwork.image != nil {
+            let caption = NSRect(x: Self.inset, y: Self.coverTop + Self.coverSize - 28 + shift,
+                                 width: Self.coverSize, height: 28)
+            if caption.intersects(bounds) {
+                if artwork.state == "deezer", let logo = ArtworkBrand.deezerLogo {
+                    logo.draw(in: NSRect(x: caption.minX + 18, y: caption.minY + 4, width: 20, height: 20),
+                              from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                    ("Deezer" as NSString).draw(in: NSRect(x: caption.minX + 41, y: caption.minY + 7, width: 50, height: 14),
+                                               withAttributes: Self.attributionAttributes)
+                } else {
+                    ("Data provided by Discogs." as NSString).draw(with: caption, options: [.usesLineFragmentOrigin],
+                                                                 attributes: Self.attributionAttributes)
+                }
+            }
+        }
         var y = Self.factsTop + shift
         for (index, line) in lines.enumerated() {
             let title = index == 0
@@ -87,7 +108,7 @@ final class AlbumBlockCell: NSTableCellView {
         NSGraphicsContext.saveGraphicsState()
         let shape = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
         shape.addClip()
-        if let image {
+        if let image = artwork.image {
             NSImage(cgImage: image, size: rect.size)
                 .draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         } else {
@@ -109,6 +130,24 @@ final class AlbumBlockCell: NSTableCellView {
         border.lineWidth = 1
         border.stroke()
     }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let y = point.y + CGFloat(slice) * rowHeight
+        if artwork.requiresAttribution, artwork.image != nil,
+           y >= Self.coverTop + Self.coverSize - 28, y <= Self.coverTop + Self.coverSize,
+           let url = artwork.sourceURL {
+            NSWorkspace.shared.open(url)
+        } else { super.mouseDown(with: event) }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard artwork.requiresAttribution, artwork.image != nil, let url = artwork.sourceURL else { return false }
+        return NSWorkspace.shared.open(url)
+    }
+
+    private static let attributionAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.linkColor]
 
     private static let truncating: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()

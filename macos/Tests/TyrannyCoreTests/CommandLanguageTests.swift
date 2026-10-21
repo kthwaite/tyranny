@@ -13,6 +13,7 @@ import Testing
             ("focus-filter", .focusFilter, []), ("reveal-playing", .revealPlaying, []),
             ("browser off", .browser, ["off"]), ("drawer on", .drawer, ["on"]),
             ("artwork toggle", .artwork, ["toggle"]), ("settings playback", .settings, ["playback"]),
+            ("settings artwork", .settings, ["artwork"]),
             ("connect", .connect, []), ("disconnect", .disconnect, []),
             ("server restart", .server, ["restart"]), ("choose-folder", .chooseFolder, []),
             ("rescan 18446744073709551615", .rescan, ["18446744073709551615"]),

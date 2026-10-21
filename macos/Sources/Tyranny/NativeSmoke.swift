@@ -238,7 +238,7 @@ enum NativeSmoke {
         for window in NSApp.windows where window.isVisible { visit(window, depth: 0) }
         return result
     }
-    static func drive(_ action: String, _ identifier: String = "", _ value: String? = nil) async throws {
+    static func drive(_ action: String, _ identifier: String = "", _ value: String? = nil, sensitive: Bool = false) async throws {
         let args = CommandLine.arguments
         guard let index = args.firstIndex(of: "--ui-driver"), index + 1 < args.count else {
             throw Failure(message: "Native smoke requires --ui-driver")
@@ -251,13 +251,14 @@ enum NativeSmoke {
         process.arguments = [String(getpid()), action, identifier]
             + (value.map { ["--value-base64", Data($0.utf8).base64EncodedString()] } ?? [])
         process.standardError = errors
+        if sensitive { process.standardOutput = FileHandle.nullDevice }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             process.terminationHandler = { process in
                 if process.terminationStatus == 0 {
                     continuation.resume()
                 } else {
                     let text = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                    continuation.resume(throwing: Failure(message: text))
+                    continuation.resume(throwing: Failure(message: sensitive ? "Secure-field accessibility operation failed." : text))
                 }
             }
             do { try process.run() }

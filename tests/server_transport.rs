@@ -867,7 +867,8 @@ async fn artwork_keeps_pipelined_commands_ordered_and_queue_state_unchanged() {
     hello(&mut socket, &running.instance_id).await;
     for command in [
         serde_json::json!({"id":1,"command":"artwork","album_id":null,"entry_id":1,
-            "library_revision":before.library.revision,"size":"display"}),
+            "library_revision":before.library.revision,"size":"display",
+            "providers":["cover_art_archive"],"discogs_token":null}),
         serde_json::json!({"id":2,"command":"snapshot"}),
     ] {
         socket

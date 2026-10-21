@@ -6,7 +6,44 @@ continuous CoreAudio stream. The native engine, persistent local server,
 durable library, and native SwiftUI controller are implemented and exercised;
 see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations.
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
-Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Protocol v10 requires matching client/server processes; the main database is schema 6.
+Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery and native album/Now Playing images support configurable Cover Art Archive, Deezer and Discogs fallback with source-specific retention. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. This feature branch retains protocol v10 until integration; the main database remains schema 6.
+
+## Artwork providers
+
+Settings → Artwork controls remote provider order and enablement. Embedded and
+folder covers always take precedence. Cover Art Archive is enabled by default;
+Deezer and Discogs require explicit opt-in. Disabling every remote provider
+leaves local artwork available and sends no remote artwork requests.
+
+- **Cover Art Archive:** existing MusicBrainz release-ID lookup and disposable
+  persistent image cache.
+- **Deezer:** keyless artist/album lookup. Only a unique exact case-insensitive
+  artist/title match is accepted; ambiguous or oversized result sets are skipped.
+  Images are display-only: no persistent server cache or reusable client cache
+  after the last visible consumer releases them. The official Deezer logo and
+  album link accompany displayed covers.
+- **Discogs:** personal access token saved in macOS Keychain, never UserDefaults.
+  Search must identify one release, whose artist/title and primary image are
+  checked; multiple editions are deliberately skipped rather than guessed.
+  Images expire within six hours, including active displays; failed refreshes
+  do not expose expired covers. “Data provided by Discogs.” links accompany art.
+
+Preferences are client-local and sent with each artwork request. Changes cancel
+old requests and invalidate displayed/cached images. Deezer/Discogs images are
+excluded from notification attachments, which persist without provider attribution.
+Provider errors fall through to later enabled sources; lookup never blocks audio.
+Remote requests disclose album/artist metadata to the selected providers.
+
+The artwork provider update requires `providers` (ordered unique provider names, possibly empty)
+and `discogs_token` (string or explicit null) on `artwork` commands. Replies add
+`source_url`, `expires_at` (Unix seconds or null), and `cache_policy`
+(`persistent` or `display_only`). Clients cannot supply arbitrary provider URLs.
+
+Last.fm is explicitly deferred pending separate artwork permission. Musixmatch,
+TIDAL, Qobuz and Spotify remain assessment-only. See the
+[provider assessment](docs/superpowers/specs/2026-10-20-artwork-provider-assessment.md)
+for authentication, usage restrictions, primary sources and Deezer asset provenance,
+and [verification evidence](SPIKE_RESULTS.md#configurable-artwork-providers-2026-10-20).
 
 ## Development commands
 
@@ -87,7 +124,7 @@ percentage points, clamped to `0...100` and rounded to whole percentages.
 | Action family | Commands |
 | --- | --- |
 | Playback | `play`, `pause`, `toggle`, `stop`, `next`, `previous`, `seek`, `volume`, `repeat off\|all\|one\|cycle`, `shuffle on\|off\|toggle`, `gain off\|track\|album`, `resume on\|off\|toggle` |
-| Navigation | `go songs\|albums\|artists\|genres\|recent\|history\|up-next`, `filter`, `focus-filter`, `reveal-playing`, `settings connection\|library\|playback`, `quit` |
+| Navigation | `go songs\|albums\|artists\|genres\|recent\|history\|up-next`, `filter`, `focus-filter`, `reveal-playing`, `settings connection\|library\|playback\|artwork`, `quit` |
 | Connection/library | `connect`, `disconnect`, `server start\|restart\|stop`, `choose-folder`, `rescan <root-id>`, `retry-import`, `browse-library` |
 | Playlists | `playlist-open`, `playlist-create`, `playlist-rename`, `playlist-delete`, `playlist-play`, `playlist-enqueue`, `playlist-add`, `smart-create`, `smart-update`, `smart-snapshot` |
 | Queue/selection | `queue-clear`, `queue-shuffle`, `queue-save`, `selection-play`, `selection-run`, `selection-next`, `selection-enqueue`, `selection-remove`, `selection-move <entry-id\|end>`, `selection-album`, `selection-artist`, `selection-all`, `selection-clear` |
@@ -257,7 +294,7 @@ Keep one Rust package with internal modules initially, plus a separate native ma
 
 - **Library module:** owns roots, asynchronous indexing, metadata, album grouping, bounded queries, and scan progress. SQLite with migrations, transactional batches, and indexes; no full import on startup.
 - **Playback module:** owns queue order, current entry, transport state, next-item preparation, gain, and resume policy. Serialize commands through one owner. Native decoding and filesystem access stay on that worker; the continuous output callback consumes only preallocated PCM. SwiftUI, database work, and network requests must not block the audio callback.
-- **Artwork module:** two bounded workers own embedded/folder discovery, release-ID-only Cover Art Archive retrieval, image normalization and a disposable persistent cache. Separate artwork connections prevent slow image requests from queuing ahead of main transport controls.
+- **Artwork module:** two bounded workers own embedded/folder discovery, ordered Cover Art Archive/Deezer/Discogs lookup, image normalization and source-specific retention. Separate artwork connections prevent slow image requests from queuing ahead of main transport controls.
 - **Protocol module:** exposes commands, queries, and authoritative state without leaking FFmpeg types or SQLite rows. The implemented server uses Tokio, tungstenite, Serde, and rusqlite; the audio engine uses ffmpeg-next, a native CoreAudio DefaultOutput AudioUnit, and bounded SPSC rings.
 - **SwiftUI client:** owns navigation, selection, view caches, and connection presentation. Uses native tables/split views and a folder picker. Does not decode audio, scan the directory, or decide which track plays next.
 
@@ -266,7 +303,7 @@ Keep one Rust package with internal modules initially, plus a separate native ma
 Use versioned JSON over loopback WebSockets, accessible from Swift through `URLSessionWebSocketTask`. Use request IDs for replies and typed events. The native client keeps its main control connection separate from two reusable artwork connections; no MPD compatibility layer or Rust/Swift FFI.
 
 - Library: add root, request rescan, observe scan status, and list album artists/albums/tracks with one shared structured track filter and bounded pages.
-- Artwork: request a bounded thumbnail/display image for an authoritative album or durable queue occurrence at a library revision. The client cannot supply an image path or provider URL.
+- Artwork: request a bounded thumbnail/display image for an authoritative album or durable queue occurrence at a library revision, with an explicit ordered provider list and optional Discogs credential. The client cannot supply an image path or provider URL.
 - Saved playlists: create, rename, delete, insert indexed tracks before an occurrence or at the end, atomically remove/reorder occurrence batches, read bounded pages, and append a whole playlist to the queue with optional immediate playback. The library's Add to Playlist picker can create and populate a new destination directly. Playlist editing never edits already-enqueued occurrences.
 - Smart playlists: save/edit a named library filter, preview and browse bounded live results, and atomically create a regular snapshot of every matching track. Rules evaluate over the entire available library, independently of selected artist/album panes and temporary entry filters. The Add to Playlist picker lists regular destinations only.
 - Queue: append, atomically insert indexed track batches or move occurrence batches, remove, clear, and read a page. Commands address queue-entry IDs, not row indexes or track IDs. Native dragging captures source IDs/revisions; cross-page drops use revision-bound insertion anchors.
@@ -346,7 +383,7 @@ The reproducible scale gate seeds a declared metadata-only 50,000-track index an
 
 - Remaining codecs/containers, audio CD, module/BASS support, and every non-CoreAudio output. Maintain a tested capability list; broad dependency support is not a coverage claim.
 - Saved internet-radio stations and station-file imports; dynamic queue autofill; the directory-browser screen. Direct SHOUTcast/Icecast MP3/Ogg playback is implemented; see [streaming evidence](SPIKE_RESULTS.md#http-stream-playback).
-- MusicBrainz tag retrieval, additional cover providers and artist/title matching, lyrics providers, scrobbling, and tag writing. Artwork fallback uses an existing MusicBrainz release ID only; it does not search for or rewrite tags.
+- MusicBrainz tag retrieval, Last.fm and other assessed cover providers, lyrics providers, scrobbling, and tag writing. CAA uses release IDs; Deezer/Discogs perform conservative artist/title matching without rewriting tags.
 - Equalizer/analyzer, artwork-derived colors, configurable themes, external commands, Vi search/command modes, and keybinding configuration.
 - CUE ingestion and sophisticated release reconciliation; preserve the identity seams now.
 - MPRIS remains a later Linux integration; macOS media keys/Now Playing route the same Rust commands without a second player. Native track notifications are implemented; authorized banner/artwork delivery verification awaits macOS permission (see [SPIKE_RESULTS.md](SPIKE_RESULTS.md)).

@@ -30,15 +30,43 @@ struct ArtworkRequest: Hashable, Sendable {
     }
 }
 
-// CGImage is immutable; the decoder finishes decompression before handing it to the UI.
+/// Decoding finishes before this handle reaches the main actor. The store revokes restricted
+/// pixels on release/expiry so recycled native cells cannot retain a reusable image copy.
+private final class ArtworkPixels: @unchecked Sendable {
+    var image: CGImage?
+    init(_ image: CGImage?) { self.image = image }
+}
+
 struct ArtworkImage: @unchecked Sendable {
-    let image: CGImage?
+    private let pixels: ArtworkPixels
+    var image: CGImage? { pixels.image }
     let state: String
     let cacheKey: String?
+    var sourceURL: URL? = nil
+    var expiresAt: Date? = nil
+    var cachePolicy: ArtworkCachePolicy = .persistent
+    var credentialFailure = false
+    var requiresAttribution: Bool { state == "deezer" || state == "discogs" }
     var byteCost: Int { image.map { $0.bytesPerRow * $0.height } ?? 0 }
     static let loading = ArtworkImage(image: nil, state: "loading", cacheKey: nil)
     static let missing = ArtworkImage(image: nil, state: "missing", cacheKey: nil)
     static let unavailable = ArtworkImage(image: nil, state: "unavailable", cacheKey: nil)
+
+    init(image: CGImage?, state: String, cacheKey: String?, sourceURL: URL? = nil,
+         expiresAt: Date? = nil, cachePolicy: ArtworkCachePolicy = .persistent,
+         credentialFailure: Bool = false) {
+        pixels = ArtworkPixels(image)
+        self.state = state
+        self.cacheKey = cacheKey
+        self.sourceURL = sourceURL
+        self.expiresAt = expiresAt
+        self.cachePolicy = cachePolicy
+        self.credentialFailure = credentialFailure
+    }
+
+    @MainActor func revokeRestrictedPixels() {
+        if requiresAttribution { pixels.image = nil }
+    }
 }
 
 /// Two reusable connections: browsing cannot queue ahead of Now Playing or main controls.
@@ -63,6 +91,19 @@ final class ArtworkStore {
         var ticket = UUID()
     }
 
+    let settings = ArtworkSettings()
+    @ObservationIgnored private var expiryTimer: Timer?
+
+    init() {
+        settings.onChange = { [weak self] in
+            guard let self else { return }
+            let entryID: UInt64?
+            if case .entry(let id) = nowPlayingRequest?.target { entryID = id } else { entryID = nil }
+            synchronize(endpoint: context?.endpoint ?? "", tokenPath: context?.tokenPath ?? "",
+                        instance: context?.instance, revision: context?.revision,
+                        entryID: entryID, invalidate: true)
+        }
+    }
     private(set) var generation: UInt64 = 0
     private(set) var nowPlayingRequest: ArtworkRequest?
     private var cache: [ArtworkRequest: Cached] = [:]
@@ -86,11 +127,14 @@ final class ArtworkStore {
         }
         if next != context || invalidate {
             cancel(thumbnails)
+            expiryTimer?.invalidate()
+            expiryTimer = nil
             cancel(display)
             context = next
             generation &+= 1
             nowPlayingRequest = nil
             demand.removeAll()
+            for cached in cache.values { cached.value.revokeRestrictedPixels() }
             pending.removeAll()
             cache.removeAll()
             recency.removeAll()
@@ -115,7 +159,9 @@ final class ArtworkStore {
 
     func value(for request: ArtworkRequest?) -> ArtworkImage {
         guard let request, request.generation == generation else { return .missing }
-        return cache[request]?.value ?? .loading
+        guard let cached = cache[request] else { return .loading }
+        guard cached.value.expiresAt.map({ $0 > Date() }) ?? true else { return .loading }
+        return cached.value
     }
 
     var nowPlaying: ArtworkImage { value(for: nowPlayingRequest) }
@@ -142,6 +188,10 @@ final class ArtworkStore {
         if count > 1 { demand[request] = count - 1; return }
         demand.removeValue(forKey: request)
         pending.removeAll { $0 == request }
+        if let value = cache[request]?.value,
+           !ArtworkRetention.mayRedisplay(policy: value.cachePolicy, consumers: 0) {
+            removeCached(request)
+        }
         let lane = request.size == .thumbnail ? thumbnails : display
         if lane.request == request {
             cancel(lane)
@@ -164,6 +214,7 @@ final class ArtworkStore {
         let ticket = UUID()
         lane.ticket = ticket
         lane.request = request
+        let providerFields = settings.requestFields
         lane.task = Task { [weak self] in
             let value: ArtworkImage
             do {
@@ -173,7 +224,8 @@ final class ArtworkStore {
                 guard lane.wire.instanceID == context.instance else {
                     throw ServerFailure(code: "artwork_session_changed", message: "Artwork belongs to a different server session.")
                 }
-                let data = try await lane.wire.request("artwork", fields: request.fields)
+                let fields = request.fields.merging(providerFields) { _, provider in provider }
+                let data = try await lane.wire.request("artwork", fields: fields)
                 try Task.checkCancellation()
                 let decoding = Task.detached(priority: .utility) { ArtworkDecoder.decode(data, size: request.size) }
                 value = await withTaskCancellationHandler {
@@ -194,25 +246,57 @@ final class ArtworkStore {
     }
 
     private func insert(_ value: ArtworkImage, for request: ArtworkRequest) {
+        let value = value.state == "deezer" && ArtworkBrand.deezerLogo == nil ? ArtworkImage.unavailable : value
         removeCached(request)
+        if value.credentialFailure { settings.reportCredentialFailure() }
         while cache.count >= Self.maximumEntries || cacheBytes + value.byteCost > Self.maximumBytes {
             guard let oldest = recency.first(where: { demand[$0] == nil }) ?? recency.first else { break }
             removeCached(oldest)
         }
         let lifetime: TimeInterval = value.state == "unavailable" ? 60 : 24 * 60 * 60
-        cache[request] = Cached(value: value, expires: Date().addingTimeInterval(lifetime))
+        cache[request] = Cached(value: value, expires: value.expiresAt ?? Date().addingTimeInterval(lifetime))
         cacheBytes += value.byteCost
         touch(request)
+        scheduleExpiry()
     }
 
     private func removeCached(_ request: ArtworkRequest) {
-        if let old = cache.removeValue(forKey: request) { cacheBytes -= old.value.byteCost }
+        if let old = cache.removeValue(forKey: request) {
+            cacheBytes -= old.value.byteCost
+            old.value.revokeRestrictedPixels()
+        }
         recency.removeAll { $0 == request }
     }
 
     private func touch(_ request: ArtworkRequest) {
         recency.removeAll { $0 == request }
         recency.append(request)
+    }
+
+    private func scheduleExpiry() {
+        expiryTimer?.invalidate()
+        expiryTimer = nil
+        guard let deadline = cache.values.compactMap({ $0.value.expiresAt }).min() else { return }
+        let timer = Timer(fire: deadline, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.expireArtwork() }
+        }
+        expiryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func expireArtwork() {
+        let now = Date()
+        let expired = cache.compactMap { request, cached in
+            cached.value.expiresAt.map { $0 <= now } == true ? request : nil
+        }
+        for request in expired {
+            // Remove first, including active displays: a failed refresh must never reveal stale art.
+            removeCached(request)
+            if demand[request] != nil { pending.append(request) }
+        }
+        scheduleExpiry()
+        pump(thumbnails)
+        pump(display)
     }
 }
 
@@ -223,7 +307,7 @@ private enum ArtworkDecoder {
     }
     private struct Payload: Decodable {
         enum Status: String, Decodable { case ready, missing, unavailable }
-        enum Source: String, Decodable { case embedded, folder, cover_art_archive }
+        enum Source: String, Decodable { case embedded, folder, cover_art_archive, deezer, discogs }
         let status: Status
         let source: Source?
         let cache_key: String?
@@ -232,6 +316,9 @@ private enum ArtworkDecoder {
         let mime_type: String?
         let data: String?
         let message: String?
+        let source_url: URL?
+        let expires_at: Double?
+        let cache_policy: ArtworkCachePolicy
     }
     private static let maximumEncodedBytes = 2 * 1024 * 1024
 
@@ -241,8 +328,13 @@ private enum ArtworkDecoder {
         let art = reply.artwork
         guard art.status == .ready else {
             guard art.data == nil, art.width == 0, art.height == 0 else { return .unavailable }
-            return art.status == .missing ? .missing : .unavailable
+            return ArtworkImage(image: nil, state: art.status == .missing ? "missing" : "unavailable",
+                                cacheKey: nil, credentialFailure: art.message == "Discogs rejected credentials or access")
         }
+        let expiry = art.expires_at.map(Date.init(timeIntervalSince1970:))
+        guard let provenance = art.source,
+              ArtworkRetention.valid(source: provenance.rawValue, policy: art.cache_policy,
+                                     sourceURL: art.source_url, expiresAt: expiry, now: Date()) else { return .unavailable }
         guard let source = art.source, let key = art.cache_key, !key.isEmpty, key.utf8.count <= 256,
               art.mime_type == "image/jpeg", art.width > 0, art.height > 0,
               Int(art.width) <= size.maximumDimension, Int(art.height) <= size.maximumDimension,
@@ -264,6 +356,8 @@ private enum ArtworkDecoder {
         guard let image = CGImageSourceCreateImageAtIndex(imageSource, 0, decodeOptions),
               image.width == Int(art.width), image.height == Int(art.height),
               image.bitsPerPixel <= 32, !Task.isCancelled else { return .unavailable }
-        return ArtworkImage(image: image, state: source.rawValue, cacheKey: key)
+        return ArtworkImage(image: image, state: source.rawValue, cacheKey: key,
+                            sourceURL: art.source_url, expiresAt: expiry, cachePolicy: art.cache_policy,
+                            credentialFailure: art.message == "Discogs rejected credentials or access")
     }
 }

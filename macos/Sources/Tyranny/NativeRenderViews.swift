@@ -272,7 +272,7 @@ enum NativeRenderViews {
     private static func renderSettings(_ model: PlayerModel, _ navigation: NavigationModel, into output: URL) -> String {
         var lines: [String] = []
         for (tab, name) in [(SettingsTab.connection, "12-settings-connection"), (.library, "13-settings-library"),
-                            (.playback, "14-settings-playback")] {
+                            (.playback, "14-settings-playback"), (.artwork, "14-settings-artwork")] {
             navigation.settingsTab = tab
             let host = NSHostingView(rootView: SettingsView(model: model, navigation: navigation))
             let size = host.fittingSize

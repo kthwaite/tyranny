@@ -109,7 +109,8 @@ def main():
         return {item['title']: item for item in result['entries']}
 
     def art(album=None, entry=None, size='display', **overrides):
-        fields = dict(album_id=album, entry_id=entry, library_revision=client.state()['library']['revision'], size=size)
+        fields = dict(album_id=album, entry_id=entry, library_revision=client.state()['library']['revision'],
+                      size=size, providers=['cover_art_archive'], discogs_token=None)
         fields.update(overrides)
         return client.request('artwork', **fields)
 
