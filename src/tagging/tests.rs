@@ -1279,6 +1279,133 @@ fn revert_skips_files_changed_since_the_edit() {
     );
 }
 
+/// One MP3 matched to release A's second track by its release track ID. Its
+/// ID3v2 tag has track number 5 and no total; an APE tag holds `Track` "5/3",
+/// so its current total (3) matches MusicBrainz's.
+fn mp3_with_ape_track_pair() -> LibraryFixture {
+    use lofty::{
+        ape::{ApeItem, ApeTag},
+        config::WriteOptions,
+        tag::{ItemValue, TagExt},
+    };
+    let album = LibraryFixture::new(&[(
+        "tone.mp3",
+        &[
+            (TagField::MusicbrainzReleaseId, A),
+            (
+                TagField::MusicbrainzTrackId,
+                "a1000000-0000-4000-8000-000000000002",
+            ),
+            (TagField::TrackNumber, "5"),
+        ],
+    )]);
+    let mut ape = ApeTag::new();
+    ape.insert(ApeItem::new("Track".to_owned(), ItemValue::Text("5/3".to_owned())).unwrap());
+    ape.save_to_path(&album.files[0], WriteOptions::default())
+        .unwrap();
+    album
+}
+
+fn ape_track(path: &std::path::Path) -> Option<String> {
+    use lofty::{config::ParseOptions, file::AudioFile, mpeg::MpegFile};
+    let file =
+        MpegFile::read_from(&mut std::fs::File::open(path).unwrap(), ParseOptions::new()).unwrap();
+    file.ape()?
+        .get("Track")
+        .and_then(|item| item.value().text())
+        .map(str::to_owned)
+}
+
+#[test]
+fn a_track_total_only_in_another_tag_is_proposed_and_reverted_whole() {
+    let album = mp3_with_ape_track_pair();
+    let path = &album.files[0];
+    let before = read_tags(path).unwrap();
+    assert_eq!(before.primary.get(&TagField::TrackTotal), None);
+    assert_eq!(before.current(TagField::TrackTotal), Some("3"));
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let track = &proposal.tracks[0];
+    assert!(track.matched && track.writable, "{track:?}");
+    assert!(track.removes_other_copies);
+    // Writing the number drops the APE item, so the total is written too.
+    for change in [
+        FieldChange {
+            field: TagField::TrackNumber,
+            old: Some("5".into()),
+            new: "2".into(),
+        },
+        FieldChange {
+            field: TagField::TrackTotal,
+            old: None,
+            new: "3".into(),
+        },
+    ] {
+        assert!(track.changes.contains(&change), "{change:?} in {track:?}");
+    }
+
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    let tags = read_tags(path).unwrap();
+    assert_eq!(tags.primary[&TagField::TrackNumber], "2");
+    assert_eq!(tags.primary[&TagField::TrackTotal], "3");
+    assert_eq!(ape_track(path), None);
+
+    let (reverted, _) = engine.revert(applied.edit_id.unwrap(), &running()).unwrap();
+    assert_eq!(outcomes(&reverted), [WRITTEN]);
+    assert_eq!(ape_track(path).as_deref(), Some("5/3"));
+    let after = read_tags(path).unwrap();
+    assert_eq!(after.primary, before.primary);
+    assert_eq!(after.copies, before.copies);
+}
+
+#[test]
+fn revert_restores_what_the_write_removed() {
+    let album = mp3_with_ape_track_pair();
+    let path = &album.files[0];
+    let before = read_tags(path).unwrap();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    // The user leaves the total out: the APE item still goes whole.
+    let (applied, _) = engine
+        .apply(
+            &apply_request(&proposal, &[TagField::TrackTotal]),
+            &running(),
+        )
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    assert_eq!(ape_track(path), None);
+    let edit_id = applied.edit_id.unwrap();
+    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    let removed: Vec<_> = record.files[0]
+        .0
+        .removed
+        .iter()
+        .map(|copy| (copy.tag, copy.field, copy.value.as_str()))
+        .collect();
+    assert_eq!(
+        removed,
+        [
+            (TagKind::Ape, TagField::TrackNumber, "5"),
+            (TagKind::Ape, TagField::TrackTotal, "3")
+        ]
+    );
+
+    engine.revert(edit_id, &running()).unwrap();
+    assert_eq!(ape_track(path).as_deref(), Some("5/3"));
+    let after = read_tags(path).unwrap();
+    assert_eq!(after.primary, before.primary);
+    assert_eq!(after.copies, before.copies);
+}
+
 #[test]
 fn edits_lists_latest_first_with_counts() {
     let album = stored_a();

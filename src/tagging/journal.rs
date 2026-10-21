@@ -157,6 +157,38 @@ impl Journal {
         Ok(())
     }
 
+    /// Marks a file `written` and records the copies its write removed, which
+    /// revert puts back.
+    pub(super) fn set_written(
+        &mut self,
+        edit_id: u64,
+        track_id: u64,
+        removed: &[TagCopy],
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        let body: String = tx
+            .query_row(
+                "SELECT body FROM edit_files WHERE edit_id=?1 AND track_id=?2",
+                params![edit_id as i64, track_id as i64],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("no journaled file for track {track_id}"))?;
+        let mut file: JournalFile = serde_json::from_str(&body)?;
+        file.removed = removed.to_vec();
+        tx.execute(
+            "UPDATE edit_files SET body=?1, status=?2 WHERE edit_id=?3 AND track_id=?4",
+            params![
+                serde_json::to_string(&file)?,
+                FileStatus::Written.as_str(),
+                edit_id as i64,
+                track_id as i64
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(super) fn load(&self, edit_id: u64) -> Result<Option<EditRecord>> {
         let Some(reverted) = self
             .connection
@@ -295,6 +327,28 @@ mod tests {
             FileStatus::Reverted
         );
         assert!(journal.load(id + 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_written_records_what_the_write_removed() {
+        let dir = temp_dir();
+        let mut journal = open(&dir);
+        let files = [file(7), file(9)];
+        let id = journal.begin("r", "T", &files).unwrap();
+        let removed = vec![TagCopy {
+            tag: TagKind::Ape,
+            field: TagField::TrackTotal,
+            key: CopyKey::Field,
+            value: "12".to_string(),
+            read_only: false,
+        }];
+        journal.set_written(id, 9, &removed).unwrap();
+        let record = journal.load(id).unwrap().unwrap();
+        assert_eq!(record.files[0], (files[0].clone(), FileStatus::Pending));
+        let mut written = files[1].clone();
+        written.removed = removed;
+        assert_eq!(record.files[1], (written, FileStatus::Written));
+        assert!(journal.set_written(id, 8, &[]).is_err());
     }
 
     #[test]

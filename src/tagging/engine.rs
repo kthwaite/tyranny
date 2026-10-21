@@ -17,7 +17,7 @@ use super::{
 use crate::cancel::Cancellation;
 use crate::library_types::TrackMetadata;
 use crate::protocol::{
-    ErrorCode, TagApplyResult, TagCandidate, TagEditSummary, TagField, TagFileOutcome,
+    ErrorCode, FieldChange, TagApplyResult, TagCandidate, TagEditSummary, TagField, TagFileOutcome,
     TagFileResult, TagProposal, TrackProposal,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -280,21 +280,25 @@ impl Engine {
                 set: file.after.clone(),
                 restore: Vec::new(),
             };
-            let (outcome, message, status) = match write_safely(&file.path, expected, &edit) {
-                Ok(_) => (TagFileOutcome::Written, None, FileStatus::Written),
+            let write = write_safely(&file.path, expected, &edit);
+            // The journal keeps what the write removed, so revert restores
+            // exactly that. A file left `pending` is still checked by revert,
+            // with the removals `prepare` predicted, so a failed update loses
+            // nothing.
+            let recorded = match &write {
+                Ok(removed) => journal.set_written(edit_id, file.track_id, removed),
+                Err(_) => journal.set_status(edit_id, file.track_id, FileStatus::Failed),
+            };
+            logged(edit_id, recorded);
+            let (outcome, message) = match write {
+                Ok(_) => (TagFileOutcome::Written, None),
                 // Preflight ruling 17a: not written, so not counted and not revertible.
                 Err(WriteError::Changed) => (
                     TagFileOutcome::Skipped,
                     Some(CHANGED_SINCE_LOOKUP.to_owned()),
-                    FileStatus::Failed,
                 ),
-                Err(WriteError::Failed(message)) => {
-                    (TagFileOutcome::Failed, Some(message), FileStatus::Failed)
-                }
+                Err(WriteError::Failed(message)) => (TagFileOutcome::Failed, Some(message)),
             };
-            // A file left `pending` is still checked by revert, so a failed
-            // status update loses nothing.
-            logged(edit_id, journal.set_status(edit_id, file.track_id, status));
             if outcome == TagFileOutcome::Written {
                 written.push(file.path.clone());
             }
@@ -723,11 +727,27 @@ fn propose_file(
         return (row, None);
     };
     let unwritable = unwritable_fields_in(&tags);
-    let (blocked, writable): (Vec<_>, Vec<_>) = changes(&tags, &proposed(release, at))
+    let values = proposed(release, at);
+    let (blocked, mut writable): (Vec<_>, Vec<_>) = changes(&tags, &values)
         .into_iter()
         .partition(|change| unwritable.contains(&change.field));
     row.unwritable_fields = blocked.into_iter().map(|change| change.field).collect();
-    let changed: BTreeSet<TagField> = writable.iter().map(|change| change.field).collect();
+    let mut changed: BTreeSet<TagField> = writable.iter().map(|change| change.field).collect();
+    // Writing one half of a number pair can drop the other half from another
+    // tag. When the primary tag lacks that half, it is written there too, so
+    // the review shows it and no value is lost. Its old primary value is none.
+    for copy in tags.partners_dropped_with(&changed) {
+        if tags.primary.contains_key(&copy.field) || !changed.insert(copy.field) {
+            continue;
+        }
+        let new = values.get(&copy.field).cloned().unwrap_or(copy.value);
+        writable.push(FieldChange {
+            field: copy.field,
+            old: None,
+            new,
+        });
+    }
+    writable.sort_by_key(|change| change.field);
     let copies = tags.copies_of(&changed);
     row.removes_other_copies = !copies.is_empty();
     row.changes = writable;
@@ -834,7 +854,8 @@ fn prepare(file: &ProposedFile, omitted: &BTreeSet<TagField>) -> Step {
                 .iter()
                 .map(|field| (*field, tags.primary.get(field).cloned()))
                 .collect(),
-            removed: tags.copies_of(&fields),
+            // What the write will remove; the write's own list replaces it.
+            removed: [tags.copies_of(&fields), tags.partners_dropped_with(&fields)].concat(),
             after: values
                 .into_iter()
                 .map(|(field, value)| (field, Some(value)))

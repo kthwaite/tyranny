@@ -152,6 +152,36 @@ impl FileTags {
             .collect()
     }
 
+    /// The copies a write of `fields` drops although it does not set them. A
+    /// secondary APE tag keeps a number and its total in one item (`Track`,
+    /// `Disc`), and `edit_ape` removes that item whole when the write sets
+    /// either half. The other half is then lost unless the write sets it too.
+    pub fn partners_dropped_with(&self, fields: &BTreeSet<TagField>) -> Vec<TagCopy> {
+        let dropped = |field: TagField| {
+            PAIRS.iter().any(|&(number, total)| {
+                let partner = if field == number {
+                    total
+                } else if field == total {
+                    number
+                } else {
+                    return false;
+                };
+                fields.contains(&partner) && !fields.contains(&field)
+            })
+        };
+        self.copies
+            .iter()
+            .filter(|copy| {
+                copy.tag == TagKind::Ape
+                    && copy.tag != self.primary_kind
+                    && !copy.read_only
+                    && copy.key == CopyKey::Field
+                    && dropped(copy.field)
+            })
+            .cloned()
+            .collect()
+    }
+
     /// `Some(READ_ONLY_REASON)` when setting these fields would need a change to
     /// a tag lofty cannot write. `edit_tags` then fails with `ReadOnlyTag`.
     pub fn read_only_reason(&self, fields: &BTreeSet<TagField>) -> Option<&'static str> {
@@ -1970,6 +2000,7 @@ mod tests {
         let alone = scratch.0.join("alone.mp3");
         with_ape_items(&alone, &[("Track", "3/12"), ("Title", "Keep")]);
         let before = read_tags(&alone).unwrap();
+        let number = fields(&[TagField::TrackNumber]);
         let removed = edit_tags(&alone, &setting(&[(TagField::TrackNumber, "5")])).unwrap();
         let copy = |field, value: &str| TagCopy {
             tag: TagKind::Ape,
@@ -1985,6 +2016,12 @@ mod tests {
                 copy(TagField::TrackTotal, "12")
             ]
         );
+        // The prediction matches what the write dropped.
+        assert_eq!(
+            before.partners_dropped_with(&number),
+            [copy(TagField::TrackTotal, "12")]
+        );
+        assert!(before.partners_dropped_with(&track).is_empty());
         assert_eq!(ape_text(&alone, "Track"), None);
         assert_eq!(ape_text(&alone, "Title").as_deref(), Some("Keep"));
         assert!(read_tags(&alone).unwrap().copies_of(&track).is_empty());
