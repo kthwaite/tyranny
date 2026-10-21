@@ -348,6 +348,8 @@ final class WireClient {
         switch command {
         case "snapshot": return "snapshot"
         case "queue_page", "library_roots", "saved_playlists", "playlist_entries", "artwork", "lyrics": return command
+        case "search_directory": return "directory_results"
+        case "count_directory_click": return "directory_click_counted"
         case "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history": return command
         case "enqueue_tracks", "insert_tracks", "clear_upcoming", "shuffle_upcoming": return "applied"
         case "save_upcoming": return "playlist_applied"
@@ -493,6 +495,7 @@ struct ResultHeader: Decodable {
         case "snapshot", "applied", "playlist_applied", "stations_applied":
             snapshot = try container.decode(ControlState.self, forKey: .snapshot)
         case "queue_page", "root_added", "scan_accepted", "library_roots", "saved_playlists", "playlist_entries", "artwork", "lyrics",
+             "directory_results", "directory_click_counted",
              "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history",
              "stations":
             snapshot = nil

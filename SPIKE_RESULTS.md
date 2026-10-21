@@ -209,6 +209,19 @@ cargo test --locked --test server_transport stations
 
 **The live UI check was not done.** Driving the app (add, play, edit, remove a station; import a `.pls`) needs a visible window and Accessibility control, which this run could not use without a human. The Radio view, its sheet, the table's double-click/Return action and the open panel are compiled but not exercised in a running app.
 
+## Station directory (radio-browser.info)
+
+Radio's **Find Stations…** searches radio-browser.info by station name (protocol v13 `search_directory`). The server looks up `all.api.radio-browser.info`, then reverse-resolves each address with `getnameinfo`. It keeps only `*.api.radio-browser.info` names, in random order. A search is HTTPS only with no redirects. It tries at most 3 mirrors within 8 s, and a failed mirror moves to the back of the list. The list is resolved again after an hour or once every mirror has failed. A search returns at most 50 stations, the most-clicked first. Broken stations, HLS streams, bad stream URLs, unsafe IDs and repeated URLs are dropped. Each reply is capped at 512 KiB, and a failure returns `unavailable` with short text. Playing or adding a result sends `count_directory_click`, which the server sends on as `/json/url/{uuid}` from its own click worker. The app sends searches on their own connection, so a slow mirror never stalls the transport connection. Saves go through `StationCatalog`.
+
+Verification (2026-10-21): 253 Rust lib tests (one ignored), 49 server-transport tests and 341 Swift tests in 47 suites passed. Clippy and formatting passed. The tests never call the live API: they use loopback HTTP origins and `tests/fixtures/radio-browser/search.json`. One `#[ignore]` test resolves the real mirrors.
+
+```sh
+cargo test --locked --lib directory
+swift test --package-path macos --scratch-path target/swift-client --filter StationDirectory
+```
+
+**The live UI check was not done.** The Find Stations sheet is compiled but has not been run in the app.
+
 ## Album artwork
 
 Artwork is implemented and verified in Rust and SwiftUI. The matching protocol-v8 development bundle is installed at `target/Tyranny.app`; the prior protocol-v7 bundle is preserved at `target/artwork/Tyranny.app`. The directories were atomically exchanged, preserving the old executable inodes; both bundle signatures verified. The user's running daemon/database were not changed. To load matching processes: **Connection Settings → Stop…, quit the client, then reopen `target/Tyranny.app`**.

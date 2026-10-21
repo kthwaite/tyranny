@@ -460,7 +460,10 @@ async fn serve_connection(
                         // is written between reading a request and writing its reply. Events
                         // are polled only after the reply (below), so a reply's connection
                         // saw no state change in between.
-                        let discovery = matches!(&request.command, Command::Artwork { .. } | Command::Lyrics { .. });
+                        let discovery = matches!(&request.command, Command::Artwork { .. }
+                                | Command::Lyrics { .. }
+                                | Command::SearchDirectory { .. }
+                        );
                         let pending = controller.request(request);
                         tokio::pin!(pending);
                         let reply = loop {
