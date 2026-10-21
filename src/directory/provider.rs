@@ -179,7 +179,7 @@ impl Provider {
                     .min(REQUEST_TIMEOUT),
             )
             .send()
-            .map_err(|error| failure(&origin, "request", &error, UNREACHABLE))?;
+            .map_err(|error| failure(origin, "request", &error, UNREACHABLE))?;
         cancel.check(deadline)?;
         match response.status() {
             StatusCode::OK => {}
