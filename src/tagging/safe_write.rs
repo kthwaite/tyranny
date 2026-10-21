@@ -2,15 +2,16 @@
 //!
 //! The original is never opened for writing. A playing decoder keeps the old
 //! inode open, so it keeps decoding the old bytes.
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use super::tags::{TagCopy, TagEdit, edit_tags};
+use super::tags::{TagCopy, TagEdit, edit_tags, read_tags};
 
 /// Size and modification time of a file, taken when it was looked up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,8 +70,13 @@ pub(crate) fn write_safely(
     write_with(path, expected, edit, |_| Ok(()))
 }
 
-fn unchanged(path: &Path, expected: FileStamp) -> bool {
-    stamp(path).is_ok_and(|current| current == expected)
+/// `Ok(false)` when the file is gone or differs from the stamp. Other I/O errors are errors.
+fn unchanged(path: &Path, expected: FileStamp) -> Result<bool> {
+    match stamp(path) {
+        Ok(current) => Ok(current == expected),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(anyhow!("check file: {error}")),
+    }
 }
 
 /// `before_commit` runs on the edited clone, before it is flushed.
@@ -80,15 +86,65 @@ fn write_with(
     edit: &TagEdit,
     before_commit: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<Vec<TagCopy>, WriteError> {
-    if !unchanged(path, expected) {
+    if !unchanged(path, expected)? {
         return Err(WriteError::Changed);
     }
     let temp = temp_path(path);
-    let result = clone_edit_and_commit(path, expected, edit, &temp, before_commit);
-    if result.is_err() {
+    let mut created = None;
+    let result = clone_edit_and_commit(path, expected, edit, &temp, &mut created, before_commit);
+    // Only remove a file this call created. It is a regular file, never a followed link.
+    if result.is_err() && created.is_some() {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+/// Creates the clone exclusively (never through a symlink) and copies the original into it.
+fn create_clone(path: &Path, temp: &Path) -> Result<File> {
+    // A stale temporary file, or a link planted there, is removed itself, never followed.
+    match fs::remove_file(temp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(anyhow!("remove stale temporary file: {error}")),
+    }
+    let mut clone = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(temp)
+        .map_err(|error| anyhow!("create temporary file: {error}"))?;
+    copy_into(path, &mut clone).map_err(|error| anyhow!("clone file: {error}"))?;
+    Ok(clone)
+}
+
+/// Data, permissions and extended attributes.
+#[cfg(target_os = "macos")]
+fn copy_into(path: &Path, clone: &mut File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let source = File::open(path)?;
+    let flags =
+        libc::COPYFILE_ACL | libc::COPYFILE_STAT | libc::COPYFILE_XATTR | libc::COPYFILE_DATA;
+    // SAFETY: both descriptors are open for the call; a null state is allowed.
+    let status = unsafe {
+        libc::fcopyfile(
+            source.as_raw_fd(),
+            clone.as_raw_fd(),
+            std::ptr::null_mut(),
+            flags,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_into(path: &Path, clone: &mut File) -> std::io::Result<()> {
+    let mut source = File::open(path)?;
+    std::io::copy(&mut source, clone)?;
+    clone.set_permissions(source.metadata()?.permissions())
 }
 
 fn clone_edit_and_commit(
@@ -96,20 +152,27 @@ fn clone_edit_and_commit(
     expected: FileStamp,
     edit: &TagEdit,
     temp: &Path,
+    created: &mut Option<()>,
     before_commit: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<Vec<TagCopy>, WriteError> {
-    match fs::remove_file(temp) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(anyhow!("remove stale temporary file: {error}").into()),
-    }
-    fs::copy(path, temp).map_err(|error| anyhow!("clone file: {error}"))?;
+    let clone = create_clone(path, temp)?;
+    *created = Some(());
+    let identity = clone.metadata().map_err(|error| anyhow!("{error}"))?;
+    drop(clone);
     let removed = edit_tags(temp, edit)?;
     before_commit(temp)?;
+    // The edited clone must still parse, so a bad write never replaces a good file.
+    read_tags(temp).map_err(|error| anyhow!("edited file does not parse: {error:#}"))?;
     File::open(temp)
         .and_then(|file| file.sync_all())
         .map_err(|error| anyhow!("flush temporary file: {error}"))?;
-    if !unchanged(path, expected) {
+    let current = fs::symlink_metadata(temp).map_err(|error| anyhow!("check clone: {error}"))?;
+    if !current.is_file() || current.dev() != identity.dev() || current.ino() != identity.ino() {
+        // Not ours any more: remove nothing.
+        *created = None;
+        return Err(anyhow!("temporary file was replaced").into());
+    }
+    if !unchanged(path, expected)? {
         return Err(WriteError::Changed);
     }
     fs::rename(temp, path).map_err(|error| anyhow!("replace file: {error}"))?;
@@ -127,7 +190,6 @@ mod tests {
     use super::*;
     use crate::decoder::{Decoder, GainMode};
     use crate::protocol::TagField;
-    use crate::tagging::tags::read_tags;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
@@ -287,5 +349,50 @@ mod tests {
             total += read;
         }
         assert_eq!(total, 12000);
+    }
+
+    #[test]
+    fn symlink_planted_at_temp_path_never_touches_the_victim() {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.flac");
+        let victim = scratch.0.join("victim.txt");
+        fs::write(&victim, b"precious").unwrap();
+        std::os::unix::fs::symlink(&victim, temp_path(&path)).unwrap();
+        let expected = stamp(&path).unwrap();
+        let result = write_safely(&path, expected, &title("Linked"));
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(fs::read(&victim).unwrap(), b"precious");
+        assert!(!temp_path(&path).exists());
+    }
+
+    #[test]
+    fn replaced_temp_fails_cleanly_and_removes_nothing_foreign() {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.flac");
+        let before = fs::read(&path).unwrap();
+        let expected = stamp(&path).unwrap();
+        let result = write_with(&path, expected, &title("New"), |temp| {
+            fs::remove_file(temp)?;
+            fs::copy(&path, temp)?;
+            Ok(())
+        });
+        assert!(matches!(result, Err(WriteError::Failed(_))), "{result:?}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(temp_path(&path)).unwrap(), before);
+    }
+
+    #[test]
+    fn unparseable_edited_clone_is_not_committed() {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.flac");
+        let before = fs::read(&path).unwrap();
+        let expected = stamp(&path).unwrap();
+        let result = write_with(&path, expected, &title("New"), |temp| {
+            fs::write(temp, b"not audio")?;
+            Ok(())
+        });
+        assert!(matches!(result, Err(WriteError::Failed(_))), "{result:?}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!temp_path(&path).exists());
     }
 }
