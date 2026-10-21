@@ -1120,6 +1120,64 @@ async fn restart_closes_other_open_rows_as_stopped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_close_of_stale_rows_does_not_stop_startup() {
+    let mut fixture = Fixture::new();
+    fixture.index_frames(&["a", "b"], TEN_SECONDS).await;
+    let first = fixture.queue_library().await;
+    fixture.play_to(first, 48_000).await;
+    fixture.stop().await;
+    // A play of the other entry left open, as by a crash.
+    let mut store = Store::open(&fixture.database()).unwrap();
+    let other = store
+        .open_play(&PlayRecord {
+            entry_id: first + 1,
+            track_id: None,
+            path: "/music/b.wav".into(),
+            title: "b".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration_ms: None,
+            source: None,
+            played_at: 1_700_000_000,
+            raw_title: None,
+        })
+        .unwrap();
+    store.checkpoint_play(other, 3_000).unwrap();
+    drop(store);
+    // Closing it fails, as on a busy database.
+    let database = rusqlite::Connection::open(fixture.database()).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER injected BEFORE UPDATE ON play_history
+             BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+        )
+        .unwrap();
+
+    fixture.start();
+    ok(&fixture.control(), Command::Play { entry_id: None }).await;
+    let state = fixture
+        .until(|state| state.transport == Transport::Playing && state.position_frames > 0)
+        .await;
+    assert_eq!((state.current_id, state.error), (Some(first), None));
+    // The stale row stays open; the next start closes it.
+    assert_eq!(
+        fixture
+            .plays()
+            .iter()
+            .find(|play| play.id == other)
+            .map(|play| play.end_reason.clone()),
+        Some(None)
+    );
+    database.execute_batch("DROP TRIGGER injected;").unwrap();
+    fixture.stop().await;
+    fixture.start();
+    let plays = fixture
+        .until_plays(|plays| closed(plays, first + 1).is_some())
+        .await;
+    assert_eq!(closed(&plays, first + 1).unwrap().id, other, "{plays:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_write_failures_queue_events_without_stalling_playback() {
     let fixture = Fixture::new();
     fixture.index_frames(&["a", "b"], TEN_SECONDS).await;

@@ -697,14 +697,17 @@ fn shuffle_strategy() -> Box<dyn ShuffleStrategy> {
 /// Continues the open play from before the restart: the newest open row of
 /// entry `selected`, the restored selection. Every other open row closes as
 /// stopped. Returns the pending history, which knows the continued row.
-fn restore_plays(
-    store: &mut Store,
-    player: &mut Player,
-    selected: Option<u64>,
-) -> Result<PendingHistory> {
-    let rows = store.open_play_rows()?;
+/// History never stops playback: a failed read or close is logged, and the
+/// rows it left open close on the next start.
+fn restore_plays(store: &mut Store, player: &mut Player, selected: Option<u64>) -> PendingHistory {
+    let rows = store.open_play_rows().unwrap_or_else(|error| {
+        eprintln!("tyranny: reading open plays failed; they close on the next start: {error:#}");
+        Vec::new()
+    });
     let kept = selected.and_then(|id| rows.into_iter().rev().find(|row| row.entry_id == id));
-    store.close_open_plays_except(kept.as_ref().map(|row| row.row))?;
+    if let Err(error) = store.close_open_plays_except(kept.as_ref().map(|row| row.row)) {
+        eprintln!("tyranny: closing stale plays failed; they close on the next start: {error:#}");
+    }
     let mut pending = PendingHistory::default();
     if let Some(row) = kept {
         let play = player.restore_play(
@@ -715,7 +718,7 @@ fn restore_plays(
         );
         pending.adopt(play, row.row);
     }
-    Ok(pending)
+    pending
 }
 
 /// Why an entry is selected.
@@ -800,7 +803,7 @@ impl Actor {
                 }
             }
         }
-        let pending_plays = restore_plays(&mut store, &mut player, selected)?;
+        let pending_plays = restore_plays(&mut store, &mut player, selected);
         if resume {
             player.play();
         }
