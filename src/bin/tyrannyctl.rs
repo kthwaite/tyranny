@@ -48,7 +48,7 @@ Add: {\"id\":8,\"command\":\"add_stations\",\"expected_revision\":0,\"stations\"
 Station directory (protocol 16): search_directory, count_directory_click.\n\
 Search: {\"id\":9,\"command\":\"search_directory\",\"query\":\"jazz\"} (query 1..100 bytes, no control characters)\n\
 Count: {\"id\":10,\"command\":\"count_directory_click\",\"station_uuid\":\"<uuid>\"} (replies at once; the click is best effort)\n\
-Listening stats (protocol 17): stats {period:{kind,anchor}}, wrapped {year}, stats_years.\n\
+Listening stats (protocol 18): stats {period:{kind,anchor}}, wrapped {year}, stats_years.\n\
 Parametric EQ: set_equalizer {equalizer:{enabled,preamp_db,bands}} replaces the complete curve (0..16 bands).\n\
 Each band requires enabled,kind,frequency_hz,gain_db,q,shelf_slope,slope_db; kinds: bell,low_shelf,high_shelf,high_pass,low_pass,notch.\n\
 Named EQ presets: save_equalizer_preset {name,equalizer}, rename_equalizer_preset {name,new_name}, remove_equalizer_preset {name}.\n\

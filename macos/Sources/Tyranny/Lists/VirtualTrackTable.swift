@@ -28,6 +28,7 @@ struct VirtualTrackTable: NSViewRepresentable {
     /// Read in the parent's body so a ⌘L reveal reaches the table.
     let revealToken: UInt64?
     let selectionToken: UInt64
+    let canMutate: Bool
 
     var identifier: String { "track-table-\(list.key)" }
 
@@ -132,6 +133,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var shownPlaying: UInt64?
         private var shownColours: UInt64?
         private var shownHidden: Set<String>?
+        private var shownCanMutate: Bool?
         private var shownBlocks: Bool?
         private var reported: Range<Int>?
         /// The reveal request last handled. The outer nil: none seen yet.
@@ -226,6 +228,10 @@ struct VirtualTrackTable: NSViewRepresentable {
                 if !reloadedAll { reloadGutter() }
             }
             shownPlaying = parent.playingTrackID
+            if parent.canMutate != shownCanMutate {
+                shownCanMutate = parent.canMutate
+                if let liked = columnIndex("liked") { reloadVisible(columns: IndexSet(integer: liked)) }
+            }
             if parent.colours.revision != shownColours {
                 shownColours = parent.colours.revision
                 table.enumerateAvailableRowViews { view, _ in
@@ -358,6 +364,17 @@ struct VirtualTrackTable: NSViewRepresentable {
             let id = tableColumn.identifier.rawValue
             if id == AlbumBlockCell.columnID { return gutterCell(tableView, row: row) }
             guard let column = TrackColumns.column(id) else { return nil }
+            if id == "liked" {
+                guard case .track(let position, _)? = display,
+                      let item = cache.row(at: position), let revision = cache.revision else { return nil }
+                let cell = tableView.makeView(withIdentifier: LikedTrackCell.reuse, owner: nil) as? LikedTrackCell
+                    ?? LikedTrackCell()
+                cell.show(item.track, enabled: parent.canMutate && item.available,
+                          identifier: "\(parent.identifier)-cell-\(item.row_id)-liked") { [weak self] in
+                    self?.parent.player.setTrackLiked(item.track.id, liked: !item.track.liked, libraryRevision: revision)
+                }
+                return cell
+            }
             let cell = tableView.makeView(withIdentifier: TrackCellView.reuse, owner: nil) as? TrackCellView
                 ?? TrackCellView()
             guard case .track(let position, let blockIndex)? = display else {

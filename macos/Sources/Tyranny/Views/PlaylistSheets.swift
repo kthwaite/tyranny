@@ -21,6 +21,7 @@ struct TrackFilterHelp: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Live Track Filters").font(.headline)
                     Text("Use title:, artist: (track artist), or album:. Text matches literal substrings, ignoring case. Bare words search all three fields; quote a phrase.")
+                    Text("Use liked:true for liked songs or liked:false for songs you have not liked. Combine either with any other rule.")
                     Text(#"artist:"Miles Davis" & !album:"Kind of Blue""#).font(.system(.callout, design: .monospaced))
                     Text(#"(artist:"Miles Davis" | artist:"Ornette Coleman") & !album:"Kind of Blue""#)
                         .font(.system(.callout, design: .monospaced))

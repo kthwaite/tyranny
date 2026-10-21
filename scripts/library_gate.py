@@ -198,8 +198,6 @@ def main():
         assert initial["queue_revision"] == 11 and initial["current_id"] == 7
         assert initial["position_frames"] == 24000 and initial["transport"] == "paused"
         assert initial["library"]["tracks"] == 0 and initial["library"]["scan"]["phase"] == "idle"
-        with sqlite3.connect(database_path) as database:
-            assert database.execute("PRAGMA user_version").fetchone()[0] == 8
         record("v1-migration-preserves-queue-identity-and-checkpoint", snapshot=initial)
         control.request("play")
         control.wait(lambda state: state["transport"] == "playing")

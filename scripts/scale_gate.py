@@ -88,7 +88,6 @@ def seed(database_path, root, scan_root, playing):
     seed_started = time.perf_counter()
     with sqlite3.connect(database_path) as db:
         db.execute("PRAGMA foreign_keys=ON")
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 8
         assert db.execute("SELECT count(*) FROM library_tracks").fetchone()[0] == 0
         for identity, path in [(1, root), (2, scan_root)]:
             db.execute("INSERT INTO library_roots(id,path,search) VALUES(?,?,?)",

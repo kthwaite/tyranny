@@ -26,7 +26,7 @@ const TRACK_COLUMNS: &str = "t.id,t.album_id,t.artist_id,al.artist_id,
     COALESCE((SELECT group_concat(g.name,', ' ORDER BY tg.position) FROM library_track_genres tg
         JOIN library_genres g ON g.id=tg.genre_id WHERE tg.track_id=t.id),''),
     t.codec,t.bit_depth,COALESCE(json_extract(t.metadata,'$.sample_rate'),0),t.bitrate_kbps,
-    COALESCE(s.play_count,0),s.last_played,t.date_added,a.path";
+    COALESCE(s.play_count,0),s.last_played,t.date_added,a.path,t.liked";
 
 fn invalid(message: &str) -> anyhow::Error {
     LibraryError {
@@ -330,6 +330,7 @@ fn track_summary(row: &Row<'_>, first: usize) -> rusqlite::Result<TrackSummary> 
         last_played: row.get(column(19))?,
         date_added: row.get(column(20))?,
         path: row.get(column(21))?,
+        liked: row.get(column(22))?,
     })
 }
 

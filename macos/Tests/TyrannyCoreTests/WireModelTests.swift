@@ -42,7 +42,7 @@ private let row = #"""
 {"row_id":7,"artist_key":2,"album_key":3,"available":true,"track":{
  "id":7,"album_id":3,"artist_id":2,"album_artist_id":2,"title":"T","artist":"A","album":"B","album_artist":"A",
  "compilation":false,"disc_number":1,"track_number":4,"duration_ms":1000,"year":null,"genre":"Jazz","format":"FLAC 24/96",
- "sample_rate":96000,"bitrate_kbps":null,"play_count":0,"last_played":null,"date_added":1700000000,"path":"/x.flac"}}
+ "sample_rate":96000,"bitrate_kbps":null,"play_count":0,"last_played":null,"date_added":1700000000,"path":"/x.flac","liked":false}}
 """#
 
 @Test func listTracksResponseDecodes() throws {
@@ -50,6 +50,7 @@ private let row = #"""
     let decoded = try JSONDecoder().decode(ListTracksResponse.self, from: Data(with.utf8))
     #expect(decoded.entries.first?.id == 7)
     #expect(decoded.entries.first?.track.year == nil)
+    #expect(decoded.entries.first?.track.liked == false)
     #expect(decoded.totals == ListTotals(tracks: 1, duration_ms: 1000, size_bytes: 42))
     for absent in [#"{"revision":5,"total":1,"offset":0,"entries":[\#(row)]}"#,
                    #"{"revision":5,"total":1,"offset":0,"entries":[\#(row)],"totals":null}"#] {
@@ -57,6 +58,18 @@ private let row = #"""
         #expect(none.totals == nil)
         #expect(none.total == 1)
     }
+}
+
+@Test func likedTrackRowsAndMutationReplyDecode() throws {
+    let liked = row.replacingOccurrences(of: "\"liked\":false", with: "\"liked\":true")
+    let decoded = try JSONDecoder().decode(ListRow.self, from: Data(liked.utf8))
+    #expect(decoded.track.liked)
+    #expect(try JSONDecoder().decode(ListRow.self, from: JSONEncoder().encode(decoded)) == decoded)
+    let reply = try JSONDecoder().decode(TrackLiked.self, from: Data(
+        #"{"track_id":7,"liked":true,"library_revision":6}"#.utf8))
+    #expect(reply.track_id == decoded.track.id)
+    #expect(reply.liked)
+    #expect(reply.library_revision == 6)
 }
 
 @Test func trackSelectionListEncodesHalfOpenRanges() throws {

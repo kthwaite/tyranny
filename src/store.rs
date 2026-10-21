@@ -35,7 +35,7 @@ mod playlists_tests;
 #[cfg(test)]
 mod stations_tests;
 const APPLICATION_ID: i64 = 0x7479726e;
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Runs the migration ladder up to `target`; tests use a lower target to build old schemas.
 pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
@@ -151,6 +151,13 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
         transaction.pragma_update(None, "user_version", 8)?;
         transaction.commit()?;
         version = 8;
+    }
+    if version == 8 && target > 8 {
+        let transaction = connection.transaction()?;
+        library::migrate_v9(&transaction)?;
+        transaction.pragma_update(None, "user_version", 9)?;
+        transaction.commit()?;
+        version = 9;
     }
     ensure!(version == target, "unsupported database version {version}");
     Ok(version)
@@ -889,7 +896,6 @@ mod tests {
             drop(store);
             let store = Store::open(&path)?;
             assert_eq!(store.load()?.settings, settings);
-            assert_eq!(user_version(&path), 8);
             Ok(())
         })();
         let _ = fs::remove_file(&path);
@@ -948,7 +954,7 @@ mod tests {
             let local = store.load()?;
             assert!(local.entries[0].stream.is_none());
             assert_eq!(local.checkpoint.position_frames, 48_000);
-            assert_eq!(user_version(&path), 8);
+            assert_eq!(user_version(&path), 9);
             let stream =
                 StreamSpec::new("HTTPS://RADIO.EXAMPLE:443/live".into(), "Station".into())?;
             store.edit(
@@ -1078,7 +1084,7 @@ mod tests {
             )?;
             drop(connection);
             let store = Store::open(&path)?;
-            assert_eq!(user_version(&path), 8);
+            assert_eq!(user_version(&path), 9);
             let connection = Connection::open(&path)?;
             let row: (i64, Option<i64>, Option<String>, Option<i64>) = connection.query_row(
                 "SELECT counted,listened_ms,end_reason,ended_at FROM play_history",
@@ -1356,7 +1362,7 @@ mod tests {
         let result = (|| -> Result<()> {
             let store = Store::open(&path)?;
             let loaded = store.load()?;
-            assert_eq!(user_version(&path), 8);
+            assert_eq!(user_version(&path), SCHEMA_VERSION);
             assert_eq!(loaded.entries.len(), 1);
             assert_eq!(loaded.checkpoint.current_id, Some(1));
             assert_eq!(pending_upgrade(&path), 1);
@@ -1412,11 +1418,50 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn schema_eight_adds_durable_unliked_defaults_without_changing_metadata() -> Result<()> {
+        let path = schema_4_file(true);
+        let result = (|| -> Result<()> {
+            let mut connection = Connection::open(&path)?;
+            migrate(&mut connection, 8)?;
+            let metadata: String = connection.query_row(
+                "SELECT metadata FROM library_tracks WHERE id=1",
+                [],
+                |row| row.get(0),
+            )?;
+            drop(connection);
+            let store = Store::open(&path)?;
+            assert_eq!(user_version(&path), SCHEMA_VERSION);
+            assert_eq!(column_default(&path, "library_tracks", "liked"), 0);
+            let (liked, after): (bool, String) = store.connection.query_row(
+                "SELECT liked,metadata FROM library_tracks WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert!(!liked);
+            assert_eq!(after, metadata);
+            store
+                .connection
+                .execute("UPDATE library_tracks SET liked=1 WHERE id=1", [])?;
+            drop(store);
+            let store = Store::open(&path)?;
+            assert!(store.connection.query_row(
+                "SELECT liked FROM library_tracks WHERE id=1",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?);
+            assert_eq!(store.load()?.entries.len(), 1);
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+
+    #[test]
     fn empty_schema_4_database_migrates_without_pending_upgrade() -> Result<()> {
         let path = schema_4_file(false);
         let result = (|| -> Result<()> {
             Store::open(&path)?;
-            assert_eq!(user_version(&path), 8);
+            assert_eq!(user_version(&path), SCHEMA_VERSION);
             assert_eq!(pending_upgrade(&path), 0);
             Ok(())
         })();

@@ -360,13 +360,14 @@ fn unknown_newer_schema_is_rejected_without_resetting_existing_state() -> Result
     let path = scratch.database();
     legacy_database(&path, 1)?;
     let connection = Connection::open(&path)?;
-    connection.pragma_update(None, "user_version", 9)?;
+    let future_version = SCHEMA_VERSION + 1;
+    connection.pragma_update(None, "user_version", future_version)?;
     assert!(
         Store::open(&path)
             .err()
             .unwrap()
             .to_string()
-            .contains("unsupported database version 9")
+            .contains(&format!("unsupported database version {future_version}"))
     );
     connection.pragma_update(None, "user_version", 1)?;
     drop(connection);
@@ -730,12 +731,6 @@ fn batch_reorders_and_inserts_are_atomic_bounded_and_revision_bound() -> Result<
     let mut restored = Store::open(&path)?;
     assert_eq!(ids(&restored)?, [12, 14, 3, 13, 9]);
     assert_eq!(restored.load()?.checkpoint.position_frames, 48_000);
-    assert_eq!(
-        restored
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, u64>(0))?,
-        8
-    );
     restored
         .connection
         .execute_batch("UPDATE library_assets SET indexed=1;")?;

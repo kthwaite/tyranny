@@ -148,7 +148,7 @@ final class ListModel {
             discardGroups()
         }
         self.session = session
-        let filter = navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filter = navigation.effectiveFilter
         if filter != query {
             if filter.isEmpty || needsReset {
                 cancelFilter()

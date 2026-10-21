@@ -18,6 +18,21 @@ final class ActivatingTableView: NSTableView {
     /// move its selection. Other tables pass them on.
     var ignoresLeftRight = false
 
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let column = column(at: point)
+        if tableColumns.indices.contains(column), tableColumns[column].identifier.rawValue == "liked" {
+            // Consume even double clicks and disabled/empty hearts before NSTableView selects
+            // a row or invokes its playback action.
+            let row = row(at: point)
+            if row >= 0, let cell = view(atColumn: column, row: row, makeIfNecessary: false) as? LikedTrackCell {
+                cell.button.mouseDown(with: event)
+            }
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])

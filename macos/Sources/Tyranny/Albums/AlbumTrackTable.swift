@@ -3,8 +3,8 @@ import SwiftUI
 import TyrannyCore
 
 /// The album panel's tracklist (spec 4.4): one table over `AlbumExpansion.tracks`, without a
-/// header. Columns: number, title, artist (compilations only) and time. Unavailable tracks are
-/// dimmed. Selection is held by row ID on the expansion.
+/// header. Columns: number, title, artist (compilations only), optional liked heart and time.
+/// Unavailable tracks are dimmed. Selection is held by row ID on the expansion.
 ///
 /// Double-click plays the album from the row to its end. Return plays the selection: one row
 /// as a run, several as exactly those rows. ⌥Return adds the selection to Up Next. Space
@@ -23,6 +23,8 @@ struct AlbumTrackTable: NSViewRepresentable {
     let selected: Set<UInt64>
     /// The album's track count, which can exceed the rows shown.
     let total: Int
+    let likedHidden: Bool
+    let canMutate: Bool
 
     static let identifier = "album-track-table"
     /// The panel's tracks area. While the tracks load or fail, the panel's placeholder carries it.
@@ -100,6 +102,7 @@ struct AlbumTrackTable: NSViewRepresentable {
         static let columns = [
             Column(id: "number", title: "#", width: 34, fixed: true, alignment: .right),
             Column(id: "title", title: "Title", width: 240, fixed: false, alignment: .left),
+            Column(id: "liked", title: "Liked", width: 32, fixed: true, alignment: .center),
             Column(id: artist, title: "Artist", width: 160, fixed: false, alignment: .left),
             Column(id: "time", title: "Time", width: 44, fixed: true, alignment: .right),
         ]
@@ -111,6 +114,8 @@ struct AlbumTrackTable: NSViewRepresentable {
         private var rows: [ListRow] = []
         private weak var shownExpansion: AlbumExpansion?
         private var shownColours: UInt64?
+        private var shownLikedHidden: Bool?
+        private var shownCanMutate: Bool?
 
         init(_ parent: AlbumTrackTable) { self.parent = parent }
 
@@ -145,6 +150,13 @@ struct AlbumTrackTable: NSViewRepresentable {
                 table.reloadData()
                 if albumChanged { table.scrollRowToVisible(0) }
             }
+            if parent.likedHidden != shownLikedHidden || parent.canMutate != shownCanMutate {
+                shownLikedHidden = parent.likedHidden
+                shownCanMutate = parent.canMutate
+                table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("liked"))?.isHidden = parent.likedHidden
+                fitColumns()
+                table.reloadData()
+            }
             if parent.colours.revision != shownColours {
                 shownColours = parent.colours.revision
                 table.enumerateAvailableRowViews { view, _ in
@@ -161,7 +173,9 @@ struct AlbumTrackTable: NSViewRepresentable {
         private func fitColumns() {
             guard let table, let clip = table.enclosingScrollView?.contentView else { return }
             let shown = table.tableColumns.filter { !$0.isHidden }
-            let fixed = Self.columns.filter(\.fixed).reduce(0) { $0 + $1.width }
+            let fixed = Self.columns.filter { column in
+                column.fixed && shown.contains { $0.identifier.rawValue == column.id }
+            }.reduce(0) { $0 + $1.width }
             let free = max(80, floor(clip.bounds.width - fixed - CGFloat(shown.count) * table.intercellSpacing.width))
             guard let title = table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("title")),
                   let artist = table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(Self.artist)) else { return }
@@ -178,6 +192,17 @@ struct AlbumTrackTable: NSViewRepresentable {
             guard let tableColumn, rows.indices.contains(row),
                   let column = Self.columns.first(where: { $0.id == tableColumn.identifier.rawValue }) else { return nil }
             let item = rows[row]
+            if column.id == "liked" {
+                let cell = tableView.makeView(withIdentifier: LikedTrackCell.reuse, owner: nil) as? LikedTrackCell
+                    ?? LikedTrackCell()
+                let revision = parent.expansion.basis?.revision
+                cell.show(item.track, enabled: parent.canMutate && item.available && revision != nil,
+                          identifier: "\(AlbumTrackTable.identifier)-cell-\(item.row_id)-liked") { [weak self] in
+                    guard let revision else { return }
+                    self?.parent.player.setTrackLiked(item.track.id, liked: !item.track.liked, libraryRevision: revision)
+                }
+                return cell
+            }
             let cell = tableView.makeView(withIdentifier: TrackCellView.reuse, owner: nil) as? TrackCellView
                 ?? TrackCellView()
             let text = value(column.id, item.track)

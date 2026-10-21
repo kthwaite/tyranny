@@ -1,4 +1,4 @@
-//! Version 17 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 18 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -14,7 +14,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 17;
+pub const VERSION: u32 = 18;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -183,6 +183,11 @@ pub enum Command {
     },
     Rescan {
         root_id: u64,
+    },
+    SetTrackLiked {
+        track_id: u64,
+        liked: bool,
+        library_revision: u64,
     },
     LibraryRoots {
         revision: Option<u64>,
@@ -980,6 +985,11 @@ pub enum Response {
     ScanAccepted {
         root_id: u64,
     },
+    TrackLiked {
+        track_id: u64,
+        liked: bool,
+        library_revision: u64,
+    },
     LibraryRoots {
         #[serde(flatten)]
         page: Page<Root>,
@@ -1056,6 +1066,15 @@ impl From<LibraryReply> for Response {
         match reply {
             LibraryReply::RootAdded(root) => Self::RootAdded { root },
             LibraryReply::ScanAccepted { root_id } => Self::ScanAccepted { root_id },
+            LibraryReply::TrackLiked {
+                track_id,
+                liked,
+                library_revision,
+            } => Self::TrackLiked {
+                track_id,
+                liked,
+                library_revision,
+            },
             LibraryReply::Roots(page) => Self::LibraryRoots { page },
             LibraryReply::Artists(page) => Self::LibraryArtists { page },
             LibraryReply::Albums(page) => Self::LibraryAlbums { page },
@@ -1230,6 +1249,49 @@ mod tests {
             }
         ));
         assert_eq!(SourceKind::parse("stream"), Some(SourceKind::Stream));
+    }
+
+    #[test]
+    fn liked_mutation_requires_boolean_state_and_revision_and_replies_with_revision() {
+        let command = serde_json::json!({
+            "id": 1, "command": "set_track_liked", "track_id": 7,
+            "liked": true, "library_revision": 2
+        });
+        assert!(matches!(
+            serde_json::from_value::<Request>(command.clone())
+                .unwrap()
+                .command,
+            Command::SetTrackLiked {
+                track_id: 7,
+                liked: true,
+                library_revision: 2
+            }
+        ));
+        for field in ["track_id", "liked", "library_revision"] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
+        }
+        for value in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let mut invalid = command.clone();
+            invalid["liked"] = value;
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
+        let response = Response::from(LibraryReply::TrackLiked {
+            track_id: 7,
+            liked: true,
+            library_revision: 3,
+        });
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "kind": "track_liked", "track_id": 7, "liked": true, "library_revision": 3
+            })
+        );
     }
 
     #[test]
@@ -1525,7 +1587,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 17);
+        assert_eq!(VERSION, 18);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

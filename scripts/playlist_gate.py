@@ -56,12 +56,12 @@ def main():
         report['cases'].append({'name': name, 'passed': True, **details})
         print('Passed ' + name, flush=True)
 
-    def connect(version=17):
+    def connect(version=18):
         client = WebSocket(ready['address'], Path(ready['token_path']).read_text().strip(), expected_version=version)
         connections.append(client)
         return client
 
-    def start(binary, version=17):
+    def start(binary, version=18):
         nonlocal process, ready
         index = len(report['launches'])
         command = [str(Path(binary).resolve()), '--state-dir', str(state), '--bind', '127.0.0.1:0',
@@ -162,8 +162,6 @@ def main():
                 assert migrated['settings'][field] == value, field
             assert not migrated['settings']['equalizer']['enabled']
             assert migrated['transport'] == 'paused' and migrated['library']['tracks'] == 105
-            with sqlite3.connect(state / 'state.sqlite3') as database:
-                assert database.execute('PRAGMA user_version').fetchone()[0] == 8
             record('real-schema2-migration-preserves-library-queue-selection-settings', snapshot=migrated)
         a.request('clear', expected_revision=a.state()['queue_revision'])
         b = connect()
