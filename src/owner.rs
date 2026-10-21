@@ -804,6 +804,8 @@ impl Actor {
             }
         }
         let pending_plays = restore_plays(&mut store, &mut player, selected);
+        // The restored row already holds the restored play's listened time.
+        let checkpointed = player.open_play();
         if resume {
             player.play();
         }
@@ -852,7 +854,7 @@ impl Actor {
             stats_revision,
             pending_plays,
             retrying_plays: false,
-            checkpointed: None,
+            checkpointed,
         };
         actor.publish();
         Ok(actor)

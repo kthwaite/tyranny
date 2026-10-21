@@ -1062,6 +1062,28 @@ async fn restart_continues_the_restored_play() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_play_is_not_checkpointed_again_until_it_moves() {
+    let mut fixture = Fixture::new();
+    fixture.index_frames(&["a"], TEN_SECONDS).await;
+    let first = fixture.queue_library().await;
+    fixture.play_to(first, 48_000).await;
+    fixture.stop().await;
+    let mut actor = Actor::open(OwnerConfig {
+        database_path: fixture.database(),
+        output: OutputConfig::Capture {
+            path: fixture.root.join("capture.f32"),
+            clocked: true,
+        },
+    })
+    .unwrap();
+    assert!(actor.player.open_play().is_some());
+    // The first 30 s tick after the restart: the row already holds this time.
+    actor.checkpoint_play();
+    assert!(actor.pending_plays.is_empty());
+    actor.library.shutdown().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_closes_other_open_rows_as_stopped() {
     let mut fixture = Fixture::new();
     fixture.index_frames(&["a", "b"], TEN_SECONDS).await;
