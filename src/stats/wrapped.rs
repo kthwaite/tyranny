@@ -3,8 +3,8 @@
 use super::{
     period::{Date, Zone, bounds, local},
     report::{
-        Names, Tallies, Thresholds, lapsed_gap_days, listed, rank, ranked_track, span_days,
-        station_list,
+        Names, Tallies, Thresholds, lapsed_gap_days, listed, rank, ranked_track, scaled_plays,
+        span_days, station_list,
     },
     rows::{LibraryIndex, PlayRow, artist_key},
 };
@@ -40,9 +40,11 @@ struct Span {
     first: Option<i64>,
     last_before: Option<i64>,
     first_in_year: Option<i64>,
+    /// Counted plays before the year.
+    before: u64,
 }
 
-/// The index of the first maximum, so ties go to the earliest.
+/// The index of the first maximum, so ties go to the earliest weekday, then band.
 fn first_max(values: &[u64]) -> usize {
     let mut best = 0;
     for (index, &value) in values.iter().enumerate() {
@@ -76,8 +78,8 @@ pub(crate) fn wrapped(
     let mut tallies = Tallies::default();
     let mut listened_ms = 0;
     let mut plays = 0;
-    let mut weekdays = [0u64; 7];
-    let mut bands = [0u64; 24 / BAND_HOURS];
+    // Listened time by weekday, then by 3-hour band.
+    let mut slots = [[0u64; 24 / BAND_HOURS]; 7];
     let mut stations: HashMap<&str, u64> = HashMap::new();
     let mut months: Vec<Month> = (0..12).map(|_| Month::default()).collect();
     let mut spans: HashMap<String, Span> = HashMap::new();
@@ -97,6 +99,7 @@ pub(crate) fn wrapped(
                             .map_or(row.played_at, |t| t.min(row.played_at)),
                     );
                 } else {
+                    span.before += 1;
                     span.last_before = Some(
                         span.last_before
                             .map_or(row.played_at, |t| t.max(row.played_at)),
@@ -111,8 +114,7 @@ pub(crate) fn wrapped(
         let month = &mut months[usize::from(at.date.month) - 1];
         if let Some(ms) = row.listened_ms {
             listened_ms += ms;
-            weekdays[usize::from(at.weekday)] += ms;
-            bands[usize::from(at.hour) / BAND_HOURS] += ms;
+            slots[usize::from(at.weekday)][usize::from(at.hour) / BAND_HOURS] += ms;
             month.listened_ms += ms;
             let key = artist_key(&row.artist);
             if !key.is_empty() {
@@ -190,9 +192,13 @@ pub(crate) fn wrapped(
             listened_ms: t.listened_ms,
         });
 
-    let peak_time = (listened_ms >= PEAK_MIN_MS).then(|| PeakTime {
-        weekday: first_max(&weekdays) as u8,
-        band_start_hour: (first_max(&bands) * BAND_HOURS) as u8,
+    let peak_time = (listened_ms >= PEAK_MIN_MS).then(|| {
+        let cells: Vec<u64> = slots.iter().flatten().copied().collect();
+        let best = first_max(&cells);
+        PeakTime {
+            weekday: (best / slots[0].len()) as u8,
+            band_start_hour: (best % slots[0].len() * BAND_HOURS) as u8,
+        }
     });
 
     let most_skipped = tracks
@@ -212,22 +218,31 @@ pub(crate) fn wrapped(
             track_id: library.tracks.get(key).copied(),
         });
 
-    // A lapsed love that returned: no plays for G before its first play this year.
-    let gap = lapsed_gap_days(span_days(first_play, through), thresholds);
-    let comeback = artists
-        .iter()
-        .filter(|(_, t)| t.plays >= COMEBACK_MIN_PLAYS)
-        .filter_map(|(key, t)| {
-            let span = spans.get(key)?;
-            let silent = (span.first_in_year? - span.last_before?).max(0) as u64 / 86_400;
-            (silent >= gap).then_some((key, t, silent))
+    // A lapsed love that returned: enough plays before, and no plays for G before its first
+    // play this year. Needs the same history as lapsed loves.
+    let history_days = span_days(first_play, through);
+    let comeback = (history_days >= thresholds.lapsed_min_span_days)
+        .then(|| {
+            let gap = lapsed_gap_days(history_days, thresholds);
+            let love = thresholds
+                .lapsed_plays_floor
+                .max(scaled_plays(history_days, thresholds));
+            artists
+                .iter()
+                .filter(|(_, t)| t.plays >= COMEBACK_MIN_PLAYS)
+                .filter_map(|(key, t)| {
+                    let span = spans.get(key)?;
+                    let silent = (span.first_in_year? - span.last_before?).max(0) as u64 / 86_400;
+                    (span.before >= love && silent >= gap).then_some((key, t, silent))
+                })
+                .max_by(|a, b| a.1.plays.cmp(&b.1.plays).then_with(|| b.0.cmp(a.0)))
+                .map(|(_, t, silent)| Comeback {
+                    name: t.names.display(),
+                    plays: t.plays,
+                    gap_days: silent,
+                })
         })
-        .max_by(|a, b| a.1.plays.cmp(&b.1.plays).then_with(|| b.0.cmp(a.0)))
-        .map(|(_, t, silent)| Comeback {
-            name: t.names.display(),
-            plays: t.plays,
-            gap_days: silent,
-        });
+        .flatten();
 
     let top_station = station_list(stations)
         .into_iter()
@@ -436,6 +451,15 @@ mod tests {
     }
 
     #[test]
+    fn discovery_ignores_artists_below_five_plays_whatever_their_time() {
+        let mut rows = vec![listened(play(T0 + DAY, "Long", "L"), 9_000_000)];
+        rows.extend(plays_of(T0 + 2 * DAY, 3, "Long", "L"));
+        rows.extend(plays_of(T0 + 3 * DAY, 5, "Short", "S"));
+        let found = year_2026(&rows).discovery.expect("discovery");
+        assert_eq!(found.name, "Short");
+    }
+
+    #[test]
     fn discovery_needs_five_counted_plays() {
         let rows = plays_of(T0 + DAY, 4, "New", "N");
         assert!(year_2026(&rows).discovery.is_none());
@@ -454,6 +478,28 @@ mod tests {
     }
 
     #[test]
+    fn peak_time_is_the_busiest_slot_not_two_separate_maxima() {
+        // Tuesday has the most time (6 h, all at 09:00). Wednesday and Thursday tie
+        // at 5 h each in the 18:00 band. Independent maxima would say Tuesday 18:00.
+        let rows = vec![
+            listened(play(T0 + 5 * DAY + 9 * 3600, "A", "A"), 6 * HOUR_MS),
+            listened(play(T0 + 6 * DAY + 19 * 3600, "B", "B"), 5 * HOUR_MS),
+            listened(play(T0 + 7 * DAY + 19 * 3600, "C", "C"), 5 * HOUR_MS),
+        ];
+        let peak = year_2026(&rows).peak_time.expect("peak");
+        assert_eq!((peak.weekday, peak.band_start_hour), (1, 9));
+        // Now Wednesday and Thursday 18:00 hold 5 h each against Tuesday's 4 h.
+        // The tie goes to the earlier weekday.
+        let rows = vec![
+            listened(play(T0 + 5 * DAY + 9 * 3600, "A", "A"), 4 * HOUR_MS),
+            listened(play(T0 + 6 * DAY + 19 * 3600, "B", "B"), 5 * HOUR_MS),
+            listened(play(T0 + 7 * DAY + 19 * 3600, "C", "C"), 5 * HOUR_MS),
+        ];
+        let peak = year_2026(&rows).peak_time.expect("peak");
+        assert_eq!((peak.weekday, peak.band_start_hour), (2, 18));
+    }
+
+    #[test]
     fn peak_time_needs_ten_hours() {
         let rows = vec![listened(play(T0 + DAY, "A", "A"), 10 * HOUR_MS - 1)];
         assert!(year_2026(&rows).peak_time.is_none());
@@ -465,17 +511,21 @@ mod tests {
     fn most_skipped_is_the_track_with_most_skips_from_five() {
         let mut rows: Vec<_> = (0..5).map(|i| skip(T0 + DAY + i, "A", "Hated")).collect();
         rows.extend((0..4).map(|i| skip(T0 + 2 * DAY + i, "B", "Meh")));
-        // A skim is not a skip, and radio never is.
+        // A skim is not a skip, and a skipped radio play never is.
         rows.push(PlayRow {
             listened_ms: Some(1_000),
             ..skip(T0 + 3 * DAY, "A", "Hated")
+        });
+        rows.push(PlayRow {
+            radio: true,
+            ..skip(T0 + 3 * DAY + 1, "A", "Hated")
         });
         let found = year_2026(&rows).most_skipped.expect("most skipped");
         assert_eq!(
             (found.title.as_str(), found.skips, found.started),
             ("Hated", 5, 5)
         );
-        rows.pop();
+        rows.truncate(rows.len() - 2);
         rows.remove(0);
         assert!(year_2026(&rows).most_skipped.is_none());
     }
@@ -496,15 +546,17 @@ mod tests {
     }
 
     #[test]
-    fn comeback_needs_a_gap_before_this_year() {
-        // 760 days of history to `now` make G = 190 days.
-        let early = T0 - 400 * DAY;
-        let mut rows = plays_of(early, 1, "Steady", "S");
-        // "Gone" last played 200 days before the year, then returns with 10 plays.
-        rows.extend(plays_of(T0 - 200 * DAY, 1, "Gone", "G"));
+    fn comeback_needs_a_lapsed_love_with_a_gap_before_this_year() {
+        // 760 days of history to `now` make G = 190 days and a love 62 plays.
+        let mut rows = plays_of(T0 - 400 * DAY, 1, "Steady", "S");
+        // "Gone" is a love: 62 plays, the last 200 days before the year. It returns with 10.
+        rows.extend(plays_of(T0 - 200 * DAY - 61 * 3600, 62, "Gone", "G"));
         rows.extend(plays_of(T0 + 10 * DAY, 10, "Gone", "G"));
-        // "Recent" played 20 days before the year: no gap, however many plays.
-        rows.extend(plays_of(T0 - 20 * DAY, 1, "Recent", "R"));
+        // "Thin" has one earlier play 200 days before: a gap, but no love.
+        rows.extend(plays_of(T0 - 200 * DAY, 1, "Thin", "T"));
+        rows.extend(plays_of(T0 + 10 * DAY, 30, "Thin", "T"));
+        // "Recent" is a love played 20 days before the year: no gap.
+        rows.extend(plays_of(T0 - 20 * DAY - 61 * 3600, 62, "Recent", "R"));
         rows.extend(plays_of(T0 + 11 * DAY, 30, "Recent", "R"));
         // "Fresh" has no history at all.
         rows.extend(plays_of(T0 + 12 * DAY, 40, "Fresh", "F"));
@@ -516,8 +568,18 @@ mod tests {
     }
 
     #[test]
+    fn no_comeback_before_ninety_days_of_history() {
+        let mut rows = plays_of(T0 - 60 * DAY, 10, "Gone", "G");
+        rows.extend(plays_of(T0 + DAY, 10, "Gone", "G"));
+        // 80 days of history at `now`.
+        assert!(run(&rows, 2026, T0 + 20 * DAY).comeback.is_none());
+        // 100 days of history: G = 30 days, the love floor is 10 plays.
+        assert!(run(&rows, 2026, T0 + 40 * DAY).comeback.is_some());
+    }
+
+    #[test]
     fn comeback_needs_ten_plays() {
-        let mut rows = plays_of(T0 - 400 * DAY, 1, "Gone", "G");
+        let mut rows = plays_of(T0 - 400 * DAY, 62, "Gone", "G");
         rows.extend(plays_of(T0 + 10 * DAY, 9, "Gone", "G"));
         assert!(year_2026(&rows).comeback.is_none());
     }

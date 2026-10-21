@@ -259,12 +259,12 @@ Each data point is optional and absent when its data falls below a minimum.
 | `listened_ms`, `plays`, `artists`, `tracks` | Year totals. | — |
 | `top_artists` | Top 5 by listened time, each with plays, listened time, and share of the year's time. | 1 artist |
 | `top_tracks` | Top 5 by counted plays, each with plays. | 1 track |
-| `discovery` | The artist first heard this year with the most listened time this year, with first-play date. | ≥ 5 counted plays |
-| `peak_time` | The busiest weekday and the busiest 3-hour band by listened time ("Tuesday evenings"). | ≥ 10 h listened in the year |
+| `discovery` | Among artists first heard this year (first counted play ever) with at least 5 counted plays this year, the one with the most listened time this year, with first-play date. | ≥ 5 counted plays |
+| `peak_time` | The busiest weekday × 3-hour slot by listened time ("Tuesday evenings"). Ties go to the earlier weekday, then the earlier band. | ≥ 10 h listened in the year |
 | `most_skipped` | The track with the most skips this year, with its skip count. | ≥ 5 skips |
-| `comeback` | A lapsed love that returned: an artist with no plays for G before its first play this year (G as for lapsed loves) and the most plays this year among such artists. | ≥ 10 counted plays this year |
+| `comeback` | A lapsed love that returned: an artist with at least the lapsed-love play floor `max(10, 150 × min(S, 5 y) ÷ 5 y)` of counted plays before the year and no plays for G before its first play this year, with the most plays this year among such artists. S and G are measured to the report's `through`. None while S < 90 days. | ≥ 10 counted plays this year |
 | `top_station` | The station with the most listened time. | ≥ 1 h |
-| `months` | For each month, its listened time and top artist. | ≥ 3 months with plays |
+| `months` | For each month with a counted play (sparse, not zero-filled), its listened time and top artist. | ≥ 3 months with plays |
 
 If the year has fewer than 50 counted plays, the client shows one slide, "Not enough
 listening yet for a Wrapped", and an exit.

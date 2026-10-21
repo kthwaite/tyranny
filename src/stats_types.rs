@@ -139,7 +139,7 @@ pub struct Comeback {
     pub gap_days: u64,
 }
 
-/// One month of the year. `month` is 1 to 12.
+/// One month of the year. `month` is 1 to 12. Only months with a counted play are listed.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MonthTop {
     pub month: u8,
@@ -163,5 +163,6 @@ pub struct WrappedReport {
     pub most_skipped: Option<SkippedTrack>,
     pub comeback: Option<Comeback>,
     pub top_station: Option<StationTime>,
+    /// Sparse: only months with a counted play, not zero-filled.
     pub months: Option<Vec<MonthTop>>,
 }

@@ -174,6 +174,11 @@ pub(crate) fn span_days(first_play: Option<i64>, now: i64) -> u64 {
     first_play.map_or(0, |first| (now - first).max(0) as u64 / 86_400)
 }
 
+/// Plays that a history of `span_days` asks for, scaled up to `scale_plays` at `scale_span_days`.
+pub(crate) fn scaled_plays(span_days: u64, thresholds: &Thresholds) -> u64 {
+    thresholds.scale_plays * span_days.min(thresholds.scale_span_days) / thresholds.scale_span_days
+}
+
 /// The lapsed-love gap G, in days, for a history of `span_days`.
 pub(crate) fn lapsed_gap_days(span_days: u64, thresholds: &Thresholds) -> u64 {
     (span_days / 4).clamp(
@@ -344,14 +349,13 @@ pub(crate) fn report(
 
     let stations = station_list(stations);
 
-    let span_days = span_days(first_play, now);
-    let scaled = thresholds.scale_plays * span_days.min(thresholds.scale_span_days)
-        / thresholds.scale_span_days;
+    let history_days = span_days(first_play, now);
+    let scaled = scaled_plays(history_days, thresholds);
     let artist_id = |key: &String| library.artists.get(key).copied();
 
     let mut lapsed: Vec<_> = Vec::new();
-    if span_days >= thresholds.lapsed_min_span_days {
-        let gap_days = lapsed_gap_days(span_days, thresholds);
+    if history_days >= thresholds.lapsed_min_span_days {
+        let gap_days = lapsed_gap_days(history_days, thresholds);
         let cutoff = now - gap_days as i64 * 86_400;
         let min_plays = thresholds.lapsed_plays_floor.max(scaled);
         lapsed = history
@@ -433,7 +437,7 @@ pub(crate) fn report(
             .take(limit)
             .map(|(_, dive)| dive)
             .collect(),
-        history_span_days: span_days,
+        history_span_days: history_days,
     }
 }
 
