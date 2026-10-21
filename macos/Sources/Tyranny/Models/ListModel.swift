@@ -516,7 +516,7 @@ final class TrackLists {
         case .playlist(let id):
             guard let current = player.savedPlaylists.playlist(id: id) else { return nil }
             return playlist(current, player: player, navigation: navigation)
-        case .albums, .history, .stats, .upNext, .radio:
+        case .albums, .history, .stats, .upNext, .radio, .device:
             return nil
         }
     }

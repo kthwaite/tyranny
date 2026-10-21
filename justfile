@@ -30,10 +30,12 @@ test-server:
 
 # Build the SwiftUI client (debug).
 build-client:
+    scripts/build_mtp.sh
     swift build --package-path macos --scratch-path target/swift-client
 
 # Build the SwiftUI client with release optimizations.
 build-client-release:
+    scripts/build_mtp.sh
     swift build --package-path macos --scratch-path target/swift-client --configuration release
 
 # Run the Swift client test suite.

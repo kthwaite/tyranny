@@ -27,6 +27,15 @@ struct TrackColumn: Identifiable {
 @MainActor
 enum TrackColumns {
     static let status = "status"
+    static let devicePrefix = "device-sync-"
+
+    static func devices(_ model: DeviceSyncModel) -> [TrackColumn] {
+        model.devices.map { device in
+            TrackColumn(id: devicePrefix + device.id, title: device.name, width: 110, minWidth: 80) {
+                model.syncStatus(for: $0, deviceID: device.id)
+            }
+        }
+    }
 
     static let all: [TrackColumn] = [
         TrackColumn(id: status, title: "", width: 22, minWidth: 22, hideable: false) { _ in "" },
@@ -100,7 +109,7 @@ final class ColumnPreferences {
 
     /// A user choice. It is remembered even when the hidden set does not change.
     func setHidden(_ id: String, _ isHidden: Bool) {
-        guard TrackColumns.column(id)?.hideable == true else { return }
+        guard TrackColumns.column(id)?.hideable == true || id.hasPrefix(TrackColumns.devicePrefix) else { return }
         if !explicit.contains(id) {
             explicit.insert(id)
             defaults.set(explicit.sorted(), forKey: "explicitColumns")

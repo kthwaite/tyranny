@@ -94,6 +94,21 @@ class BundleTests(unittest.TestCase):
         subprocess.run([str(relocated / "Contents/MacOS/tyranny-server")], check=True,
                        env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=10)
 
+    def test_rebuilding_executable_replaces_previous_pinned_library(self):
+        utility, codec = self.chain()
+        self.invoke()
+        self.compile(utility, "int utility(void) { return 17; }",
+                     identity="@rpath/libavutil.61.dylib")
+        self.compile(self.macos / "tyranny-server",
+                     "int codec(void); int main(void) { return codec() == 18 ? 0 : 1; }",
+                     [codec], runpaths=[self.lib])
+        self.invoke()
+        subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
+                        str(self.macos / "tyranny-server")], check=True, capture_output=True)
+        shutil.rmtree(self.prefix)
+        subprocess.run([str(self.macos / "tyranny-server")], check=True,
+                       env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=10)
+
     def test_tracker_library_closure_uses_only_system_cpp_runtime(self):
         tracker = self.compile(
             self.lib / "libopenmpt.0.dylib", "int tracker(void) { return 9; }",

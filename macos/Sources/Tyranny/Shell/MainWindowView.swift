@@ -119,7 +119,11 @@ struct MainWindowView: View {
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             Spacer()
-            filterField
+            if case .device = navigation.destination {
+                EmptyView()
+            } else {
+                filterField
+            }
         }
     }
 
@@ -157,7 +161,10 @@ struct MainWindowView: View {
     }
 
     @ViewBuilder private var mainArea: some View {
-        if !model.connected {
+        if case .device(let id) = navigation.destination {
+            DeviceView(model: model.devices, player: model, deviceID: id)
+                .id(id)
+        } else if !model.connected {
             ContentUnavailableView {
                 Label(model.connection == "connecting" ? "Connecting to Tyranny" : "Server Disconnected",
                       systemImage: "network")

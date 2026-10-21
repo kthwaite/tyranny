@@ -373,8 +373,8 @@ do {
                 try mouse(.leftMouseDragged, fraction: fractions[0] + (fractions[1] - fractions[0]) * Double(step) / 10)
             }
             try mouse(.leftMouseUp, fraction: fractions[1])
-        case "scroll-fraction":
-            // Moves the enclosing scroll area's vertical scroller, as VoiceOver does.
+        case "scroll-fraction", "scroll-horizontal-fraction":
+            // Moves the enclosing scroll area's scroller, as VoiceOver does.
             guard arguments.count >= 5, let fraction = Double(arguments[4]), (0...1).contains(fraction) else {
                 throw DriverFailure(message: "Scroll requires a fraction in 0...1")
             }
@@ -383,8 +383,9 @@ do {
                 guard let parent = attribute(element, kAXParentAttribute) else { area = nil; break }
                 area = (parent as! AXUIElement)
             }
-            guard let area, let bar = attribute(area, kAXVerticalScrollBarAttribute) else {
-                throw DriverFailure(message: "No vertical scroll bar for \(arguments[3])")
+            let axis = action == "scroll-horizontal-fraction" ? kAXHorizontalScrollBarAttribute : kAXVerticalScrollBarAttribute
+            guard let area, let bar = attribute(area, axis) else {
+                throw DriverFailure(message: "No requested scroll bar for \(arguments[3])")
             }
             try check(AXUIElementSetAttributeValue(bar as! AXUIElement, kAXValueAttribute as CFString,
                                                    NSNumber(value: fraction)), "Set scroll position")

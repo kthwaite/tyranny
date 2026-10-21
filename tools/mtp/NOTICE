@@ -1,0 +1,34 @@
+Tyranny MTP helper native dependencies
+
+The internal/mtp Go transport is copied from github.com/ganeshrvel/go-mtpfs,
+commit 1c3302b3c476f69e787a0339122a804dd518a007, the revision used by
+OpenMTP's kalam native module alongside go-mtpx commit
+18f12db021cc4256396748dbd2996d15853d7033.
+Source: https://github.com/ganeshrvel/go-mtpfs/tree/1c3302b3c476f69e787a0339122a804dd518a007/mtp
+License: BSD-3-Clause, reproduced in internal/mtp/LICENSE.
+Local modifications: supported Sony Walkman vendor/product selection before
+opening USB; MTP interface-string verification before claiming the interface;
+propagation of interface-claim failure; no USB reset on close failure.
+The high-level filesystem and FUSE packages are not included.
+go-mtpx itself and Electron are not linked.
+
+USB Go binding: github.com/ganeshrvel/usb,
+commit 14d96f5ae403, pinned in go.mod and go.sum.
+Source: https://github.com/ganeshrvel/usb/tree/14d96f5ae403
+License: BSD-3-Clause, bundled as go-usb-LICENSE.
+
+libusb 1.0.30, dynamically linked. LGPL-2.1-or-later.
+Source: https://github.com/libusb/libusb/releases/tag/v1.0.30
+The complete unmodified source archive and COPYING license accompany this
+helper in the application Resources/MTP directory. Build configuration:
+macOS deployment target 14.0, shared library enabled, static library disabled,
+pipe2 detection disabled so newer SDKs do not require macOS 27 at runtime.
+The build_mtp.sh script records the pinned source checksum and compiler flags.
+To replace libusb, build a compatible libusb-1.0.0.dylib from that source,
+replace Contents/Frameworks/libusb-1.0.0.dylib, set its install ID to
+@loader_path/libusb-1.0.0.dylib using install_name_tool, and ad-hoc codesign
+that library and the modified app. Tyranny imposes no prohibition on such
+replacement for debugging modifications to the LGPL library.
+
+Go standard library and runtime: BSD-3-Clause, bundled as go-LICENSE.
+Source: https://go.dev/dl/ (build toolchain version recorded by go version -m).

@@ -10,10 +10,11 @@ Playback controls include server-owned Next/Previous and toggle, occurrence-boun
 
 ## Development commands
 
-Install Rust, Xcode command-line tools, Python 3.9+, and optionally `just`
-(`brew install just`). Server build/test recipes compile pinned FFmpeg and
-libopenmpt from source; Homebrew FFmpeg and pkg-config are not required. The first
-build needs network access; subsequent builds reuse the verified native cache.
+Install Rust, Xcode command-line tools, Python 3.9+, Go 1.23+, `pkg-config`, and
+optionally `just` (`brew install just`). Server build/test recipes compile pinned
+FFmpeg and libopenmpt from source; Homebrew FFmpeg is not required. Client builds
+also build the USB device helper against pinned libusb. First builds need network
+access; subsequent builds reuse the verified native cache.
 
 | Command | Action |
 | --- | --- |
@@ -21,8 +22,8 @@ build needs network access; subsequent builds reuse the verified native cache.
 | `just build-server` | Build the Rust server and companion CLI tools (debug). |
 | `just build-server-release` | Build release Rust binaries against pinned, source-built FFmpeg. |
 | `just test-server` | Run all Rust unit and integration tests; hardware tests remain opt-in. |
-| `just build-client` | Build the SwiftUI client (debug). |
-| `just build-client-release` | Build the SwiftUI client with release optimizations. |
+| `just build-client` | Build the SwiftUI client and USB device helper (debug). |
+| `just build-client-release` | Build the optimized SwiftUI client and USB device helper. |
 | `just test-client` | Run the Swift client test suite. |
 | `just build` | Build both components (debug). |
 | `just build-release` | Build both components with release optimizations. |
@@ -41,6 +42,18 @@ To package the development app, stop the app/daemon before running
 native libraries with a debug client. `scripts/build_macos.sh release` builds both
 components in release mode and assembles a self-contained
 `target/release/Tyranny.app`. An optional second argument selects the app destination.
+
+### Sony Walkman sync
+
+The NW-A306 appears in the sidebar while connected in USB File Transfer mode.
+Browse its existing audio, choose internal storage or SD card, drag library songs
+onto it for content-deduplicated copying, and explicitly delete selected device
+copies. A bottom capacity bar shows music/other/free space; connected-device
+columns show verified membership in normal track tables. This is local macOS
+USB management, independent of the playback wire protocol. See
+[device sync](docs/device-sync.md) for setup, safety guarantees, native build
+dependencies, and hardware verification details.
+
 
 ### Tracker modules
 

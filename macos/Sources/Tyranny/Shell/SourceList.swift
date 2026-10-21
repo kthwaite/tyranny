@@ -1,13 +1,14 @@
 import SwiftUI
 import TyrannyCore
 
-/// The native sidebar: LIBRARY, PLAYING and PLAYLISTS. While the player bar's art is
+/// The native sidebar: LIBRARY, PLAYING, DEVICES and PLAYLISTS. While the player bar's art is
 /// expanded, a sidebar-width square of it sits at the foot, below the scrolling list.
 ///
 /// Tracks dropped on Up Next are appended to the queue. Tracks dropped on a regular playlist
 /// are appended to it; hovering a playlist during a drag opens it, to choose an insertion
 /// point. Smart playlists refuse drops.
 struct SourceList: View {
+    @Environment(\.themeColours) private var colours
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
     /// Always true while the sidebar renders; passed so placement is decided in one place.
@@ -52,6 +53,25 @@ struct SourceList: View {
             }
             Section("Playing") {
                 ForEach(Destination.playing, id: \.self) { row($0) }
+            }
+            Section("Devices") {
+                ForEach(model.devices.devices) { deviceRow($0) }
+                if model.devices.devices.isEmpty {
+                    Label("No Connected Devices", systemImage: "ipod")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("source-devices-empty")
+                }
+                if let error = model.devices.error {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(colours.error)
+                        .lineLimit(3)
+                        .help(error)
+                        .accessibilityIdentifier("source-devices-error")
+                    Button("Refresh Devices") { Task { await model.devices.refresh() } }
+                        .disabled(model.devices.busy)
+                        .accessibilityIdentifier("source-devices-retry")
+                }
             }
             Section("Playlists") {
                 ForEach(playlists.rows) { playlistRow($0) }
@@ -147,6 +167,25 @@ struct SourceList: View {
             }
     }
 
+    private func deviceRow(_ device: MTPDevice) -> some View {
+        let destination = Destination.device(device.id)
+        return Label(device.name, systemImage: destination.systemImage)
+            .lineLimit(1)
+            .badge(model.devices.hasInventory(device.id) ? Text(DisplayFormat.count(device.songs.count)) : nil)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .trackDragHover(model: model, enabled: model.hasLocalLibrary && !model.devices.busy, destination: nil,
+                            hover: {},
+                            drop: { token in
+                                guard model.dropTracksOnDevice(token: token, deviceID: device.id) else { return false }
+                                navigation.destination = destination
+                                return true
+                            })
+            .tag(destination)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier(destination.identifier)
+            .help("Drop tracks to copy them to the selected storage. Click to browse music and choose storage.")
+    }
+
     /// The expanded now-playing art. Hover shows ⤡; clicking returns it to the player bar.
     private var largeArt: some View {
         let dimension = max(width - 16, 1)
@@ -206,7 +245,7 @@ struct SourceList: View {
         case .genres: return counts.genres
         case .upNext: return model.upNext.upcomingCount.map { UInt64($0) }
         // History, Stats and Radio have no count.
-        case .recent, .history, .stats, .radio, .playlist: return nil
+        case .recent, .history, .stats, .radio, .playlist, .device: return nil
         }
     }
 

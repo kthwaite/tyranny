@@ -28,6 +28,9 @@ struct VirtualTrackTable: NSViewRepresentable {
     /// Read in the parent's body so a ⌘L reveal reaches the table.
     let revealToken: UInt64?
     let selectionToken: UInt64
+    var deviceGeneration: UInt64 = 0
+
+    var columns: [TrackColumn] { TrackColumns.all + TrackColumns.devices(player.devices) }
 
     var identifier: String { "track-table-\(list.key)" }
 
@@ -59,7 +62,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         gutter.headerToolTip = "Album"
         gutter.isHidden = true
         table.addTableColumn(gutter)
-        for column in TrackColumns.all {
+        for column in columns {
             let native = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.id))
             native.title = column.title
             native.width = column.width
@@ -132,6 +135,8 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var shownPlaying: UInt64?
         private var shownColours: UInt64?
         private var shownHidden: Set<String>?
+        private var shownDevices: UInt64?
+        private var deviceColumns: [TrackColumn] = []
         private var shownBlocks: Bool?
         private var reported: Range<Int>?
         /// The reveal request last handled. The outer nil: none seen yet.
@@ -165,7 +170,30 @@ struct VirtualTrackTable: NSViewRepresentable {
             updating = true
             defer { updating = false }
             let blocks = parent.list.showsAlbumBlocks
-            if parent.hidden != shownHidden || parent.explicit != shownExplicit || blocks != shownBlocks || parent.list.sortKeys != shownSort {
+            let devicesChanged = shownDevices != parent.deviceGeneration
+            if devicesChanged {
+                shownDevices = parent.deviceGeneration
+                let wanted = TrackColumns.devices(parent.player.devices)
+                deviceColumns = wanted
+                let ids = Set(wanted.map(\.id))
+                for column in table.tableColumns where column.identifier.rawValue.hasPrefix(TrackColumns.devicePrefix)
+                    && !ids.contains(column.identifier.rawValue) {
+                    table.removeTableColumn(column)
+                }
+                for column in wanted {
+                    if let existing = table.tableColumns.first(where: { $0.identifier.rawValue == column.id }) {
+                        existing.title = column.title
+                    } else {
+                        let native = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.id))
+                        native.title = column.title
+                        native.width = column.width
+                        native.minWidth = column.minWidth
+                        native.headerCell.setAccessibilityIdentifier("track-header-\(column.id)")
+                        table.addTableColumn(native)
+                    }
+                }
+            }
+            if devicesChanged || parent.hidden != shownHidden || parent.explicit != shownExplicit || blocks != shownBlocks || parent.list.sortKeys != shownSort {
                 shownSort = parent.list.sortKeys
                 shownHidden = parent.hidden
                 shownExplicit = parent.explicit
@@ -226,6 +254,12 @@ struct VirtualTrackTable: NSViewRepresentable {
                 if !reloadedAll { reloadGutter() }
             }
             shownPlaying = parent.playingTrackID
+            if devicesChanged {
+                let indexes = IndexSet(table.tableColumns.indices.filter {
+                    table.tableColumns[$0].identifier.rawValue.hasPrefix(TrackColumns.devicePrefix)
+                })
+                if !indexes.isEmpty { reloadVisible(columns: indexes) }
+            }
             if parent.colours.revision != shownColours {
                 shownColours = parent.colours.revision
                 table.enumerateAvailableRowViews { view, _ in
@@ -237,6 +271,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             if table.selectedRowIndexes != selected { table.selectRowIndexes(selected, byExtendingSelection: false) }
             applyReveal(parent.revealToken)
             reportVisible()
+            checkVisibleDeviceStatus()
         }
 
         private func columnIndex(_ id: String) -> Int? {
@@ -297,6 +332,20 @@ struct VirtualTrackTable: NSViewRepresentable {
             reported = range
             parent.list.visible(range)
             updateArtwork(range)
+            checkVisibleDeviceStatus()
+        }
+
+        private func checkVisibleDeviceStatus() {
+            guard !dismantled, parent.player.hasLocalLibrary, !parent.player.devices.devices.isEmpty,
+                  let table else { return }
+            let visible = table.rows(in: table.visibleRect)
+            guard visible.length > 0 else { return }
+            let tracks = (visible.location..<visible.location + visible.length).compactMap { row -> TrackSummary? in
+                guard case .track(let position, _)? = layout.row(at: row),
+                      let item = cache.loadedRow(at: position), item.available else { return nil }
+                return item.track
+            }
+            parent.player.devices.check(tracks)
         }
 
         // MARK: Artwork
@@ -357,7 +406,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             guard let tableColumn else { return nil }
             let id = tableColumn.identifier.rawValue
             if id == AlbumBlockCell.columnID { return gutterCell(tableView, row: row) }
-            guard let column = TrackColumns.column(id) else { return nil }
+            guard let column = TrackColumns.column(id) ?? deviceColumns.first(where: { $0.id == id }) else { return nil }
             let cell = tableView.makeView(withIdentifier: TrackCellView.reuse, owner: nil) as? TrackCellView
                 ?? TrackCellView()
             guard case .track(let position, let blockIndex)? = display else {
@@ -380,7 +429,13 @@ struct VirtualTrackTable: NSViewRepresentable {
                 cell.toolTip = nil
                 return cell
             }
-            let text = column.value(item.track)
+            let text: String
+            if column.id.hasPrefix(TrackColumns.devicePrefix) {
+                text = !parent.player.hasLocalLibrary ? "Local files only"
+                    : !item.available ? "Unavailable" : column.value(item.track)
+            } else {
+                text = column.value(item.track)
+            }
             // Compilation blocks keep a track Artist column even when the table's is hidden.
             let artist = column.id == "title" && blockIndex != nil && item.track.compilation
                 && parent.hidden.contains("artist") ? item.track.artist : nil
@@ -491,7 +546,7 @@ struct VirtualTrackTable: NSViewRepresentable {
 
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
-            for column in TrackColumns.all where column.hideable {
+            for column in parent.columns where column.hideable {
                 let item = NSMenuItem(title: column.title, action: #selector(toggleColumn(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = column.id
@@ -505,6 +560,15 @@ struct VirtualTrackTable: NSViewRepresentable {
             ColumnPreferences.shared.toggle(id, sortFields: parent.list.sortKeys.map(\.field))
         }
 
+        private func loadedDevicePaths(_ positions: IndexSet) -> [String]? {
+            guard positions.count <= 500 else { return nil }
+            var paths: [String] = []
+            for position in positions {
+                guard let row = cache.loadedRow(at: position), row.available, row.track.path.hasPrefix("/") else { return nil }
+                paths.append(row.track.path)
+            }
+            return paths
+        }
         // MARK: Drag
 
         func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
@@ -516,7 +580,8 @@ struct VirtualTrackTable: NSViewRepresentable {
                     let selection = try parent.list.encode(positions)
                     dragToken = parent.player.beginSelectionDrag(selection, count: positions.count,
                                                                  label: parent.list.displayName ?? parent.list.destination.title,
-                                                                 trackIDs: parent.list.loadedTrackIDs(positions))
+                                                                 trackIDs: parent.list.loadedTrackIDs(positions),
+                                                                 paths: loadedDevicePaths(positions))
                     if dragToken != nil { parent.list.dragBegan(positions: positions) }
                 } catch {
                     parent.player.message = (error as? LocalizedError)?.errorDescription

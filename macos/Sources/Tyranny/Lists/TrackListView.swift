@@ -48,7 +48,8 @@ struct TrackListView: View {
                 list: list, player: player, colours: player.theme.tableColours, generation: list.cache.generation, epoch: list.epoch,
                 layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden, explicit: columns.explicit,
                 playingTrackID: player.snapshot?.now_playing?.track_id,
-                revealToken: list.revealRequest?.token, selectionToken: list.commandSelectionRevision)
+                revealToken: list.revealRequest?.token, selectionToken: list.commandSelectionRevision,
+                deviceGeneration: player.devices.generation)
                 .overlay { emptyState }
                 .overlay(alignment: .bottom) { reorderHint }
         }
@@ -164,7 +165,7 @@ struct TrackListView: View {
                 .accessibilityIdentifier("browser-toggle")
             }
             Menu {
-                ForEach(TrackColumns.all.filter(\.hideable)) { column in
+                ForEach((TrackColumns.all + TrackColumns.devices(player.devices)).filter(\.hideable)) { column in
                     Toggle(column.title, isOn: Binding(
                         get: { columns.isShown(column.id, sortFields: list.sortKeys.map(\.field)) },
                         set: { columns.setHidden(column.id, !$0) }))

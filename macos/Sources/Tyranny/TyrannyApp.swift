@@ -235,6 +235,7 @@ private struct MainWindow: View {
                 NativeRunsSmoke.startIfRequested(model, navigation: navigation)
                 NativeEqualizerSmoke.startIfRequested(model, navigation: navigation, openWindow: { openWindow(id: "equalizer") })
                 NativeRenderViews.startIfRequested(model, navigation: navigation)
+                NativeDeviceSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }
