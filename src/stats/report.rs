@@ -153,24 +153,23 @@ pub(crate) fn report(
         if row.counted {
             plays += 1;
             untimed_plays += u64::from(row.listened_ms.is_none());
-            if !artist.is_empty() {
-                let tally = artists.entry(artist.clone()).or_default();
-                tally.plays += 1;
-                tally.listened_ms += ms;
-                tally.names.add(&row.artist, row.played_at);
-            }
+        }
+        // Plays count only counted rows, but listened time sums every timed row.
+        if !artist.is_empty() {
+            let tally = artists.entry(artist.clone()).or_default();
+            tally.plays += u64::from(row.counted);
+            tally.listened_ms += ms;
+            tally.names.add(&row.artist, row.played_at);
         }
         // A play is started unless it is radio, from before schema 8, or a skim.
         let play_started = !row.radio && row.listened_ms.is_some_and(|ms| ms >= thresholds.skim_ms);
         let skipped = play_started && !row.counted && row.end_reason == Some(EndReason::Skipped);
         started += u64::from(play_started);
         skips += u64::from(skipped);
-        if !title.is_empty() && (row.counted || play_started) {
+        if !title.is_empty() {
             let tally = tracks.entry((artist, title)).or_default();
-            if row.counted {
-                tally.plays += 1;
-                tally.listened_ms += ms;
-            }
+            tally.plays += u64::from(row.counted);
+            tally.listened_ms += ms;
             tally.started += u64::from(play_started);
             tally.skips += u64::from(skipped);
             tally.artist.add(&row.artist, row.played_at);
@@ -191,12 +190,16 @@ pub(crate) fn report(
             },
         )
     };
+    // By plays, only entries with a counted play. By time, any entry with listened time.
+    let listed =
+        |plays: u64, listened_ms: u64, by_time: bool| plays > 0 || (by_time && listened_ms > 0);
     let artist_list = |by_time| {
-        rank(
-            artists.iter().map(|(k, t)| ranked_artist(k, t)).collect(),
-            by_time,
-            limit,
-        )
+        let items = artists
+            .iter()
+            .filter(|(_, t)| listed(t.plays, t.listened_ms, by_time))
+            .map(|(k, t)| ranked_artist(k, t))
+            .collect();
+        rank(items, by_time, limit)
     };
     let counted_tracks: Vec<_> = tracks.iter().filter(|(_, tally)| tally.plays > 0).collect();
     let ranked_track = |key: &(String, String), tally: &TrackTally| {
@@ -214,14 +217,12 @@ pub(crate) fn report(
         )
     };
     let track_list = |by_time| {
-        rank(
-            counted_tracks
-                .iter()
-                .map(|(k, t)| ranked_track(k, t))
-                .collect(),
-            by_time,
-            limit,
-        )
+        let items = tracks
+            .iter()
+            .filter(|(_, t)| listed(t.plays, t.listened_ms, by_time))
+            .map(|(k, t)| ranked_track(k, t))
+            .collect();
+        rank(items, by_time, limit)
     };
 
     // History before the period decides which artists are new.
@@ -251,10 +252,11 @@ pub(crate) fn report(
     let new_artists = rank(
         artists
             .iter()
-            .filter(|(key, _)| {
-                first_heard
-                    .get(*key)
-                    .is_some_and(|&first| first >= period.start)
+            .filter(|(key, tally)| {
+                tally.plays > 0
+                    && first_heard
+                        .get(*key)
+                        .is_some_and(|&first| first >= period.start)
             })
             .map(|(k, t)| ranked_artist(k, t))
             .collect(),
@@ -371,7 +373,7 @@ pub(crate) fn report(
         plays,
         listened_ms,
         untimed_plays,
-        artists: artists.len() as u64,
+        artists: artists.values().filter(|tally| tally.plays > 0).count() as u64,
         tracks: counted_tracks.len() as u64,
         skip_rate: (started > 0).then(|| skips as f64 / started as f64),
         top_artists_by_plays: artist_list(false),
@@ -638,6 +640,47 @@ mod tests {
         assert_eq!(report.top_artists_by_time[0].listened_ms, 1_800_000);
         assert_eq!(report.top_tracks_by_time[0].title, "b");
         assert_eq!(report.top_tracks_by_plays[0].title, "a");
+    }
+
+    #[test]
+    fn by_time_rankings_count_skipped_time_but_plays_stay_counted_only() {
+        let open = PlayRow {
+            end_reason: None,
+            counted: false,
+            ..listened(play(T0 + 3, "Heard", "a"), 30_000)
+        };
+        let untimed = PlayRow {
+            listened_ms: None,
+            end_reason: None,
+            ..play(T0 + 4, "Heard", "a")
+        };
+        let rows = [
+            play(T0, "Heard", "a"),
+            skip(T0 + 1, "Skipped", "b", 600_000),
+            skip(T0 + 2, "Skipped", "b", 600_000),
+            open,
+            untimed,
+        ];
+        let report = month(&rows);
+        let by_time: Vec<_> = report
+            .top_artists_by_time
+            .iter()
+            .map(|a| (a.name.as_str(), a.plays, a.listened_ms))
+            .collect();
+        assert_eq!(by_time, [("Skipped", 0, 1_200_000), ("Heard", 2, 210_000)]);
+        assert_eq!(report.top_tracks_by_time[0].title, "b");
+        assert_eq!(report.top_tracks_by_time[0].plays, 0);
+        // By plays, an entry with no counted play is absent.
+        let by_plays: Vec<_> = report
+            .top_artists_by_plays
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(by_plays, ["Heard"]);
+        assert_eq!(report.top_artists_by_plays[0].listened_ms, 210_000);
+        assert_eq!(report.top_tracks_by_plays.len(), 1);
+        assert_eq!((report.artists, report.tracks, report.plays), (1, 1, 2));
+        assert!(report.new_artists.iter().all(|a| a.name == "Heard"));
     }
 
     #[test]

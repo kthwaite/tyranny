@@ -69,7 +69,9 @@ despotify. So tracking quality matters: nothing older backfills it.
   entry, or one announced song on a radio stream.
 - **Counted play**: a play that reached the count threshold (`count_threshold_frames`: half
   the duration or 240 s). Radio has its own threshold, below. Play counts, top lists, new
-  artists, lapsed loves and shallow dives use counted plays.
+  artists, lapsed loves and shallow dives use counted plays. Listened-time rankings (top
+  artists and tracks by time) are the exception: they sum the listened time of all timed
+  plays that carry the key, counted or not, so a track heard only as skips can still rank.
 - **Listened time**: audio of the play that output actually rendered. Paused time is not
   listened time. Seeking forward skips the time jumped over. Seeking back hears it again.
 - **End reason**: how a play ended.
@@ -227,7 +229,7 @@ every copy listed there.
 | `over_time` | Listened time per sub-bucket: All → years, Year → months, Month and Week → days, Day → hours. |
 | `heatmap` | 7 × 24 listened time, weekday × local hour, bucketed by `played_at`. *(My call: by time, not by play count, because accurate time is a goal.)* |
 | `new_artists` | Artist keys whose first counted play ever falls in the period, ordered by plays in the period, up to 25. |
-| `most_skipped` | Tracks with at least 3 non-radio, non-skim plays started in the period, ordered by skip rate then by skips, up to 10. |
+| `most_skipped` | Tracks with at least 3 non-radio, non-skim plays started in the period, with at least one skip, ordered by skip rate then by skips, up to 10. |
 | `stations` | Listened time per station in the period, junk included. |
 | `lapsed_loves` | All history, not scoped to the period. See the thresholds below. |
 | `shallow_dives` | All history, not scoped to the period. See the thresholds below. |
