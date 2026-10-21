@@ -100,7 +100,7 @@ pub(crate) struct Tallies {
 }
 impl Tallies {
     /// Tallies one row. Returns whether the play started and whether it was a skip.
-    /// A play is started unless it is radio, from before schema 8, or a skim.
+    /// A play is started unless it is radio, from before schema 8, a skim, or still open.
     pub(crate) fn add(&mut self, row: &PlayRow, thresholds: &Thresholds) -> (bool, bool) {
         let artist = artist_key(&row.artist);
         let title = artist_key(&row.title);
@@ -111,7 +111,9 @@ impl Tallies {
             tally.listened_ms += ms;
             tally.names.add(&row.artist, row.played_at);
         }
-        let started = !row.radio && row.listened_ms.is_some_and(|ms| ms >= thresholds.skim_ms);
+        let started = !row.radio
+            && row.end_reason.is_some()
+            && row.listened_ms.is_some_and(|ms| ms >= thresholds.skim_ms);
         let skipped = started && !row.counted && row.end_reason == Some(EndReason::Skipped);
         if !title.is_empty() {
             let tally = self.tracks.entry((artist, title)).or_default();
@@ -586,6 +588,18 @@ mod tests {
     }
 
     #[test]
+    fn open_plays_are_left_out_of_skip_stats() {
+        let open = PlayRow {
+            counted: false,
+            end_reason: None,
+            ..listened(play(T0, "A", "open"), 30_000)
+        };
+        let rows = [open, skip(T0 + 1, "A", "a", 30_000), play(T0 + 2, "A", "b")];
+        // 2 started, 1 skip. The open play has not ended, so it is not a start yet.
+        assert_eq!(month(&rows).skip_rate, Some(0.5));
+    }
+
+    #[test]
     fn skims_are_left_out_of_skip_stats() {
         let mut rows: Vec<PlayRow> = (0..20).map(|i| skip(T0 + i, "A", "scrub", 300)).collect();
         rows.push(play(T0 + 100, "A", "full"));
@@ -803,9 +817,10 @@ mod tests {
             skip(T0 + 2, "A", "often", 20_000),
             skip(T0 + 3, "A", "often", 20_000),
             play(T0 + 4, "A", "often"),
-            // Three starts, one skip, and an open play counted as started.
+            // Three starts, one skip, and an open play, which is not a start yet.
             skip(T0 + 5, "A", "some", 20_000),
             play(T0 + 6, "A", "some"),
+            play(T0 + 7, "A", "some"),
             PlayRow {
                 end_reason: None,
                 counted: false,
