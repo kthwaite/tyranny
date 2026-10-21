@@ -184,3 +184,11 @@ import Testing
     let state = try JSONDecoder().decode(ControlState.self, from: Data(text.utf8))
     #expect(state.history_revision == 5 && state.stats_revision == 9)
 }
+
+@Test func shallowDivePlaysScaleWithHistoryLikeTheServer() {
+    #expect(ShallowDive.minimumPlays(historySpanDays: 0) == 20)
+    #expect(ShallowDive.minimumPlays(historySpanDays: 243) == 20)
+    #expect(ShallowDive.minimumPlays(historySpanDays: 365) == 29)
+    #expect(ShallowDive.minimumPlays(historySpanDays: 1_826) == 150)
+    #expect(ShallowDive.minimumPlays(historySpanDays: 4_000) == 150)
+}

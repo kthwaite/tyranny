@@ -54,6 +54,13 @@ public struct ShallowDive: Codable, Sendable, Equatable {
     public let top_tracks: [String]
     public let library_tracks: UInt64?
     public let artist_id: UInt64?
+
+    /// The counted plays an artist needs, as the server's thresholds scale them:
+    /// `max(20, 150 × min(S, 5 years) ÷ 5 years)` for a history of S days.
+    public static func minimumPlays(historySpanDays: UInt64) -> UInt64 {
+        let fullSpan: UInt64 = 1_826
+        return max(20, 150 * min(historySpanDays, fullSpan) / fullSpan)
+    }
 }
 
 /// Everything the Stats page shows for one period.

@@ -164,8 +164,7 @@ private struct StatsReportView: View {
                 HStack(alignment: .top, spacing: 12) {
                     LapsedLovesPanel(loves: report.lapsed_loves, spanDays: report.history_span_days, plays: report.plays,
                                      open: openArtist)
-                    ShallowDivesPanel(dives: report.shallow_dives, spanDays: report.history_span_days, plays: report.plays,
-                                      open: openArtist)
+                    ShallowDivesPanel(dives: report.shallow_dives, spanDays: report.history_span_days, open: openArtist)
                 }
             }
         }
@@ -678,10 +677,10 @@ private struct StationsPanel: View {
     }
 }
 
-/// The all-history panels fill in once history spans this many days.
+/// Lapsed loves fill in once history spans this many days.
 private let historyDaysNeeded: UInt64 = 90
 
-/// "Not enough history yet": the empty state of an all-history panel while history is young.
+/// "Not enough history yet": the empty state of lapsed loves while history is young.
 /// With no plays at all, there is no first play to date the fill-in from.
 private struct YoungHistory: View {
     let identifier: String
@@ -732,13 +731,14 @@ private struct LapsedLovesPanel: View {
 private struct ShallowDivesPanel: View {
     let dives: [ShallowDive]
     let spanDays: UInt64
-    let plays: UInt64
     let open: (UInt64) -> Void
 
     var body: some View {
         Panel(title: "Shallow dives", identifier: "shallow-dives") {
             if dives.isEmpty {
-                YoungHistory(identifier: "shallow-dives", spanDays: spanDays, plays: plays, fallback: "No shallow dives")
+                // No 90-day wait: shallow dives need only enough plays of one artist.
+                EmptyPanel(identifier: "shallow-dives", title: "No shallow dives",
+                           detail: "An artist shows here once it has \(DisplayFormat.count(ShallowDive.minimumPlays(historySpanDays: spanDays))) plays, with 60% on its top three tracks")
             } else {
                 Ranked(rows: dives) { _, dive in
                     RankRow(rank: nil, name: dive.name, detail: detail(dive),

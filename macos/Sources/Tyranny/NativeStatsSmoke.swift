@@ -111,6 +111,10 @@ enum NativeStatsSmoke {
         try await drive("expect-text", "stats-lapsed-loves-empty-title", "Not enough history yet — fills in after 90 days")
         // With no plays at all, there is no first play to count 90 days from.
         try await drive("expect-text", "stats-lapsed-loves-empty-detail", "From 90 days after your first play")
+        // Shallow dives have no 90-day wait, only a play floor.
+        try await drive("expect-text", "stats-shallow-dives-empty-title", "No shallow dives")
+        try await drive("expect-text", "stats-shallow-dives-empty-detail",
+                        "An artist shows here once it has 20 plays, with 60% on its top three tracks")
         try await Task.sleep(for: .milliseconds(400))
         try capture("stats-empty")
         cases.append("native-stats-empty-history-shows-empty-states")
