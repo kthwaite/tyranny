@@ -15,6 +15,7 @@ final class StatsModel {
     var period: StatsPeriod {
         didSet {
             guard period != oldValue else { return }
+            shownAt = Date()
             defaults.set(period.kind.rawValue, forKey: Self.periodKindKey)
             if visible { fetchReport() }
         }
@@ -34,6 +35,8 @@ final class StatsModel {
     @ObservationIgnored private let defaults: UserDefaults
     /// The page is on screen. Only then does a new `stats_revision` refetch the report.
     @ObservationIgnored private var visible = false
+    /// When `period` was last chosen or shown. A period current then follows now on appear.
+    @ObservationIgnored private var shownAt = Date()
     /// nil while disconnected: the next snapshot is a new connection.
     @ObservationIgnored private var statsRevision: UInt64?
     @ObservationIgnored private var historyRevision: UInt64?
@@ -97,8 +100,12 @@ final class StatsModel {
         }
     }
 
-    /// The page calls these from `onAppear` and `onDisappear`.
+    /// The page calls these from `onAppear` and `onDisappear`. A page left on the current
+    /// period shows the current period again, however long the app has run.
     func appeared() {
+        let now = Date()
+        period = period.refreshed(shownAt: shownAt, now: now, calendar: calendar)
+        shownAt = now
         visible = true
         fetchReport()
     }

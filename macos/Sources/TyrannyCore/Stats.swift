@@ -206,6 +206,15 @@ public struct StatsPeriod: Equatable, Sendable {
         return next.start <= now
     }
 
+    /// The period to show when the page returns at `now`. A period that was current at
+    /// `shownAt` follows now, so a page left on this week shows the new week. Any other period
+    /// stays where the user left it.
+    public func refreshed(shownAt: Date, now: Date, calendar: Calendar) -> StatsPeriod {
+        guard !canStepForward(now: shownAt, calendar: calendar),
+              canStepForward(now: now, calendar: calendar) else { return self }
+        return .current(kind, now: now)
+    }
+
     /// The local date, `yyyy-MM-dd`: the server's period anchor.
     public func anchorString(calendar: Calendar) -> String {
         let parts = calendar.dateComponents([.year, .month, .day], from: anchor)

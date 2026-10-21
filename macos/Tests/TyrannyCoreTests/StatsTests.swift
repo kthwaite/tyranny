@@ -68,6 +68,23 @@ import Testing
         #expect(!StatsPeriod.current(.all, now: now).canStepForward(now: now, calendar: cal))
     }
 
+    @Test func aCurrentPeriodFollowsNowWhenThePageReturns() {
+        let cal = Self.calendar
+        let shown = Self.at(2026, 10, 25, 23)
+        let monday = Self.at(2026, 10, 26, 9)
+        let week = StatsPeriod.current(.week, now: shown)
+        // Shown as the current week on Sunday night; back on Monday it is the new week.
+        #expect(week.refreshed(shownAt: shown, now: monday, calendar: cal) == .current(.week, now: monday))
+        // Still the same week: unchanged.
+        #expect(week.refreshed(shownAt: shown, now: shown.addingTimeInterval(1800), calendar: cal) == week)
+        // The user stepped back a week: it stays where they left it.
+        let previous = week.stepped(-1, calendar: cal)
+        #expect(previous.refreshed(shownAt: shown, now: monday, calendar: cal) == previous)
+        // All has no stepping.
+        let all = StatsPeriod.current(.all, now: shown)
+        #expect(all.refreshed(shownAt: shown, now: monday, calendar: cal) == all)
+    }
+
     @Test func drillDownNarrowsByOneLevel() {
         let cal = Self.calendar
         let bucket = Self.at(2026, 3, 9, 0)
