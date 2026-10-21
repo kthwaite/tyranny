@@ -128,6 +128,9 @@ pub struct FileTags {
     pub primary: BTreeMap<TagField, String>,
     /// Every other value of a field, in lofty's tag order.
     pub copies: Vec<TagCopy>,
+    /// The fields whose second home holds their primary value. That value is
+    /// not a copy, so it is in neither `primary` nor `copies`.
+    pub second_homes: BTreeSet<TagField>,
 }
 
 impl FileTags {
@@ -180,6 +183,19 @@ impl FileTags {
             })
             .cloned()
             .collect()
+    }
+
+    /// The field's second home holds exactly its primary value, or both are
+    /// empty. Always true for a field without a second home.
+    pub fn second_home_agrees(&self, field: TagField) -> bool {
+        let Some(key) = second_home(self.primary_kind, field) else {
+            return true;
+        };
+        let differs = self
+            .copies
+            .iter()
+            .any(|copy| copy.tag == self.primary_kind && copy.field == field && copy.key == key);
+        !differs && self.second_homes.contains(&field) == self.primary.contains_key(&field)
     }
 
     /// `Some(READ_ONLY_REASON)` when setting these fields would need a change to
@@ -555,6 +571,7 @@ impl Parsed {
         let primary_kind = self.primary_kind()?;
         let mut primary = BTreeMap::new();
         let mut copies = Vec::new();
+        let mut second_homes = BTreeSet::new();
         for slot in &self.slots {
             for (field, mut entries) in slot.body.entries() {
                 if slot.kind == primary_kind {
@@ -567,6 +584,7 @@ impl Parsed {
                                 .position(|(k, v)| *k == second && *v == value)
                         {
                             entries.remove(position);
+                            second_homes.insert(field);
                         }
                         primary.insert(field, value);
                     }
@@ -586,6 +604,7 @@ impl Parsed {
             id3v23: self.id3v23,
             primary,
             copies,
+            second_homes,
         })
     }
 

@@ -748,8 +748,9 @@ fn propose_file(
         });
     }
     writable.sort_by_key(|change| change.field);
-    let copies = tags.copies_of(&changed);
-    row.removes_other_copies = !copies.is_empty();
+    // A dropped partner whose primary value stays is still a removed copy.
+    row.removes_other_copies =
+        !tags.copies_of(&changed).is_empty() || !tags.partners_dropped_with(&changed).is_empty();
     row.changes = writable;
     if let Some(reason) = tags.read_only_reason(&changed) {
         row.reason = Some(reason.into());
@@ -825,7 +826,7 @@ fn prepare(file: &ProposedFile, omitted: &BTreeSet<TagField>) -> Step {
             Some(message.to_owned()),
         ))
     };
-    let values: BTreeMap<TagField, String> = file
+    let mut values: BTreeMap<TagField, String> = file
         .values
         .iter()
         .filter(|(field, _)| !omitted.contains(field))
@@ -841,6 +842,17 @@ fn prepare(file: &ProposedFile, omitted: &BTreeSet<TagField>) -> Step {
         Ok(tags) => tags,
         Err(error) => return done(TagFileOutcome::Failed, &unreadable(&format!("{error:#}"))),
     };
+    // Writing one half of a number pair drops the other half from another tag.
+    // When that half is not written and the primary tag lacks it, it is
+    // written there with the dropped copy's value, so the value stays. Such a
+    // half is always omitted: `propose_file` puts every one in the proposal.
+    // This rule runs before `unpaired_total`, so a kept number pairs a total.
+    let fields: BTreeSet<TagField> = values.keys().copied().collect();
+    for copy in tags.partners_dropped_with(&fields) {
+        if !tags.primary.contains_key(&copy.field) {
+            values.entry(copy.field).or_insert(copy.value);
+        }
+    }
     // A refusal, not a disk error.
     if let Some(reason) = unpaired_total(&tags, &values) {
         return done(TagFileOutcome::Skipped, reason);
@@ -883,16 +895,16 @@ fn unpaired_total(tags: &FileTags, values: &BTreeMap<TagField, String>) -> Optio
 }
 
 /// Writes a journaled file's "before" values back, if every "after" value is
-/// still its primary value.
+/// still its primary value and its second home (the ID3 recording ID's UFID)
+/// still agrees: neither missing nor different.
 fn revert_file(file: &JournalFile) -> Result<(), WriteError> {
     // The stamp comes first, so a change after the check fails the write.
     let expected = stamp(&file.path).map_err(|_| WriteError::Changed)?;
     let tags = read_tags(&file.path)
         .map_err(|error| WriteError::Failed(unreadable(&format!("{error:#}"))))?;
-    let unchanged = file
-        .after
-        .iter()
-        .all(|(field, value)| tags.primary.get(field) == value.as_ref());
+    let unchanged = file.after.iter().all(|(field, value)| {
+        tags.primary.get(field) == value.as_ref() && tags.second_home_agrees(*field)
+    });
     if !unchanged {
         return Err(WriteError::Changed);
     }

@@ -46,6 +46,10 @@ use resolve::{Resolution, Resolver};
 
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 const EVENT_INTERVAL: Duration = Duration::from_millis(250);
+/// How long shutdown waits for tag writes to hand their re-index to the library.
+/// With the library's drain limit and one file write it stays under launchd's
+/// 15 s `ExitTimeOut`.
+const TAGGING_SETTLE_LIMIT: Duration = Duration::from_secs(3);
 
 pub struct OwnerConfig {
     pub database_path: PathBuf,
@@ -154,6 +158,16 @@ impl Owner {
         self.lyrics.stop();
         self.tagging.stop();
         self.directory.stop();
+        // A tag write in flight finishes its current file and replies. Its
+        // re-index must reach the library before the library shuts down.
+        let tagging = self.tagging;
+        if tokio::task::spawn_blocking(move || tagging.shutdown())
+            .await
+            .is_err()
+        {
+            eprintln!("tyranny: joining the tagging worker failed during shutdown");
+        }
+        self.controller.tagging.settle(TAGGING_SETTLE_LIMIT).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = self.controller.sender.send(Work::Shutdown(reply_tx)).await;
         let result = if sent.is_ok() {
@@ -166,7 +180,6 @@ impl Owner {
         let joined = tokio::task::spawn_blocking(move || {
             self.artwork.shutdown();
             self.lyrics.shutdown();
-            self.tagging.shutdown();
             self.directory.shutdown();
             self.thread.join()
         })
@@ -2225,8 +2238,9 @@ impl Actor {
                         let checkpoint = self.checkpoint();
                         self.player.pause();
                         self.write_plays();
-                        let library = self.library.shutdown();
+                        // Saved first: the library may take its whole drain limit.
                         let saved = self.store.checkpoint(checkpoint, &self.settings);
+                        let library = self.library.shutdown();
                         let result = library.and(saved);
                         let response = result
                             .as_ref()
@@ -2239,8 +2253,9 @@ impl Actor {
                         let checkpoint = self.checkpoint();
                         self.player.pause();
                         self.write_plays();
-                        let library = self.library.shutdown();
+                        // Saved first: the library may take its whole drain limit.
                         let saved = self.store.checkpoint(checkpoint, &self.settings);
+                        let library = self.library.shutdown();
                         return library.and(saved);
                     }
                     Err(mpsc::error::TryRecvError::Empty) => {}

@@ -1406,6 +1406,284 @@ fn revert_restores_what_the_write_removed() {
     assert_eq!(after.copies, before.copies);
 }
 
+/// One MP3 matched to release A's second track by its release track ID, with
+/// these ID3v2 values and an APE `Track` item holding `ape_track`.
+fn mp3_on_track_two_with_ape_track(id3: &[(TagField, &str)], ape_track: &str) -> LibraryFixture {
+    use lofty::{
+        ape::{ApeItem, ApeTag},
+        config::WriteOptions,
+        tag::{ItemValue, TagExt},
+    };
+    let mut tags = vec![
+        (TagField::MusicbrainzReleaseId, A),
+        (
+            TagField::MusicbrainzTrackId,
+            "a1000000-0000-4000-8000-000000000002",
+        ),
+    ];
+    tags.extend_from_slice(id3);
+    let album = LibraryFixture::new(&[("tone.mp3", &tags)]);
+    let mut ape = ApeTag::new();
+    ape.insert(ApeItem::new("Track".to_owned(), ItemValue::Text(ape_track.to_owned())).unwrap());
+    ape.save_to_path(&album.files[0], WriteOptions::default())
+        .unwrap();
+    album
+}
+
+#[test]
+fn dropped_partner_alone_shows_the_removal_note() {
+    // The APE item holds only a total; the primary tag has its own total, which
+    // matches MusicBrainz's. Writing the number drops the APE total.
+    let album = mp3_on_track_two_with_ape_track(
+        &[(TagField::TrackNumber, "5"), (TagField::TrackTotal, "3")],
+        "/12",
+    );
+    let tags = read_tags(&album.files[0]).unwrap();
+    assert_eq!(tags.primary[&TagField::TrackTotal], "3");
+    assert_eq!(
+        tags.copies,
+        [TagCopy {
+            tag: TagKind::Ape,
+            field: TagField::TrackTotal,
+            key: CopyKey::Field,
+            value: "12".into(),
+            read_only: false,
+        }]
+    );
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let track = &proposal.tracks[0];
+    assert!(track.matched && track.writable, "{track:?}");
+    let fields: Vec<_> = track.changes.iter().map(|c| c.field).collect();
+    assert!(fields.contains(&TagField::TrackNumber), "{fields:?}");
+    assert!(!fields.contains(&TagField::TrackTotal), "{fields:?}");
+    assert!(track.removes_other_copies, "{track:?}");
+}
+
+#[test]
+fn omitting_an_added_partner_keeps_the_copied_value() {
+    let album = mp3_on_track_two_with_ape_track(&[(TagField::TrackNumber, "3")], "3/12");
+    let path = &album.files[0];
+    let before = read_tags(path).unwrap();
+    assert_eq!(before.primary.get(&TagField::TrackTotal), None);
+    assert_eq!(before.current(TagField::TrackTotal), Some("12"));
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let fields: Vec<_> = proposal.tracks[0].changes.iter().map(|c| c.field).collect();
+    assert!(
+        fields.contains(&TagField::TrackNumber) && fields.contains(&TagField::TrackTotal),
+        "{fields:?}"
+    );
+
+    let (applied, _) = engine
+        .apply(
+            &apply_request(&proposal, &[TagField::TrackTotal]),
+            &running(),
+        )
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    let tags = read_tags(path).unwrap();
+    assert_eq!(tags.primary[&TagField::TrackNumber], "2");
+    assert_eq!(tags.primary[&TagField::TrackTotal], "12");
+    assert_eq!(tags.current(TagField::TrackTotal), Some("12"));
+    assert_eq!(ape_track(path), None);
+    let edit_id = applied.edit_id.unwrap();
+    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    let file = &record.files[0].0;
+    assert_eq!(file.before[&TagField::TrackTotal], None);
+    assert_eq!(file.after[&TagField::TrackTotal].as_deref(), Some("12"));
+    let removed: Vec<_> = file
+        .removed
+        .iter()
+        .map(|copy| (copy.tag, copy.field, copy.value.as_str()))
+        .collect();
+    assert_eq!(
+        removed,
+        [
+            (TagKind::Ape, TagField::TrackNumber, "3"),
+            (TagKind::Ape, TagField::TrackTotal, "12")
+        ]
+    );
+
+    let (reverted, _) = engine.revert(edit_id, &running()).unwrap();
+    assert_eq!(outcomes(&reverted), [WRITTEN]);
+    assert_eq!(ape_track(path).as_deref(), Some("3/12"));
+    let after = read_tags(path).unwrap();
+    assert_eq!(after.primary, before.primary);
+    assert_eq!(after.copies, before.copies);
+}
+
+/// The identifiers of the MP3's `UFID:http://musicbrainz.org` frames.
+fn musicbrainz_ufids(path: &std::path::Path) -> Vec<String> {
+    use lofty::{config::ParseOptions, file::AudioFile, id3::v2::Frame, mpeg::MpegFile};
+    let file =
+        MpegFile::read_from(&mut std::fs::File::open(path).unwrap(), ParseOptions::new()).unwrap();
+    file.id3v2()
+        .into_iter()
+        .flatten()
+        .filter_map(|frame| match frame {
+            Frame::UniqueFileIdentifier(ufid) if ufid.owner == "http://musicbrainz.org" => {
+                Some(String::from_utf8(ufid.identifier.to_vec()).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn revert_skips_a_file_whose_ufid_changed_after_the_edit() {
+    use lofty::{
+        config::{ParseOptions, WriteOptions},
+        file::AudioFile,
+        id3::v2::{Frame, UniqueFileIdentifierFrame},
+        mpeg::MpegFile,
+        tag::TagExt,
+    };
+    let album = LibraryFixture::new(&[("tone.mp3", &[(TagField::MusicbrainzReleaseId, A)])]);
+    let path = &album.files[0];
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let fields: Vec<_> = proposal.tracks[0].changes.iter().map(|c| c.field).collect();
+    assert!(
+        fields.contains(&TagField::MusicbrainzRecordingId),
+        "{fields:?}"
+    );
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    let recording = read_tags(path).unwrap().primary[&TagField::MusicbrainzRecordingId].clone();
+    assert_eq!(musicbrainz_ufids(path), std::slice::from_ref(&recording));
+
+    // Another program changes only the UFID; the TXXX keeps the written value.
+    let file =
+        MpegFile::read_from(&mut std::fs::File::open(path).unwrap(), ParseOptions::new()).unwrap();
+    let mut id3 = file.id3v2().unwrap().clone();
+    id3.insert(Frame::UniqueFileIdentifier(UniqueFileIdentifierFrame::new(
+        "http://musicbrainz.org",
+        b"outside".to_vec(),
+    )));
+    id3.save_to_path(path, WriteOptions::default()).unwrap();
+    assert_eq!(musicbrainz_ufids(path), ["outside"]);
+    let changed = read_tags(path).unwrap();
+    assert_eq!(
+        changed.primary[&TagField::MusicbrainzRecordingId],
+        recording
+    );
+    let outside = bytes(&album);
+
+    let edit_id = applied.edit_id.unwrap();
+    let (reverted, written) = engine.revert(edit_id, &running()).unwrap();
+    assert_eq!(
+        outcomes(&reverted),
+        [(TagFileOutcome::Skipped, Some("changed since the edit"))]
+    );
+    assert!(written.is_empty(), "{written:?}");
+    assert_eq!(bytes(&album), outside);
+    assert_eq!(musicbrainz_ufids(path), ["outside"]);
+}
+
+#[test]
+fn revert_skips_a_file_whose_ufid_was_deleted_after_the_edit() {
+    use lofty::{
+        config::{ParseOptions, WriteOptions},
+        file::AudioFile,
+        id3::v2::Frame,
+        mpeg::MpegFile,
+        tag::TagExt,
+    };
+    let album = LibraryFixture::new(&[("tone.mp3", &[(TagField::MusicbrainzReleaseId, A)])]);
+    let path = &album.files[0];
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    let recording = read_tags(path).unwrap().primary[&TagField::MusicbrainzRecordingId].clone();
+    assert_eq!(musicbrainz_ufids(path), std::slice::from_ref(&recording));
+
+    // Another program deletes only the UFID; the TXXX keeps the written value.
+    let file =
+        MpegFile::read_from(&mut std::fs::File::open(path).unwrap(), ParseOptions::new()).unwrap();
+    let mut id3 = file.id3v2().unwrap().clone();
+    id3.retain(|frame| {
+        !matches!(frame, Frame::UniqueFileIdentifier(ufid) if ufid.owner == "http://musicbrainz.org")
+    });
+    id3.save_to_path(path, WriteOptions::default()).unwrap();
+    assert!(musicbrainz_ufids(path).is_empty());
+    let deleted = read_tags(path).unwrap();
+    assert_eq!(
+        deleted.primary[&TagField::MusicbrainzRecordingId],
+        recording
+    );
+    let outside = bytes(&album);
+
+    let (reverted, written) = engine.revert(applied.edit_id.unwrap(), &running()).unwrap();
+    assert_eq!(
+        outcomes(&reverted),
+        [(TagFileOutcome::Skipped, Some("changed since the edit"))]
+    );
+    assert!(written.is_empty(), "{written:?}");
+    assert_eq!(bytes(&album), outside);
+}
+
+#[test]
+fn omitting_the_track_number_keeps_the_copied_number() {
+    // ID3v2 has no track number; the APE item holds it. Writing only the
+    // total would drop the APE number and leave the total unpaired.
+    let album = mp3_on_track_two_with_ape_track(&[], "3/12");
+    let path = &album.files[0];
+    let before = read_tags(path).unwrap();
+    assert_eq!(before.primary.get(&TagField::TrackNumber), None);
+    assert_eq!(before.current(TagField::TrackNumber), Some("3"));
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let changes = &proposal.tracks[0].changes;
+    assert!(
+        changes.contains(&FieldChange {
+            field: TagField::TrackTotal,
+            old: Some("12".into()),
+            new: "3".into(),
+        }),
+        "{changes:?}"
+    );
+
+    let (applied, _) = engine
+        .apply(
+            &apply_request(&proposal, &[TagField::TrackNumber]),
+            &running(),
+        )
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    let tags = read_tags(path).unwrap();
+    assert_eq!(tags.primary[&TagField::TrackNumber], "3");
+    assert_eq!(tags.primary[&TagField::TrackTotal], "3");
+    assert_eq!(ape_track(path), None);
+
+    let (reverted, _) = engine.revert(applied.edit_id.unwrap(), &running()).unwrap();
+    assert_eq!(outcomes(&reverted), [WRITTEN]);
+    assert_eq!(ape_track(path).as_deref(), Some("3/12"));
+    let after = read_tags(path).unwrap();
+    assert_eq!(after.primary, before.primary);
+    assert_eq!(after.copies, before.copies);
+}
+
 #[test]
 fn edits_lists_latest_first_with_counts() {
     let album = stored_a();
@@ -1507,25 +1785,30 @@ fn apply_is_not_cancelled_when_the_requester_goes_away() {
     workers.shutdown();
 }
 
+/// One `LibraryCommand::Tracks` page of every track.
+async fn all_tracks(library: &LibraryHandle) -> Page<Track> {
+    let reply = library
+        .request(LibraryCommand::Tracks {
+            album_id: None,
+            page: PageRequest {
+                revision: None,
+                offset: 0,
+                limit: 500,
+                query: String::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let LibraryReply::Tracks(page) = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    page
+}
 /// Polls `LibraryCommand::Tracks` until every track's album is `title`.
 async fn tracks_titled(library: &LibraryHandle, title: &str) -> Page<Track> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let reply = library
-            .request(LibraryCommand::Tracks {
-                album_id: None,
-                page: PageRequest {
-                    revision: None,
-                    offset: 0,
-                    limit: 500,
-                    query: String::new(),
-                },
-            })
-            .await
-            .unwrap();
-        let LibraryReply::Tracks(page) = reply else {
-            panic!("unexpected reply {reply:?}");
-        };
+        let page = all_tracks(library).await;
         if !page.entries.is_empty() && page.entries.iter().all(|t| t.metadata.album == title) {
             return page;
         }
@@ -1604,6 +1887,105 @@ fn dropped_apply_future_still_reindexes() {
         tracks_titled(&library.handle(), "Fixture Album").await
     });
     assert!(page.revision > album.revision);
+    workers.shutdown();
+    library.shutdown().unwrap();
+}
+
+#[test]
+fn settle_waits_for_a_detached_apply() {
+    let album = stored_a();
+    // Release B is slow, so a lookup of it holds the apply in the queue.
+    let server = HttpFixture::new(|target| {
+        let mut reply = releases_or(target, "search.json");
+        if target.contains(B) {
+            reply.delay = Duration::from_millis(500);
+        }
+        reply
+    });
+    let library = Library::start(album.database.clone()).unwrap();
+    let workers = TaggingWorkers::with_providers(
+        album.database.clone(),
+        Some(providers(&server, None)),
+        Some(library.handle()),
+    );
+    let handle = workers.handle();
+    let original = bytes(&album);
+    block_on(async {
+        let Ok(TagOutcome::Proposal(proposal)) =
+            handle.request(TagRequest::Lookup(request(&album))).await
+        else {
+            panic!("lookup failed");
+        };
+        let busy = {
+            let handle = handle.clone();
+            let explicit = LookupRequest {
+                release_id: Some(B.into()),
+                ..request(&album)
+            };
+            tokio::spawn(async move { handle.request(TagRequest::Lookup(explicit)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // One poll queues the apply; the future is then dropped.
+        let apply = handle.request(TagRequest::Apply(apply_request(&proposal, &[])));
+        let gone = tokio::time::timeout(Duration::ZERO, apply).await;
+        assert!(gone.is_err(), "the apply is still waiting");
+        // The queued apply's task is running, so `settle` waits its limit.
+        let started = Instant::now();
+        handle.settle(Duration::from_millis(100)).await;
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(matches!(busy.await, Ok(Ok(TagOutcome::Proposal(_)))));
+        // Quit during the apply, in the owner's order: join the worker, which
+        // finishes the current file and replies, then settle.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bytes(&album)[0] == original[0] {
+            assert!(Instant::now() < deadline, "the apply never started");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        tokio::task::spawn_blocking(move || workers.shutdown())
+            .await
+            .unwrap();
+        let limit = Duration::from_secs(10);
+        let started = Instant::now();
+        handle.settle(limit).await;
+        assert!(started.elapsed() < limit, "settle reached its limit");
+    });
+    // The library shuts down at once, as the owner does after `settle`. It
+    // re-indexes only what reached it, and its queue lives only in memory.
+    library.shutdown().unwrap();
+    let written: Vec<bool> = bytes(&album)
+        .iter()
+        .zip(&original)
+        .map(|(now, before)| now != before)
+        .collect();
+    assert!(written[0]);
+    let reopened = Library::start(album.database.clone()).unwrap();
+    let page = block_on(all_tracks(&reopened.handle()));
+    for (path, written) in album.files.iter().zip(written) {
+        let track = page
+            .entries
+            .iter()
+            .find(|t| std::path::Path::new(&t.path) == path)
+            .unwrap();
+        let expected = if written {
+            "Fixture Album"
+        } else {
+            "Old Album"
+        };
+        assert_eq!(track.metadata.album, expected, "{path:?}");
+    }
+    reopened.shutdown().unwrap();
+}
+
+#[test]
+fn settle_returns_at_once_when_no_task_is_running() {
+    let album = stored_a();
+    let library = Library::start(album.database.clone()).unwrap();
+    let workers =
+        TaggingWorkers::with_providers(album.database.clone(), None, Some(library.handle()));
+    let handle = workers.handle();
+    let started = Instant::now();
+    block_on(handle.settle(Duration::from_secs(10)));
+    assert!(started.elapsed() < Duration::from_secs(1));
     workers.shutdown();
     library.shutdown().unwrap();
 }

@@ -334,6 +334,7 @@ mod tests {
             id3v23: false,
             primary: values.iter().map(|(f, v)| (*f, v.to_string())).collect(),
             copies: vec![],
+            second_homes: Default::default(),
         }
     }
 

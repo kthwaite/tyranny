@@ -242,4 +242,12 @@ public enum TagEditMessage {
         default: TagLookupMessage.text(for: failure)
         }
     }
+
+    /// Failures of reading the Recent Tag Edits list.
+    public static func listText(for failure: ServerFailure) -> String {
+        switch failure.code {
+        case "request_timeout": "Recent tag edits took too long to load. Try again."
+        default: TagLookupMessage.text(for: failure)
+        }
+    }
 }
