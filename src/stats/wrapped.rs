@@ -10,7 +10,7 @@ use super::{
 use crate::stats_types::{
     Comeback, Discovery, MonthTop, PeakTime, PeriodKind, SkippedTrack, WrappedArtist, WrappedReport,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 const TOP_LIMIT: usize = 5;
 /// Minimum counted plays this year for the discovery artist.
@@ -282,16 +282,6 @@ pub(crate) fn wrapped(
         top_station,
         months,
     }
-}
-
-/// Years with at least one counted play, newest first.
-pub(crate) fn years(rows: &[PlayRow], zone: &dyn Zone) -> Vec<i32> {
-    let years: BTreeSet<i32> = rows
-        .iter()
-        .filter(|row| row.counted)
-        .map(|row| local(zone, row.played_at).date.year)
-        .collect();
-    years.into_iter().rev().collect()
 }
 
 #[cfg(test)]
@@ -610,21 +600,5 @@ mod tests {
         assert_eq!(year_2026(&[]).through, NOW);
         assert_eq!(run(&[], 2025, NOW).through, T0);
         assert_eq!(run(&[], 2026, year_end + DAY).through, year_end);
-    }
-
-    #[test]
-    fn years_lists_years_with_counted_plays_newest_first() {
-        let rows = vec![
-            play(T0 - 400 * DAY, "A", "A"),
-            // An uncounted play does not make its year (2024 has a counted play, 2023 does not).
-            skip(T0 - 3 * 365 * DAY, "A", "A"),
-            play(T0 + DAY, "A", "A"),
-            play(T0 + 2 * DAY, "A", "A"),
-            // Local time decides the year: this is 2025 in UTC and 2026 at +1h.
-            play(T0 - 1800, "A", "A"),
-        ];
-        assert_eq!(years(&rows, &FixedZone(0)), [2026, 2025, 2024]);
-        assert_eq!(years(&rows, &FixedZone(3600)), [2026, 2024]);
-        assert!(years(&[], &FixedZone(0)).is_empty());
     }
 }

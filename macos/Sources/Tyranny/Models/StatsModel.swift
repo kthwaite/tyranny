@@ -7,7 +7,8 @@ import TyrannyCore
 ///
 /// The page fetches on appear and when `period` changes. While the page is visible, a new
 /// `stats_revision` refetches at most once every 10 s. `wrappedYears` comes from `stats_years`
-/// on connect and, debounced the same way, when `stats_revision` changes.
+/// on connect and, debounced the same way, when `history_revision` changes: a year gains its
+/// first play only when a play counts.
 @MainActor @Observable
 final class StatsModel {
     /// Setting it remembers its kind and fetches its report.
@@ -35,6 +36,7 @@ final class StatsModel {
     @ObservationIgnored private var visible = false
     /// nil while disconnected: the next snapshot is a new connection.
     @ObservationIgnored private var statsRevision: UInt64?
+    @ObservationIgnored private var historyRevision: UInt64?
     @ObservationIgnored private let reportThrottle = Throttle(interval: refetchInterval)
     @ObservationIgnored private let yearsThrottle = Throttle(interval: refetchInterval)
     /// Bumped by every report request; an older reply is dropped.
@@ -62,12 +64,14 @@ final class StatsModel {
 
     // MARK: Following state
 
-    /// Follows the connection and `stats_revision`. The player calls it on every snapshot.
+    /// Follows the connection, `stats_revision` and `history_revision`. The player calls it on
+    /// every snapshot.
     func sync() {
         guard let player else { return }
         guard player.connected, let snapshot = player.snapshot else {
             if statsRevision != nil {
                 statsRevision = nil
+                historyRevision = nil
                 reportThrottle.cancel()
                 yearsThrottle.cancel()
                 reportRequest &+= 1
@@ -78,11 +82,17 @@ final class StatsModel {
         let revision = snapshot.stats_revision
         if statsRevision == nil {
             statsRevision = revision
+            historyRevision = snapshot.history_revision
             fetchYears()
             if visible { fetchReport() }
-        } else if revision != statsRevision {
-            statsRevision = revision
+            return
+        }
+        if snapshot.history_revision != historyRevision {
+            historyRevision = snapshot.history_revision
             yearsThrottle.request { [weak self] in self?.sendYears() }
+        }
+        if revision != statsRevision {
+            statsRevision = revision
             if visible { reportThrottle.request { [weak self] in self?.sendReport() } }
         }
     }

@@ -1,4 +1,5 @@
 //! Play rows and the library index, loaded from the store for aggregation.
+use super::period::{Date, Zone, local, start_of_day};
 use crate::store::EndReason;
 use anyhow::Result;
 use rusqlite::Connection;
@@ -34,6 +35,36 @@ pub(crate) struct LibraryIndex {
 /// The artist key of `name`: trimmed and lowercase. A track key is `(artist_key(artist), artist_key(title))`.
 pub(crate) fn artist_key(name: &str) -> String {
     name.trim().to_lowercase()
+}
+
+/// Years with at least one counted play, newest first. Reads no library and no play rows:
+/// one range query per local year between the first and the last counted play.
+pub(crate) fn years(connection: &Connection, zone: &dyn Zone) -> Result<Vec<i32>> {
+    let (first, last): (Option<i64>, Option<i64>) = connection.query_row(
+        "SELECT MIN(played_at),MAX(played_at) FROM play_history WHERE counted=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (Some(first), Some(last)) = (first, last) else {
+        return Ok(Vec::new());
+    };
+    let mut played = connection.prepare(
+        "SELECT EXISTS(SELECT 1 FROM play_history WHERE counted=1 AND played_at>=?1 AND played_at<?2)",
+    )?;
+    let new_year = |year| Date {
+        year,
+        month: 1,
+        day: 1,
+    };
+    let mut years = Vec::new();
+    for year in (local(zone, first).date.year..=local(zone, last).date.year).rev() {
+        let start = start_of_day(zone, new_year(year));
+        let end = start_of_day(zone, new_year(year + 1));
+        if played.query_row([start, end], |row| row.get::<_, bool>(0))? {
+            years.push(year);
+        }
+    }
+    Ok(years)
 }
 
 /// Every play, ordered by `played_at`, and the library index.
@@ -132,6 +163,7 @@ impl<K: std::hash::Hash + Eq> Unique<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::period::FixedZone;
     use crate::store::Store;
     use std::path::PathBuf;
 
@@ -140,6 +172,41 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    #[test]
+    fn years_lists_years_with_counted_plays_newest_first() {
+        let path =
+            std::env::temp_dir().join(format!("tyranny-stats-{}.sqlite", uuid::Uuid::new_v4()));
+        let _store = Store::open(&path).unwrap();
+        let _database = Database(path.clone());
+        let connection = Connection::open(&path).unwrap();
+        assert!(years(&connection, &FixedZone(0)).unwrap().is_empty());
+        // 2026-01-01T00:00:00Z.
+        let t0: i64 = 1_767_225_600;
+        let day = 86_400;
+        for (played_at, counted) in [
+            (t0 - 400 * day, 1),
+            // An uncounted play does not make its year (2024 has a counted play, 2023 does not).
+            (t0 - 3 * 365 * day, 0),
+            (t0 + day, 1),
+            (t0 + 2 * day, 1),
+            // Local time decides the year: this is 2025 in UTC and 2026 at +1h.
+            (t0 - 1800, 1),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO play_history(played_at,entry_id,path,title,artist,album,listened_ms,end_reason,counted)
+                     VALUES(?1,1,'/m/1','T','A','',1000,'finished',?2)",
+                    [played_at, counted],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            years(&connection, &FixedZone(0)).unwrap(),
+            [2026, 2025, 2024]
+        );
+        assert_eq!(years(&connection, &FixedZone(3600)).unwrap(), [2026, 2024]);
     }
 
     #[test]

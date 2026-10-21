@@ -169,10 +169,14 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
         Request::Wrapped(year) if !(1970..=9999).contains(year) => return Err(Failure::BadYear),
         _ => None,
     };
-    let stats_revision: u64 = connection
-        .query_row("SELECT writes FROM history_control", [], |row| row.get(0))
-        .map_err(|error| unavailable(error.into()))?;
-    let (rows, library) = rows::load(connection).map_err(unavailable)?;
+    // Reports read every row and the library index. Years read neither.
+    let load = || {
+        let stats_revision: u64 = connection
+            .query_row("SELECT writes FROM history_control", [], |row| row.get(0))
+            .map_err(|error| unavailable(error.into()))?;
+        let (rows, library) = rows::load(connection).map_err(unavailable)?;
+        Ok::<_, Failure>((stats_revision, rows, library))
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64);
@@ -180,6 +184,7 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
     let thresholds = Thresholds::default();
     let result = match request {
         Request::Stats(period) => {
+            let (stats_revision, rows, library) = load()?;
             // All starts at the earliest row of any kind, so skips, radio and open rows
             // before the first counted play still count towards its listened time.
             let earliest = rows.first().map(|row| row.played_at);
@@ -203,19 +208,22 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
                 )),
             }
         }
-        Request::Wrapped(year) => Response::Wrapped {
-            stats_revision,
-            report: Box::new(wrapped::wrapped(
-                &rows,
-                &library,
-                &zone,
-                year,
-                now,
-                &thresholds,
-            )),
-        },
+        Request::Wrapped(year) => {
+            let (stats_revision, rows, library) = load()?;
+            Response::Wrapped {
+                stats_revision,
+                report: Box::new(wrapped::wrapped(
+                    &rows,
+                    &library,
+                    &zone,
+                    year,
+                    now,
+                    &thresholds,
+                )),
+            }
+        }
         Request::Years => Response::StatsYears {
-            years: wrapped::years(&rows, &zone),
+            years: rows::years(connection, &zone).map_err(unavailable)?,
         },
     };
     Ok(Reply::Ok { result })

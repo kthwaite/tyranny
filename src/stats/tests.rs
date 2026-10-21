@@ -122,6 +122,27 @@ async fn all_counts_radio_time_when_nothing_has_counted() {
 }
 
 #[tokio::test]
+async fn stats_years_reads_counted_play_times_only() {
+    let database = Database::new();
+    database.execute(PLAY);
+    // An uncounted 2025 play does not make its year, and the library is never read.
+    database.execute(
+        "INSERT INTO play_history(played_at,entry_id,track_id,path,title,artist,album,duration_ms,source_kind,source_name,listened_ms,ended_at,end_reason,counted) VALUES
+        (1750000000,2,NULL,'/m/2','Other','Band','A',200000,NULL,NULL,30000,1750000030,'skipped',0),
+        (1720000000,3,NULL,'/m/3','Old','Band','A',200000,NULL,NULL,150000,1720000150,'finished',1);
+        DROP TABLE library_tracks;",
+    );
+    let workers = StatsWorkers::start(database.0.clone());
+    match workers.handle().request(Request::Years).await {
+        Reply::Ok {
+            result: Response::StatsYears { years },
+        } => assert_eq!(years, vec![2026, 2024]),
+        reply => panic!("unexpected reply: {reply:?}"),
+    }
+    workers.shutdown();
+}
+
+#[tokio::test]
 async fn a_bad_anchor_is_an_invalid_command() {
     let database = Database::new();
     let workers = StatsWorkers::start(database.0.clone());
