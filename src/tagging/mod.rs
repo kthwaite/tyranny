@@ -1,6 +1,3 @@
-// Task 10 routes this module and removes the attribute.
-#![allow(dead_code)]
-
 mod acoustid;
 mod engine;
 mod fingerprint;
@@ -18,7 +15,10 @@ mod tests;
 
 use crate::cancel::{CancelOnDrop, Cancellation, Stop};
 use crate::library::LibraryHandle;
-use crate::protocol::{ErrorCode, TagApplyResult, TagEditSummary, TagField, TagProposal};
+use crate::library_types::LibraryCommand;
+use crate::protocol::{
+    ErrorCode, Reply, Response, TagApplyResult, TagEditSummary, TagField, TagProposal,
+};
 use std::{
     fmt,
     path::PathBuf,
@@ -102,7 +102,7 @@ impl Work {
 pub(crate) struct Handle {
     sender: mpsc::SyncSender<Work>,
     stop: Arc<AtomicBool>,
-    /// Used to re-index written files (Task 10).
+    /// Re-indexes the files that an apply or a revert wrote.
     library: Option<LibraryHandle>,
 }
 pub(crate) struct TaggingWorkers {
@@ -204,11 +204,16 @@ fn run(
 }
 
 impl Handle {
+    /// An apply or a revert re-indexes the files it wrote, in a detached task.
+    /// So a dropped future or a gone client never loses the re-index (F3).
     pub(crate) async fn request(&self, request: TagRequest) -> Result<TagOutcome, Failure> {
-        let stopped = || Failure::new(ErrorCode::InvalidCommand, "tagging workers stopped");
         if self.stop.load(Ordering::Acquire) {
             return Err(stopped());
         }
+        let library = match request {
+            TagRequest::Apply(_) | TagRequest::Revert { .. } => self.library.clone(),
+            TagRequest::Lookup(_) | TagRequest::Edits => None,
+        };
         let (reply, receive) = oneshot::channel();
         let abandoned = Arc::new(AtomicBool::new(false));
         // Dropping a lookup's future stops it; other work is never abandoned.
@@ -231,7 +236,50 @@ impl Handle {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => return Err(stopped()),
         }
-        receive.await.unwrap_or_else(|_| Err(stopped()))
+        let Some(library) = library else {
+            return receive.await.unwrap_or_else(|_| Err(stopped()));
+        };
+        let (forward, forwarded) = oneshot::channel();
+        tokio::spawn(async move {
+            let outcome = receive.await.unwrap_or_else(|_| Err(stopped()));
+            if let Ok(TagOutcome::Applied { written, .. }) = &outcome
+                && !written.is_empty()
+            {
+                let paths = written.clone();
+                if let Err(error) = library.request(LibraryCommand::Reindex { paths }).await {
+                    eprintln!("tyranny: re-index after tag write failed: {error}");
+                }
+            }
+            // The requester may be gone; its outcome then goes nowhere.
+            let _ = forward.send(outcome);
+        });
+        forwarded.await.unwrap_or_else(|_| Err(stopped()))
+    }
+}
+
+fn stopped() -> Failure {
+    Failure::new(ErrorCode::InvalidCommand, "tagging workers stopped")
+}
+
+/// The wire reply for a tagging outcome. A failure keeps its `queue_revision`.
+pub(crate) fn reply(outcome: Result<TagOutcome, Failure>) -> Reply {
+    match outcome {
+        Ok(outcome) => Reply::Ok {
+            result: match outcome {
+                TagOutcome::Proposal(proposal) => Response::TagProposal { proposal },
+                TagOutcome::Applied { result, .. } => Response::TagApply { result },
+                TagOutcome::Edits(edits) => Response::TagEdits { edits },
+            },
+        },
+        Err(Failure {
+            code,
+            message,
+            queue_revision,
+        }) => Reply::Error {
+            code,
+            message,
+            queue_revision,
+        },
     }
 }
 

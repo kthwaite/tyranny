@@ -53,9 +53,6 @@ impl FileStatus {
 }
 
 pub(super) struct EditRecord {
-    pub edit_id: u64,
-    pub release_id: String,
-    pub release_title: String,
     pub reverted: bool,
     pub files: Vec<(JournalFile, FileStatus)>,
 }
@@ -161,12 +158,12 @@ impl Journal {
     }
 
     pub(super) fn load(&self, edit_id: u64) -> Result<Option<EditRecord>> {
-        let Some((release_id, release_title, reverted)) = self
+        let Some(reverted) = self
             .connection
             .query_row(
-                "SELECT release_id, release_title, reverted FROM edits WHERE id=?1",
+                "SELECT reverted FROM edits WHERE id=?1",
                 [edit_id as i64],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+                |r| Ok(r.get::<_, i64>(0)? != 0),
             )
             .optional()?
         else {
@@ -183,13 +180,20 @@ impl Journal {
             let (body, status) = row?;
             files.push((serde_json::from_str(&body)?, FileStatus::parse(&status)?));
         }
-        Ok(Some(EditRecord {
-            edit_id,
-            release_id,
-            release_title,
-            reverted,
-            files,
-        }))
+        Ok(Some(EditRecord { reverted, files }))
+    }
+
+    /// The release an edit was journaled with, as `(release_id, release_title)`.
+    #[cfg(test)]
+    pub(super) fn release(&self, edit_id: u64) -> Result<Option<(String, String)>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT release_id, release_title FROM edits WHERE id=?1",
+                [edit_id as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     pub(super) fn mark_reverted(&mut self, edit_id: u64) -> Result<()> {
@@ -268,9 +272,10 @@ mod tests {
         let files = [file(7), file(9)];
         let id = journal.begin("rel-1", "Release", &files).unwrap();
         let record = journal.load(id).unwrap().unwrap();
-        assert_eq!(record.edit_id, id);
-        assert_eq!(record.release_id, "rel-1");
-        assert_eq!(record.release_title, "Release");
+        assert_eq!(
+            journal.release(id).unwrap(),
+            Some(("rel-1".into(), "Release".into()))
+        );
         assert!(!record.reverted);
         assert_eq!(
             record.files,

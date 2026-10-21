@@ -56,6 +56,27 @@ pub enum Command {
         entry_id: u64,
         library_revision: u64,
     },
+    /// Looks an album up on MusicBrainz into a stored proposal. Nothing is written.
+    MusicbrainzLookup {
+        album_id: u64,
+        library_revision: u64,
+        release_id: Option<String>,
+        #[serde(default)]
+        fingerprint: bool,
+        acoustid_key: Option<String>,
+    },
+    /// Writes a stored proposal's values to the named tracks. The client sends
+    /// no tag values.
+    ApplyTags {
+        proposal_id: String,
+        track_ids: Vec<u64>,
+        #[serde(default)]
+        omit_fields: Vec<TagField>,
+    },
+    TagEdits,
+    RevertTagEdit {
+        edit_id: u64,
+    },
     QueuePage {
         revision: Option<u64>,
         offset: usize,
@@ -853,6 +874,16 @@ pub enum Response {
     Lyrics {
         lyrics: Lyrics,
     },
+    TagProposal {
+        proposal: TagProposal,
+    },
+    TagApply {
+        #[serde(flatten)]
+        result: TagApplyResult,
+    },
+    TagEdits {
+        edits: Vec<TagEditSummary>,
+    },
     Snapshot {
         snapshot: Box<ControlState>,
     },
@@ -1200,6 +1231,128 @@ mod tests {
             unsafe_target[field] = serde_json::json!("untrusted");
             assert!(serde_json::from_value::<Request>(unsafe_target).is_err());
         }
+    }
+
+    #[test]
+    fn tag_commands_use_snake_case_wire_names_and_refuse_client_values() {
+        let decode = |value: serde_json::Value| serde_json::from_value::<Request>(value);
+        let lookup = serde_json::json!({"id":1,"command":"musicbrainz_lookup",
+            "album_id":7,"library_revision":2});
+        assert!(matches!(
+            decode(lookup.clone()).unwrap().command,
+            Command::MusicbrainzLookup {
+                album_id: 7,
+                library_revision: 2,
+                release_id: None,
+                fingerprint: false,
+                acoustid_key: None
+            }
+        ));
+        let full = serde_json::json!({"id":1,"command":"musicbrainz_lookup","album_id":7,
+            "library_revision":2,"release_id":"r","fingerprint":true,"acoustid_key":"k"});
+        match decode(full).unwrap().command {
+            Command::MusicbrainzLookup {
+                release_id: Some(release_id),
+                fingerprint: true,
+                acoustid_key: Some(key),
+                ..
+            } => assert_eq!((release_id.as_str(), key.as_str()), ("r", "k")),
+            other => panic!("decoded as {other:?}"),
+        }
+        let apply = serde_json::json!({"id":1,"command":"apply_tags","proposal_id":"p",
+            "track_ids":[3,4]});
+        match decode(apply.clone()).unwrap().command {
+            Command::ApplyTags {
+                proposal_id,
+                track_ids,
+                omit_fields,
+            } => {
+                assert_eq!((proposal_id.as_str(), track_ids), ("p", vec![3, 4]));
+                assert!(omit_fields.is_empty());
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        let mut omitting = apply.clone();
+        omitting["omit_fields"] = serde_json::json!(["album_artist", "date"]);
+        assert!(matches!(
+            decode(omitting).unwrap().command,
+            Command::ApplyTags { omit_fields, .. }
+                if omit_fields == [TagField::AlbumArtist, TagField::Date]
+        ));
+        assert!(matches!(
+            decode(serde_json::json!({"id":1,"command":"tag_edits"}))
+                .unwrap()
+                .command,
+            Command::TagEdits
+        ));
+        let revert = serde_json::json!({"id":1,"command":"revert_tag_edit","edit_id":9});
+        assert!(matches!(
+            decode(revert.clone()).unwrap().command,
+            Command::RevertTagEdit { edit_id: 9 }
+        ));
+
+        let mut with_path = lookup.clone();
+        with_path["path"] = serde_json::json!("/private/source");
+        assert!(decode(with_path).is_err());
+        for field in ["values", "tags", "path"] {
+            let mut untrusted = apply.clone();
+            untrusted[field] = serde_json::json!({"title":"untrusted"});
+            assert!(decode(untrusted).is_err(), "{field} was accepted");
+        }
+        for (command, field) in [
+            (&lookup, "album_id"),
+            (&lookup, "library_revision"),
+            (&apply, "proposal_id"),
+            (&apply, "track_ids"),
+            (&revert, "edit_id"),
+        ] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(decode(missing).is_err(), "missing {field} was accepted");
+        }
+
+        let proposal = TagProposal {
+            proposal_id: "p".into(),
+            release_id: "r".into(),
+            candidates: Vec::new(),
+            tracks: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(Response::TagProposal { proposal }).unwrap(),
+            serde_json::json!({"kind":"tag_proposal","proposal":{"proposal_id":"p",
+                "release_id":"r","candidates":[],"tracks":[]}})
+        );
+        let result = TagApplyResult {
+            edit_id: Some(3),
+            files: vec![TagFileResult {
+                track_id: 4,
+                file_name: "01 a.flac".into(),
+                outcome: TagFileOutcome::Written,
+                message: None,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(Response::TagApply { result }).unwrap(),
+            serde_json::json!({"kind":"tag_apply","edit_id":3,"files":[{"track_id":4,
+                "file_name":"01 a.flac","outcome":"written","message":null}]})
+        );
+        let edits = vec![TagEditSummary {
+            edit_id: 3,
+            created_at: 1_792_575_000,
+            release_title: "Fixture Album".into(),
+            file_count: 1,
+            reverted: false,
+        }];
+        assert_eq!(
+            serde_json::to_value(Response::TagEdits { edits }).unwrap(),
+            serde_json::json!({"kind":"tag_edits","edits":[{"edit_id":3,
+                "created_at":1_792_575_000,"release_title":"Fixture Album","file_count":1,
+                "reverted":false}]})
+        );
+        assert_eq!(
+            serde_json::to_value(ErrorCode::Lookup).unwrap(),
+            serde_json::json!("lookup")
+        );
     }
 
     #[test]

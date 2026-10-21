@@ -1,7 +1,7 @@
 //! Rate-gated JSON GETs shared by the tagging providers.
 use super::LookupError;
 use crate::cancel::Cancellation;
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, ClientBuilder},
@@ -70,9 +70,10 @@ pub(super) fn client(https_only: bool) -> ClientBuilder {
 }
 
 /// Accepts only a plain `http://` loopback origin, for fixture servers in tests.
+#[cfg(test)]
 pub(super) fn loopback_origin(origin: &str) -> Result<Url> {
     let origin = Url::parse(origin)?;
-    ensure!(
+    anyhow::ensure!(
         origin.scheme() == "http"
             && origin
                 .host_str()

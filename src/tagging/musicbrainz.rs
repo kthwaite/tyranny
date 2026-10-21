@@ -176,7 +176,6 @@ pub(super) struct ReleaseTrack {
 #[derive(Clone, Deserialize)]
 pub(super) struct Recording {
     pub id: String,
-    pub title: String,
     #[serde(default)]
     pub length: Option<u64>,
     #[serde(default, rename = "artist-credit")]

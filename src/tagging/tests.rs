@@ -11,6 +11,8 @@ use super::{
     test_support::{HttpFixture, LibraryFixture, Reply, fixture, json},
 };
 use crate::cancel::Cancellation;
+use crate::library::{Library, LibraryHandle};
+use crate::library_types::{LibraryCommand, LibraryReply, Page, PageRequest, Track};
 use crate::protocol::{
     ErrorCode, FieldChange, TagApplyResult, TagCandidate, TagField, TagFileOutcome, TagProposal,
 };
@@ -744,11 +746,12 @@ fn apply_writes_proposal_values_and_journals_before_and_after() {
     assert_eq!(written, album.files);
     assert_eq!(outcomes(&result), [WRITTEN; 3]);
     let edit_id = result.edit_id.expect("the edit is journaled");
-    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    let journal = journal(&album);
     assert_eq!(
-        (record.release_id.as_str(), record.release_title.as_str()),
-        (A, "Fixture Album")
+        journal.release(edit_id).unwrap(),
+        Some((A.into(), "Fixture Album".into()))
     );
+    let record = journal.load(edit_id).unwrap().unwrap();
     assert!(!record.reverted);
     assert_eq!(record.files.len(), 3);
     for (index, (track, (file, status))) in proposal.tracks.iter().zip(&record.files).enumerate() {
@@ -1375,4 +1378,105 @@ fn apply_is_not_cancelled_when_the_requester_goes_away() {
         std::thread::sleep(Duration::from_millis(20));
     }
     workers.shutdown();
+}
+
+/// Polls `LibraryCommand::Tracks` until every track's album is `title`.
+async fn tracks_titled(library: &LibraryHandle, title: &str) -> Page<Track> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let reply = library
+            .request(LibraryCommand::Tracks {
+                album_id: None,
+                page: PageRequest {
+                    revision: None,
+                    offset: 0,
+                    limit: 500,
+                    query: String::new(),
+                },
+            })
+            .await
+            .unwrap();
+        let LibraryReply::Tracks(page) = reply else {
+            panic!("unexpected reply {reply:?}");
+        };
+        if !page.entries.is_empty() && page.entries.iter().all(|t| t.metadata.album == title) {
+            return page;
+        }
+        let albums: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|t| t.metadata.album.as_str())
+            .collect();
+        assert!(Instant::now() < deadline, "never re-indexed: {albums:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+fn sorted_ids(ids: impl Iterator<Item = u64>) -> Vec<u64> {
+    let mut ids: Vec<u64> = ids.collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn apply_through_handle_reindexes_written_paths() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let library = Library::start(album.database.clone()).unwrap();
+    let workers = TaggingWorkers::with_providers(
+        album.database.clone(),
+        Some(providers(&server, None)),
+        Some(library.handle()),
+    );
+    let handle = workers.handle();
+    let (proposal, page) = block_on(async {
+        let Ok(TagOutcome::Proposal(proposal)) =
+            handle.request(TagRequest::Lookup(request(&album))).await
+        else {
+            panic!("lookup failed");
+        };
+        let applied = handle
+            .request(TagRequest::Apply(apply_request(&proposal, &[])))
+            .await;
+        let Ok(TagOutcome::Applied { result, .. }) = applied else {
+            panic!("apply failed");
+        };
+        assert_eq!(outcomes(&result), [WRITTEN; 3]);
+        let page = tracks_titled(&library.handle(), "Fixture Album").await;
+        (proposal, page)
+    });
+    assert_eq!(
+        sorted_ids(page.entries.iter().map(|t| t.id)),
+        sorted_ids(proposal.tracks.iter().map(|t| t.track_id))
+    );
+    assert!(page.revision > album.revision);
+    workers.shutdown();
+    library.shutdown().unwrap();
+}
+
+#[test]
+fn dropped_apply_future_still_reindexes() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let library = Library::start(album.database.clone()).unwrap();
+    let workers = TaggingWorkers::with_providers(
+        album.database.clone(),
+        Some(providers(&server, None)),
+        Some(library.handle()),
+    );
+    let handle = workers.handle();
+    let page = block_on(async {
+        let Ok(TagOutcome::Proposal(proposal)) =
+            handle.request(TagRequest::Lookup(request(&album))).await
+        else {
+            panic!("lookup failed");
+        };
+        // One poll queues the apply; the future is then dropped.
+        let apply = handle.request(TagRequest::Apply(apply_request(&proposal, &[])));
+        let gone = tokio::time::timeout(Duration::ZERO, apply).await;
+        assert!(gone.is_err(), "the apply is still waiting");
+        tracks_titled(&library.handle(), "Fixture Album").await
+    });
+    assert!(page.revision > album.revision);
+    workers.shutdown();
+    library.shutdown().unwrap();
 }
