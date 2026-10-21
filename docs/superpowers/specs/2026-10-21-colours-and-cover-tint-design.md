@@ -77,6 +77,10 @@ The tables use plain `NSTableRowView`. Add one shared row-view subclass, `TokenR
 
 `QueueRowView` (UpNextTable) becomes a subclass of `TokenRowView`.
 
+Every `NSTableView` uses `TokenRowView`: the track, album-track, Up Next, History and column
+browser tables (Genres, Artists, Albums). The Radio list is a SwiftUI `Table` and keeps the
+system selection.
+
 ## Resolution
 
 Pure logic in TyrannyCore, which has no AppKit or SwiftUI imports:

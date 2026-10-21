@@ -30,6 +30,9 @@ enum NativeRenderViews {
                          drawer: navigation.upNextDrawerVisible,
                          art: navigation.nowPlayingArtExpanded,
                          grouping: navigation.grouping(for: .songs))
+            // A crashed smoke run can leave custom colours in the suite. Render the default look.
+            let savedColours = model.theme.settings
+            model.theme.update(ColourSettings())
             var savedSidebarCollapsed: Bool?
             var savedFrame: NSRect?
             do {
@@ -162,6 +165,7 @@ enum NativeRenderViews {
             }
             model.importOverride = nil
             model.importFolderOverride = nil
+            model.theme.update(savedColours)
             navigation.setGrouping(saved.grouping, for: .songs)
             navigation.columnBrowserVisible = saved.browser
             navigation.upNextDrawerVisible = saved.drawer
