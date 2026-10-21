@@ -199,8 +199,8 @@ server computes the period's UTC bounds and handles DST.
 
 Two new commands. Field names below are indicative, and the builder may refine them:
 
-- `stats { period: {kind, anchor} }` → `stats { history_revision, report: StatsReport }`
-- `wrapped { year }` → `wrapped { history_revision, report: WrappedReport }`
+- `stats { period: {kind, anchor} }` → `stats { stats_revision, report: StatsReport }`
+- `wrapped { year }` → `wrapped { stats_revision, report: WrappedReport }`
 
 Also add a third command, `stats_years` → `stats_years { years: [u16] }`. It returns the
 years that have at least one counted play, and the Wrapped menu uses it.
