@@ -233,10 +233,29 @@ fn count_click_requests_url_path() {
 
 #[test]
 fn count_click_ignores_unsafe_ids() {
-    // No server is listening; a request would error, and nothing may panic either way.
-    let provider = Provider::for_test(vec![Url::parse("http://127.0.0.1:9/").unwrap()]).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let provider = Provider::for_test(vec![origin]).unwrap();
     provider.count_click("../stations");
     provider.count_click("");
+    let error = listener.accept().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn failed_host_moves_to_the_back() {
+    let (first, first_server) = serve(reply("503 Service Unavailable", "text/plain", "down"));
+    let (second, second_server) = serve(json("[]"));
+    let provider = Provider::for_test(vec![first.clone(), second.clone()]).unwrap();
+    provider.search("jazz", &Cancellation::idle()).unwrap();
+    first_server.join().unwrap();
+    second_server.join().unwrap();
+    let cancel = Cancellation::idle();
+    let order = provider
+        .origins(&cancel, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(order, [second, first]);
 }
 
 #[test]

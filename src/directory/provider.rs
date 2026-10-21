@@ -33,26 +33,28 @@ pub(super) const USER_AGENT: &str = concat!(
 );
 
 struct Mirrors {
-    hosts: Vec<String>,
+    // Head first; a host that fails moves to the back.
+    origins: Vec<Url>,
     resolved_at: Instant,
+    // Test origins stand in for DNS: never re-resolved, never forgotten.
+    #[cfg(test)]
+    pinned: bool,
 }
 
 pub(crate) struct Provider {
     client: Client,
     mirrors: Mutex<Mirrors>,
-    #[cfg(test)]
-    fixture_origins: Option<Vec<Url>>,
 }
 impl Provider {
     pub(crate) fn new() -> Result<Self> {
         Ok(Self {
             client: Self::builder().https_only(true).build()?,
             mirrors: Mutex::new(Mirrors {
-                hosts: Vec::new(),
+                origins: Vec::new(),
                 resolved_at: Instant::now(),
+                #[cfg(test)]
+                pinned: false,
             }),
-            #[cfg(test)]
-            fixture_origins: None,
         })
     }
     fn builder() -> reqwest::blocking::ClientBuilder {
@@ -82,10 +84,10 @@ impl Provider {
         Ok(Self {
             client: Self::builder().no_proxy().build()?,
             mirrors: Mutex::new(Mirrors {
-                hosts: Vec::new(),
+                origins,
                 resolved_at: Instant::now(),
+                pinned: true,
             }),
-            fixture_origins: Some(origins),
         })
     }
 
@@ -95,27 +97,36 @@ impl Provider {
         cancel: &Cancellation,
     ) -> Result<Vec<DirectoryStation>> {
         let deadline = Instant::now() + SEARCH_DEADLINE;
-        let origins = self.origins(cancel, deadline)?;
+        let result = self.search_mirrors(query, cancel, deadline);
+        if result.is_err() {
+            self.forget_mirrors();
+        }
+        result
+    }
+    fn search_mirrors(
+        &self,
+        query: &str,
+        cancel: &Cancellation,
+        deadline: Instant,
+    ) -> Result<Vec<DirectoryStation>> {
         let mut last = None;
-        for origin in origins {
+        for origin in self.origins(cancel, deadline)? {
             cancel.check(deadline)?;
             match self.search_one(&origin, query, cancel, deadline) {
                 Ok(stations) => return Ok(stations),
-                Err(error) => last = Some(error),
+                Err(error) => {
+                    self.demote(&origin);
+                    last = Some(error);
+                }
             }
         }
-        cancel.check(deadline)?;
-        self.forget_mirrors();
         let error = last.context("no radio-browser.info mirrors available")?;
         Err(error.context("radio-browser.info is unavailable"))
     }
 
     /// Best-effort: the API counts one click per IP, station and day.
     pub(crate) fn count_click(&self, uuid: &str) {
-        if uuid.is_empty()
-            || uuid.len() > MAX_UUID_BYTES
-            || !uuid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
+        if !is_safe_uuid(uuid) {
             return;
         }
         let _ = self.count_click_inner(uuid);
@@ -145,7 +156,7 @@ impl Provider {
         let mut url = origin.join("json/stations/search")?;
         url.query_pairs_mut()
             .append_pair("name", query)
-            .append_pair("limit", "50")
+            .append_pair("limit", &MAX_RESULTS.to_string())
             .append_pair("hidebroken", "true")
             .append_pair("order", "clickcount")
             .append_pair("reverse", "true");
@@ -173,34 +184,54 @@ impl Provider {
         parse(&bytes)
     }
 
-    fn origins(&self, cancel: &Cancellation, deadline: Instant) -> Result<Vec<Url>> {
-        #[cfg(test)]
-        if let Some(origins) = &self.fixture_origins {
-            return Ok(origins.iter().take(MAX_HOSTS).cloned().collect());
-        }
-        let mut mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
-        if mirrors.hosts.is_empty() || mirrors.resolved_at.elapsed() > MIRROR_TTL {
+    pub(super) fn origins(&self, cancel: &Cancellation, deadline: Instant) -> Result<Vec<Url>> {
+        let stale = {
+            let mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
+            #[cfg(test)]
+            let pinned = mirrors.pinned;
+            #[cfg(not(test))]
+            let pinned = false;
+            !pinned && (mirrors.origins.is_empty() || mirrors.resolved_at.elapsed() > MIRROR_TTL)
+        };
+        if stale {
             cancel.check(deadline)?;
-            mirrors.hosts = resolve_within(deadline)?;
+            // Resolve outside the lock so a slow lookup blocks no one else.
+            let origins = resolve_within(deadline)?
+                .iter()
+                .map(|host| Url::parse(&format!("https://{host}/")).map_err(Into::into))
+                .collect::<Result<Vec<Url>>>()?;
+            let mut mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
+            mirrors.origins = origins;
             mirrors.resolved_at = Instant::now();
         }
-        mirrors
-            .hosts
-            .iter()
-            .take(MAX_HOSTS)
-            .map(|host| Url::parse(&format!("https://{host}/")).map_err(Into::into))
-            .collect()
+        let mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(mirrors.origins.iter().take(MAX_HOSTS).cloned().collect())
+    }
+    fn demote(&self, failed: &Url) {
+        let mut mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(index) = mirrors.origins.iter().position(|o| o == failed) {
+            let origin = mirrors.origins.remove(index);
+            mirrors.origins.push(origin);
+        }
     }
     fn forget_mirrors(&self) {
-        self.mirrors
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .hosts
-            .clear();
+        let mut mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(test)]
+        if mirrors.pinned {
+            return;
+        }
+        mirrors.origins.clear();
     }
 }
 
+fn is_safe_uuid(uuid: &str) -> bool {
+    !uuid.is_empty()
+        && uuid.len() <= MAX_UUID_BYTES
+        && uuid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 // DNS has no timeout of its own, so it runs on a helper thread the search can abandon.
+// The thread can outlive the deadline: at most one per search, bounded by the resolver's own timeout.
 fn resolve_within(deadline: Instant) -> Result<Vec<String>> {
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()
@@ -277,10 +308,7 @@ fn convert(raw: RawStation) -> Option<DirectoryStation> {
         return None;
     }
     let uuid = raw.stationuuid.unwrap_or_default();
-    if uuid.is_empty()
-        || uuid.len() > MAX_UUID_BYTES
-        || !uuid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
+    if !is_safe_uuid(&uuid) {
         return None;
     }
     let resolved = raw.url_resolved.unwrap_or_default();

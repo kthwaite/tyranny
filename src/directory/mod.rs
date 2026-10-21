@@ -5,7 +5,7 @@ mod provider;
 mod tests;
 
 use anyhow::{Result, ensure};
-#[allow(unused_imports)] // wired in by the directory protocol commands
+#[cfg_attr(not(test), expect(unused_imports))] // wired in by the directory protocol commands
 pub(crate) use provider::Provider;
 use std::{
     sync::{

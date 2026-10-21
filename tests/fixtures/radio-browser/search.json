@@ -89,6 +89,28 @@
     "tags": ""
   },
   {
+    "stationuuid": "",
+    "name": "No Uuid",
+    "url": "https://g.example/x",
+    "url_resolved": "https://g.example/x",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 64,
+    "countrycode": "FR",
+    "tags": ""
+  },
+  {
+    "stationuuid": "../stations",
+    "name": "Unsafe Uuid",
+    "url": "https://h2.example/x",
+    "url_resolved": "https://h2.example/x",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 64,
+    "countrycode": "FR",
+    "tags": ""
+  },
+  {
     "stationuuid": "99999999-9999-9999-9999-999999999999",
     "name": "  Padded Name  ",
     "url": "https://f.example/stream",
