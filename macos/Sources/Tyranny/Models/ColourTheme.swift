@@ -112,7 +112,11 @@ final class ColourTheme {
         let resolved = ThemeResolver.resolve(settings: settings, artColour: artColour)
         guard resolved != tokens else { return }
         var transaction = Transaction()
-        transaction.disablesAnimations = !animated
+        if animated {
+            transaction.animation = .easeInOut(duration: 0.3)
+        } else {
+            transaction.disablesAnimations = true
+        }
         withTransaction(transaction) {
             tokens = resolved
             colours = Self.colours(for: resolved)

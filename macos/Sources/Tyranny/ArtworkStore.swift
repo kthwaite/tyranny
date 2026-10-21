@@ -212,7 +212,7 @@ final class ArtworkStore {
         cache[request] = Cached(value: value, expires: Date().addingTimeInterval(lifetime))
         cacheBytes += value.byteCost
         touch(request)
-        onNowPlayingChange?()
+        if request == nowPlayingRequest { onNowPlayingChange?() }
     }
 
     private func removeCached(_ request: ArtworkRequest) {
