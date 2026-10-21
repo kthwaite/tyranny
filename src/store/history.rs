@@ -79,7 +79,6 @@ impl EndReason {
             Self::Stopped => "stopped",
         }
     }
-    #[allow(dead_code)] // Task 6 reads end reasons back
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "finished" => Some(Self::Finished),
