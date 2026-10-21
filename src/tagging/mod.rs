@@ -237,6 +237,9 @@ impl Handle {
             TagRequest::Apply(_) | TagRequest::Revert { .. } => self.library.clone(),
             TagRequest::Lookup(_) | TagRequest::Edits => None,
         };
+        // Counted before the work is queued, so `settle` never sees 0 while
+        // queued work may still need a re-index. An error return drops it.
+        let reindex = library.map(|library| (library, DetachedTask::start(&self.detached)));
         let (reply, receive) = oneshot::channel();
         let abandoned = Arc::new(AtomicBool::new(false));
         // Dropping a lookup's future stops it; other work is never abandoned.
@@ -259,11 +262,10 @@ impl Handle {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => return Err(stopped()),
         }
-        let Some(library) = library else {
+        let Some((library, task)) = reindex else {
             return receive.await.unwrap_or_else(|_| Err(stopped()));
         };
         let (forward, forwarded) = oneshot::channel();
-        let task = DetachedTask::start(&self.detached);
         tokio::spawn(async move {
             let _task = task;
             let outcome = receive.await.unwrap_or_else(|_| Err(stopped()));

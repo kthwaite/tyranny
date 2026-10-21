@@ -1693,25 +1693,30 @@ fn apply_is_not_cancelled_when_the_requester_goes_away() {
     workers.shutdown();
 }
 
+/// One `LibraryCommand::Tracks` page of every track.
+async fn all_tracks(library: &LibraryHandle) -> Page<Track> {
+    let reply = library
+        .request(LibraryCommand::Tracks {
+            album_id: None,
+            page: PageRequest {
+                revision: None,
+                offset: 0,
+                limit: 500,
+                query: String::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let LibraryReply::Tracks(page) = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    page
+}
 /// Polls `LibraryCommand::Tracks` until every track's album is `title`.
 async fn tracks_titled(library: &LibraryHandle, title: &str) -> Page<Track> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let reply = library
-            .request(LibraryCommand::Tracks {
-                album_id: None,
-                page: PageRequest {
-                    revision: None,
-                    offset: 0,
-                    limit: 500,
-                    query: String::new(),
-                },
-            })
-            .await
-            .unwrap();
-        let LibraryReply::Tracks(page) = reply else {
-            panic!("unexpected reply {reply:?}");
-        };
+        let page = all_tracks(library).await;
         if !page.entries.is_empty() && page.entries.iter().all(|t| t.metadata.album == title) {
             return page;
         }
@@ -1797,7 +1802,14 @@ fn dropped_apply_future_still_reindexes() {
 #[test]
 fn settle_waits_for_a_detached_apply() {
     let album = stored_a();
-    let server = musicbrainz("search.json");
+    // Release B is slow, so a lookup of it holds the apply in the queue.
+    let server = HttpFixture::new(|target| {
+        let mut reply = releases_or(target, "search.json");
+        if target.contains(B) {
+            reply.delay = Duration::from_millis(500);
+        }
+        reply
+    });
     let library = Library::start(album.database.clone()).unwrap();
     let workers = TaggingWorkers::with_providers(
         album.database.clone(),
@@ -1805,47 +1817,83 @@ fn settle_waits_for_a_detached_apply() {
         Some(library.handle()),
     );
     let handle = workers.handle();
+    let original = bytes(&album);
     block_on(async {
         let Ok(TagOutcome::Proposal(proposal)) =
             handle.request(TagRequest::Lookup(request(&album))).await
         else {
             panic!("lookup failed");
         };
+        let busy = {
+            let handle = handle.clone();
+            let explicit = LookupRequest {
+                release_id: Some(B.into()),
+                ..request(&album)
+            };
+            tokio::spawn(async move { handle.request(TagRequest::Lookup(explicit)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
         // One poll queues the apply; the future is then dropped.
         let apply = handle.request(TagRequest::Apply(apply_request(&proposal, &[])));
         let gone = tokio::time::timeout(Duration::ZERO, apply).await;
         assert!(gone.is_err(), "the apply is still waiting");
-        handle.settle(Duration::from_secs(10)).await;
+        // The queued apply's task is running, so `settle` waits its limit.
+        let started = Instant::now();
+        handle.settle(Duration::from_millis(100)).await;
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(matches!(busy.await, Ok(Ok(TagOutcome::Proposal(_)))));
+        // Quit during the apply, in the owner's order: join the worker, which
+        // finishes the current file and replies, then settle.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bytes(&album)[0] == original[0] {
+            assert!(Instant::now() < deadline, "the apply never started");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        tokio::task::spawn_blocking(move || workers.shutdown())
+            .await
+            .unwrap();
+        let limit = Duration::from_secs(10);
+        let started = Instant::now();
+        handle.settle(limit).await;
+        assert!(started.elapsed() < limit, "settle reached its limit");
     });
     // The library shuts down at once, as the owner does after `settle`. It
     // re-indexes only what reached it, and its queue lives only in memory.
+    library.shutdown().unwrap();
+    let written: Vec<bool> = bytes(&album)
+        .iter()
+        .zip(&original)
+        .map(|(now, before)| now != before)
+        .collect();
+    assert!(written[0]);
+    let reopened = Library::start(album.database.clone()).unwrap();
+    let page = block_on(all_tracks(&reopened.handle()));
+    for (path, written) in album.files.iter().zip(written) {
+        let track = page
+            .entries
+            .iter()
+            .find(|t| std::path::Path::new(&t.path) == path)
+            .unwrap();
+        let expected = if written {
+            "Fixture Album"
+        } else {
+            "Old Album"
+        };
+        assert_eq!(track.metadata.album, expected, "{path:?}");
+    }
+    reopened.shutdown().unwrap();
+}
+
+#[test]
+fn settle_returns_at_once_when_no_task_is_running() {
+    let album = stored_a();
+    let library = Library::start(album.database.clone()).unwrap();
+    let workers =
+        TaggingWorkers::with_providers(album.database.clone(), None, Some(library.handle()));
+    let handle = workers.handle();
+    let started = Instant::now();
+    block_on(handle.settle(Duration::from_secs(10)));
+    assert!(started.elapsed() < Duration::from_secs(1));
     workers.shutdown();
     library.shutdown().unwrap();
-    let reopened = Library::start(album.database.clone()).unwrap();
-    let page = block_on(async {
-        let reply = reopened
-            .handle()
-            .request(LibraryCommand::Tracks {
-                album_id: None,
-                page: PageRequest {
-                    revision: None,
-                    offset: 0,
-                    limit: 500,
-                    query: String::new(),
-                },
-            })
-            .await
-            .unwrap();
-        let LibraryReply::Tracks(page) = reply else {
-            panic!("unexpected reply {reply:?}");
-        };
-        page
-    });
-    let albums: Vec<&str> = page
-        .entries
-        .iter()
-        .map(|t| t.metadata.album.as_str())
-        .collect();
-    assert_eq!(albums, ["Fixture Album"; 3]);
-    reopened.shutdown().unwrap();
 }

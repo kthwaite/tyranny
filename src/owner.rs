@@ -47,7 +47,9 @@ use resolve::{Resolution, Resolver};
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 const EVENT_INTERVAL: Duration = Duration::from_millis(250);
 /// How long shutdown waits for tag writes to hand their re-index to the library.
-const TAGGING_SETTLE_LIMIT: Duration = Duration::from_secs(5);
+/// With the library's drain limit and one file write it stays under launchd's
+/// 15 s `ExitTimeOut`.
+const TAGGING_SETTLE_LIMIT: Duration = Duration::from_secs(3);
 
 pub struct OwnerConfig {
     pub database_path: PathBuf,
@@ -163,7 +165,7 @@ impl Owner {
             .await
             .is_err()
         {
-            eprintln!("tyranny: the tagging worker panicked during shutdown");
+            eprintln!("tyranny: joining the tagging worker failed during shutdown");
         }
         self.controller.tagging.settle(TAGGING_SETTLE_LIMIT).await;
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -2236,8 +2238,9 @@ impl Actor {
                         let checkpoint = self.checkpoint();
                         self.player.pause();
                         self.write_plays();
-                        let library = self.library.shutdown();
+                        // Saved first: the library may take its whole drain limit.
                         let saved = self.store.checkpoint(checkpoint, &self.settings);
+                        let library = self.library.shutdown();
                         let result = library.and(saved);
                         let response = result
                             .as_ref()
@@ -2250,8 +2253,9 @@ impl Actor {
                         let checkpoint = self.checkpoint();
                         self.player.pause();
                         self.write_plays();
-                        let library = self.library.shutdown();
+                        // Saved first: the library may take its whole drain limit.
                         let saved = self.store.checkpoint(checkpoint, &self.settings);
+                        let library = self.library.shutdown();
                         return library.and(saved);
                     }
                     Err(mpsc::error::TryRecvError::Empty) => {}

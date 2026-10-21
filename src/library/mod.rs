@@ -34,7 +34,7 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 /// Bounds the in-memory Reindex queue; it is never persisted.
 pub(crate) const MAX_PENDING_REINDEX: usize = 4096;
 /// Bounds the Reindex work that shutdown finishes.
-const SHUTDOWN_REINDEX_LIMIT: Duration = Duration::from_secs(10);
+const SHUTDOWN_REINDEX_LIMIT: Duration = Duration::from_secs(8);
 struct Work {
     command: LibraryCommand,
     reply: oneshot::Sender<std::result::Result<LibraryReply, LibraryError>>,
@@ -340,10 +340,14 @@ impl Coordinator {
     fn drain_reindex(&mut self, deadline: Instant) -> Result<()> {
         while self.active.is_some() || !self.pending_reindex.is_empty() {
             if Instant::now() >= deadline {
-                eprintln!(
-                    "tyranny: shutdown dropped an unfinished re-index and {} queued file(s)",
-                    self.pending_reindex.len()
-                );
+                let queued = self.pending_reindex.len();
+                if self.active.is_some() {
+                    eprintln!(
+                        "tyranny: shutdown dropped an unfinished re-index and {queued} queued file(s)"
+                    );
+                } else {
+                    eprintln!("tyranny: shutdown dropped {queued} file(s) queued for re-index");
+                }
                 return Ok(());
             }
             let worked = if self.active.is_some() {
