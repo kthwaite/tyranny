@@ -136,6 +136,6 @@ import Testing
             library: LibraryState(revision: 1, roots: 0, tracks: 0, duration_ms: 0, size_bytes: 0,
                                   scan: ScanStatus(root_id: nil, phase: "idle", discovered: 0, processed: 0,
                                                    total: nil, updated: 0, unchanged: 0, failures: 0, skipped: 0, last_error: nil)),
-            history_revision: 0, current_index: current == nil ? nil : 1, upcoming_count: 1)
+            history_revision: 0, stats_revision: 0, current_index: current == nil ? nil : 1, upcoming_count: 1)
     }
 }
