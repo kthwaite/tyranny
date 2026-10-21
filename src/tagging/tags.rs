@@ -1,10 +1,11 @@
 //! Tag fields in audio files, read and written with lofty.
 //!
-//! Each field has one primary home: its key in the file's primary tag. Every
-//! other value of the field is a copy: an alias key in the primary tag, an extra
-//! value of the primary key, or the field in another tag. An edit removes every
-//! copy of each field it sets, so FFmpeg (which merges all tags and accepts
-//! aliases) reads the new value.
+//! Each field has one primary home: its key in the file's primary tag. The ID3v2
+//! recording ID also has a second home, written with the same value (see
+//! `second_home`). Every other value of the field is a copy: an alias key in the
+//! primary tag, an extra value of the primary key, or the field in another tag.
+//! An edit removes every copy of each field it sets, so FFmpeg (which merges all
+//! tags and accepts aliases) reads the new value.
 //!
 //! Every other item must survive an edit. lofty's generic `Tag` drops unmapped
 //! Vorbis, APE and RIFF INFO items, mangles APE number pairs and turns AIFF
@@ -165,7 +166,7 @@ impl FileTags {
 #[derive(Clone, Debug, Default)]
 pub struct TagEdit {
     /// Each field is first removed everywhere; `Some` then writes it to its
-    /// primary home.
+    /// primary home, and to its second home unless `restore` puts a copy there.
     pub set: BTreeMap<TagField, Option<String>>,
     /// Copies put back into their own tags, after `set`.
     pub restore: Vec<TagCopy>,
@@ -225,12 +226,22 @@ const ALIASES: &[(TagKind, TagField, &str)] = &[
     ),
 ];
 
-/// The primary key is a raw key, not the field's ItemKey; the ItemKey copy is then an alias.
+/// The primary key is a raw key, not the field's ItemKey; the ItemKey value is
+/// then a copy, unless it is the field's `second_home`.
 const PRIMARY_RAW: &[(TagKind, TagField, &str)] = &[(
     TagKind::Id3v2,
     TagField::MusicbrainzRecordingId,
     "TXXX:MusicBrainz Track Id",
 )];
+
+/// The field's second home in this tag kind: a key written with the same value
+/// as the primary key, for other readers. The ID3v2 recording ID lives in
+/// `TXXX:MusicBrainz Track Id` and in `UFID:http://musicbrainz.org` (lofty's
+/// `ItemKey` for it), which Picard, beets and mutagen read. A second-home value
+/// equal to the primary value is not a copy.
+fn second_home(kind: TagKind, field: TagField) -> Option<CopyKey> {
+    (kind == TagKind::Id3v2 && field == TagField::MusicbrainzRecordingId).then_some(CopyKey::Field)
+}
 
 /// ID3v2.3 writes TDOR as TORY (year only), so these fields cannot round-trip in a v2.3 file.
 const ID3V23_UNWRITABLE: &[TagField] = &[TagField::OriginalDate];
@@ -519,7 +530,15 @@ impl Parsed {
                 if slot.kind == primary_kind {
                     let key = primary_key(slot.kind, field);
                     if let Some(position) = entries.iter().position(|(k, _)| *k == key) {
-                        primary.insert(field, entries.remove(position).1);
+                        let value = entries.remove(position).1;
+                        if let Some(second) = second_home(slot.kind, field)
+                            && let Some(position) = entries
+                                .iter()
+                                .position(|(k, v)| *k == second && *v == value)
+                        {
+                            entries.remove(position);
+                        }
+                        primary.insert(field, value);
                     }
                 }
                 copies.extend(entries.into_iter().map(|(key, value)| TagCopy {
@@ -555,11 +574,16 @@ impl Parsed {
         for (field, value) in &edit.set {
             if let Some(value) = value {
                 let slot = self.slot(primary_kind)?;
-                let key = primary_key(primary_kind, *field);
-                pushes
-                    .entry(slot)
-                    .or_default()
-                    .push((*field, key, value.clone()));
+                let push = pushes.entry(slot).or_default();
+                push.push((*field, primary_key(primary_kind, *field), value.clone()));
+                // A restored copy at the second home takes its place.
+                if let Some(second) = second_home(primary_kind, *field)
+                    && !edit.restore.iter().any(|copy| {
+                        copy.tag == primary_kind && copy.field == *field && copy.key == second
+                    })
+                {
+                    push.push((*field, second, value.clone()));
+                }
             }
         }
         for copy in &edit.restore {
@@ -1582,8 +1606,32 @@ mod tests {
         assert_eq!(item.value().text(), Some("B000TEST"));
     }
 
+    /// The identifiers of the file's ID3v2 `UFID` frames with this owner.
+    fn ufids(path: &Path, owner: &str) -> Vec<String> {
+        read_mpeg(path)
+            .id3v2()
+            .into_iter()
+            .flatten()
+            .filter_map(|frame| match frame {
+                Frame::UniqueFileIdentifier(ufid) if ufid.owner == owner => {
+                    Some(String::from_utf8(ufid.identifier.to_vec()).unwrap())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn txxx_recording_id(path: &Path) -> Option<String> {
+        read_mpeg(path)
+            .id3v2()?
+            .get_user_text("MusicBrainz Track Id")
+            .map(str::to_owned)
+    }
+
+    const MUSICBRAINZ_UFID: &str = "http://musicbrainz.org";
+
     #[test]
-    fn id3_recording_id_is_written_as_txxx_and_ufid_is_removed() {
+    fn id3_recording_id_is_written_as_txxx_and_ufid() {
         let scratch = Scratch::new();
         let path = scratch.copy("tone.mp3");
         let mut generic = Tag::new(TagType::Id3v2);
@@ -1594,43 +1642,104 @@ mod tests {
             b"other-id".to_vec(),
         )));
         id3.save_to_path(&path, WriteOptions::default()).unwrap();
-        let musicbrainz_ufids = |id3: &Id3v2Tag, owner: &str| {
-            id3.into_iter()
-                .filter(|frame| {
-                    matches!(frame, Frame::UniqueFileIdentifier(ufid) if ufid.owner == owner)
-                })
-                .count()
-        };
-        let before = read_mpeg(&path);
-        assert_eq!(
-            musicbrainz_ufids(before.id3v2().unwrap(), "http://musicbrainz.org"),
-            1
-        );
-        assert!(read_tags(&path).unwrap().copies.contains(&TagCopy {
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), ["old-recording"]);
+        let old_ufid = TagCopy {
             tag: TagKind::Id3v2,
             field: TagField::MusicbrainzRecordingId,
             key: CopyKey::Field,
             value: "old-recording".to_owned(),
             read_only: false,
-        }));
+        };
+        let before = read_tags(&path).unwrap();
+        assert_eq!(before.copies, std::slice::from_ref(&old_ufid));
+        // Without a TXXX value, the current value is the UFID's.
+        assert_eq!(
+            before.current(TagField::MusicbrainzRecordingId),
+            Some("old-recording")
+        );
 
         let new = &values()[&TagField::MusicbrainzRecordingId];
-        edit_tags(&path, &setting(&[(TagField::MusicbrainzRecordingId, new)])).unwrap();
-        let mpeg = read_mpeg(&path);
-        let id3 = mpeg.id3v2().unwrap();
-        assert_eq!(
-            id3.get_user_text("MusicBrainz Track Id"),
-            Some(new.as_str())
-        );
-        assert_eq!(musicbrainz_ufids(id3, "http://musicbrainz.org"), 0);
-        assert_eq!(musicbrainz_ufids(id3, "http://example.com"), 1);
+        let removed =
+            edit_tags(&path, &setting(&[(TagField::MusicbrainzRecordingId, new)])).unwrap();
+        assert_eq!(removed, std::slice::from_ref(&old_ufid));
+        assert_eq!(txxx_recording_id(&path).as_ref(), Some(new));
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), std::slice::from_ref(new));
+        assert_eq!(ufids(&path, "http://example.com"), ["other-id"]);
         assert_eq!(
             probe(&path).musicbrainz_recording_id.as_deref(),
             Some(new.as_str())
         );
+        // The UFID is the field's second home, not a copy.
         let tags = read_tags(&path).unwrap();
         assert_eq!(tags.primary[&TagField::MusicbrainzRecordingId], *new);
         assert!(tags.copies.is_empty(), "{:?}", tags.copies);
+
+        // Reverting removes both homes and puts the old UFID back.
+        let revert = TagEdit {
+            set: [(TagField::MusicbrainzRecordingId, None)]
+                .into_iter()
+                .collect(),
+            restore: removed,
+        };
+        edit_tags(&path, &revert).unwrap();
+        assert_eq!(txxx_recording_id(&path), None);
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), ["old-recording"]);
+        assert_eq!(ufids(&path, "http://example.com"), ["other-id"]);
+        let after = read_tags(&path).unwrap();
+        assert_eq!(after.primary, before.primary);
+        assert_eq!(after.copies, before.copies);
+    }
+
+    #[test]
+    fn reverting_an_id3_recording_id_restores_both_homes() {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.mp3");
+        let recording = |value: &str| setting(&[(TagField::MusicbrainzRecordingId, value)]);
+        let back_to = |value: &str, removed: Vec<TagCopy>| TagEdit {
+            set: [(TagField::MusicbrainzRecordingId, Some(value.to_owned()))]
+                .into_iter()
+                .collect(),
+            restore: removed,
+        };
+
+        // Both homes hold the same value: revert writes it to both again.
+        edit_tags(&path, &recording("first")).unwrap();
+        let removed = edit_tags(&path, &recording("second")).unwrap();
+        assert!(removed.is_empty(), "{removed:?}");
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), ["second"]);
+        edit_tags(&path, &back_to("first", removed)).unwrap();
+        assert_eq!(txxx_recording_id(&path).as_deref(), Some("first"));
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), ["first"]);
+        assert!(read_tags(&path).unwrap().copies.is_empty());
+
+        // The UFID differs from the TXXX: it is a copy, and revert restores it as it was.
+        let mut id3 = read_mpeg(&path).id3v2().unwrap().clone();
+        id3.insert(Frame::UniqueFileIdentifier(UniqueFileIdentifierFrame::new(
+            MUSICBRAINZ_UFID,
+            b"other".to_vec(),
+        )));
+        id3.save_to_path(&path, WriteOptions::default()).unwrap();
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), ["other"]);
+        let before = read_tags(&path).unwrap();
+        assert_eq!(before.primary[&TagField::MusicbrainzRecordingId], "first");
+        let removed = edit_tags(&path, &recording("second")).unwrap();
+        assert_eq!(
+            removed,
+            [TagCopy {
+                tag: TagKind::Id3v2,
+                field: TagField::MusicbrainzRecordingId,
+                key: CopyKey::Field,
+                value: "other".to_owned(),
+                read_only: false,
+            }]
+        );
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), ["second"]);
+        edit_tags(&path, &back_to("first", removed)).unwrap();
+        assert_eq!(txxx_recording_id(&path).as_deref(), Some("first"));
+        assert_eq!(ufids(&path, MUSICBRAINZ_UFID), ["other"]);
+        let after = read_tags(&path).unwrap();
+        assert_eq!(after.primary, before.primary);
+        assert_eq!(after.copies, before.copies);
     }
 
     #[test]

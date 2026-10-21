@@ -154,7 +154,9 @@ For each file:
    for each written field only (Claude):
    - remove its alias keys in the primary tag (for example `TOTALTRACKS` when writing
      `TRACKTOTAL`, `MUSICBRAINZ_RELEASEID` beside `MUSICBRAINZ_ALBUMID`, `ORIGINALYEAR` beside
-     the original date, an ID3 `UFID` beside the `TXXX` recording ID);
+     the original date). The ID3 recording ID is written to both `TXXX:MusicBrainz Track Id`
+     and `UFID:http://musicbrainz.org` with the same value, since Picard, beets and mutagen
+     read only the `UFID`; revert restores or removes both (amended 2026-10-21, final review);
    - remove that field from the file's other tags (ID3v1 or APEv2 on MP3, ID3 in WAV).
      lofty can't edit an ID3 tag inside FLAC, APE or Musepack, only strip it whole. A file
      whose such tag holds a field the proposal changes is not writable: "Has an old ID3 tag
