@@ -3,6 +3,7 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const BLOCK_FRAMES: usize = 1024;
 
 mod artwork;
+mod cancel;
 pub mod decoder;
 pub mod equalizer;
 mod filter;
