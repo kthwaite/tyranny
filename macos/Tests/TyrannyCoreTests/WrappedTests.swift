@@ -127,6 +127,21 @@ import Testing
         #expect(clock.index == 0 && clock.progress == 0)
     }
 
+    @Test func clockIsIdleWhilePausedOrHoldingTheLastSlide() {
+        var clock = SlideshowClock(count: 2)
+        #expect(!clock.idle)
+        clock.togglePause()
+        #expect(clock.idle)
+        clock.togglePause()
+        clock.tick(7)
+        // The last slide is still filling.
+        #expect(clock.index == 1 && !clock.idle)
+        clock.tick(6)
+        #expect(clock.progress == 1 && clock.idle)
+        clock.previous()
+        #expect(!clock.idle)
+    }
+
     @Test func aLongTickCanCrossSeveralSlides() {
         var clock = SlideshowClock(count: 5)
         clock.tick(13)

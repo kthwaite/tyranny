@@ -91,6 +91,9 @@ public struct SlideshowClock: Equatable, Sendable {
     /// The fraction of the current slide's interval that has passed, 0 to 1.
     public var progress: Double { min(elapsed / interval, 1) }
 
+    /// Ticks change nothing: paused, or holding the full last slide.
+    public var idle: Bool { paused || (isLast && progress >= 1) }
+
     public mutating func tick(_ dt: TimeInterval) {
         guard !paused else { return }
         elapsed += dt

@@ -18,6 +18,8 @@ struct WrappedView: View {
 
     @State private var load = Load.loading
     @State private var clock = SlideshowClock(count: 1)
+    /// The timeline's last frame, nil until the first frame after a pause.
+    @State private var lastTick: Date?
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -70,13 +72,18 @@ struct WrappedView: View {
     private func chrome(scale: CGFloat) -> some View {
         VStack(spacing: 14) {
             if case .loaded = load {
-                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                // Idle, the timeline stops, so a paused or finished slideshow costs nothing.
+                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: clock.idle)) { context in
                     ProgressBars(clock: clock)
-                        .onChange(of: context.date) { old, new in
+                        .onChange(of: context.date) { _, new in
+                            defer { lastTick = new }
+                            // The first frame after a pause only starts the count.
+                            guard let lastTick else { return }
                             // A hidden window stops the timeline: never jump more than a frame or two.
-                            clock.tick(min(max(new.timeIntervalSince(old), 0), 0.25))
+                            clock.tick(min(max(new.timeIntervalSince(lastTick), 0), 0.25))
                         }
                 }
+                .onChange(of: clock.idle) { lastTick = nil }
             }
             HStack(spacing: 12) {
                 Text("Tyranny Wrapped · \(String(year))")
