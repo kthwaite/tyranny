@@ -152,7 +152,7 @@ final class ColourTheme {
         case .custom(let rgb):
             return NSColor(srgbRed: rgb.red, green: rgb.green, blue: rgb.blue, alpha: 1)
         case .tinted(let rgb):
-            return NSColor(name: nil) { appearance in
+            return NSColor(name: nil) { @Sendable appearance in
                 let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 let raised = Contrast.raise(
                     rgb, against: dark ? Contrast.darkBackground : Contrast.lightBackground, to: Contrast.floor)
