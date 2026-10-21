@@ -19,6 +19,7 @@ use std::{
 };
 
 mod order;
+mod radio;
 pub use order::CountedPlay;
 
 const PREBUFFER_FRAMES: usize = SAMPLE_RATE as usize / 2;
