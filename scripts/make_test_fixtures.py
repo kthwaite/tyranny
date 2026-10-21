@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Regenerate tests/fixtures/ (format and gapless test fixtures + manifest.json).
 
-Usage: python3 scripts/make_test_fixtures.py
+Usage: TYRANNY_LIBOPENMPT=<prefix>/lib/libopenmpt.dylib python3 scripts/make_test_fixtures.py
 
 Needs ffmpeg (with encoders), lame and afconvert on this machine, plus the Homebrew formulas
 speex, musepack, mac, opencore-amr and vo-amrwbenc. Python 3 stdlib only; the AMR encoder
 libraries are called through ctypes. Shorten, DSF and DSDIFF have no encoder to install, so
 this script writes them itself. Removes stale files under tests/fixtures/ first. Tests never
-need the encoders; only this script does.
+need the encoders; only this script does. Tracker references use the pinned libopenmpt
+shared library selected by TYRANNY_LIBOPENMPT, independently of the FFmpeg CLI.
 afconvert output (the 8 aacapple* files) is not byte-stable across runs; decoded lengths and
 the manifest are, so regeneration dirtying those files is expected.
 """
 import ctypes, json, math, os, re, shutil, struct, subprocess, sys, tempfile
+from make_tracker_fixtures import add_fixtures as add_tracker_fixtures
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(REPO, "tests", "fixtures")
@@ -528,6 +530,11 @@ def stream_fixtures(ff, fixtures):
 
 
 def main():
+    tracker_library = os.environ.get("TYRANNY_LIBOPENMPT")
+    if not tracker_library:
+        die("set TYRANNY_LIBOPENMPT to the pinned libopenmpt shared library")
+    # Fail before removing fixtures if the reference library cannot be loaded.
+    ctypes.CDLL(tracker_library)
     ff, lame, af = require_tools()
     tools = require_external()
     fixtures = os.path.realpath(FIXTURES)
@@ -622,6 +629,7 @@ def main():
                 "lengths": LENGTHS[rate], "encoder": label})
 
     stream_fixtures(ff, fixtures)
+    add_tracker_fixtures(fixtures, manifest, tracker_library)
 
     with open(os.path.join(fixtures, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)

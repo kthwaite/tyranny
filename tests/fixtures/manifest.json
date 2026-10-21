@@ -8,7 +8,9 @@
     "mac": "--- Monkey's Audio Console Front End (v 13.41) Copyright 2000-2026 Matthew T. Ashland ---",
     "opencore-amr": "/opt/homebrew/Cellar/opencore-amr/0.1.6/lib/libopencore-amrnb.0.dylib",
     "vo-amrwbenc": "/opt/homebrew/Cellar/vo-amrwbenc/0.1.3/lib/libvo-amrwbenc.0.dylib",
-    "shn, dsf, dff": "written by scripts/make_test_fixtures.py"
+    "shn, dsf, dff": "written by scripts/make_test_fixtures.py",
+    "mod, xm, it, s3m": "scripts/make_tracker_fixtures.py; self-authored integer triangle, one note, backward order jump at row 7; no third-party music or samples",
+    "tracker reference libopenmpt": "0.8.9+r25652.pkg"
   },
   "signal": {
     "description": "stereo int16; sum of three chirps over 2.0 s: log 40->2000 Hz, log 3000->250 Hz, lin 700->1300 Hz; sample n at rate r is evaluated at t=n/r; channel c = sum_i amplitudes[i]*sin(phase_i(t)+phases[c][i]); quantised round(x*32768)",
@@ -362,6 +364,62 @@
         "channels": 2,
         "seconds": 0.25,
         "frames": 15216
+      },
+      {
+        "extension": "mod",
+        "file": "trackers/loop.mod",
+        "codec": "pcm_f32le",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.96,
+        "subsongs": 1,
+        "frames": 50880,
+        "title": "Tyranny MOD loop",
+        "sha256": "47ac5c1cb8c6abd979d7b180168ed2c645354e0d114b4ccb5df19fd4fe2bfa53",
+        "frames_from": "libopenmpt C API, 48000 Hz stereo float, subsong=-1, default repeat count 0",
+        "duration_seconds": 0.96
+      },
+      {
+        "extension": "xm",
+        "file": "trackers/loop.xm",
+        "codec": "pcm_f32le",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.96,
+        "subsongs": 1,
+        "frames": 50880,
+        "title": "Tyranny XM loop",
+        "sha256": "94c8064d0e928fa9420e81397ce98892edf96f0bcb43c9ccc1d37d9b5be3390c",
+        "frames_from": "libopenmpt C API, 48000 Hz stereo float, subsong=-1, default repeat count 0",
+        "duration_seconds": 0.96
+      },
+      {
+        "extension": "it",
+        "file": "trackers/loop.it",
+        "codec": "pcm_f32le",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 1.92,
+        "subsongs": 2,
+        "frames": 96960,
+        "title": "Tyranny IT loop",
+        "sha256": "d065e3b98b83eee6718a9898c85cbef205272823caecf6ca763ae8a6bea21da9",
+        "frames_from": "libopenmpt C API, 48000 Hz stereo float, subsong=-1, default repeat count 0",
+        "duration_seconds": 1.92
+      },
+      {
+        "extension": "s3m",
+        "file": "trackers/loop.s3m",
+        "codec": "pcm_f32le",
+        "rate": 48000,
+        "channels": 2,
+        "seconds": 0.96,
+        "subsongs": 1,
+        "frames": 50880,
+        "title": "Tyranny S3M loop",
+        "sha256": "c65bb61e62a41770432f9d40611109e3caa032e41a18fd9b9c13a935b408930d",
+        "frames_from": "libopenmpt C API, 48000 Hz stereo float, subsong=-1, default repeat count 0",
+        "duration_seconds": 0.96
       }
     ]
   },
