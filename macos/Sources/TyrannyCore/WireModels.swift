@@ -962,3 +962,36 @@ public struct StationsApplied: Codable, Sendable, Equatable {
         self.stations = stations
     }
 }
+
+/// One station of the radio-browser directory, as `search_directory` returns it.
+public struct DirectoryStation: Codable, Sendable, Equatable, Identifiable {
+    public let uuid: String
+    public let name: String
+    public let url: String
+    public let codec: String
+    public let bitrate: UInt32
+    /// Two ASCII letters, or empty.
+    public let country_code: String
+    public let tags: [String]
+
+    public var id: String { uuid }
+
+    public init(uuid: String, name: String, url: String, codec: String = "", bitrate: UInt32 = 0,
+                country_code: String = "", tags: [String] = []) {
+        self.uuid = uuid
+        self.name = name
+        self.url = url
+        self.codec = codec
+        self.bitrate = bitrate
+        self.country_code = country_code
+        self.tags = tags
+    }
+}
+
+public struct DirectoryResults: Codable, Sendable, Equatable {
+    public let stations: [DirectoryStation]
+
+    public init(stations: [DirectoryStation]) {
+        self.stations = stations
+    }
+}
