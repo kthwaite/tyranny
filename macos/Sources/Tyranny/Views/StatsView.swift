@@ -3,20 +3,42 @@ import SwiftUI
 import TyrannyCore
 
 /// Stats (spec "Client: Stats page"): one scrolling page for the chosen period. The header steps
-/// and picks the period. Below it: tiles, top artists and tracks, listening over time, the
-/// weekday × hour heatmap, new artists, most skipped and stations, and two all-history panels.
+/// and picks the period, and in December offers the year's Wrapped. Below it: tiles, top
+/// artists and tracks, listening over time, the weekday × hour heatmap, new artists, most
+/// skipped and stations, and two all-history panels.
 struct StatsView: View {
     @Environment(\.themeColours) private var colours
     let model: StatsModel
     let player: PlayerModel
     let navigation: NavigationModel
+    /// The year of the Wrapped banner, while this visit shows it.
+    @State private var bannerYear: Int?
 
     private var calendar: Calendar { model.calendar }
+
+    /// The year the header offers a Wrapped for, from 1 to 31 December.
+    private var offerYear: Int? {
+        #if DEBUG
+        let now = NativeStatsSmoke.offerDate ?? Date()
+        #else
+        let now = Date()
+        #endif
+        return WrappedOffer.callToActionYear(now: now, calendar: calendar)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            if let year = bannerYear {
+                WrappedBanner(year: year) {
+                    navigation.wrappedYear = year
+                } dismiss: {
+                    model.dismissBanner(year: year)
+                    bannerYear = nil
+                }
+                Divider()
+            }
             ScrollView {
                 if let report = model.report {
                     StatsReportView(report: report, period: model.loadedPeriod ?? model.period, model: model,
@@ -33,6 +55,7 @@ struct StatsView: View {
         .accessibilityIdentifier("main-stats")
         .onAppear {
             model.appeared()
+            if let year = offerYear, model.takeBannerOffer(year: year) { bannerYear = year }
             #if DEBUG
             NativeStatsSmoke.stats = model
             #endif
@@ -82,6 +105,11 @@ struct StatsView: View {
                     .accessibilityIdentifier("stats-error")
             }
             Spacer(minLength: 0)
+            if let year = offerYear {
+                Button("Your \(String(year)) Wrapped ▶") { navigation.wrappedYear = year }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("stats-wrapped")
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)

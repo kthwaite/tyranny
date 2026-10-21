@@ -183,6 +183,8 @@ struct TyrannyApp: App {
                     }
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }
+                Divider()
+                WrappedMenu(years: model.stats.wrappedYears) { navigation.wrappedYear = $0 }
             }
         }
         Window("Equalizer", id: "equalizer") {

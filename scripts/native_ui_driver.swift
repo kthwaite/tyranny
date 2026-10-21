@@ -55,6 +55,25 @@ func find(_ identifier: String, in app: AXUIElement, byTitle: Bool = false) thro
     let frontmost = attribute(app, kAXFrontmostAttribute) as? Bool
     throw DriverFailure(message: "Visible control missing: \(identifier); windows=\(windows.count); frontmost=\(String(describing: frontmost))")
 }
+/// A menu bar item by its titles, such as "Go›Wrapped›2026 so far". Each menu bar item and
+/// submenu item holds one AXMenu, whose children are the items.
+func menuItem(_ path: String, in app: AXUIElement) throws -> AXUIElement {
+    guard let bar = attribute(app, kAXMenuBarAttribute), CFGetTypeID(bar) == AXUIElementGetTypeID() else {
+        throw DriverFailure(message: "Menu bar unavailable")
+    }
+    var element = bar as! AXUIElement
+    for title in path.split(separator: "›").map(String.init) {
+        var items = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        if items.count == 1, attribute(items[0], kAXRoleAttribute) as? String == kAXMenuRole {
+            items = attribute(items[0], kAXChildrenAttribute) as? [AXUIElement] ?? []
+        }
+        guard let item = items.first(where: { attribute($0, kAXTitleAttribute) as? String == title }) else {
+            throw DriverFailure(message: "Menu item missing: \(path)")
+        }
+        element = item
+    }
+    return element
+}
 
 do {
     var arguments = CommandLine.arguments
@@ -75,6 +94,19 @@ do {
     if action == "activate" {
         guard let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement], !windows.isEmpty else {
             throw DriverFailure(message: "Application windows unavailable")
+        }
+    } else if action == "menu" || action == "expect-menu-enabled" {
+        // The identifier is a menu path; "menu" presses the item without opening the menu.
+        guard arguments.count >= 4 else { throw DriverFailure(message: "Menu path required") }
+        let item = try menuItem(arguments[3], in: app)
+        if action == "menu" {
+            try check(AXUIElementPerformAction(item, kAXPressAction as CFString), "Press \(arguments[3])")
+        } else {
+            guard arguments.count >= 5, ["true", "false"].contains(arguments[4]),
+                  let enabled = attribute(item, kAXEnabledAttribute) as? Bool,
+                  enabled == (arguments[4] == "true") else {
+                throw DriverFailure(message: "Unexpected enabled state for \(arguments[3])")
+            }
         }
     } else {
         guard arguments.count >= 4 else { throw DriverFailure(message: "Control identifier required") }
@@ -118,11 +150,11 @@ do {
             let name = arguments.count >= 5 ? arguments[4] : ""
             let command = name.hasPrefix("command-")
             let keys: [String: CGKeyCode] = ["left": 123, "right": 124, "down": 125, "up": 126,
-                                             "return": 36, "escape": 53, "delete": 51]
+                                             "return": 36, "escape": 53, "delete": 51, "space": 49]
             let digits: [String: CGKeyCode] = ["1": 18, "2": 19, "3": 20, "4": 21, "5": 23,
                                                "6": 22, "7": 26, "8": 28, "9": 25]
             guard let key = command ? digits[String(name.dropFirst("command-".count))] : keys[name] else {
-                throw DriverFailure(message: "Arrow, return, escape, delete or command-digit key required")
+                throw DriverFailure(message: "Arrow, return, escape, delete, space or command-digit key required")
             }
             try check(AXUIElementSetAttributeValue(control, kAXFocusedAttribute as CFString, kCFBooleanTrue), "Focus control")
             // AX focus changes are asynchronous to AppKit's key-window update.
@@ -131,10 +163,9 @@ do {
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: false) else {
                 throw DriverFailure(message: "Cannot create keyboard events")
             }
-            if command {
-                down.flags = .maskCommand
-                up.flags = .maskCommand
-            }
+            // Set the modifiers outright: a new event takes the current modifier state.
+            down.flags = command ? .maskCommand : []
+            up.flags = command ? .maskCommand : []
             down.post(tap: .cghidEventTap)
             Thread.sleep(forTimeInterval: 0.05)
             up.post(tap: .cghidEventTap)

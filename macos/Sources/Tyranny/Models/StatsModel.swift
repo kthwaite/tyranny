@@ -2,7 +2,8 @@ import Foundation
 import Observation
 import TyrannyCore
 
-/// The Stats page's report for one period, and the years the Wrapped menu offers.
+/// The Stats page's report for one period, the years the Wrapped menu offers, and the
+/// December Wrapped banner's state.
 ///
 /// The page fetches on appear and when `period` changes. While the page is visible, a new
 /// `stats_revision` refetches at most once every 10 s. `wrappedYears` comes from `stats_years`
@@ -24,6 +25,8 @@ final class StatsModel {
     private(set) var wrappedYears: [Int] = []
 
     static let periodKindKey = "stats.periodKind"
+    /// The years whose Wrapped banner was dismissed, as an array of `Int`.
+    static let bannerDismissedKey = "stats.wrappedBannerDismissed"
     static let refetchInterval: Duration = .seconds(10)
 
     @ObservationIgnored private weak var player: PlayerModel?
@@ -37,6 +40,8 @@ final class StatsModel {
     /// Bumped by every report request; an older reply is dropped.
     @ObservationIgnored private var reportRequest: UInt64 = 0
     @ObservationIgnored private var yearsRequest: UInt64 = 0
+    /// The banner shows only on the page's first visit since launch.
+    @ObservationIgnored private var bannerOffered = false
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
@@ -91,6 +96,22 @@ final class StatsModel {
     func disappeared() {
         visible = false
         reportThrottle.cancel()
+    }
+
+    // MARK: Wrapped banner
+
+    /// Whether this visit shows the Wrapped banner for `year`: only the first visit since
+    /// launch, and only until the year is dismissed.
+    func takeBannerOffer(year: Int) -> Bool {
+        guard !bannerOffered else { return false }
+        bannerOffered = true
+        let dismissed = Set(defaults.array(forKey: Self.bannerDismissedKey) as? [Int] ?? [])
+        return WrappedOffer.showsBanner(year: year, dismissed: dismissed)
+    }
+
+    func dismissBanner(year: Int) {
+        let dismissed = Set(defaults.array(forKey: Self.bannerDismissedKey) as? [Int] ?? []).union([year])
+        defaults.set(dismissed.sorted(), forKey: Self.bannerDismissedKey)
     }
 
     // MARK: Fetching
