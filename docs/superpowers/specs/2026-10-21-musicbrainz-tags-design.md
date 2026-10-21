@@ -155,9 +155,14 @@ For each file:
    - remove its alias keys in the primary tag (for example `TOTALTRACKS` when writing
      `TRACKTOTAL`, `MUSICBRAINZ_RELEASEID` beside `MUSICBRAINZ_ALBUMID`, `ORIGINALYEAR` beside
      the original date, an ID3 `UFID` beside the `TXXX` recording ID);
-   - remove that field from the file's other tags (ID3v1 or APEv2 on MP3, ID3 in FLAC or WAV).
+   - remove that field from the file's other tags (ID3v1 or APEv2 on MP3, ID3 in WAV).
+     lofty can't edit an ID3 tag inside FLAC, APE or Musepack, only strip it whole. A file
+     whose such tag holds a field the proposal changes is not writable: "Has an old ID3 tag
+     Tyranny can't edit" (amended 2026-10-21, plan preflight).
 
-   Other fields are never touched. The review shows "Also removes old copies of these fields from
+   Other fields keep their values. lofty may normalise how untouched items are spelled (for
+   example `TOTALTRACKS` → `TRACKTOTAL`, ID3v2.4 frame forms), which is accepted (amended
+   2026-10-21). The review shows "Also removes old copies of these fields from
    other tags" on files where this applies. The journal records the removed values too, so revert
    restores them.
 4. Flush, `fsync`, check the original is still unchanged, then `rename` the clone over the
@@ -251,7 +256,7 @@ mirrored in Swift.
 ## Verification
 
 - **Rust unit tests with the loopback fixture:**
-  - lookup by ID, by search and by fingerprint, with recorded MusicBrainz and AcoustID JSON in
+  - lookup by ID, by search and by fingerprint, with hand-written MusicBrainz and AcoustID JSON that follows the real ws/2 and v2 schemas in
     `tests/fixtures/musicbrainz/`;
   - candidate scoring;
   - file-to-track matching: by ID, by position, by duration;
