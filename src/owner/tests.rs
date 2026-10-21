@@ -457,7 +457,7 @@ fn a_disconnected_owner_writes_its_pending_plays() {
         },
     })
     .unwrap();
-    actor.pending_plays.push(PlayRecord {
+    let record = PlayRecord {
         entry_id: 1,
         track_id: None,
         path: "/music/a.flac".into(),
@@ -467,7 +467,12 @@ fn a_disconnected_owner_writes_its_pending_plays() {
         duration_ms: None,
         source: None,
         played_at: 1_700_000_000,
-    });
+        raw_title: None,
+    };
+    actor
+        .pending_plays
+        .push(HistoryEvent::Open { play: 1, record });
+    actor.pending_plays.push(HistoryEvent::Count { play: 1 });
     // An earlier write failed, so the loop leaves the play for its retry.
     actor.retrying_plays = true;
     let (sender, receiver) = mpsc::channel(1);

@@ -18,9 +18,9 @@ use crate::{
         StreamSpec, TrackSelection, Transport,
     },
     store::{
-        Checkpoint, Edit, EntryTrack, LoadedEntry, PendingPlays, PlayRecord, PlaylistChange,
-        PlaylistEdit, PlaylistFailure, StaleStationsRevision, StationEdit, Store, UpcomingEdit,
-        played_overflow,
+        Checkpoint, Edit, EndReason, EntryTrack, HistoryEvent, LoadedEntry, PendingHistory,
+        PlayRecord, PlaylistChange, PlaylistEdit, PlaylistFailure, StaleStationsRevision,
+        StationEdit, Store, UpcomingEdit, played_overflow,
     },
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -634,7 +634,7 @@ struct Actor {
     /// The newest play history ID, or 0.
     history_revision: u64,
     /// Counted plays whose history write has not succeeded yet.
-    pending_plays: PendingPlays,
+    pending_plays: PendingHistory,
     /// The last history write failed: pending plays wait for the retry.
     retrying_plays: bool,
 }
@@ -718,7 +718,7 @@ impl Actor {
             now_track: RefCell::new(None),
             marked: loaded.checkpoint.current_id,
             history_revision,
-            pending_plays: PendingPlays::default(),
+            pending_plays: PendingHistory::default(),
             retrying_plays: false,
         };
         actor.publish();
@@ -993,16 +993,31 @@ impl Actor {
     /// pages show for its entry. An entry already gone from the queue has
     /// nothing to describe it, and is not recorded.
     fn count_play(&mut self, play: CountedPlay) {
+        let started_at = play.started_at;
         match self.store.queue_entry(play.entry_id) {
             Ok(Some(item)) => {
-                if let Some(dropped) = self
-                    .pending_plays
-                    .push(PlayRecord::of(item, play.started_at))
-                {
-                    eprintln!(
-                        "tyranny: play history writes keep failing; dropped the play of entry {} at {}",
-                        dropped.entry_id, dropped.played_at
-                    );
+                // Task 4 replaces this: a counted pass becomes a play that
+                // opens, counts and closes at once.
+                let play = play.entry_id;
+                let events = [
+                    HistoryEvent::Open {
+                        play,
+                        record: PlayRecord::of(item, started_at),
+                    },
+                    HistoryEvent::Count { play },
+                    HistoryEvent::Close {
+                        play,
+                        listened_ms: 0,
+                        reason: EndReason::Finished,
+                        ended_at: started_at,
+                    },
+                ];
+                for event in events {
+                    if self.pending_plays.push(event).is_some() {
+                        eprintln!(
+                            "tyranny: play history writes keep failing; dropped an event of the play of entry {play}"
+                        );
+                    }
                 }
             }
             Ok(None) => {}
@@ -1028,20 +1043,17 @@ impl Actor {
     /// failure stops this attempt; it and the later plays wait for the retry.
     /// Playback never pauses for history. Returns whether any play was written.
     fn write_plays(&mut self) -> bool {
-        let mut written = false;
-        while let Some(play) = self.pending_plays.front() {
-            if let Err(error) = self.store.record_play(play) {
-                eprintln!(
-                    "tyranny: recording a play failed; {} waiting to retry: {error:#}",
-                    self.pending_plays.len()
-                );
-                break;
-            }
-            self.pending_plays.pop_front();
-            written = true;
+        // Task 4 replaces this.
+        let result = self.pending_plays.write(&mut self.store);
+        if let Some(error) = &result.error {
+            eprintln!(
+                "tyranny: recording a play failed; {} events waiting to retry: {error:#}",
+                self.pending_plays.len()
+            );
         }
+        let written = result.wrote;
         self.retrying_plays = !self.pending_plays.is_empty();
-        if written {
+        if result.counted {
             match self.store.history_revision() {
                 Ok(revision) => self.history_revision = revision,
                 Err(error) => eprintln!("tyranny: reading the history revision failed: {error:#}"),

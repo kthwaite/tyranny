@@ -1,7 +1,9 @@
-//! Counted plays. Each one adds a `play_history` row and, for an indexed track,
-//! updates its `track_stats` row in the same commit. The playback owner is
-//! the only writer of both. A play is neither a library nor a queue edit, so
-//! it changes neither revision; it changes the history revision.
+//! Plays. Each one is a `play_history` row, opened when it starts and closed
+//! when it ends, with its listened time and end reason. A play counts once,
+//! and only then does it appear in the history and update its `track_stats`
+//! row, in one commit. The playback owner is the only writer of both. A play
+//! is neither a library nor a queue edit, so it changes neither revision; a
+//! counted play changes the history revision, and every write the stats one.
 use super::{Store, source};
 use crate::{
     SAMPLE_RATE,
@@ -10,7 +12,7 @@ use crate::{
 };
 use anyhow::Result;
 use rusqlite::{TransactionBehavior, params};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 /// A play counts after at most this long, however long the track is.
 const MAX_THRESHOLD_SECS: u64 = 240;
@@ -38,6 +40,8 @@ pub(crate) struct PlayRecord {
     pub source: Option<QueueSource>,
     /// UTC seconds.
     pub played_at: i64,
+    /// The stream title as the station sent it, for radio.
+    pub raw_title: Option<String>,
 }
 impl PlayRecord {
     /// A play of queue entry `item` at `played_at`, with its queue page fields.
@@ -52,49 +56,183 @@ impl PlayRecord {
             duration_ms: item.duration_ms,
             source: item.source,
             played_at,
+            raw_title: None,
         }
     }
 }
 
-/// Counted plays not yet written, oldest first: the newest
-/// `MAX_PENDING_PLAYS` of them.
+/// Why a play ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EndReason {
+    /// The track played to its end.
+    Finished,
+    /// The listener moved on, or the entry was removed.
+    Skipped,
+    /// Playback stopped: the queue was cleared, or the daemon went away.
+    Stopped,
+}
+impl EndReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Finished => "finished",
+            Self::Skipped => "skipped",
+            Self::Stopped => "stopped",
+        }
+    }
+    #[allow(dead_code)] // Task 6 reads end reasons back
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "finished" => Some(Self::Finished),
+            "skipped" => Some(Self::Skipped),
+            "stopped" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+}
+
+/// A play row that has not ended yet.
+#[allow(dead_code)] // Task 4 restores open plays at startup
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpenPlayRow {
+    pub row: i64,
+    pub entry_id: u64,
+    pub counted: bool,
+    pub listened_ms: u64,
+}
+
+/// One change to a play row, in the order it happened. `play` names the play
+/// within the owner; the row ID is known only once `Open` is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HistoryEvent {
+    Open {
+        play: u64,
+        record: PlayRecord,
+    },
+    Count {
+        play: u64,
+    },
+    #[allow(dead_code)] // Task 4 checkpoints listened time
+    Checkpoint {
+        play: u64,
+        listened_ms: u64,
+    },
+    Close {
+        play: u64,
+        listened_ms: u64,
+        reason: EndReason,
+        ended_at: i64,
+    },
+}
+impl HistoryEvent {
+    fn play(&self) -> u64 {
+        match self {
+            Self::Open { play, .. }
+            | Self::Count { play }
+            | Self::Checkpoint { play, .. }
+            | Self::Close { play, .. } => *play,
+        }
+    }
+}
+
+/// What one `PendingHistory::write` did.
+#[derive(Debug, Default)]
+pub(crate) struct HistoryWrite {
+    /// Some event was written.
+    pub wrote: bool,
+    /// Some play counted, so the history revision moved.
+    pub counted: bool,
+    /// The failure that stopped the write; its event and the later ones wait.
+    pub error: Option<anyhow::Error>,
+}
+
+/// Play events not yet written, oldest first: the newest `MAX_PENDING_PLAYS`
+/// of them.
 #[derive(Default)]
-pub(crate) struct PendingPlays(VecDeque<PlayRecord>);
-impl PendingPlays {
-    /// Adds `play` last. Returns the oldest play, dropped to make room.
-    pub fn push(&mut self, play: PlayRecord) -> Option<PlayRecord> {
-        let dropped = if self.0.len() >= MAX_PENDING_PLAYS {
-            self.0.pop_front()
+pub(crate) struct PendingHistory {
+    events: VecDeque<HistoryEvent>,
+    /// The row of each play whose `Open` was written and which has not closed.
+    rows: HashMap<u64, i64>,
+}
+impl PendingHistory {
+    /// Adds `event` last. Returns the oldest event, dropped to make room.
+    pub fn push(&mut self, event: HistoryEvent) -> Option<HistoryEvent> {
+        let dropped = if self.events.len() >= MAX_PENDING_PLAYS {
+            self.events.pop_front()
         } else {
             None
         };
-        self.0.push_back(play);
+        self.events.push_back(event);
         dropped
     }
-    pub fn front(&self) -> Option<&PlayRecord> {
-        self.0.front()
+    /// Tells the queue that `play` already has `row`, as for an open row
+    /// restored at startup.
+    #[allow(dead_code)] // Task 4 restores open plays at startup
+    pub fn adopt(&mut self, play: u64, row: i64) {
+        self.rows.insert(play, row);
     }
-    pub fn pop_front(&mut self) -> Option<PlayRecord> {
-        self.0.pop_front()
+    /// Writes the events oldest first, one small commit each. The first
+    /// failure stops the write. An event of a play with no row is discarded:
+    /// its `Open` was dropped.
+    pub fn write(&mut self, store: &mut Store) -> HistoryWrite {
+        let mut result = HistoryWrite::default();
+        while let Some(event) = self.events.front() {
+            let row = self.rows.get(&event.play()).copied();
+            let outcome = match (event, row) {
+                (HistoryEvent::Open { play, record }, _) => store.open_play(record).map(|row| {
+                    self.rows.insert(*play, row);
+                }),
+                (_, None) => {
+                    self.events.pop_front();
+                    continue;
+                }
+                (HistoryEvent::Count { .. }, Some(row)) => store.count_play(row).map(|()| {
+                    result.counted = true;
+                }),
+                (HistoryEvent::Checkpoint { listened_ms, .. }, Some(row)) => {
+                    store.checkpoint_play(row, *listened_ms)
+                }
+                (
+                    HistoryEvent::Close {
+                        play,
+                        listened_ms,
+                        reason,
+                        ended_at,
+                    },
+                    Some(row),
+                ) => store
+                    .close_play(row, *listened_ms, *reason, *ended_at)
+                    .map(|()| {
+                        self.rows.remove(play);
+                    }),
+            };
+            if let Err(error) = outcome {
+                result.error = Some(error);
+                break;
+            }
+            self.events.pop_front();
+            result.wrote = true;
+        }
+        result
     }
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.events.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.events.is_empty()
     }
 }
 
 impl Store {
-    /// Adds `play` to the history and, for an indexed track, adds one to its
-    /// play count and sets its last played time, in one commit.
-    pub fn record_play(&mut self, play: &PlayRecord) -> Result<()> {
+    /// Adds an open row for `play`: not counted, with no listened time. It is
+    /// absent from the history and the track statistics until it counts.
+    pub fn open_play(&mut self, play: &PlayRecord) -> Result<i64> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO play_history(played_at,entry_id,track_id,path,title,artist,album,
-                duration_ms,source_kind,source_name) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                duration_ms,source_kind,source_name,raw_title,counted,listened_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,0)",
             params![
                 play.played_at,
                 play.entry_id,
@@ -106,28 +244,126 @@ impl Store {
                 play.duration_ms,
                 play.source.as_ref().map(|source| source.kind.as_str()),
                 play.source.as_ref().map(|source| source.name.as_str()),
+                play.raw_title,
             ],
         )?;
-        if let Some(track_id) = play.track_id {
+        let row = transaction.last_insert_rowid();
+        bump_writes(&transaction)?;
+        transaction.commit()?;
+        Ok(row)
+    }
+
+    /// Marks `row` counted and, for an indexed track, adds one to its play
+    /// count and sets its last played time, in one commit. Does nothing to a
+    /// row that has already counted.
+    pub fn count_play(&mut self, row: i64) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let counted = transaction.execute(
+            "UPDATE play_history SET counted=1 WHERE id=?1 AND counted=0",
+            [row],
+        )?;
+        if counted == 1 {
             transaction.execute(
-                "INSERT INTO track_stats(track_id,play_count,last_played) VALUES(?1,1,?2)
+                "INSERT INTO track_stats(track_id,play_count,last_played)
+                 SELECT track_id,1,played_at FROM play_history
+                 WHERE id=?1 AND track_id IS NOT NULL
                  ON CONFLICT(track_id) DO UPDATE SET
                     play_count=play_count+1,last_played=excluded.last_played",
-                params![track_id, play.played_at],
+                [row],
             )?;
         }
+        bump_writes(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
 
+    /// Saves the listened time of the open row `row`.
+    #[allow(dead_code)] // Task 4 checkpoints listened time
+    pub fn checkpoint_play(&mut self, row: i64, listened_ms: u64) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE play_history SET listened_ms=?2 WHERE id=?1",
+            params![row, listened_ms],
+        )?;
+        bump_writes(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Ends `row` with its final listened time and reason.
+    pub fn close_play(
+        &mut self,
+        row: i64,
+        listened_ms: u64,
+        reason: EndReason,
+        ended_at: i64,
+    ) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE play_history SET listened_ms=?2,end_reason=?3,ended_at=?4 WHERE id=?1",
+            params![row, listened_ms, reason.as_str(), ended_at],
+        )?;
+        bump_writes(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The rows not yet ended, oldest first. A row from before schema 8 has no
+    /// listened time and is not open.
+    #[allow(dead_code)] // Task 4 restores open plays at startup
+    pub fn open_play_rows(&self) -> Result<Vec<OpenPlayRow>> {
+        let mut query = self.connection.prepare(
+            "SELECT id,entry_id,counted,listened_ms FROM play_history
+             WHERE ended_at IS NULL AND listened_ms IS NOT NULL ORDER BY id",
+        )?;
+        let rows = query
+            .query_map([], |row| {
+                Ok(OpenPlayRow {
+                    row: row.get(0)?,
+                    entry_id: row.get(1)?,
+                    counted: row.get(2)?,
+                    listened_ms: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Closes every open row but `keep` as stopped, ended when its listening
+    /// would have stopped. Returns how many it closed.
+    #[allow(dead_code)] // Task 4 closes stale plays at startup
+    pub fn close_open_plays_except(&mut self, keep: Option<i64>) -> Result<usize> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let closed = transaction.execute(
+            "UPDATE play_history SET end_reason='stopped',ended_at=played_at+listened_ms/1000
+             WHERE ended_at IS NULL AND listened_ms IS NOT NULL AND id IS NOT ?1",
+            [keep],
+        )?;
+        if closed > 0 {
+            bump_writes(&transaction)?;
+        }
+        transaction.commit()?;
+        Ok(closed)
+    }
+
     /// Counted plays, newest first.
     pub fn history_page(&self, offset: usize, limit: usize) -> Result<Page<HistoryEntry>> {
-        let total = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM play_history", [], |row| row.get(0))?;
+        let total = self.connection.query_row(
+            "SELECT COUNT(*) FROM play_history WHERE counted=1",
+            [],
+            |row| row.get(0),
+        )?;
         let mut query = self.connection.prepare(
             "SELECT id,played_at,track_id,title,artist,album,duration_ms,source_kind,source_name
-             FROM play_history ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+             FROM play_history WHERE counted=1 ORDER BY id DESC LIMIT ?1 OFFSET ?2",
         )?;
         let entries = query
             .query_map(params![limit, offset], |row| {
@@ -151,14 +387,28 @@ impl Store {
         })
     }
 
-    /// The newest history ID, or 0 before the first play.
+    /// How many plays have counted: it moves only when a play counts.
     pub fn history_revision(&self) -> Result<u64> {
         Ok(self.connection.query_row(
-            "SELECT COALESCE(MAX(id),0) FROM play_history",
+            "SELECT COUNT(*) FROM play_history WHERE counted=1",
             [],
             |row| row.get(0),
         )?)
     }
+
+    /// How many play writes have been made: it moves on every one.
+    #[allow(dead_code)] // Task 6 reads it for stats
+    pub fn stats_revision(&self) -> Result<u64> {
+        Ok(self
+            .connection
+            .query_row("SELECT writes FROM history_control", [], |row| row.get(0))?)
+    }
+}
+
+/// Counts a play write, for `stats_revision`.
+fn bump_writes(connection: &rusqlite::Connection) -> Result<()> {
+    connection.execute("UPDATE history_control SET writes=writes+1", [])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -243,27 +493,29 @@ mod tests {
             duration_ms: Some(1_000),
             source: album(),
             played_at,
+            raw_title: None,
         }
+    }
+    /// Opens and counts `play`, as a play that counts at once.
+    fn record(store: &mut Store, play: &PlayRecord) -> Result<i64> {
+        let row = store.open_play(play)?;
+        store.count_play(row)?;
+        Ok(row)
+    }
+    /// The columns of row `row` that a close sets.
+    fn timing(database: &Database, row: i64) -> (Option<u64>, Option<String>, Option<i64>) {
+        database
+            .query(
+                &format!("SELECT listened_ms,end_reason,ended_at FROM play_history WHERE id={row}"),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .remove(0)
     }
     fn titles(page: &Page<HistoryEntry>) -> Vec<&str> {
         page.entries
             .iter()
             .map(|entry| entry.title.as_str())
             .collect()
-    }
-
-    #[test]
-    fn pending_plays_keep_the_newest_1000_in_order() {
-        let mut pending = PendingPlays::default();
-        for id in 1..=1_000 {
-            assert_eq!(pending.push(play(id, None, "Waiting", id as i64)), None);
-        }
-        let dropped = pending.push(play(1_001, None, "Waiting", 1_001));
-        assert_eq!(dropped.map(|play| play.entry_id), Some(1));
-        assert_eq!(pending.len(), 1_000);
-        assert_eq!(pending.front().map(|play| play.entry_id), Some(2));
-        pending.pop_front();
-        assert_eq!(pending.front().map(|play| play.entry_id), Some(3));
     }
 
     #[test]
@@ -281,10 +533,10 @@ mod tests {
     #[test]
     fn unindexed_entries_record_history_without_stats() -> Result<()> {
         let (database, mut store) = Database::open();
-        store.record_play(&play(1, None, "Loose", 100))?;
+        record(&mut store, &play(1, None, "Loose", 100))?;
         assert!(database.stats().is_empty());
-        store.record_play(&play(2, Some(3), "Indexed", 200))?;
-        store.record_play(&play(3, Some(3), "Indexed", 300))?;
+        record(&mut store, &play(2, Some(3), "Indexed", 200))?;
+        record(&mut store, &play(3, Some(3), "Indexed", 300))?;
         assert_eq!(database.stats(), [(3, 2, Some(300))]);
         let page = store.history_page(0, 10)?;
         assert_eq!(
@@ -309,7 +561,7 @@ mod tests {
         );
         for (index, title) in ["First", "Second", "Third"].into_iter().enumerate() {
             let id = index as u64 + 1;
-            store.record_play(&play(id, Some(3), title, 1_000 + id as i64))?;
+            record(&mut store, &play(id, Some(3), title, 1_000 + id as i64))?;
             assert_eq!(store.history_revision()?, id);
         }
         let page = store.history_page(0, 2)?;
@@ -333,5 +585,180 @@ mod tests {
         // Plays are not library or queue edits.
         assert_eq!(database.revisions(), revisions);
         Ok(())
+    }
+
+    #[test]
+    fn an_open_play_is_absent_from_history_and_stats_until_it_counts() -> Result<()> {
+        let (database, mut store) = Database::open();
+        let before = store.stats_revision()?;
+        let row = store.open_play(&play(1, Some(3), "Open", 100))?;
+        assert_eq!(store.history_page(0, 10)?.total, 0);
+        assert!(database.stats().is_empty());
+        assert_eq!(store.history_revision()?, 0);
+        assert!(store.stats_revision()? > before);
+        store.count_play(row)?;
+        assert_eq!(store.history_page(0, 10)?.total, 1);
+        assert_eq!(database.stats(), [(3, 1, Some(100))]);
+        assert_eq!(store.history_revision()?, 1);
+        store.count_play(row)?;
+        assert_eq!(database.stats(), [(3, 1, Some(100))]);
+        assert_eq!(store.history_revision()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn closing_records_listened_time_and_reason() -> Result<()> {
+        let (database, mut store) = Database::open();
+        let row = store.open_play(&play(1, Some(3), "Heard", 100))?;
+        assert_eq!(timing(&database, row), (Some(0), None, None));
+        store.checkpoint_play(row, 12_000)?;
+        assert_eq!(timing(&database, row), (Some(12_000), None, None));
+        store.close_play(row, 31_500, EndReason::Skipped, 140)?;
+        assert_eq!(
+            timing(&database, row),
+            (Some(31_500), Some("skipped".into()), Some(140))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn close_open_plays_except_keeps_one_and_stops_the_rest() -> Result<()> {
+        let (database, mut store) = Database::open();
+        let mut rows = vec![];
+        for (id, listened) in [(1, 10_000), (2, 20_000), (3, 0)] {
+            let row = store.open_play(&play(id, None, "Open", 100 * id as i64))?;
+            store.checkpoint_play(row, listened)?;
+            rows.push(row);
+        }
+        assert_eq!(store.close_open_plays_except(Some(rows[1]))?, 2);
+        assert_eq!(
+            timing(&database, rows[0]),
+            (Some(10_000), Some("stopped".into()), Some(110))
+        );
+        assert_eq!(
+            timing(&database, rows[2]),
+            (Some(0), Some("stopped".into()), Some(300))
+        );
+        assert_eq!(timing(&database, rows[1]), (Some(20_000), None, None));
+        assert_eq!(
+            store
+                .open_play_rows()?
+                .iter()
+                .map(|open| (open.row, open.entry_id, open.counted, open.listened_ms))
+                .collect::<Vec<_>>(),
+            [(rows[1], 2, false, 20_000)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_history_writes_in_order_and_maps_rows() -> Result<()> {
+        let (database, mut store) = Database::open();
+        let mut pending = PendingHistory::default();
+        pending.push(HistoryEvent::Open {
+            play: 1,
+            record: play(1, Some(3), "Queued", 100),
+        });
+        pending.push(HistoryEvent::Count { play: 1 });
+        pending.push(HistoryEvent::Close {
+            play: 1,
+            listened_ms: 200_000,
+            reason: EndReason::Finished,
+            ended_at: 300,
+        });
+        let result = pending.write(&mut store);
+        assert!(result.wrote && result.counted && result.error.is_none());
+        assert!(pending.is_empty());
+        assert_eq!(
+            timing(&database, 1),
+            (Some(200_000), Some("finished".into()), Some(300))
+        );
+        assert_eq!(database.stats(), [(3, 1, Some(100))]);
+        // The close freed the play's row: a later event of it has none.
+        pending.push(HistoryEvent::Count { play: 1 });
+        let result = pending.write(&mut store);
+        assert!(!result.wrote && result.error.is_none() && pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn pending_history_drops_events_of_a_play_whose_open_was_dropped() {
+        let (database, mut store) = Database::open();
+        let mut pending = PendingHistory::default();
+        assert_eq!(
+            pending.push(HistoryEvent::Open {
+                play: 9,
+                record: play(9, None, "Lost", 100),
+            }),
+            None
+        );
+        for _ in 0..MAX_PENDING_PLAYS - 2 {
+            pending.push(HistoryEvent::Checkpoint {
+                play: 9,
+                listened_ms: 1,
+            });
+        }
+        pending.push(HistoryEvent::Checkpoint {
+            play: 9,
+            listened_ms: 2,
+        });
+        let dropped = pending.push(HistoryEvent::Count { play: 9 });
+        assert!(matches!(dropped, Some(HistoryEvent::Open { play: 9, .. })));
+        assert_eq!(pending.len(), MAX_PENDING_PLAYS);
+        let result = pending.write(&mut store);
+        assert!(!result.wrote && !result.counted && result.error.is_none());
+        assert!(pending.is_empty());
+        assert!(
+            database
+                .query("SELECT id FROM play_history", |row| row.get::<_, i64>(0))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn pending_history_stops_at_a_failure_and_keeps_the_rest() {
+        let (_database, mut store) = Database::open();
+        let mut pending = PendingHistory::default();
+        // A play of a track that is not in the library fails its insert.
+        pending.push(HistoryEvent::Open {
+            play: 1,
+            record: play(1, Some(99), "Bad", 100),
+        });
+        pending.push(HistoryEvent::Count { play: 1 });
+        let result = pending.write(&mut store);
+        assert!(!result.wrote && result.error.is_some());
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn stats_revision_moves_on_every_write_and_history_revision_only_on_count() -> Result<()> {
+        let (_database, mut store) = Database::open();
+        let mut last = store.stats_revision()?;
+        let mut moved = |store: &Store| -> Result<bool> {
+            let now = store.stats_revision()?;
+            let moved = now > last;
+            last = now;
+            Ok(moved)
+        };
+        let row = store.open_play(&play(1, Some(3), "Rev", 100))?;
+        assert!(moved(&store)?);
+        store.checkpoint_play(row, 1_000)?;
+        assert!(moved(&store)?);
+        assert_eq!(store.history_revision()?, 0);
+        store.count_play(row)?;
+        assert!(moved(&store)?);
+        assert_eq!(store.history_revision()?, 1);
+        store.close_play(row, 2_000, EndReason::Stopped, 102)?;
+        assert!(moved(&store)?);
+        assert_eq!(store.history_revision()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn end_reasons_round_trip_through_text() {
+        for reason in [EndReason::Finished, EndReason::Skipped, EndReason::Stopped] {
+            assert_eq!(EndReason::parse(reason.as_str()), Some(reason));
+        }
+        assert_eq!(EndReason::parse("other"), None);
     }
 }

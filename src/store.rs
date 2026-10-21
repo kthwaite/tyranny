@@ -23,7 +23,11 @@ mod history;
 mod playlists;
 mod selection;
 mod stations;
-pub(crate) use history::{PendingPlays, PlayRecord, count_threshold_frames};
+#[allow(unused_imports)] // Task 4 names HistoryWrite and OpenPlayRow
+pub(crate) use history::{
+    EndReason, HistoryEvent, HistoryWrite, OpenPlayRow, PendingHistory, PlayRecord,
+    count_threshold_frames,
+};
 pub(crate) use playlists::{
     PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule, playlist_sources,
 };
@@ -34,7 +38,7 @@ mod playlists_tests;
 #[cfg(test)]
 mod stations_tests;
 const APPLICATION_ID: i64 = 0x7479726e;
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Runs the migration ladder up to `target`; tests use a lower target to build old schemas.
 pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
@@ -129,6 +133,27 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
         transaction.pragma_update(None, "user_version", 7)?;
         transaction.commit()?;
         version = 7;
+    }
+    if version == 7 && target > 7 {
+        let transaction = connection.transaction()?;
+        // Rows from before schema 8 stay counted, with no timing.
+        transaction.execute_batch(
+            "ALTER TABLE play_history ADD COLUMN listened_ms INTEGER;
+            ALTER TABLE play_history ADD COLUMN ended_at INTEGER;
+            ALTER TABLE play_history ADD COLUMN end_reason TEXT;
+            ALTER TABLE play_history ADD COLUMN counted INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE play_history ADD COLUMN raw_title TEXT;
+            CREATE INDEX play_history_played_at ON play_history(played_at);
+            CREATE TABLE history_control (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                writes INTEGER NOT NULL
+            );
+            INSERT INTO history_control
+                SELECT 1,COALESCE(MAX(id),0) FROM play_history;",
+        )?;
+        transaction.pragma_update(None, "user_version", 8)?;
+        transaction.commit()?;
+        version = 8;
     }
     ensure!(version == target, "unsupported database version {version}");
     Ok(version)
@@ -756,7 +781,7 @@ mod tests {
             drop(store);
             let store = Store::open(&path)?;
             assert_eq!(store.load()?.settings, settings);
-            assert_eq!(user_version(&path), 7);
+            assert_eq!(user_version(&path), 8);
             Ok(())
         })();
         let _ = fs::remove_file(&path);
@@ -813,7 +838,7 @@ mod tests {
             let local = store.load()?;
             assert!(local.entries[0].stream.is_none());
             assert_eq!(local.checkpoint.position_frames, 48_000);
-            assert_eq!(user_version(&path), 7);
+            assert_eq!(user_version(&path), 8);
             let stream =
                 StreamSpec::new("HTTPS://RADIO.EXAMPLE:443/live".into(), "Station".into())?;
             store.edit(
@@ -925,6 +950,42 @@ mod tests {
                 vec![(1, PathBuf::from("/music/a.flac"))]
             );
             assert_eq!((loaded.revision, loaded.next_id), (2, 2));
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+
+    #[test]
+    fn schema_7_rows_survive_as_counted_and_untimed() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let mut connection = Connection::open(&path)?;
+            migrate(&mut connection, 7)?;
+            connection.execute_batch(
+                "INSERT INTO play_history(played_at,entry_id,path,title,artist,album)
+                    VALUES(100,1,'/music/a.flac','A','','');",
+            )?;
+            drop(connection);
+            let store = Store::open(&path)?;
+            assert_eq!(user_version(&path), 8);
+            let connection = Connection::open(&path)?;
+            let row: (i64, Option<i64>, Option<String>, Option<i64>) = connection.query_row(
+                "SELECT counted,listened_ms,end_reason,ended_at FROM play_history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            assert_eq!(row, (1, None, None, None));
+            let indexed: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='index' AND name='play_history_played_at'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(indexed, 1);
+            assert_eq!(store.history_revision()?, 1);
+            assert_eq!(store.stats_revision()?, 1);
+            assert!(store.open_play_rows()?.is_empty());
             Ok(())
         })();
         let _ = fs::remove_file(&path);
@@ -1185,7 +1246,7 @@ mod tests {
         let result = (|| -> Result<()> {
             let store = Store::open(&path)?;
             let loaded = store.load()?;
-            assert_eq!(user_version(&path), 7);
+            assert_eq!(user_version(&path), 8);
             assert_eq!(loaded.entries.len(), 1);
             assert_eq!(loaded.checkpoint.current_id, Some(1));
             assert_eq!(pending_upgrade(&path), 1);
@@ -1245,7 +1306,7 @@ mod tests {
         let path = schema_4_file(false);
         let result = (|| -> Result<()> {
             Store::open(&path)?;
-            assert_eq!(user_version(&path), 7);
+            assert_eq!(user_version(&path), 8);
             assert_eq!(pending_upgrade(&path), 0);
             Ok(())
         })();
