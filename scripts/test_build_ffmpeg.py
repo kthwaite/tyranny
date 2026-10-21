@@ -4,8 +4,10 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import build_ffmpeg
 
@@ -87,6 +89,60 @@ class DependencyTests(unittest.TestCase):
         archive.write_bytes(b"changed dependency")
         with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
             build_ffmpeg.download(archive, {}, "https://invalid.example/source", expected)
+
+    def test_download_uses_mirror_after_connection_failure(self):
+        archive = self.root / "source.tar.gz"
+        partial = archive.with_suffix(".gz.partial")
+        content = b"pinned dependency"
+        expected = hashlib.sha256(content).hexdigest()
+        primary = "https://upstream.example/source"
+        mirror = "https://mirror.example/source"
+
+        def fetch(command, env):
+            if command[-1] == primary:
+                partial.write_bytes(b"interrupted transfer")
+                raise subprocess.CalledProcessError(7, command)
+            self.assertFalse(partial.exists())
+            Path(command[-2]).write_bytes(content)
+
+        with patch.object(build_ffmpeg, "run", side_effect=fetch):
+            build_ffmpeg.download(archive, {}, primary, expected, (mirror,))
+        self.assertEqual(archive.read_bytes(), content)
+        self.assertFalse(partial.exists())
+
+    def test_failed_sources_leave_no_cached_or_partial_archive(self):
+        archive = self.root / "source.tar.gz"
+        partial = archive.with_suffix(".gz.partial")
+
+        def fetch(command, env):
+            partial.write_bytes(b"interrupted transfer")
+            raise subprocess.CalledProcessError(7, command)
+
+        with patch.object(build_ffmpeg, "run", side_effect=fetch):
+            with self.assertRaises(subprocess.CalledProcessError):
+                build_ffmpeg.download(archive, {}, "https://upstream.example/source",
+                                      "0" * 64, ("https://mirror.example/source",))
+        self.assertFalse(archive.exists())
+        self.assertFalse(partial.exists())
+
+    def test_checksum_mismatch_is_fatal_on_primary_and_mirror(self):
+        archive = self.root / "source.tar.gz"
+        partial = archive.with_suffix(".gz.partial")
+        primary = "https://upstream.example/source"
+        mirror = "https://mirror.example/source"
+        for primary_down in (False, True):
+            with self.subTest(primary_down=primary_down):
+                def fetch(command, env):
+                    if primary_down and command[-1] == primary:
+                        raise subprocess.CalledProcessError(7, command)
+                    Path(command[-2]).write_bytes(b"untrusted source")
+
+                with patch.object(build_ffmpeg, "run", side_effect=fetch) as fetcher:
+                    with self.assertRaisesRegex(RuntimeError, "pinned SHA256"):
+                        build_ffmpeg.download(archive, {}, primary, "0" * 64, (mirror,))
+                self.assertEqual(fetcher.call_count, 2 if primary_down else 1)
+                self.assertFalse(archive.exists())
+                self.assertFalse(partial.exists())
 
     def test_cache_rejects_dependency_pin_or_installed_library_changes(self):
         library = self.root / "libopenmpt.0.dylib"

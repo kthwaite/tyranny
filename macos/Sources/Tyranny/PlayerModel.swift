@@ -345,12 +345,12 @@ final class PlayerModel {
                     guard generation == session, wantsConnection, !Task.isCancelled else { return }
                     if !attemptedBootstrap, managedEnabled, managesServer,
                        let failure = error as? ServerFailure,
-                       ["token_read_failed", "connection_lost"].contains(failure.code),
+                       ["token_read_failed", "connection_lost", "protocol_error"].contains(failure.code),
                        let managedServer {
                         attemptedBootstrap = true
                         connectionDetail = "Starting the local background server…"
                         do {
-                            try await managedServer.ensureRunning()
+                            try await managedServer.ensureRunning(replacingIncompatibleServer: failure.code == "protocol_error")
                             guard generation == session, wantsConnection, !Task.isCancelled else { return }
                             continue
                         } catch {

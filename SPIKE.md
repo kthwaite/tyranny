@@ -37,6 +37,23 @@ revision, while no-ops do not. Stale revisions are rejected, including for
 no-ops. Song likes integrate at protocol **18**; upgrade client and server
 together.
 
+## Songs scroll memory
+
+Songs remembers its viewport when navigating to another destination and back,
+including grouped rows and partial-row offsets. The viewport belongs to the retained
+list model, not the disposable native table. Restoration waits for a current layout
+and an attached, sized viewport; revision-refresh anchoring takes precedence.
+
+This is session-local, not saved across app relaunches. Changing the list description
+(sort, filter, browser selection or grouping) clears the saved viewport and starts
+at the top. Other retained track lists use the same table behavior.
+
+Native acceptance: `python3 scripts/client_gate.py --scenario scroll-memory --app
+target/swift-client/debug/Tyranny`. On an isolated 1,129-track library it navigates
+Songs → Albums → Songs twice in both None and Artist › Album grouping, checks the
+first visible track and exact viewport offset, captures the restored views, and
+checks that changing grouping resets to the top.
+
 ## Development commands
 
 Install Rust, Xcode command-line tools, Python 3.9+, and optionally `just`
@@ -350,6 +367,22 @@ FFmpeg libraries, icon, and source/license artifacts) and an Applications
 shortcut. Drag the app to Applications before launching it; do not run the
 managed server from the mounted image.
 
+App upgrades do not require the previous app to remove its LaunchAgent. When
+startup needs a server, Tyranny recognizes its saved job even if the app moved
+or the old bundle was deleted, gracefully unloads an owned loaded job, and
+rewrites the helper path for the current bundle. Library, queue, settings, and
+authentication token stay in the existing state directory. An incompatible
+protocol triggers replacement only for a verified managed job; compatible
+authenticated servers are reused. Manual servers and foreign or modified
+LaunchAgents are not stopped or overwritten. Ownership checks still require
+the saved environment, state paths, endpoint, logs, and launchd policy to match,
+and loaded arguments must match the saved plist.
+
+`scripts/lifecycle_gate.py --app <debug-app-path> --upgrade-only` exercises
+automatic migration with loaded/unloaded jobs and missing old bundles, checks
+queue/library/token preservation, and verifies foreign-job protection through
+the native app. It uses isolated labels and state, never the normal login job.
+
 The source builder currently supports native **arm64 macOS**, with a deployment
 target of macOS 14. It downloads [FFmpeg 9.0.2](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz)
 and verifies the pinned SHA256 before extraction. The FFmpeg pin was established
@@ -357,6 +390,11 @@ by verifying its upstream detached signature against the published signing
 fingerprint. It also verifies pinned official release archives for
 [libopenmpt 0.8.9](https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.8.9+release.autotools.tar.gz)
 and build-only [pkgconf 3.0.10](https://distfiles.ariadne.space/pkgconf/pkgconf-3.0.10.tar.gz).
+If the libopenmpt upstream download fails, the builder tries the
+[MacPorts distfile mirror](https://distfiles.macports.org/libopenmpt/).
+Both sources must match the same pinned SHA256; a checksum mismatch stops the
+build rather than falling back. Failed transfers are removed before another
+source is tried, and only verified archives enter the download cache.
 The first build needs network access; subsequent builds reuse a checksum-verified
 cache under `target/native`, keyed by dependency sources/options, architecture,
 builder, compiler, and SDK. Interrupted installs are not reused.

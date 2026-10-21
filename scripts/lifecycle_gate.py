@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--ui-driver", default="target/native-ui-driver")
     parser.add_argument("--work-dir", default="target/lifecycle-gate")
     parser.add_argument("--coreaudio", action="store_true")
+    parser.add_argument("--upgrade-only", action="store_true",
+                        help="Check automatic app migration and ownership protection without explicit-control AX actions")
     args = parser.parse_args()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -82,6 +84,13 @@ def main():
 
     def ctl(*arguments, check=True):
         return command(["/bin/launchctl", *arguments], check=check)
+
+    def stop_test_job():
+        ctl("bootout", target)
+        deadline = time.monotonic() + 20
+        while ctl("print", target, check=False).returncode == 0:
+            assert time.monotonic() < deadline, "Isolated job did not stop"
+            time.sleep(0.1)
 
     def record(name, **details):
         report["cases"].append({"name": name, "passed": True, **details})
@@ -293,10 +302,82 @@ def main():
         assert still["transport"] == "paused" and still["current_id"] == held["current_id"], (held, still)
         record("client-quit-while-paused-does-not-resume", before=held, after=still)
 
+        # New app locations may inherit either a loaded job or just its plist.
+        # Neither case may require the previous app to uninstall itself.
+        upgraded = run / "Updated Tyranny – 日本語.app"
+        shutil.copytree(app, upgraded, symlinks=True)
+        upgraded_helper = upgraded / "Contents/MacOS/tyranny-server"
+        token_before = (state / "token").read_bytes()
+
+        # A loaded KeepAlive job whose app disappeared cannot restart its helper.
+        previous = control.hello["instance_id"]
+        removed = run / "Removed Original.app"
+        app.rename(removed)
+        try:
+            ctl("kill", "SIGTERM", target)
+            deadline = time.monotonic() + 20
+            while "state = running" in ctl("print", target).stdout:
+                assert time.monotonic() < deadline, "Previous helper did not stop"
+                time.sleep(0.1)
+            launch("missing-loaded-app", bundle=upgraded)
+            control = connect(previous=previous)
+            assert str(upgraded_helper) in plistlib.loads(plist.read_bytes())["ProgramArguments"]
+            assert control.state()["queue_length"] == 1 and tracks(control)["total"] == 1
+            assert (state / "token").read_bytes() == token_before
+            record("missing-loaded-app-job-migrates-on-startup", hello=control.hello)
+        finally:
+            removed.rename(app)
+        stop_test_job()
+        retired = run / "Removed Previous.app"
+        upgraded.rename(retired)
+        try:
+            launch("missing-previous-app")
+            control = connect()
+            assert str(helper) in plistlib.loads(plist.read_bytes())["ProgramArguments"]
+            assert control.state()["queue_length"] == 1 and tracks(control)["total"] == 1
+            assert (state / "token").read_bytes() == token_before
+            record("missing-previous-app-plist-migrates-on-startup", hello=control.hello)
+        finally:
+            retired.rename(upgraded)
+
+        stop_test_job()
+        # A matching label alone is not ownership. Preserve both a foreign job
+        # and its on-disk configuration when startup encounters one.
+        foreign = dict(configured)
+        foreign["ProgramArguments"] = ["/usr/bin/env", "-i", "/bin/sleep", "600"]
+        foreign_bytes = plistlib.dumps(foreign)
+        plist.write_bytes(foreign_bytes)
+        plist.chmod(0o600)
+        ctl("bootstrap", domain, plist)
+        foreign_loaded = ctl("print", target).stdout
+        foreign_pid = next(line.strip() for line in foreign_loaded.splitlines() if line.strip().startswith("pid = "))
+        rejected = launch("foreign-job-refused", expect_connected=False)
+        assert rejected["error"]
+        assert plist.read_bytes() == foreign_bytes
+        assert foreign_pid in ctl("print", target).stdout
+        record("foreign-launchagent-left-running-and-unchanged", refusal=rejected["error"])
+        # Even a recognized plist cannot authorize stopping different loaded arguments.
+        plist.write_bytes(plistlib.dumps(configured))
+        recognized_bytes = plist.read_bytes()
+        rejected = launch("loaded-origin-mismatch-refused", expect_connected=False)
+        assert rejected["error"]
+        assert plist.read_bytes() == recognized_bytes
+        assert foreign_pid in ctl("print", target).stdout
+        record("loaded-origin-mismatch-left-running-and-unchanged", refusal=rejected["error"])
+        stop_test_job()
+        plist.unlink()
+        if args.upgrade_only:
+            report["passed"] = True
+            return
+
+        launch("after-upgrade-checks")
+        control = connect()
+
         launch("restart", action="restart")
         control = connect(previous=initial_instance)
         record("native-explicit-clean-restart-preserves-queue-library", hello=control.hello)
         assert control.state()["queue_length"] == 1 and tracks(control)["total"] == 1
+
         for name, sig in [("clean-exit", "SIGTERM"), ("crash", "SIGKILL")]:
             previous = control.hello["instance_id"]
             ctl("kill", sig, target)
@@ -428,6 +509,8 @@ def main():
             report["passed"] = False
         (run / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps({"report": str(run / "report.json"), "passed": report.get("passed", False)}))
+        if args.upgrade_only and not report.get("passed"):
+            raise SystemExit(1)
     if not report.get("passed"):
         raise SystemExit(1)
 

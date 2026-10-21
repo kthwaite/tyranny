@@ -10,6 +10,8 @@ import TyrannyCore
 /// `--songs-smoke-scenario grouping` drives grouping instead: Artist › Album against the
 /// server's spans, a selection inside an album block, and a rescan that adds an album
 /// (`--songs-smoke-extra`, moved into `--songs-smoke-root`) while the anchor stays in view.
+/// `--songs-smoke-scenario scroll-memory` checks navigation restoration in both layouts,
+/// including partial-row offsets, then the reset after changing grouping.
 @MainActor
 enum NativeSongsSmoke {
     private struct Failure: Error, LocalizedError {
@@ -38,10 +40,25 @@ enum NativeSongsSmoke {
                 }
                 try await NativeSmoke.drive("activate")
                 try await Task.sleep(for: .milliseconds(300))
-                // Group settings persist per destination; both scenarios start ungrouped.
+                // Group settings persist per destination; scenarios start ungrouped.
                 navigation.setGrouping(.none, for: .songs)
                 if scenario == "grouping" {
                     try await exerciseGrouping(model, navigation)
+                } else if scenario == "scroll-memory" {
+                    try await wait("songs list", model) { songsList?.cache.total == 1129 }
+                    guard let list = songsList else { throw Failure(message: "Songs list missing") }
+                    try await exerciseScrollMemory(model, navigation, list)
+                    try await drive("choose", "group-control", "Artist › Album")
+                    try await wait("grouped layout", model) {
+                        list.grouping == .artistAlbum && list.layoutIsCurrent && list.layout.count > 0
+                    }
+                    try await exerciseScrollMemory(model, navigation, list)
+                    try await drive("choose", "group-control", "None")
+                    try await wait("grouping resets viewport", model) {
+                        list.grouping == .none && list.layoutIsCurrent
+                            && findTable().map { $0.visibleRect.minY < 30 } == true
+                    }
+                    cases.append("native-songs-description-change-resets-scroll")
                 } else {
                     try await exercise(model, navigation)
                 }
@@ -82,6 +99,7 @@ enum NativeSongsSmoke {
         observations["last_row_title"] = last.track.title
         try check(loaded <= 2000, "The cache holds \(loaded) rows; it must stay bounded")
         cases.append("native-songs-scroll-to-end-shows-server-last-row")
+        try await exerciseScrollMemory(model, navigation, list)
 
         // Sort by Year, descending: two header clicks.
         try await drive("click-control", "track-header-year")
@@ -189,6 +207,7 @@ enum NativeSongsSmoke {
         try check(list.selectedPositions == IndexSet(integer: position), "Selected position differs")
         observations["block_selection"] = ["row_id": row.row_id, "display": display, "position": position]
         cases.append("native-grouping-selects-one-block-track-by-row-id")
+        try await exerciseScrollMemory(model, navigation, list)
 
         // A rescan adds an album before the anchor: the anchor track stays in view.
         guard let extra = argument("--songs-smoke-extra"), let root = argument("--songs-smoke-root") else {
@@ -222,6 +241,41 @@ enum NativeSongsSmoke {
         try await drive("exists", "\(table)-cell-\(anchor.rowID)-title")
         cases.append("native-grouping-rescan-keeps-anchor-track-in-view")
         navigation.setGrouping(.none, for: .songs)
+    }
+
+    /// The native table is destroyed off-screen; both row identity and pixel offset survive.
+    private static func exerciseScrollMemory(_ model: PlayerModel, _ navigation: NavigationModel,
+                                             _ list: ListModel) async throws {
+        try await drive("scroll-fraction", table, "0.53")
+        try await wait("middle window", model) {
+            guard let table = findTable() else { return false }
+            return firstVisibleTrack(list, table) != nil && table.visibleRect.minY > 100
+        }
+        guard let before = findTable(), let anchor = firstVisibleTrack(list, before),
+              let origin = before.enclosingScrollView?.contentView.bounds.origin else {
+            throw Failure(message: "No viewport to remember")
+        }
+        defer {
+            observations["scroll_memory_\(list.grouping)"] = [
+                "row_id": anchor.rowID, "y": origin.y,
+                "restored_y": findTable()?.enclosingScrollView?.contentView.bounds.minY as Any,
+                "remembered_y": list.scrollOrigin?.y as Any,
+                "restored_row_id": findTable().flatMap { firstVisibleTrack(list, $0)?.rowID } as Any]
+        }
+        for _ in 0..<2 {
+            try await drive("click-control", "source-albums")
+            try await wait("Albums destination", model) { navigation.destination == .albums && findTable() == nil }
+            observations["offscreen_y"] = list.scrollOrigin?.y as Any
+            try await drive("click-control", "source-songs")
+            try await wait("Songs viewport restored", model) {
+                guard let restored = findTable(), restored !== before,
+                      let point = restored.enclosingScrollView?.contentView.bounds.origin else { return false }
+                return abs(point.y - origin.y) < 1 && abs(point.x - origin.x) < 1
+                    && firstVisibleTrack(list, restored)?.rowID == anchor.rowID
+            }
+        }
+        try capture("songs-scroll-restored-\(list.grouping)")
+        cases.append("native-songs-\(list.grouping)-restores-scroll-after-navigation")
     }
 
     private struct RowKinds: Equatable, CustomStringConvertible {
@@ -335,7 +389,9 @@ enum NativeSongsSmoke {
         var report: [String: Any] = ["passed": error == nil, "cases": cases, "observations": observations,
             "automation": scenario == "grouping"
                 ? "External Accessibility group pop-up choice, row count, table selection and scroll; the smoke moves a staged album into the root and requests a rescan; server reads otherwise only for expected values."
-                : "External Accessibility scroll, header clicks, browser and table selection, and a CGEvent drag onto the Up Next source row; server reads only for expected values.",
+                : scenario == "scroll-memory"
+                    ? "External Accessibility scroll, sidebar navigation and grouping choices; native table observations compare row identity and pixel offsets across recreation."
+                    : "External Accessibility scroll, header clicks, browser and table selection, and a CGEvent drag onto the Up Next source row; server reads only for expected values.",
             "scenario": scenario]
         if let error { report["error"] = error }
         if let state = model.snapshot {

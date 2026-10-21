@@ -3,6 +3,16 @@ import Observation
 import SwiftUI
 import TyrannyCore
 
+/// SwiftUI can attach an already-sized representable without another bounds notification.
+private final class TrackScrollView: NSScrollView {
+    var didLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        didLayout?()
+    }
+}
+
 /// A continuous, virtualized track table over a `ListModel` (spec 4.2, 4.3, 7).
 ///
 /// The table shows the list's `GroupLayout`: one row per position when ungrouped; artist
@@ -35,7 +45,7 @@ struct VirtualTrackTable: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = TrackScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
@@ -102,6 +112,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             context.coordinator, selector: #selector(Coordinator.scrolled(_:)),
             name: NSView.frameDidChangeNotification, object: scroll)
         context.coordinator.attach(table: table, scroll: scroll)
+        scroll.didLayout = { [weak coordinator = context.coordinator] in coordinator?.reportVisible() }
         context.coordinator.update(self)
         return scroll
     }
@@ -122,6 +133,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         weak var table: NSTableView?
         private weak var scroll: NSScrollView?
         private var updating = false
+        private var restoreViewport = true
         /// The layout the table's rows show. Replaced only in `update`, with a reload.
         private(set) var layout = GroupLayout(grouping: .none, total: 0, spans: [])
         private var shownExplicit: Set<String> = []
@@ -165,7 +177,10 @@ struct VirtualTrackTable: NSViewRepresentable {
             self.parent = parent
             guard let table else { return }
             updating = true
-            defer { updating = false }
+            defer {
+                updating = false
+                reportVisible()
+            }
             let blocks = parent.list.showsAlbumBlocks
             if parent.hidden != shownHidden || parent.explicit != shownExplicit || blocks != shownBlocks || parent.list.sortKeys != shownSort {
                 shownSort = parent.list.sortKeys
@@ -189,6 +204,7 @@ struct VirtualTrackTable: NSViewRepresentable {
 
             let epochChanged = parent.epoch != shownEpoch
             if epochChanged {
+                if shownEpoch != nil { restoreViewport = false }
                 shownEpoch = parent.epoch
                 reported = nil
                 table.scrollRowToVisible(0)
@@ -242,7 +258,6 @@ struct VirtualTrackTable: NSViewRepresentable {
             let selected = layout.displayIndexes(ofPositions: parent.list.selectedPositions)
             if table.selectedRowIndexes != selected { table.selectRowIndexes(selected, byExtendingSelection: false) }
             applyReveal(parent.revealToken)
-            reportVisible()
         }
 
         private func columnIndex(_ id: String) -> Int? {
@@ -275,6 +290,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         private func restoreAnchor() {
             guard let anchor = cache.anchorPosition, parent.list.layoutIsCurrent else { return }
             cache.anchorPosition = nil
+            restoreViewport = false
             guard let display = layout.displayIndex(ofPosition: anchor) else { return }
             scrollToTop(max(0, display - parent.list.anchorOffset))
         }
@@ -294,8 +310,24 @@ struct VirtualTrackTable: NSViewRepresentable {
 
         @objc func scrolled(_ notification: Notification) { reportVisible() }
 
-        private func reportVisible() {
-            guard !dismantled, let table else { return }
+        fileprivate func reportVisible() {
+            guard !dismantled, !updating, let table, let scroll, table.window != nil,
+                  scroll.contentView.bounds.height > 0, parent.list.layoutIsCurrent,
+                  shownLayout == parent.list.layoutToken else { return }
+            if restoreViewport {
+                // Wait for rows and the real viewport before AppKit clamps the saved origin.
+                guard table.numberOfRows > 0 else { return }
+                restoreViewport = false
+                if let origin = parent.list.scrollOrigin {
+                    updating = true
+                    table.tile()
+                    scroll.tile()
+                    scroll.contentView.scroll(to: origin)
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                    updating = false
+                }
+            }
+            parent.list.scrollOrigin = scroll.contentView.bounds.origin
             let rows = table.rows(in: table.visibleRect)
             guard rows.length > 0 else { return }
             let range = rows.location..<rows.location + rows.length

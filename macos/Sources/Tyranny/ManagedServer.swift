@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// Development-only, per-login launchd ownership. The daemon owns playback; the app only pauses it on quit.
+/// Per-login launchd ownership. The daemon owns playback; the app only pauses it on quit.
 @MainActor
 final class ManagedServer {
     let endpoint: String
@@ -94,7 +94,7 @@ final class ManagedServer {
         logPath = state.appendingPathComponent("server.log").path
     }
 
-    func ensureRunning() async throws {
+    func ensureRunning(replacingIncompatibleServer: Bool = false) async throws {
         try begin()
         defer { operation = false }
         // A manually started, authenticated daemon is always preferable to a new job.
@@ -102,6 +102,9 @@ final class ManagedServer {
         try Task.checkCancellation()
         try prepare()
         try await preflight()
+        if replacingIncompatibleServer, !(try await ownedLoadedJob()) {
+            throw failure("The incompatible server is not a managed Tyranny job; it was left running. Update that server separately.")
+        }
         try await installAndStart()
         try await waitUntilReady()
     }
@@ -110,7 +113,7 @@ final class ManagedServer {
         try begin()
         defer { operation = false }
         try prepare()
-        guard try ownedPlist() else {
+        guard try ownedPlist() != nil else {
             throw failure("No owned LaunchAgent exists. A manual server will not be restarted; stop it using its original owner.")
         }
         try await preflight()
@@ -128,10 +131,13 @@ final class ManagedServer {
         try begin()
         defer { operation = false }
         try Self.checkPath(agentDirectory, create: false, privateLeaf: false)
-        guard try ownedPlist() else { return }
+        guard let existing = try ownedPlist() else { return }
         if try await ownedLoadedJob() { try await stopOwnedJob() }
         // Recheck immediately before removing; never remove a replacement configuration.
-        guard try ownedPlist() else { return }
+        guard let current = try ownedPlist() else { return }
+        guard NSDictionary(dictionary: current).isEqual(to: existing) else {
+            throw failure("LaunchAgent configuration changed during removal; Retry.")
+        }
         try FileManager.default.removeItem(at: plist)
     }
 
@@ -177,19 +183,41 @@ final class ManagedServer {
         }
     }
 
-    private func ownedPlist() throws -> Bool {
+    private func ownedPlist() throws -> [String: Any]? {
         var info = stat()
         if lstat(plist.path, &info) != 0 {
-            if errno == ENOENT { return false }
+            if errno == ENOENT { return nil }
             throw failure("Cannot inspect LaunchAgent configuration.")
         }
         try Self.checkFile(plist.path)
         let data = try Data(contentsOf: plist)
-        guard let existing = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              NSDictionary(dictionary: existing).isEqual(to: job) else {
-            throw failure("Refusing to overwrite or unload a different LaunchAgent at \(plist.path). Remove it using its original owner.")
+        let desired = job
+        guard let desiredArguments = desired["ProgramArguments"] as? [String],
+              let existing = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let arguments = existing["ProgramArguments"] as? [String],
+              arguments.count == desiredArguments.count else {
+            throw failure("Unrecognized LaunchAgent configuration at \(plist.path); it was left unchanged.")
         }
-        return true
+        // A moved/replaced app still owns the same job. Only the bundle location
+        // may differ: environment, state, endpoint, logs and launchd policy must match.
+        let oldHelper = arguments[5]
+        let oldURL = URL(fileURLWithPath: oldHelper)
+        guard oldHelper.hasPrefix("/"), oldURL.standardizedFileURL.path == oldHelper,
+              !oldHelper.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              oldURL.lastPathComponent == "tyranny-server",
+              oldURL.deletingLastPathComponent().lastPathComponent == "MacOS",
+              oldURL.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Contents",
+              oldURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().pathExtension == "app" else {
+            throw failure("The LaunchAgent does not reference a bundled Tyranny server; it was left unchanged.")
+        }
+        var expected = desired
+        var expectedArguments = desiredArguments
+        expectedArguments[5] = oldHelper
+        expected["ProgramArguments"] = expectedArguments
+        guard NSDictionary(dictionary: existing).isEqual(to: expected) else {
+            throw failure("The LaunchAgent at \(plist.path) is not a recognized Tyranny configuration; it was left unchanged.")
+        }
+        return existing
     }
 
     private func ownedLoadedJob() async throws -> Bool {
@@ -199,25 +227,37 @@ final class ManagedServer {
             try await launchctl(["print", "gui/\(getuid())"])
             return false
         }
-        guard try ownedPlist() else { throw failure("The label is already registered without our owned plist; refusing to change it.") }
-        // launchctl print is diagnostic, not a stable API. For this development spike,
-        // fail CLOSED if its origin cannot be established; never infer ownership by label.
+        guard let existing = try ownedPlist() else { throw failure("The label is already registered without our owned plist; refusing to change it.") }
+        // Match the loaded job to its saved configuration, not the new bundle.
+        // Fail closed if launchctl's diagnostic format changes.
         let origins = result.text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
         let start = origins.firstIndex(of: "arguments = {")
         let loadedArguments = start.map { Array(origins.dropFirst($0 + 1).prefix(while: { $0 != "}" })) }
         guard origins.contains("path = \(plist.path)"), origins.contains("program = /usr/bin/env"),
-              loadedArguments == job["ProgramArguments"] as? [String] else {
+              loadedArguments == existing["ProgramArguments"] as? [String] else {
             throw failure("Cannot establish the loaded job's origin. Refusing to change an unrelated or unrecognized LaunchAgent.")
         }
         return true
     }
 
     private func installAndStart() async throws {
+        let existing = try ownedPlist()
         if try await ownedLoadedJob() {
-            try await launchctl(["kickstart", service])
-            return
+            // This path is reached only when readiness failed or restart was
+            // requested. Gracefully retire even a same-path, older server binary.
+            try await stopOwnedJob()
         }
-        if !(try ownedPlist()) {
+        let current = try ownedPlist()
+        guard NSDictionary(dictionary: current ?? [:]).isEqual(to: existing ?? [:]) else {
+            throw failure("LaunchAgent configuration changed during startup; Retry.")
+        }
+        let needsInstall = current.map { !NSDictionary(dictionary: $0).isEqual(to: job) } ?? true
+        if current != nil && needsInstall {
+            // The old bundle may already be gone. Never execute it or require it
+            // to uninstall itself; retain the user's state and replace only its job.
+            try FileManager.default.removeItem(at: plist)
+        }
+        if needsInstall {
             let data = try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0)
             // O_EXCL ensures an intervening owner cannot be overwritten.
             let fd = open(plist.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
