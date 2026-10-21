@@ -45,11 +45,16 @@ public enum ArtworkPalette {
         }
 
         guard Double(qualifying) >= max(1, minimumShare * Double(pixelCount)) else { return nil }
-        // Ties go to the lowest bucket, so the result is deterministic.
+        // Score each pair of circularly adjacent buckets (a 30 degree window), so a cluster
+        // that straddles a bucket edge is not split. Ties go to the lowest pair.
+        func pairWeight(_ first: Int) -> Double { weight[first] + weight[(first + 1) % hueBuckets] }
         var winner = 0
-        for bucket in 1..<hueBuckets where weight[bucket] > weight[winner] { winner = bucket }
-        let n = Double(count[winner])
-        return RGB(red: sums[winner].0 / n, green: sums[winner].1 / n, blue: sums[winner].2 / n)
+        for first in 1..<hueBuckets where pairWeight(first) > pairWeight(winner) { winner = first }
+        let second = (winner + 1) % hueBuckets
+        let n = Double(count[winner] + count[second])
+        return RGB(red: (sums[winner].0 + sums[second].0) / n,
+                   green: (sums[winner].1 + sums[second].1) / n,
+                   blue: (sums[winner].2 + sums[second].2) / n)
     }
 
     /// Draws `image` into a 32×32 sRGB premultiplied-last RGBA8 buffer, then calls `dominant(rgba:width:height:)`.

@@ -56,6 +56,32 @@ import Testing
                     RGB(hex: "#FF8000")!)
     }
 
+    /// Pixels in row-major order: `runs` lists (pixel, count); the rest is black.
+    private func runsBuffer(_ runs: [(Pixel, Int)]) -> [UInt8] {
+        var pixels: [Pixel] = []
+        for (pixel, count) in runs { pixels += [Pixel](repeating: pixel, count: count) }
+        pixels += [Pixel](repeating: (0, 0, 0), count: 1024 - pixels.count)
+        return buffer { x, y in pixels[y * 32 + x] }
+    }
+
+    @Test func redSplitAcrossTheZeroHueEdgeBeatsOrange() {
+        // Hues 355 and 5 degrees fall in different 15 degree buckets; together they are 59%.
+        let rgba = runsBuffer([((255, 0, 21), 300), ((255, 21, 0), 300), ((255, 128, 0), 400)])
+        let result = ArtworkPalette.dominant(rgba: rgba, width: 32, height: 32)
+        #expect((result?.red ?? 0) > 0.99)
+        #expect((result?.green ?? 1) < 0.05)
+        #expect((result?.blue ?? 1) < 0.05)
+    }
+
+    @Test func blueSplitAcrossABucketEdgeBeatsViolet() {
+        // Hues 237 and 242 degrees straddle the 240 degree edge.
+        let rgba = runsBuffer([((0, 10, 255), 300), ((10, 0, 255), 300), ((128, 0, 255), 400)])
+        let result = ArtworkPalette.dominant(rgba: rgba, width: 32, height: 32)
+        #expect((result?.blue ?? 0) > 0.99)
+        #expect((result?.red ?? 1) < 0.05)
+        #expect((result?.green ?? 1) < 0.05)
+    }
+
     @Test func wrongBufferSizeReturnsNil() {
         #expect(ArtworkPalette.dominant(rgba: [UInt8](repeating: 255, count: 10), width: 32, height: 32) == nil)
         #expect(ArtworkPalette.dominant(rgba: [], width: 0, height: 0) == nil)
