@@ -20,3 +20,4 @@ mod scanner;
 pub mod server;
 mod store;
 mod stream;
+pub mod tagging;

@@ -424,6 +424,60 @@ pub struct Lyrics {
     pub message: Option<String>,
 }
 
+/// A tag field that a MusicBrainz lookup can propose and Tyranny can write.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TagField {
+    Title,
+    Artist,
+    Album,
+    AlbumArtist,
+    TrackNumber,
+    TrackTotal,
+    DiscNumber,
+    DiscTotal,
+    Date,
+    OriginalDate,
+    MusicbrainzRecordingId,
+    MusicbrainzTrackId,
+    MusicbrainzReleaseId,
+    MusicbrainzReleaseGroupId,
+    MusicbrainzArtistId,
+    MusicbrainzAlbumArtistId,
+}
+
+impl TagField {
+    pub const ALL: [TagField; 16] = [
+        TagField::Title,
+        TagField::Artist,
+        TagField::Album,
+        TagField::AlbumArtist,
+        TagField::TrackNumber,
+        TagField::TrackTotal,
+        TagField::DiscNumber,
+        TagField::DiscTotal,
+        TagField::Date,
+        TagField::OriginalDate,
+        TagField::MusicbrainzRecordingId,
+        TagField::MusicbrainzTrackId,
+        TagField::MusicbrainzReleaseId,
+        TagField::MusicbrainzReleaseGroupId,
+        TagField::MusicbrainzArtistId,
+        TagField::MusicbrainzAlbumArtistId,
+    ];
+
+    /// Track and disc numbers and totals, which compare as numbers.
+    pub fn is_number(self) -> bool {
+        matches!(
+            self,
+            TagField::TrackNumber
+                | TagField::TrackTotal
+                | TagField::DiscNumber
+                | TagField::DiscTotal
+        )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Settings {
     pub gain_mode: GainMode,
