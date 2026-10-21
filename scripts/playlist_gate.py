@@ -163,7 +163,7 @@ def main():
             assert not migrated['settings']['equalizer']['enabled']
             assert migrated['transport'] == 'paused' and migrated['library']['tracks'] == 105
             with sqlite3.connect(state / 'state.sqlite3') as database:
-                assert database.execute('PRAGMA user_version').fetchone()[0] == 7
+                assert database.execute('PRAGMA user_version').fetchone()[0] == 8
             record('real-schema2-migration-preserves-library-queue-selection-settings', snapshot=migrated)
         a.request('clear', expected_revision=a.state()['queue_revision'])
         b = connect()
