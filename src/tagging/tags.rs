@@ -182,6 +182,17 @@ impl FileTags {
             .collect()
     }
 
+    /// The field's second home holds a value other than its primary value. A
+    /// second-home value equal to the primary value is not a copy, so any copy
+    /// there differs.
+    pub fn second_home_differs(&self, field: TagField) -> bool {
+        second_home(self.primary_kind, field).is_some_and(|key| {
+            self.copies
+                .iter()
+                .any(|copy| copy.tag == self.primary_kind && copy.field == field && copy.key == key)
+        })
+    }
+
     /// `Some(READ_ONLY_REASON)` when setting these fields would need a change to
     /// a tag lofty cannot write. `edit_tags` then fails with `ReadOnlyTag`.
     pub fn read_only_reason(&self, fields: &BTreeSet<TagField>) -> Option<&'static str> {
