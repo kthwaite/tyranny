@@ -1,0 +1,168 @@
+import Foundation
+import Observation
+import TyrannyCore
+
+/// The Stats page's report for one period, and the years the Wrapped menu offers.
+///
+/// The page fetches on appear and when `period` changes. While the page is visible, a new
+/// `stats_revision` refetches at most once every 10 s. `wrappedYears` comes from `stats_years`
+/// on connect and, debounced the same way, when `stats_revision` changes.
+@MainActor @Observable
+final class StatsModel {
+    /// Setting it remembers its kind and fetches its report.
+    var period: StatsPeriod {
+        didSet {
+            guard period != oldValue else { return }
+            defaults.set(period.kind.rawValue, forKey: Self.periodKindKey)
+            if visible { fetchReport() }
+        }
+    }
+    private(set) var report: StatsReport?
+    /// The period `report` was fetched for.
+    private(set) var loadedPeriod: StatsPeriod?
+    private(set) var error: String?
+    private(set) var wrappedYears: [Int] = []
+
+    static let periodKindKey = "stats.periodKind"
+    static let refetchInterval: Duration = .seconds(10)
+
+    @ObservationIgnored private weak var player: PlayerModel?
+    @ObservationIgnored private let defaults: UserDefaults
+    /// The page is on screen. Only then does a new `stats_revision` refetch the report.
+    @ObservationIgnored private var visible = false
+    /// nil while disconnected: the next snapshot is a new connection.
+    @ObservationIgnored private var statsRevision: UInt64?
+    @ObservationIgnored private let reportThrottle = Throttle(interval: refetchInterval)
+    @ObservationIgnored private let yearsThrottle = Throttle(interval: refetchInterval)
+    /// Bumped by every report request; an older reply is dropped.
+    @ObservationIgnored private var reportRequest: UInt64 = 0
+    @ObservationIgnored private var yearsRequest: UInt64 = 0
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+        let kind = defaults.string(forKey: Self.periodKindKey).flatMap(StatsPeriodKind.init(rawValue:)) ?? .week
+        period = .current(kind, now: Date())
+    }
+
+    /// The harness suite for gate, smoke and render launches, so they never touch the user's choice.
+    static func forLaunch(arguments: [String]) -> StatsModel {
+        let defaults = QuitSuspensionStore.suiteName(forArguments: arguments)
+            .flatMap(UserDefaults.init(suiteName:)) ?? .standard
+        return StatsModel(defaults: defaults)
+    }
+
+    func attach(_ player: PlayerModel) { self.player = player }
+
+    var calendar: Calendar { .statsCalendar() }
+
+    // MARK: Following state
+
+    /// Follows the connection and `stats_revision`. The player calls it on every snapshot.
+    func sync() {
+        guard let player else { return }
+        guard player.connected, let snapshot = player.snapshot else {
+            if statsRevision != nil {
+                statsRevision = nil
+                reportThrottle.cancel()
+                yearsThrottle.cancel()
+                reportRequest &+= 1
+                yearsRequest &+= 1
+            }
+            return
+        }
+        let revision = snapshot.stats_revision
+        if statsRevision == nil {
+            statsRevision = revision
+            fetchYears()
+            if visible { fetchReport() }
+        } else if revision != statsRevision {
+            statsRevision = revision
+            yearsThrottle.request { [weak self] in self?.sendYears() }
+            if visible { reportThrottle.request { [weak self] in self?.sendReport() } }
+        }
+    }
+
+    /// The page calls these from `onAppear` and `onDisappear`.
+    func appeared() {
+        visible = true
+        fetchReport()
+    }
+
+    func disappeared() {
+        visible = false
+        reportThrottle.cancel()
+    }
+
+    // MARK: Fetching
+
+    private func fetchReport() { reportThrottle.now { [weak self] in self?.sendReport() } }
+    private func fetchYears() { yearsThrottle.now { [weak self] in self?.sendYears() } }
+
+    private func sendReport() {
+        guard let player, player.connected else { return }
+        reportRequest &+= 1
+        let request = reportRequest
+        let period = period
+        let fields: [String: JSONValue] = ["period": .object([
+            "kind": .string(period.kind.rawValue), "anchor": .string(period.anchorString(calendar: calendar))])]
+        // A cancelled request would close the shared connection: fetch unstructured.
+        Task { @MainActor [weak self] in
+            do {
+                let reply: StatsResponse = try await player.send("stats", fields)
+                guard let self, request == reportRequest else { return }
+                report = reply.report
+                loadedPeriod = period
+                error = nil
+            } catch {
+                guard let self, request == reportRequest else { return }
+                self.error = (error as? ServerFailure)?.message ?? error.localizedDescription
+            }
+        }
+    }
+
+    private func sendYears() {
+        guard let player, player.connected else { return }
+        yearsRequest &+= 1
+        let request = yearsRequest
+        Task { @MainActor [weak self] in
+            // The menu keeps the years it had; the Stats page shows report errors.
+            guard let reply: StatsYearsResponse = try? await player.send("stats_years"),
+                  let self, request == yearsRequest else { return }
+            wrappedYears = reply.years
+        }
+    }
+}
+
+/// Runs an action at most once per `interval`. A request inside the interval runs once at its end.
+@MainActor
+private final class Throttle {
+    private let interval: Duration
+    private var last: ContinuousClock.Instant?
+    private var pending: Task<Void, Never>?
+
+    init(interval: Duration) { self.interval = interval }
+
+    /// Runs `action` now and starts a new interval.
+    func now(_ action: @escaping @MainActor () -> Void) {
+        cancel()
+        last = .now
+        action()
+    }
+
+    func request(_ action: @escaping @MainActor () -> Void) {
+        guard pending == nil else { return }
+        guard let last, last + interval > .now else { return now(action) }
+        let due = last + interval
+        pending = Task { @MainActor [weak self] in
+            try? await Task.sleep(until: due, clock: .continuous)
+            guard !Task.isCancelled, let self else { return }
+            pending = nil
+            now(action)
+        }
+    }
+
+    func cancel() {
+        pending?.cancel()
+        pending = nil
+    }
+}

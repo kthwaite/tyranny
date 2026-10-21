@@ -28,6 +28,8 @@ final class PlayerModel {
     let savedPlaylists = PlaylistsModel()
     /// The Radio source's saved stations.
     let stations = StationsModel()
+    /// The Stats page's report, and the years the Wrapped menu offers.
+    let stats = StatsModel.forLaunch(arguments: CommandLine.arguments)
     /// Plays and adds runs from every list, grid and table, and asks "Clear Up Next?".
     let activation = ActivationModel()
     /// The music folders for Settings. One bounded page; the server limits a page to 500.
@@ -121,6 +123,7 @@ final class PlayerModel {
         upNext.attach(self)
         savedPlaylists.attach(self)
         stations.attach(self)
+        stats.attach(self)
         activation.attach(self)
         updateMediaControls()
     }
@@ -208,6 +211,7 @@ final class PlayerModel {
         upNext.sync()
         savedPlaylists.sync()
         stations.sync()
+        stats.sync()
     }
 
     private func updateArtwork(invalidate: Bool = false) {

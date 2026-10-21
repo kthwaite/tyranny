@@ -30,7 +30,7 @@ def main():
                         help="Run the app's headless model gate (NativeModelGate, no Accessibility driver) without claiming visual verification")
     parser.add_argument("--commands-only", action="store_true",
                         help="Exercise the command-language dispatcher against a real server (no UI input or visual verification)")
-    parser.add_argument("--scenario", choices=["core", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs"], default="core",
+    parser.add_argument("--scenario", choices=["core", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs", "stats"], default="core",
                         help="core: folder import, a double-click run, the seek slider, filter, rescan, disconnect and a relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
@@ -38,7 +38,8 @@ def main():
                              "artists: Artists with Compilations and Appears On, and Genres; "
                              "history: Recently Added, a played track in History and its Plays count; "
                              "upnext: Up Next sections and Added From labels, Clear, Save as Playlist and the drawer; "
-                             "runs: double-click runs under the Up Next policies, Don't ask again, and Select All then Add to Playlist")
+                             "runs: double-click runs under the Up Next policies, Don't ask again, and Select All then Add to Playlist; "
+                         "stats: the Stats page at ⌘8 on a server with no history")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -126,6 +127,10 @@ def main():
                 return
             if args.scenario == "runs":
                 runs(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "stats":
+                stats(report, run, app, port, ready, root, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             paused_at = None
@@ -510,6 +515,34 @@ def runs(report, run, app, port, ready, source, controller, screenshots):
     for image in sorted(output.glob("*.png")):
         shutil.copy2(image, screenshots / ("runs-" + image.name if not image.name.startswith("runs") else image.name))
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
+
+
+def stats(report, run, app, port, ready, root, controller, screenshots):
+    """Drive the Stats page on a server with a library and no history: ⌘8 opens it, the header
+    shows this week's label, ‹ and › step the period, and every panel shows its empty state."""
+    report["scenario"] = "stats"
+    controller.request("add_root", path=str(root))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 105, seconds=60)
+    output = run / "stats"
+    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+               "--stats-smoke-output", str(output),
+               "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+    report["app_command"] = command
+    with (run / "stats.stdout").open("w") as stdout, (run / "stats.stderr").open("w") as stderr:
+        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=120)
+    assert result.returncode == 0, f"native app exited {result.returncode}"
+    native = json.loads((output / "report.json").read_text())
+    report["stats"] = native
+    assert native["passed"], native.get("error")
+    # The server, not the app, holds the empty history the page showed.
+    years = controller.request("stats_years")
+    assert years["years"] == [], years
+    report["cases"].append({"name": "stats-server-has-no-history", "years": years["years"]})
+    screenshots.mkdir(parents=True, exist_ok=True)
+    for image in sorted(output.glob("stats*.png")):
+        shutil.copy2(image, screenshots / image.name)
+    report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("stats*.png"))]
 
 
 if __name__ == "__main__":

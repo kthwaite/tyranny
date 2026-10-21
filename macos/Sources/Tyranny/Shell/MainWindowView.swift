@@ -179,6 +179,8 @@ struct MainWindowView: View {
             UpNextView(model: model.upNext, player: model)
         } else if navigation.destination == .history {
             HistoryView(model: lists.history(player: model), player: model)
+        } else if navigation.destination == .stats {
+            StatsView(model: model.stats, player: model, navigation: navigation)
         } else if navigation.destination == .radio {
             RadioView(model: model.stations, player: model)
         } else if let list = currentList {

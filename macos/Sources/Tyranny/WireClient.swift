@@ -356,6 +356,7 @@ final class WireClient {
         case "create_playlist", "create_smart_playlist", "update_smart_playlist", "snapshot_smart_playlist", "rename_playlist", "delete_playlist", "playlist_add", "playlist_add_selection", "playlist_remove", "playlist_move": return "playlist_applied"
         case "enqueue_playlist": return "applied"
         case "stations": return "stations"
+        case "stats", "wrapped", "stats_years": return command
         case "add_stations", "update_station", "remove_station": return "stations_applied"
         case "add_root": return "root_added"
         case "rescan": return "scan_accepted"
@@ -497,7 +498,7 @@ struct ResultHeader: Decodable {
         case "queue_page", "root_added", "scan_accepted", "library_roots", "saved_playlists", "playlist_entries", "artwork", "lyrics",
              "directory_results", "directory_click_counted",
              "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "history",
-             "stations":
+             "stations", "stats", "wrapped", "stats_years":
             snapshot = nil
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown protocol v\(WireProtocol.version) result kind")

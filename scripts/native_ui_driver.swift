@@ -114,10 +114,15 @@ do {
             try check(AXUIElementPerformAction(control,
                 (action == "increment" ? kAXIncrementAction : kAXDecrementAction) as CFString), "Adjust slider")
         case "key":
-            guard arguments.count >= 5,
-                  let key: CGKeyCode = ["left": 123, "right": 124, "down": 125, "up": 126,
-                                        "return": 36, "escape": 53, "delete": 51][arguments[4]] else {
-                throw DriverFailure(message: "Arrow, return, escape or delete key required")
+            // "command-8" holds ⌘ with a digit: the Go menu's destination shortcuts.
+            let name = arguments.count >= 5 ? arguments[4] : ""
+            let command = name.hasPrefix("command-")
+            let keys: [String: CGKeyCode] = ["left": 123, "right": 124, "down": 125, "up": 126,
+                                             "return": 36, "escape": 53, "delete": 51]
+            let digits: [String: CGKeyCode] = ["1": 18, "2": 19, "3": 20, "4": 21, "5": 23,
+                                               "6": 22, "7": 26, "8": 28, "9": 25]
+            guard let key = command ? digits[String(name.dropFirst("command-".count))] : keys[name] else {
+                throw DriverFailure(message: "Arrow, return, escape, delete or command-digit key required")
             }
             try check(AXUIElementSetAttributeValue(control, kAXFocusedAttribute as CFString, kCFBooleanTrue), "Focus control")
             // AX focus changes are asynchronous to AppKit's key-window update.
@@ -125,6 +130,10 @@ do {
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: true),
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: false) else {
                 throw DriverFailure(message: "Cannot create keyboard events")
+            }
+            if command {
+                down.flags = .maskCommand
+                up.flags = .maskCommand
             }
             down.post(tap: .cghidEventTap)
             Thread.sleep(forTimeInterval: 0.05)
