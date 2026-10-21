@@ -74,17 +74,39 @@ pub(crate) struct Scanner {
     worker: Option<JoinHandle<()>>,
 }
 
+/// What the scanner enumerates before probing.
+enum Source {
+    Root(PathBuf),
+    Paths(Vec<PathBuf>),
+}
+
 impl Scanner {
     pub fn start(root: PathBuf) -> Result<Self> {
         ensure!(root.is_absolute(), "scan root must be an absolute path");
         ensure!(root.to_str().is_some(), "scan root must be UTF-8");
+        Self::spawn(Source::Root(root))
+    }
+
+    /// Enumerates exactly `paths` instead of walking a root. The enumeration is
+    /// never complete, so the coordinator never reconciles missing assets.
+    pub fn start_paths(paths: Vec<PathBuf>) -> Result<Self> {
+        ensure!(
+            paths
+                .iter()
+                .all(|path| path.is_absolute() && path.to_str().is_some()),
+            "scan paths must be absolute UTF-8 paths"
+        );
+        Self::spawn(Source::Paths(paths))
+    }
+
+    fn spawn(source: Source) -> Result<Self> {
         let (event_tx, events) = mpsc::sync_channel(EVENT_CAPACITY);
         let (probes, probe_rx) = mpsc::sync_channel(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let worker = thread::Builder::new()
             .name("library-scanner".into())
-            .spawn(move || run(root, event_tx, probe_rx, worker_cancelled))
+            .spawn(move || run(source, event_tx, probe_rx, worker_cancelled))
             .context("starting library scanner")?;
         Ok(Self {
             events,
@@ -133,12 +155,16 @@ impl Drop for Scanner {
 }
 
 fn run(
-    root: PathBuf,
+    source: Source,
     events: SyncSender<ScanEvent>,
     probes: Receiver<Vec<Candidate>>,
     cancelled: Arc<AtomicBool>,
 ) {
-    let Some(enumeration) = enumerate(&root, &events, &cancelled) else {
+    let enumeration = match source {
+        Source::Root(root) => enumerate(&root, &events, &cancelled),
+        Source::Paths(paths) => enumerate_paths(paths, &events, &cancelled),
+    };
+    let Some(enumeration) = enumeration else {
         return;
     };
     if !send_event(&events, ScanEvent::Enumerated(enumeration), &cancelled) {
@@ -288,23 +314,8 @@ fn enumerate(
         } else if !kind.is_file() || !is_candidate(&path) {
             result.skipped += 1;
         } else {
-            match fingerprint(&path) {
-                Ok((size, modified_ns, created_ns)) => {
-                    batch.push(Candidate {
-                        path,
-                        size,
-                        modified_ns,
-                        created_ns: Some(created_ns),
-                    });
-                    result.total += 1;
-                    if batch.len() == ENUMERATION_BATCH {
-                        if !send_event(events, ScanEvent::Candidates(batch), cancelled) {
-                            return None;
-                        }
-                        batch = Vec::with_capacity(ENUMERATION_BATCH);
-                    }
-                }
-                Err(error) => result.failure(format!("{error:#}")),
+            if !offer(path, &mut batch, &mut result, events, cancelled) {
+                return None;
             }
         }
     }
@@ -315,10 +326,70 @@ fn enumerate(
         Ok(_) => result.failure(format!("root is no longer a directory: {}", root.display())),
         Err(error) => result.failure(format!("checking scan root {}: {error}", root.display())),
     }
-    if !batch.is_empty() && !send_event(events, ScanEvent::Candidates(batch), cancelled) {
-        return None;
+    flush(batch, events, cancelled).then_some(result)
+}
+
+/// Each path that is a regular file with a candidate extension becomes a
+/// candidate. Every other path is an enumeration failure.
+fn enumerate_paths(
+    paths: Vec<PathBuf>,
+    events: &SyncSender<ScanEvent>,
+    cancelled: &AtomicBool,
+) -> Option<Enumeration> {
+    let mut result = Enumeration {
+        total: 0,
+        skipped: 0,
+        failures: 0,
+        complete: false,
+        last_error: None,
+    };
+    let mut batch = Vec::with_capacity(ENUMERATION_BATCH);
+    for path in paths {
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        if !is_candidate(&path) {
+            result.failure(format!("not an audio file: {}", path.display()));
+            continue;
+        }
+        if !offer(path, &mut batch, &mut result, events, cancelled) {
+            return None;
+        }
     }
-    Some(result)
+    flush(batch, events, cancelled).then_some(result)
+}
+
+/// Fingerprints one candidate into `batch` and sends each full batch. A
+/// fingerprint error is an enumeration failure. False when cancelled.
+fn offer(
+    path: PathBuf,
+    batch: &mut Vec<Candidate>,
+    result: &mut Enumeration,
+    events: &SyncSender<ScanEvent>,
+    cancelled: &AtomicBool,
+) -> bool {
+    match fingerprint(&path) {
+        Ok((size, modified_ns, created_ns)) => {
+            batch.push(Candidate {
+                path,
+                size,
+                modified_ns,
+                created_ns: Some(created_ns),
+            });
+            result.total += 1;
+            if batch.len() == ENUMERATION_BATCH {
+                let full = std::mem::replace(batch, Vec::with_capacity(ENUMERATION_BATCH));
+                return send_event(events, ScanEvent::Candidates(full), cancelled);
+            }
+        }
+        Err(error) => result.failure(format!("{error:#}")),
+    }
+    true
+}
+
+/// Sends the last, partial batch. False when cancelled.
+fn flush(batch: Vec<Candidate>, events: &SyncSender<ScanEvent>, cancelled: &AtomicBool) -> bool {
+    batch.is_empty() || send_event(events, ScanEvent::Candidates(batch), cancelled)
 }
 
 impl Enumeration {
@@ -444,6 +515,48 @@ mod tests {
             panic!("expected probes");
         };
         assert!(results[0].result.is_err());
+        scanner.shutdown().unwrap();
+    }
+
+    #[test]
+    fn named_paths_are_batched_and_others_fail_enumeration() {
+        let directory = TemporaryDirectory::new();
+        let mut paths: Vec<PathBuf> = (0..300)
+            .map(|index| directory.0.join(format!("{index}.flac")))
+            .collect();
+        for path in &paths {
+            fs::write(path, b"corrupt").unwrap();
+        }
+        fs::write(directory.0.join("cover.jpg"), b"ignored").unwrap();
+        paths.push(directory.0.join("cover.jpg"));
+        paths.push(directory.0.join("missing.flac"));
+        fs::create_dir(directory.0.join("folder.flac")).unwrap();
+        paths.push(directory.0.join("folder.flac"));
+        assert!(Scanner::start_paths(vec![PathBuf::from("relative.flac")]).is_err());
+        let scanner = Scanner::start_paths(paths).unwrap();
+        let mut count = 0;
+        loop {
+            match receive(&scanner) {
+                ScanEvent::Candidates(batch) => {
+                    assert!(batch.len() <= ENUMERATION_BATCH);
+                    assert!(batch.iter().all(|candidate| candidate.created_ns.is_some()));
+                    count += batch.len();
+                }
+                ScanEvent::Enumerated(result) => {
+                    assert!(!result.complete);
+                    assert_eq!((result.total, result.skipped, result.failures), (300, 0, 3));
+                    assert!(
+                        result
+                            .last_error
+                            .unwrap()
+                            .contains("no longer a regular file")
+                    );
+                    break;
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(count, 300);
         scanner.shutdown().unwrap();
     }
 

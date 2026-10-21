@@ -5,6 +5,7 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
+use crate::cancel::{CancelOnDrop, Cancellation, Stop};
 use crate::protocol::{ErrorCode, Lyrics, LyricsSource, LyricsStatus, Reply, Response};
 use anyhow::{Result, ensure};
 use provider::Provider;
@@ -35,35 +36,13 @@ pub(crate) struct Request {
     pub entry_id: u64,
     pub library_revision: u64,
 }
-#[derive(Clone)]
-struct Cancellation {
-    stop: Arc<AtomicBool>,
-    abandoned: Arc<AtomicBool>,
-}
 impl Cancellation {
-    #[cfg(test)]
-    fn new() -> Self {
-        Self {
-            stop: Arc::new(AtomicBool::new(false)),
-            abandoned: Arc::new(AtomicBool::new(false)),
-        }
-    }
-    fn cancelled(&self) -> bool {
-        self.stop.load(Ordering::Acquire) || self.abandoned.load(Ordering::Acquire)
-    }
     fn check(&self, deadline: Instant) -> Result<()> {
-        ensure!(!self.cancelled(), "lyrics request cancelled");
-        ensure!(
-            Instant::now() < deadline,
-            "lyrics discovery deadline exceeded"
-        );
-        Ok(())
-    }
-}
-struct CancelOnDrop(Arc<AtomicBool>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        match self.stopped(deadline) {
+            Some(Stop::Cancelled) => anyhow::bail!("lyrics request cancelled"),
+            Some(Stop::Expired) => anyhow::bail!("lyrics discovery deadline exceeded"),
+            None => Ok(()),
+        }
     }
 }
 struct Work {
@@ -174,10 +153,7 @@ impl Handle {
         let (reply, receive) = oneshot::channel();
         let abandoned = Arc::new(AtomicBool::new(false));
         let _cancel = CancelOnDrop(Arc::clone(&abandoned));
-        let cancel = Cancellation {
-            stop: Arc::clone(&self.stop),
-            abandoned,
-        };
+        let cancel = Cancellation::with_flags(Arc::clone(&self.stop), abandoned);
         if self
             .sender
             .try_send(Work {

@@ -319,6 +319,60 @@ pub(crate) struct Store {
     connection: Connection,
 }
 
+/// Legacy graphic EQ is accepted only at the storage boundary, never on the wire.
+fn decode_settings(json: &str) -> Result<Settings> {
+    let mut value: serde_json::Value = serde_json::from_str(json)?;
+    if value
+        .get("equalizer")
+        .and_then(|eq| eq.get("bands_db"))
+        .is_some()
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Graphic {
+            enabled: bool,
+            preamp_db: f64,
+            bands_db: [f64; 10],
+        }
+        let legacy: Graphic = serde_json::from_value(value["equalizer"].clone())?;
+        ensure!(
+            legacy.preamp_db.is_finite() && (-24.0..=12.0).contains(&legacy.preamp_db),
+            "invalid persisted graphic equalizer preamp"
+        );
+        ensure!(
+            legacy
+                .bands_db
+                .iter()
+                .all(|gain| gain.is_finite() && (-12.0..=12.0).contains(gain)),
+            "invalid persisted graphic equalizer gain"
+        );
+        value["equalizer"] =
+            serde_json::to_value(crate::equalizer::EqualizerSettings::from_graphic(
+                legacy.enabled,
+                legacy.preamp_db,
+                legacy.bands_db,
+            ))?;
+    }
+    let mut settings: Settings = serde_json::from_value(value)?;
+    settings.equalizer.validate()?;
+    ensure!(
+        settings.equalizer_presets.len() <= 64,
+        "too many persisted equalizer presets"
+    );
+    settings
+        .equalizer_presets
+        .sort_by(|a, b| a.name.cmp(&b.name));
+    for (index, preset) in settings.equalizer_presets.iter().enumerate() {
+        crate::protocol::validate_equalizer_preset_name(&preset.name)?;
+        preset.equalizer.validate()?;
+        ensure!(
+            index == 0 || settings.equalizer_presets[index - 1].name != preset.name,
+            "duplicate persisted equalizer preset"
+        );
+    }
+    Ok(settings)
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Ok(metadata) = fs::symlink_metadata(path) {
@@ -342,12 +396,7 @@ impl Store {
         let (revision, next_id, current_id, position_frames, playing, settings): (u64,u64,Option<u64>,u64,bool,String) = self.connection.query_row(
             "SELECT revision,next_id,current_id,position_frames,playing,settings FROM control WHERE singleton=1", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?;
-        let settings: Settings =
-            serde_json::from_str(&settings).context("reading persisted settings")?;
-        settings
-            .equalizer
-            .validate()
-            .context("reading persisted equalizer settings")?;
+        let settings = decode_settings(&settings).context("reading persisted settings")?;
         let mut query = self.connection.prepare(
             "SELECT id,path,ordinal,source_kind,run_id,played_seq,stream_title FROM queue ORDER BY ordinal",
         )?;
@@ -752,6 +801,68 @@ mod tests {
         protocol::{QueueSource, SourceKind},
     };
     #[test]
+    fn graphic_equalizer_migrates_only_at_storage_boundary() -> Result<()> {
+        let gains = [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 12.0];
+        let mut value = serde_json::to_value(Settings::default())?;
+        value.as_object_mut().unwrap().remove("equalizer_presets");
+        value["equalizer"] =
+            serde_json::json!({"enabled": true, "preamp_db": -6.0, "bands_db": gains});
+        assert!(serde_json::from_value::<Settings>(value.clone()).is_err());
+        let migrated = decode_settings(&value.to_string())?;
+        assert_eq!(
+            migrated.equalizer,
+            crate::equalizer::EqualizerSettings::from_graphic(true, -6.0, gains)
+        );
+        assert!(migrated.equalizer_presets.is_empty());
+        let encoded = serde_json::to_value(&migrated)?;
+        assert!(encoded["equalizer"].get("bands_db").is_none());
+        assert_eq!(encoded["equalizer"]["bands"].as_array().unwrap().len(), 10);
+        assert_eq!(decode_settings(&encoded.to_string())?, migrated);
+        value["equalizer"]["bands"] = serde_json::json!([]);
+        assert!(decode_settings(&value.to_string()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_parametric_settings_and_presets_are_not_silently_reset() -> Result<()> {
+        let mut settings = Settings {
+            equalizer: crate::equalizer::EqualizerSettings::from_graphic(true, -6.0, [3.0; 10]),
+            ..Settings::default()
+        };
+        let valid = serde_json::to_value(&settings)?;
+        for (field, bad) in [
+            ("frequency_hz", serde_json::json!(20001)),
+            ("gain_db", serde_json::json!(24.01)),
+            ("q", serde_json::json!(0.09)),
+            ("shelf_slope", serde_json::json!(1.01)),
+            ("slope_db", serde_json::json!(18)),
+            ("kind", serde_json::json!("graphic")),
+        ] {
+            let mut value = valid.clone();
+            value["equalizer"]["bands"][0][field] = bad;
+            assert!(
+                decode_settings(&value.to_string()).is_err(),
+                "accepted {field}"
+            );
+        }
+        let preset = crate::protocol::EqualizerUserPreset {
+            name: "Saved".into(),
+            equalizer: settings.equalizer.clone(),
+        };
+        settings.equalizer_presets = vec![preset.clone(), preset.clone()];
+        assert!(decode_settings(&serde_json::to_string(&settings)?).is_err());
+        settings.equalizer_presets = vec![preset; 65];
+        assert!(decode_settings(&serde_json::to_string(&settings)?).is_err());
+        settings.equalizer_presets.truncate(1);
+        settings.equalizer_presets[0].name = " invalid ".into();
+        assert!(decode_settings(&serde_json::to_string(&settings)?).is_err());
+        settings.equalizer_presets[0].name = "Valid".into();
+        settings.equalizer_presets[0].equalizer.preamp_db = -96.01;
+        assert!(decode_settings(&serde_json::to_string(&settings)?).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn equalizer_defaults_for_existing_database_and_round_trips() -> Result<()> {
         let path = temp_path();
         let result = (|| -> Result<()> {
@@ -769,11 +880,11 @@ mod tests {
             assert_eq!(loaded.settings.volume, 37);
             assert!(loaded.settings.resume_on_start);
             let mut settings = loaded.settings;
-            settings.equalizer = crate::equalizer::EqualizerSettings {
-                enabled: true,
-                preamp_db: -6.0,
-                bands_db: [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
-            };
+            settings.equalizer = crate::equalizer::EqualizerSettings::from_graphic(
+                true,
+                -6.0,
+                [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
+            );
             store.checkpoint(loaded.checkpoint, &settings)?;
             drop(store);
             let store = Store::open(&path)?;
@@ -790,7 +901,9 @@ mod tests {
         let path = temp_path();
         let result = (|| -> Result<()> {
             let store = Store::open(&path)?;
-            let valid = serde_json::to_value(Settings::default())?;
+            let mut valid = serde_json::to_value(Settings::default())?;
+            valid["equalizer"] =
+                serde_json::json!({"enabled": true, "preamp_db": 0.0, "bands_db": vec![0.0; 10]});
             let mut invalid = Vec::new();
             for preamp in [-24.01, 12.01] {
                 let mut settings = valid.clone();

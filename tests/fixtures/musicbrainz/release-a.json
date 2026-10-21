@@ -1,0 +1,129 @@
+{
+  "id": "11111111-1111-4111-8111-111111111111",
+  "title": "Fixture Album",
+  "status": "Official",
+  "date": "2001-05-14",
+  "country": "GB",
+  "artist-credit": [
+    {
+      "name": "Fixture Artist",
+      "joinphrase": "",
+      "artist": {
+        "id": "c1000000-0000-4000-8000-000000000002"
+      }
+    }
+  ],
+  "release-group": {
+    "id": "99999999-9999-4999-8999-999999999999",
+    "first-release-date": "1999-02-01"
+  },
+  "media": [
+    {
+      "position": 1,
+      "track-count": 3,
+      "tracks": [
+        {
+          "id": "a1000000-0000-4000-8000-000000000001",
+          "position": 1,
+          "title": "First",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000001",
+            "title": "First",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1000000-0000-4000-8000-000000000002",
+          "position": 2,
+          "title": "Second",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": " feat. ",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            },
+            {
+              "name": "Guest",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000004"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000002",
+            "title": "Second",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": " feat. ",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              },
+              {
+                "name": "Guest",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000004"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1000000-0000-4000-8000-000000000003",
+          "position": 3,
+          "title": "Third",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000003",
+            "title": "Third",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

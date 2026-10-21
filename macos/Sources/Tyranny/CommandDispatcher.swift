@@ -153,6 +153,8 @@ struct CommandDispatcher {
             try requireAlbums()
             guard grid.expansion != nil else { throw CommandLanguageError("No album is expanded.") }
             grid.collapse()
+        case .musicbrainz:
+            try lookUpOnMusicBrainz()
         case .browserGenre, .browserArtist, .browserAlbum:
             try await setBrowser(command)
         case .upNextPolicy:
@@ -441,6 +443,23 @@ struct CommandDispatcher {
         } else if navigation.destination == .upNext {
             try player.upNext.revealPlaying()
         } else { throw CommandLanguageError("Reveal Playing requires a track list or Up Next.") }
+    }
+
+    private func lookUpOnMusicBrainz() throws {
+        try requireConnection()
+        if let list = currentList {
+            guard let track = list.firstSelectedTrack else { throw CommandLanguageError("Select an album first.") }
+            player.tagging.begin(albumID: track.album_id, title: track.album)
+        } else if navigation.destination == .albums {
+            grid.sync()
+            if let expansion = grid.expansion, let position = expansion.selectedPositions.first {
+                let track = expansion.tracks[position].track
+                player.tagging.begin(albumID: track.album_id, title: track.album)
+            } else {
+                let album = try selectedAlbum()
+                player.tagging.begin(albumID: album.id, title: album.title)
+            }
+        } else { throw CommandLanguageError("Select an album first.") }
     }
 
     private func revealSelection(artist: Bool) async throws {

@@ -3,6 +3,7 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const BLOCK_FRAMES: usize = 1024;
 
 mod artwork;
+mod cancel;
 pub mod decoder;
 mod directory;
 pub mod equalizer;
@@ -23,3 +24,4 @@ mod stats;
 pub mod stats_types;
 mod store;
 mod stream;
+pub mod tagging;

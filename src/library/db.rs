@@ -267,15 +267,7 @@ pub(super) fn recover(connection: &mut Connection) -> Result<LibraryState> {
 }
 
 pub(super) fn begin_scan(transaction: &Transaction<'_>, root_id: u64) -> Result<(u64, ScanStatus)> {
-    transaction.execute(
-        "UPDATE library_state SET scan_serial=scan_serial+1 WHERE singleton=1",
-        [],
-    )?;
-    let serial = transaction.query_row(
-        "SELECT scan_serial FROM library_state WHERE singleton=1",
-        [],
-        |row| row.get(0),
-    )?;
+    let serial = begin_paths(transaction)?;
     let status = ScanStatus {
         root_id: Some(root_id),
         phase: ScanPhase::Discovering,
@@ -285,11 +277,26 @@ pub(super) fn begin_scan(transaction: &Transaction<'_>, root_id: u64) -> Result<
     Ok((serial, status))
 }
 
+/// Takes a fresh scan serial. A path-scoped scan calls only this: it saves no
+/// scan status.
+pub(super) fn begin_paths(transaction: &Transaction<'_>) -> Result<u64> {
+    transaction.execute(
+        "UPDATE library_state SET scan_serial=scan_serial+1 WHERE singleton=1",
+        [],
+    )?;
+    Ok(transaction.query_row(
+        "SELECT scan_serial FROM library_state WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn discover(
     connection: &mut Connection,
     serial: u64,
     status: &mut ScanStatus,
     candidates: &[Candidate],
+    persist_status: bool,
 ) -> Result<()> {
     ensure!(
         candidates.len() <= 128,
@@ -336,7 +343,9 @@ pub(super) fn discover(
     if restored > 0 {
         bump_revision(&transaction)?;
     }
-    save_status(&transaction, &next)?;
+    if persist_status {
+        save_status(&transaction, &next)?;
+    }
     transaction.commit()?;
     *status = next;
     Ok(())
@@ -348,6 +357,7 @@ pub(super) fn next_batch(
     connection: &mut Connection,
     serial: u64,
     status: &mut ScanStatus,
+    persist_status: bool,
 ) -> Result<Vec<Candidate>> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let entries = {
@@ -389,7 +399,7 @@ pub(super) fn next_batch(
             probes.push(candidate);
         }
     }
-    if next.processed != status.processed {
+    if persist_status && next.processed != status.processed {
         save_status(&transaction, &next)?;
     }
     transaction.commit()?;
@@ -567,6 +577,7 @@ pub(super) fn probed(
     serial: u64,
     status: &mut ScanStatus,
     results: Vec<ProbeResult>,
+    persist_status: bool,
 ) -> Result<()> {
     ensure!(results.len() <= BATCH, "scanner probe batch exceeded bound");
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -621,7 +632,9 @@ pub(super) fn probed(
     if changed {
         bump_revision(&transaction)?;
     }
-    save_status(&transaction, &next)?;
+    if persist_status {
+        save_status(&transaction, &next)?;
+    }
     transaction.commit()?;
     *status = next;
     Ok(())
@@ -678,6 +691,25 @@ pub(super) fn finish(
     save_status(&transaction, &next)?;
     transaction.commit()?;
     *status = next;
+    Ok(())
+}
+
+/// A path-scoped scan ends without saving status or moving `completed_scan`:
+/// it saw only the named files, so it can never reconcile missing assets.
+pub(super) fn finish_paths(
+    connection: &mut Connection,
+    serial: u64,
+    status: &ScanStatus,
+) -> Result<()> {
+    let pending: u64 = connection.query_row(
+        "SELECT COUNT(*) FROM library_worklist WHERE scan_id=?1",
+        [serial],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        pending == 0 && status.total == Some(status.processed),
+        "re-indexing did not complete"
+    );
     Ok(())
 }
 

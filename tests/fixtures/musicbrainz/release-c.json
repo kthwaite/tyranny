@@ -1,0 +1,150 @@
+{
+  "id": "33333333-3333-4333-8333-333333333333",
+  "title": "Fixture Double",
+  "status": "Official",
+  "date": "2010-01-01",
+  "country": "XW",
+  "artist-credit": [
+    {
+      "name": "Fixture Artist",
+      "joinphrase": "",
+      "artist": {
+        "id": "c1000000-0000-4000-8000-000000000002"
+      }
+    }
+  ],
+  "release-group": {
+    "id": "99999999-9999-4999-8999-999999999997",
+    "first-release-date": "2010-01-01"
+  },
+  "media": [
+    {
+      "position": 1,
+      "track-count": 2,
+      "tracks": [
+        {
+          "id": "a1000000-0000-4000-8000-000000000021",
+          "position": 1,
+          "title": "One",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000021",
+            "title": "One",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1000000-0000-4000-8000-000000000022",
+          "position": 2,
+          "title": "Two",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000022",
+            "title": "Two",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "position": 2,
+      "track-count": 2,
+      "tracks": [
+        {
+          "id": "a1000000-0000-4000-8000-000000000023",
+          "position": 1,
+          "title": "Three",
+          "length": null,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000023",
+            "title": "Three",
+            "length": null,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1000000-0000-4000-8000-000000000024",
+          "position": 2,
+          "title": "Four",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000024",
+            "title": "Four",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

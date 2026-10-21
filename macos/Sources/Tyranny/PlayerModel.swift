@@ -32,6 +32,8 @@ final class PlayerModel {
     let stats = StatsModel.forLaunch(arguments: CommandLine.arguments)
     /// Plays and adds runs from every list, grid and table, and asks "Clear Up Next?".
     let activation = ActivationModel()
+    /// The MusicBrainz tag lookup and its review sheet.
+    let tagging = TaggingModel()
     /// The music folders for Settings. One bounded page; the server limits a page to 500.
     private(set) var roots: Page<Root>?
     var message: String?
@@ -125,6 +127,7 @@ final class PlayerModel {
         stations.attach(self)
         stats.attach(self)
         activation.attach(self)
+        tagging.attach(self)
         updateMediaControls()
     }
 

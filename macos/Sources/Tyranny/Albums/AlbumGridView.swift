@@ -399,6 +399,10 @@ struct AlbumCollection: NSViewRepresentable {
                 cell.show(album, position: position, coverSize: CGFloat(geometry.coverSize), store: store,
                           retainArtwork: !dismantled, selectionColour: parent.colours.accent)
                 cell.onPress = { [weak self] in self?.clicked(position: position) }
+                let player = parent.player
+                cell.onLookUp = album.flatMap { album in
+                    player.connected ? { player.tagging.begin(albumID: album.id, title: album.title) } : nil
+                }
             case .expansion?:
                 guard let panel = item as? AlbumExpansionItem, let expansion = parent.grid.expansion else { return }
                 let caret = CGFloat(geometry.caretX(column: layout.expandedColumn ?? 0))

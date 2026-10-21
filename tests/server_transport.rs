@@ -280,11 +280,11 @@ async fn equalizer_is_durable_coherent_and_authoritative_after_reconnect() {
     assert_eq!(initial.settings.equalizer, EqualizerSettings::default());
     let mut first_sequence = initial.sequence;
     let mut second_sequence = hello(&mut second, &running.instance_id).await.sequence;
-    let mut equalizer = EqualizerSettings {
-        enabled: true,
-        preamp_db: -6.0,
-        bands_db: [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
-    };
+    let mut equalizer = EqualizerSettings::from_graphic(
+        true,
+        -6.0,
+        [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
+    );
     for (id, enabled) in [(1, true), (2, false)] {
         equalizer.enabled = enabled;
         first
@@ -327,7 +327,7 @@ async fn equalizer_is_durable_coherent_and_authoritative_after_reconnect() {
         }
     }
     let mut invalid = equalizer.clone();
-    invalid.bands_db[3] = 12.01;
+    invalid.bands[3].gain_db = 24.01;
     first
         .send(Frame::Text(
             serde_json::json!({
@@ -369,6 +369,53 @@ async fn equalizer_is_durable_coherent_and_authoritative_after_reconnect() {
             .settings,
         unchanged.settings
     );
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equalizer_preset_wire_lifecycle_survives_restart() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut socket = running.connect().await;
+    let initial = hello(&mut socket, &running.instance_id).await;
+    let mut sequence = initial.sequence;
+    let curve = tyranny::equalizer::EqualizerSettings::from_graphic(true, -6.0, [3.0; 10]);
+    for (id, command) in [
+        (
+            1,
+            serde_json::json!({"command":"save_equalizer_preset","name":"First","equalizer":curve}),
+        ),
+        (
+            2,
+            serde_json::json!({"command":"rename_equalizer_preset","name":"First","new_name":"Saved"}),
+        ),
+        (
+            3,
+            serde_json::json!({"command":"save_equalizer_preset","name":"Temporary","equalizer":curve}),
+        ),
+        (
+            4,
+            serde_json::json!({"command":"remove_equalizer_preset","name":"Temporary"}),
+        ),
+    ] {
+        let mut request = command;
+        request["id"] = serde_json::json!(id);
+        socket
+            .send(Frame::Text(request.to_string().into()))
+            .await
+            .unwrap();
+        let state = reply(&mut socket, id, &mut sequence).await;
+        assert_eq!(state.settings.equalizer, initial.settings.equalizer);
+        assert_eq!(state.queue_revision, initial.queue_revision);
+    }
+    running.stop().await;
+    let restarted = Running::start(&scratch).await;
+    let mut socket = restarted.connect().await;
+    let state = hello(&mut socket, &restarted.instance_id).await;
+    assert_eq!(state.settings.equalizer, initial.settings.equalizer);
+    assert_eq!(state.settings.equalizer_presets.len(), 1);
+    assert_eq!(state.settings.equalizer_presets[0].name, "Saved");
+    assert_eq!(state.settings.equalizer_presets[0].equalizer, curve);
     restarted.stop().await;
 }
 
@@ -1016,6 +1063,80 @@ async fn artwork_keeps_pipelined_commands_ordered_and_queue_state_unchanged() {
     }
     socket.close(None).await.unwrap();
     control.socket.close(None).await.unwrap();
+    running.stop().await;
+}
+
+/// The next reply's JSON, skipping state messages.
+async fn raw_reply(socket: &mut Socket, id: u64) -> serde_json::Value {
+    timeout(DEADLINE, async {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Frame::Text(text) => {
+                    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if value["type"] == "state" {
+                        continue;
+                    }
+                    assert_eq!(value["type"], "reply", "{value}");
+                    assert_eq!(value["id"], id, "{value}");
+                    return value;
+                }
+                Frame::Ping(_) => socket.flush().await.unwrap(),
+                frame => panic!("unexpected WebSocket frame: {frame:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tag_commands_answer_without_network() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut socket = running.connect().await;
+    let snapshot = hello(&mut socket, &running.instance_id).await;
+    let revision = snapshot.library.revision;
+    let refused = |code: &str, message: &str| {
+        serde_json::json!({"type":"reply","id":0,"status":"error","code":code,
+            "message":message,"queue_revision":snapshot.queue_revision})
+    };
+    let cases = [
+        (
+            serde_json::json!({"command":"tag_edits"}),
+            serde_json::json!({"type":"reply","id":0,"status":"ok",
+                "result":{"kind":"tag_edits","edits":[]}}),
+        ),
+        (
+            serde_json::json!({"command":"musicbrainz_lookup","album_id":1,"library_revision":0}),
+            refused(
+                "stale_library_revision",
+                &format!("library revision is {revision}"),
+            ),
+        ),
+        (
+            serde_json::json!({"command":"musicbrainz_lookup","album_id":999,
+                "library_revision":revision}),
+            refused("invalid_command", "unknown album"),
+        ),
+        (
+            serde_json::json!({"command":"apply_tags","proposal_id":"x","track_ids":[1]}),
+            refused("invalid_command", "lookup expired, look the album up again"),
+        ),
+        (
+            serde_json::json!({"command":"revert_tag_edit","edit_id":99}),
+            refused("invalid_command", "unknown tag edit"),
+        ),
+    ];
+    for (id, (mut command, mut expected)) in (1..).zip(cases) {
+        command["id"] = id.into();
+        expected["id"] = id.into();
+        socket
+            .send(Frame::Text(command.to_string().into()))
+            .await
+            .unwrap();
+        assert_eq!(raw_reply(&mut socket, id).await, expected, "{command}");
+    }
+    socket.close(None).await.unwrap();
     running.stop().await;
 }
 

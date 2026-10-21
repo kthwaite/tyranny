@@ -101,8 +101,10 @@ struct MusicFoldersPane: View {
     @Environment(\.themeColours) private var colours
     let model: PlayerModel
     var done: (() -> Void)?
+    @AppStorage(TaggingModel.acoustIDKeyDefault) private var acoustIDKey = ""
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 12) {
             Text("Music Folders").font(.title2)
             Text("Folders must be readable by the server. Rescan to import changes or retry failed and interrupted scans.")
@@ -125,6 +127,7 @@ struct MusicFoldersPane: View {
                         .accessibilityIdentifier("rescan-root-\(root.id)")
                 }.padding(.vertical, 4)
             }
+            .frame(height: 150)
             .accessibilityIdentifier("roots-list")
             .overlay {
                 if model.roots?.entries.isEmpty ?? true {
@@ -141,8 +144,41 @@ struct MusicFoldersPane: View {
                     Button("Done", action: done).keyboardShortcut(.cancelAction)
                 }
             }
+            Divider()
+            tagging
         }
-        .padding(20).frame(width: 600, height: 430)
+        .padding(20)
+        }
+        .frame(width: 600, height: 640)
+        .task { await model.tagging.refreshEdits() }
+    }
+
+    @ViewBuilder private var tagging: some View {
+        Text("MusicBrainz Tags").font(.title2)
+        TextField("AcoustID API key", text: $acoustIDKey)
+            .accessibilityIdentifier("settings-acoustid-key")
+        Text("Get a key at acoustid.org/new-application")
+            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        if !acoustIDKey.isEmpty, AcoustIDKey.normalized(acoustIDKey) == nil {
+            Text("Use the letters and digits of your AcoustID application key.")
+                .font(.caption).foregroundStyle(.orange)
+        }
+        Text("Recent Tag Edits").font(.headline).padding(.top, 8)
+        if let error = model.tagging.editsError {
+            Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+        }
+        if model.tagging.edits.isEmpty {
+            Text("No tag edits yet").foregroundStyle(.secondary)
+        }
+        ForEach(model.tagging.edits.prefix(50)) { edit in
+            HStack {
+                Text(edit.rowText(timeZone: .current)).textSelection(.enabled)
+                Spacer()
+                Button("Revert") { Task { await model.tagging.revert(edit.edit_id) } }
+                    .disabled(edit.reverted || !model.connected)
+                    .accessibilityIdentifier("tag-edit-revert-\(edit.edit_id)")
+            }
+        }
     }
 }
 

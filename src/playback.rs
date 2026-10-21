@@ -1862,11 +1862,11 @@ mod batch_tests {
     }
 
     fn equalizer_curve() -> EqualizerSettings {
-        EqualizerSettings {
-            enabled: true,
-            preamp_db: -6.0,
-            bands_db: [12.0, 6.0, 0.0, -2.0, 0.0, 3.0, 0.0, 0.0, 0.0, -4.0],
-        }
+        EqualizerSettings::from_graphic(
+            true,
+            -6.0,
+            [12.0, 6.0, 0.0, -2.0, 0.0, 3.0, 0.0, 0.0, 0.0, -4.0],
+        )
     }
 
     #[test]
@@ -1905,11 +1905,7 @@ mod batch_tests {
             assert_eq!(&player.block[..], &pending[..]);
             assert_eq!(player.decoded_position, submitted);
         }
-        let changed = EqualizerSettings {
-            preamp_db: -12.0,
-            bands_db: [-6.0; 10],
-            ..original.clone()
-        };
+        let changed = EqualizerSettings::from_graphic(true, -12.0, [-6.0; 10]);
         player.set_equalizer(&changed);
         for _ in 0..5 {
             player.pump()?;
@@ -1938,7 +1934,10 @@ mod batch_tests {
         let scratch =
             Scratch(std::env::temp_dir().join(format!("tyranny-eq-{}", uuid::Uuid::new_v4())));
         fs::create_dir(&scratch.0)?;
-        let first = source(&scratch.0, "first.wav", 137, 1000);
+        // Cross the boundary after the live transition, so resetting filter
+        // history at the next track would change the captured PCM.
+        let first_frames = crate::equalizer::MAX_SETTLE_FRAMES + 137;
+        let first = source(&scratch.0, "first.wav", first_frames as u32, 1000);
         let second = source(&scratch.0, "second.wav", 311, -2000);
         let capture = scratch.0.join("capture.f32");
         let mut player = Player::new(
@@ -1956,7 +1955,7 @@ mod batch_tests {
         assert!(player.error().is_none(), "{:?}", player.error());
         assert_eq!(player.started_entries(), &[1, 2]);
         drop(player);
-        let mut expected = vec![[1000.0 / 32768.0; 2]; 137];
+        let mut expected = vec![[1000.0 / 32768.0; 2]; first_frames];
         expected.extend_from_slice(&[[-2000.0 / 32768.0; 2]; 311]);
         let mut equalizer = Equalizer::default();
         equalizer.set_settings(&settings);

@@ -23,6 +23,9 @@ use crate::{
         PlayRecord, PlaylistChange, PlaylistEdit, PlaylistFailure, StaleStationsRevision,
         StationEdit, Store, UpcomingEdit, played_overflow,
     },
+    tagging::{
+        self, ApplyRequest, Handle as TaggingHandle, LookupRequest, TagRequest, TaggingWorkers,
+    },
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
@@ -51,6 +54,10 @@ const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 /// a crash loses.
 const HISTORY_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 const EVENT_INTERVAL: Duration = Duration::from_millis(250);
+/// How long shutdown waits for tag writes to hand their re-index to the library.
+/// With the library's drain limit and one file write it stays under launchd's
+/// 15 s `ExitTimeOut`.
+const TAGGING_SETTLE_LIMIT: Duration = Duration::from_secs(3);
 
 pub struct OwnerConfig {
     pub database_path: PathBuf,
@@ -61,6 +68,7 @@ pub struct Owner {
     artwork: ArtworkWorkers,
     lyrics: LyricsWorkers,
     stats: StatsWorkers,
+    tagging: TaggingWorkers,
     directory: DirectoryWorkers,
     thread: thread::JoinHandle<Result<()>>,
 }
@@ -71,6 +79,7 @@ pub struct Controller {
     artwork: ArtworkHandle,
     lyrics: LyricsHandle,
     stats: StatsHandle,
+    tagging: TaggingHandle,
     directory: DirectoryHandle,
     resolver: Arc<Resolver>,
     /// The queue revision the owner last published, for replies that must not wait for it.
@@ -125,7 +134,8 @@ impl Owner {
                 let resolver = Arc::new(Resolver::new(database.clone(), capture));
                 let artwork = ArtworkWorkers::start(database.clone());
                 let lyrics = LyricsWorkers::start(database.clone());
-                let stats = StatsWorkers::start(database);
+                let stats = StatsWorkers::start(database.clone());
+                let tagging = TaggingWorkers::start(database, library.clone());
                 let directory = DirectoryWorkers::start();
                 Ok(Self {
                     controller: Controller {
@@ -134,6 +144,7 @@ impl Owner {
                         artwork: artwork.handle(),
                         lyrics: lyrics.handle(),
                         stats: stats.handle(),
+                        tagging: tagging.handle(),
                         directory: directory.handle(),
                         resolver,
                         queue_revision,
@@ -141,6 +152,7 @@ impl Owner {
                     artwork,
                     lyrics,
                     stats,
+                    tagging,
                     directory,
                     thread,
                 })
@@ -165,7 +177,18 @@ impl Owner {
         self.artwork.stop();
         self.lyrics.stop();
         self.stats.stop();
+        self.tagging.stop();
         self.directory.stop();
+        // A tag write in flight finishes its current file and replies. Its
+        // re-index must reach the library before the library shuts down.
+        let tagging = self.tagging;
+        if tokio::task::spawn_blocking(move || tagging.shutdown())
+            .await
+            .is_err()
+        {
+            eprintln!("tyranny: joining the tagging worker failed during shutdown");
+        }
+        self.controller.tagging.settle(TAGGING_SETTLE_LIMIT).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = self.controller.sender.send(Work::Shutdown(reply_tx)).await;
         let result = if sent.is_ok() {
@@ -227,6 +250,40 @@ impl Controller {
                     *queue_revision = self.queue_revision.load(Ordering::Acquire);
                 }
                 return Ok(Message::Reply { id, reply });
+            }
+            Command::MusicbrainzLookup {
+                album_id,
+                library_revision,
+                release_id,
+                fingerprint,
+                acoustid_key,
+            } => {
+                let request = TagRequest::Lookup(LookupRequest {
+                    album_id,
+                    library_revision,
+                    release_id,
+                    fingerprint,
+                    acoustid_key,
+                });
+                return self.tagging_request(id, request).await;
+            }
+            Command::ApplyTags {
+                proposal_id,
+                track_ids,
+                omit_fields,
+            } => {
+                let request = TagRequest::Apply(ApplyRequest {
+                    proposal_id,
+                    track_ids,
+                    omit_fields,
+                });
+                return self.tagging_request(id, request).await;
+            }
+            Command::TagEdits => return self.tagging_request(id, TagRequest::Edits).await,
+            Command::RevertTagEdit { edit_id } => {
+                return self
+                    .tagging_request(id, TagRequest::Revert { edit_id })
+                    .await;
             }
             command @ (Command::SearchDirectory { .. } | Command::CountDirectoryClick { .. }) => {
                 let mut reply = match command {
@@ -384,22 +441,6 @@ impl Controller {
                 result: reply.into(),
             },
             Err(error) => {
-                let snapshot = self
-                    .playback_request(Request {
-                        id,
-                        command: Command::Snapshot,
-                    })
-                    .await?;
-                let Message::Reply {
-                    reply:
-                        Reply::Ok {
-                            result: Response::Snapshot { snapshot },
-                        },
-                    ..
-                } = snapshot
-                else {
-                    return Err(anyhow!("owner did not return its control snapshot"));
-                };
                 let code = match error.kind {
                     LibraryErrorKind::Invalid | LibraryErrorKind::Busy => ErrorCode::InvalidCommand,
                     LibraryErrorKind::InvalidFilter => ErrorCode::InvalidFilter,
@@ -410,13 +451,26 @@ impl Controller {
                 Reply::Error {
                     code,
                     message: error.message,
-                    queue_revision: snapshot.queue_revision,
+                    queue_revision: self.queue_revision(id).await?,
                 }
             }
         };
         Ok(Message::Reply { id, reply })
     }
 
+    /// A failure the tagging workers refused before the engine ran carries
+    /// `queue_revision` 0; it then takes the owner's current revision.
+    async fn tagging_request(&self, id: u64, request: TagRequest) -> Result<Message> {
+        let mut reply = tagging::reply(self.tagging.request(request).await);
+        if let Reply::Error { queue_revision, .. } = &mut reply
+            && *queue_revision == 0
+        {
+            *queue_revision = self.queue_revision(id).await?;
+        }
+        Ok(Message::Reply { id, reply })
+    }
+
+    /// The owner's current queue revision, for error replies.
     async fn queue_revision(&self, id: u64) -> Result<u64> {
         match self
             .playback_request(Request {
@@ -1822,6 +1876,10 @@ impl Actor {
             | Command::Stats { .. }
             | Command::Wrapped { .. }
             | Command::StatsYears
+            | Command::MusicbrainzLookup { .. }
+            | Command::ApplyTags { .. }
+            | Command::TagEdits
+            | Command::RevertTagEdit { .. }
             | Command::SearchDirectory { .. }
             | Command::CountDirectoryClick { .. }
             | Command::AddRoot { .. }
@@ -1837,7 +1895,7 @@ impl Actor {
             | Command::AlbumSummaries { .. }
             | Command::ListGroups { .. } => {
                 unreachable!(
-                    "library, artwork, lyrics, stats and directory commands are routed to their own workers"
+                    "library, artwork, lyrics, stats, directory and tagging commands are routed to their own workers"
                 )
             }
             Command::Remove {
@@ -2100,6 +2158,79 @@ impl Actor {
                 self.settings = settings;
                 self.published(None)
             }
+            Command::SaveEqualizerPreset { name, equalizer } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .and_then(|()| equalizer.validate())
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                if let Some(preset) = settings
+                    .equalizer_presets
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                {
+                    preset.equalizer = equalizer;
+                } else {
+                    if settings.equalizer_presets.len() >= 64 {
+                        return Err(Failure::invalid("at most 64 equalizer presets are allowed"));
+                    }
+                    settings
+                        .equalizer_presets
+                        .push(crate::protocol::EqualizerUserPreset { name, equalizer });
+                }
+                settings
+                    .equalizer_presets
+                    .sort_by(|a, b| a.name.cmp(&b.name));
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
+            Command::RenameEqualizerPreset { name, new_name } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .and_then(|()| crate::protocol::validate_equalizer_preset_name(&new_name))
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                if settings
+                    .equalizer_presets
+                    .iter()
+                    .any(|p| p.name == new_name)
+                {
+                    return Err(Failure::invalid(
+                        "destination equalizer preset already exists",
+                    ));
+                }
+                let preset = settings
+                    .equalizer_presets
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                    .ok_or_else(|| Failure::invalid("equalizer preset does not exist"))?;
+                preset.name = new_name;
+                settings
+                    .equalizer_presets
+                    .sort_by(|a, b| a.name.cmp(&b.name));
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
+            Command::RemoveEqualizerPreset { name } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                let index = settings
+                    .equalizer_presets
+                    .iter()
+                    .position(|p| p.name == name)
+                    .ok_or_else(|| Failure::invalid("equalizer preset does not exist"))?;
+                settings.equalizer_presets.remove(index);
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
             Command::SetGain { mode } => {
                 let checkpoint = self.checkpoint();
                 let prepared = checkpoint
@@ -2219,8 +2350,9 @@ impl Actor {
         self.collect_plays();
         self.checkpoint_play();
         self.write_plays();
-        let library = self.library.shutdown();
+        // Saved first: the library may take its whole drain limit.
         let saved = self.store.checkpoint(checkpoint, &self.settings);
+        let library = self.library.shutdown();
         library.and(saved)
     }
 

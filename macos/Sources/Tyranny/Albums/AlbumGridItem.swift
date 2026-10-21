@@ -59,6 +59,12 @@ final class AlbumGridItem: NSCollectionViewItem {
         set { cell.onPress = newValue }
     }
 
+    /// Runs on "Look Up on MusicBrainz…" in the cell's menu. Nil disables the item.
+    var onLookUp: (() -> Void)? {
+        get { cell.onLookUp }
+        set { cell.onLookUp = newValue }
+    }
+
     func releaseArtwork() {
         showing &+= 1
         if let retained { store?.release(retained) }
@@ -80,6 +86,7 @@ final class AlbumGridCellView: NSView {
     private var coverSize: CGFloat = 140
     private var image: CGImage?
     private var hasAlbum = false
+    var onLookUp: (() -> Void)?
     /// The selected cover's border. Set by `show`.
     var selectionColour = NSColor.clear { didSet { if selectionColour != oldValue { needsDisplay = true } } }
     var selected = false { didSet { if selected != oldValue { needsDisplay = true } } }
@@ -122,6 +129,18 @@ final class AlbumGridCellView: NSView {
         showArtwork(artwork)
         needsLayout = true
     }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard hasAlbum else { return nil }
+        let menu = NSMenu(title: "Album")
+        let item = NSMenuItem(title: "Look Up on MusicBrainz…", action: onLookUp == nil ? nil : #selector(lookUp), keyEquivalent: "")
+        item.target = self
+        item.setAccessibilityIdentifier("album-menu-musicbrainz")
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func lookUp() { onLookUp?() }
 
     func showArtwork(_ artwork: ArtworkImage) {
         image = artwork.image
