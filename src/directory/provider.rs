@@ -1,6 +1,6 @@
 use super::{Cancellation, mirrors};
 use crate::protocol::{DirectoryStation, StreamSpec};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, Response},
@@ -39,6 +39,9 @@ struct Mirrors {
     // Test origins stand in for DNS: never re-resolved, never forgotten.
     #[cfg(test)]
     pinned: bool,
+    // Counts the forgets a pinned list ignored.
+    #[cfg(test)]
+    forgets: usize,
 }
 
 pub(crate) struct Provider {
@@ -54,6 +57,8 @@ impl Provider {
                 resolved_at: Instant::now(),
                 #[cfg(test)]
                 pinned: false,
+                #[cfg(test)]
+                forgets: 0,
             }),
         })
     }
@@ -87,6 +92,7 @@ impl Provider {
                 origins,
                 resolved_at: Instant::now(),
                 pinned: true,
+                forgets: 0,
             }),
         })
     }
@@ -96,12 +102,7 @@ impl Provider {
         query: &str,
         cancel: &Cancellation,
     ) -> Result<Vec<DirectoryStation>> {
-        let deadline = Instant::now() + SEARCH_DEADLINE;
-        let result = self.search_mirrors(query, cancel, deadline);
-        if result.is_err() {
-            self.forget_mirrors();
-        }
-        result
+        self.search_mirrors(query, cancel, Instant::now() + SEARCH_DEADLINE)
     }
     fn search_mirrors(
         &self,
@@ -122,29 +123,32 @@ impl Provider {
                 }
             }
         }
-        let error = last.context("no radio-browser.info mirrors available")?;
-        Err(error.context("radio-browser.info is unavailable"))
+        // Every tried host failed on its own, so the cached list may be stale.
+        // Cancellation and the deadline returned above and keep it.
+        self.forget_mirrors();
+        Err(last.unwrap_or_else(|| anyhow!("radio-browser.info has no mirrors available")))
     }
 
     /// Best-effort: the API counts one click per IP, station and day.
-    pub(crate) fn count_click(&self, uuid: &str) {
+    /// Stops before sending if `cancel` is set, so shutdown waits for no new request.
+    pub(crate) fn count_click(&self, uuid: &str, cancel: &Cancellation) {
         if !is_safe_uuid(uuid) {
             return;
         }
-        let _ = self.count_click_inner(uuid);
+        let _ = self.count_click_inner(uuid, cancel);
     }
-    fn count_click_inner(&self, uuid: &str) -> Result<()> {
+    fn count_click_inner(&self, uuid: &str, cancel: &Cancellation) -> Result<()> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
-        let cancel = Cancellation::new(Default::default(), Default::default());
         let origin = self
-            .origins(&cancel, deadline)?
+            .origins(cancel, deadline)?
             .into_iter()
             .next()
             .context("no mirrors")?;
         let url = origin.join(&format!("json/url/{uuid}"))?;
+        cancel.check(deadline)?;
         let response = self.client.get(url).send()?;
         ensure!(response.status() == StatusCode::OK, "click not counted");
-        read_bounded(response, MAX_CLICK_BYTES, &cancel, deadline)?;
+        read_bounded(response, MAX_CLICK_BYTES, cancel, deadline)?;
         Ok(())
     }
 
@@ -175,12 +179,17 @@ impl Provider {
                     .min(REQUEST_TIMEOUT),
             )
             .send()
-            .context("mirror could not be reached")?;
+            .map_err(|error| failure(&origin, "request", &error, UNREACHABLE))?;
         cancel.check(deadline)?;
         match response.status() {
             StatusCode::OK => {}
-            status if status.is_redirection() => bail!("mirror redirect rejected"),
-            status => bail!("mirror answered {status}"),
+            status if status.is_redirection() => {
+                bail!("radio-browser.info sent a redirect. Try again.")
+            }
+            status => {
+                eprintln!("tyranny: {origin} answered {status}");
+                bail!("radio-browser.info answered with an error. Try again.")
+            }
         }
         let bytes = read_bounded(response, MAX_SEARCH_BYTES, cancel, deadline)?;
         parse(&bytes)
@@ -210,6 +219,10 @@ impl Provider {
         let mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
         Ok(mirrors.origins.iter().take(MAX_HOSTS).cloned().collect())
     }
+    #[cfg(test)]
+    pub(super) fn forgets(&self) -> usize {
+        self.mirrors.lock().unwrap().forgets
+    }
     fn demote(&self, failed: &Url) {
         let mut mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(index) = mirrors.origins.iter().position(|o| o == failed) {
@@ -221,10 +234,20 @@ impl Provider {
         let mut mirrors = self.mirrors.lock().unwrap_or_else(|p| p.into_inner());
         #[cfg(test)]
         if mirrors.pinned {
+            mirrors.forgets += 1;
             return;
         }
         mirrors.origins.clear();
     }
+}
+
+const UNREACHABLE: &str = "radio-browser.info could not be reached. Try again.";
+
+/// reqwest's Display includes the full request URL, which has no place in a message the user
+/// sees. The detail goes to stderr, like the owner's other background failures.
+fn failure(origin: &Url, what: &str, error: &dyn std::fmt::Display, shown: &str) -> anyhow::Error {
+    eprintln!("tyranny: directory {what} to {origin} failed: {error}");
+    anyhow!("{shown}")
 }
 
 fn is_safe_uuid(uuid: &str) -> bool {
@@ -256,17 +279,23 @@ fn read_bounded(
 ) -> Result<Vec<u8>> {
     ensure!(
         response.content_length().is_none_or(|n| n <= limit as u64),
-        "response exceeds size limit"
+        "radio-browser.info sent too large a reply."
     );
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
         cancel.check(deadline)?;
-        let count = response.read(&mut chunk).context("reading reply")?;
+        let count = response.read(&mut chunk).map_err(|error| {
+            eprintln!("tyranny: reading a directory reply failed: {error}");
+            anyhow!(UNREACHABLE)
+        })?;
         if count == 0 {
             return Ok(bytes);
         }
-        ensure!(count <= limit - bytes.len(), "response exceeds size limit");
+        ensure!(
+            count <= limit - bytes.len(),
+            "radio-browser.info sent too large a reply."
+        );
         bytes.extend_from_slice(&chunk[..count]);
     }
 }
@@ -286,8 +315,10 @@ struct RawStation {
 }
 
 fn parse(bytes: &[u8]) -> Result<Vec<DirectoryStation>> {
-    let records: Vec<serde_json::Value> =
-        serde_json::from_slice(bytes).context("radio-browser.info sent an invalid reply")?;
+    let records: Vec<serde_json::Value> = serde_json::from_slice(bytes).map_err(|error| {
+        eprintln!("tyranny: directory reply is not a JSON list: {error}");
+        anyhow!("radio-browser.info sent an invalid reply.")
+    })?;
     let mut seen = HashSet::new();
     let mut stations = Vec::new();
     for record in records {

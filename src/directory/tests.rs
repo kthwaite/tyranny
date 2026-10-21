@@ -1,5 +1,5 @@
 use super::{
-    Cancellation, DirectoryWorkers, Handle, Provider, Work, mirrors, normalize_uuid,
+    Cancellation, DirectoryWorkers, Handle, Provider, Search, mirrors, normalize_uuid,
     provider::USER_AGENT, validate_query,
 };
 use crate::protocol::{DirectoryStation, ErrorCode, Reply, Response};
@@ -231,9 +231,10 @@ fn cancelled_search_stops_before_any_request() {
 #[test]
 fn count_click_requests_url_path() {
     let (origin, server) = serve(json("{\"ok\":true}"));
-    Provider::for_test(vec![origin])
-        .unwrap()
-        .count_click("11111111-1111-1111-1111-111111111111");
+    Provider::for_test(vec![origin]).unwrap().count_click(
+        "11111111-1111-1111-1111-111111111111",
+        &Cancellation::idle(),
+    );
     assert!(
         server
             .join()
@@ -248,8 +249,8 @@ fn count_click_ignores_unsafe_ids() {
     listener.set_nonblocking(true).unwrap();
     let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
     let provider = Provider::for_test(vec![origin]).unwrap();
-    provider.count_click("../stations");
-    provider.count_click("");
+    provider.count_click("../stations", &Cancellation::idle());
+    provider.count_click("", &Cancellation::idle());
     let error = listener.accept().unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
 }
@@ -325,28 +326,155 @@ fn click_uuid_is_queued_in_hyphenated_form() {
     ] {
         assert_eq!(normalize_uuid(form).as_deref(), Some(plain), "{form}");
     }
-    let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+    let (searches, _searches) = std::sync::mpsc::sync_channel(4);
+    let (clicks, receiver) = std::sync::mpsc::sync_channel(4);
     let handle = Handle {
-        sender,
+        searches,
+        clicks,
         stop: Default::default(),
     };
     handle.count_click("{9617a958-0601-11e8-ae97-52543be04c81}");
-    assert!(matches!(receiver.try_recv(), Ok(Work::Click { uuid }) if uuid == plain));
+    assert_eq!(receiver.try_recv().as_deref(), Ok(plain));
 }
 #[tokio::test]
 async fn dropped_search_marks_its_work_abandoned() {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+    let (searches, receiver) = std::sync::mpsc::sync_channel(4);
+    let (clicks, _clicks) = std::sync::mpsc::sync_channel(4);
     let handle = Handle {
-        sender,
+        searches,
+        clicks,
         stop: Default::default(),
     };
     let mut search = Box::pin(handle.search("jazz"));
     assert!(futures_util::poll!(search.as_mut()).is_pending());
-    let Ok(Work::Search { cancel, reply, .. }) = receiver.try_recv() else {
+    let Ok(Search { cancel, reply, .. }) = receiver.try_recv() else {
         panic!("search was not queued");
     };
     assert!(!cancel.cancelled());
     drop(search);
     assert!(cancel.cancelled());
     assert!(reply.is_closed());
+}
+
+#[test]
+fn clicks_queue_apart_from_searches() {
+    let (searches, search_receiver) = std::sync::mpsc::sync_channel(4);
+    let (clicks, click_receiver) = std::sync::mpsc::sync_channel(4);
+    let handle = Handle {
+        searches,
+        clicks,
+        stop: Default::default(),
+    };
+    let uuid = "9617a958-0601-11e8-ae97-52543be04c81";
+    // More clicks than the click queue holds: the extras drop, every reply is still ok.
+    for _ in 0..10 {
+        assert!(matches!(
+            handle.count_click(uuid),
+            Reply::Ok {
+                result: Response::DirectoryClickCounted
+            }
+        ));
+    }
+    assert_eq!(click_receiver.try_iter().count(), 4);
+    assert!(search_receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn full_click_queue_does_not_fill_the_search_queue() {
+    let (searches, search_receiver) = std::sync::mpsc::sync_channel(4);
+    let (clicks, _clicks) = std::sync::mpsc::sync_channel(4);
+    let handle = Handle {
+        searches,
+        clicks,
+        stop: Default::default(),
+    };
+    for _ in 0..10 {
+        handle.count_click("9617a958-0601-11e8-ae97-52543be04c81");
+    }
+    let mut search = Box::pin(handle.search("jazz"));
+    assert!(futures_util::poll!(search.as_mut()).is_pending());
+    assert!(search_receiver.try_recv().is_ok());
+}
+
+#[test]
+fn stopped_click_sends_nothing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let cancel = Cancellation::idle();
+    cancel
+        .stop
+        .store(true, std::sync::atomic::Ordering::Release);
+    Provider::for_test(vec![origin])
+        .unwrap()
+        .count_click("11111111-1111-1111-1111-111111111111", &cancel);
+    let error = listener.accept().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn unreachable_host_error_names_no_url() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    drop(listener);
+    let error = search(vec![origin.clone()], "jazz").unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("radio-browser.info"), "{message}");
+    assert!(!message.contains("127.0.0.1"), "{message}");
+    assert!(!message.contains("http"), "{message}");
+}
+
+#[test]
+fn http_and_json_errors_are_short() {
+    let (origin, _server) = serve(reply("503 Service Unavailable", "text/plain", "down"));
+    let message = format!("{:#}", search(vec![origin], "jazz").unwrap_err());
+    assert!(message.contains("radio-browser.info"), "{message}");
+    assert!(
+        !message.contains("127.0.0.1") && !message.contains("503"),
+        "{message}"
+    );
+    let (origin, _server) = serve(json("not json at all"));
+    let message = format!("{:#}", search(vec![origin], "jazz").unwrap_err());
+    assert!(message.contains("radio-browser.info"), "{message}");
+    assert!(!message.contains("expected"), "{message}");
+}
+
+#[test]
+fn mirrors_are_forgotten_only_when_every_host_failed() {
+    let (first, _first_server) = serve(reply("503 Service Unavailable", "text/plain", "down"));
+    let (second, _second_server) = serve(reply("503 Service Unavailable", "text/plain", "down"));
+    let provider = Provider::for_test(vec![first, second]).unwrap();
+    provider.search("jazz", &Cancellation::idle()).unwrap_err();
+    assert_eq!(provider.forgets(), 1);
+
+    let (ok, _ok_server) = serve(json("[]"));
+    let provider = Provider::for_test(vec![ok]).unwrap();
+    provider.search("jazz", &Cancellation::idle()).unwrap();
+    assert_eq!(provider.forgets(), 0);
+
+    let cancel = Cancellation::idle();
+    cancel
+        .abandoned
+        .store(true, std::sync::atomic::Ordering::Release);
+    provider.search("jazz", &cancel).unwrap_err();
+    assert_eq!(provider.forgets(), 0);
+}
+
+/// Accepts one connection and never answers.
+fn hang() -> Url {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    thread::spawn(move || {
+        let _socket = listener.accept().unwrap();
+        thread::sleep(Duration::from_secs(12));
+    });
+    origin
+}
+
+#[test]
+fn slow_hosts_past_the_deadline_keep_the_mirrors() {
+    // The first host times out on its own (5 s); the second runs into the 8 s deadline.
+    let provider = Provider::for_test(vec![hang(), hang()]).unwrap();
+    provider.search("jazz", &Cancellation::idle()).unwrap_err();
+    assert_eq!(provider.forgets(), 0);
 }

@@ -9,7 +9,7 @@ use anyhow::{Result, ensure};
 use provider::Provider;
 use std::{
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -20,6 +20,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 const QUEUE_CAPACITY: usize = 4;
+const CLICK_QUEUE_CAPACITY: usize = 4;
 const MAX_QUERY_BYTES: usize = 100;
 
 #[derive(Clone)]
@@ -51,15 +52,10 @@ impl Cancellation {
     }
 }
 
-enum Work {
-    Search {
-        query: String,
-        reply: oneshot::Sender<Reply>,
-        cancel: Cancellation,
-    },
-    Click {
-        uuid: String,
-    },
+struct Search {
+    query: String,
+    reply: oneshot::Sender<Reply>,
+    cancel: Cancellation,
 }
 struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
@@ -69,62 +65,96 @@ impl Drop for CancelOnDrop {
 }
 #[derive(Clone)]
 pub(crate) struct Handle {
-    sender: mpsc::SyncSender<Work>,
+    searches: mpsc::SyncSender<Search>,
+    // Clicks have their own queue and worker, so they never make a search wait or fail.
+    clicks: mpsc::SyncSender<String>,
     stop: Arc<AtomicBool>,
 }
 pub(crate) struct DirectoryWorkers {
     handle: Handle,
-    thread: Option<thread::JoinHandle<()>>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+type SharedProvider = Arc<OnceLock<std::result::Result<Provider, String>>>;
+
+/// Builds the provider on the first worker that needs it, on a worker thread: the blocking
+/// client must not be created or dropped inside the async runtime.
+fn provider(shared: &SharedProvider) -> &std::result::Result<Provider, String> {
+    shared.get_or_init(|| Provider::new().map_err(|e| format!("{e:#}")))
+}
+/// Runs `handle` for each item until `stop` is set or every sender is gone.
+fn spawn_worker<T: Send + 'static>(
+    name: &str,
+    receiver: mpsc::Receiver<T>,
+    stop: Arc<AtomicBool>,
+    mut handle: impl FnMut(T) + Send + 'static,
+) -> Option<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                match receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(item) => handle(item),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .ok()
 }
 impl DirectoryWorkers {
     pub(crate) fn start() -> Self {
-        let (sender, receiver) = mpsc::sync_channel::<Work>(QUEUE_CAPACITY);
+        let (searches, search_receiver) = mpsc::sync_channel::<Search>(QUEUE_CAPACITY);
+        let (clicks, click_receiver) = mpsc::sync_channel::<String>(CLICK_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
-        let thread = thread::Builder::new()
-            .name("directory-0".into())
-            .spawn(move || {
-                let mut provider = None;
-                while !worker_stop.load(Ordering::Acquire) {
-                    let work = match receiver.recv_timeout(Duration::from_millis(100)) {
-                        Ok(work) => work,
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    };
-                    if provider.is_none() {
-                        provider = Some(Provider::new().map_err(|e| format!("{e:#}")));
+        let shared: SharedProvider = Arc::default();
+        let search_provider = Arc::clone(&shared);
+        let click_provider = shared;
+        let click_cancel = Cancellation::new(Arc::clone(&stop), Arc::default());
+        let threads = [
+            spawn_worker(
+                "directory-0",
+                search_receiver,
+                Arc::clone(&stop),
+                move |Search {
+                          query,
+                          reply,
+                          cancel,
+                      }| {
+                    if reply.is_closed() || cancel.cancelled() {
+                        return;
                     }
-                    let Some(provider) = &provider else { continue };
-                    match (work, provider) {
-                        (Work::Search { reply, cancel, .. }, _)
-                            if reply.is_closed() || cancel.cancelled() => {}
-                        (
-                            Work::Search {
-                                query,
-                                reply,
-                                cancel,
+                    let _ = reply.send(match provider(&search_provider) {
+                        Ok(provider) => match provider.search(&query, &cancel) {
+                            Ok(stations) => Reply::Ok {
+                                result: Response::DirectoryResults { stations },
                             },
-                            Ok(provider),
-                        ) => {
-                            let _ = reply.send(match provider.search(&query, &cancel) {
-                                Ok(stations) => Reply::Ok {
-                                    result: Response::DirectoryResults { stations },
-                                },
-                                Err(error) => unavailable(format!("{error:#}")),
-                            });
-                        }
-                        (Work::Search { reply, .. }, Err(error)) => {
-                            let _ = reply.send(unavailable(error.clone()));
-                        }
-                        (Work::Click { uuid }, Ok(provider)) => provider.count_click(&uuid),
-                        (Work::Click { .. }, Err(_)) => {}
+                            Err(error) => unavailable(format!("{error:#}")),
+                        },
+                        Err(error) => unavailable(error.clone()),
+                    });
+                },
+            ),
+            spawn_worker(
+                "directory-clicks",
+                click_receiver,
+                Arc::clone(&stop),
+                move |uuid: String| {
+                    if let Ok(provider) = provider(&click_provider) {
+                        provider.count_click(&uuid, &click_cancel);
                     }
-                }
-            })
-            .ok();
+                },
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         Self {
-            handle: Handle { sender, stop },
-            thread,
+            handle: Handle {
+                searches,
+                clicks,
+                stop,
+            },
+            threads,
         }
     }
     pub(crate) fn handle(&self) -> Handle {
@@ -135,7 +165,7 @@ impl DirectoryWorkers {
     }
     pub(crate) fn shutdown(mut self) {
         self.stop();
-        if let Some(thread) = self.thread.take() {
+        for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
     }
@@ -159,12 +189,12 @@ impl Handle {
         let abandoned = Arc::new(AtomicBool::new(false));
         let _cancel = CancelOnDrop(Arc::clone(&abandoned));
         let cancel = Cancellation::new(Arc::clone(&self.stop), abandoned);
-        let work = Work::Search {
+        let work = Search {
             query: query.to_owned(),
             reply,
             cancel,
         };
-        if self.sender.try_send(work).is_err() {
+        if self.searches.try_send(work).is_err() {
             return unavailable("radio-browser.info lookup queue is full or unavailable".into());
         }
         receive
@@ -176,7 +206,7 @@ impl Handle {
         let Some(uuid) = normalize_uuid(station_uuid) else {
             return error(ErrorCode::InvalidCommand, "invalid station uuid".into());
         };
-        let _ = self.sender.try_send(Work::Click { uuid });
+        let _ = self.clicks.try_send(uuid);
         Reply::Ok {
             result: Response::DirectoryClickCounted,
         }
