@@ -12,6 +12,8 @@ final class ActivatingTableView: NSTableView {
     var onCancel: (() -> Void)?
     /// Builds the menu for the row under the pointer, selecting it first when it is not selected.
     var contextMenu: ((Int) -> NSMenu?)?
+    /// Builds the menu for the album gutter column on the row under the pointer.
+    var gutterMenu: ((Int) -> NSMenu?)?
     /// Left and Right do nothing. The album panel's table sits inside the grid, and the grid would
     /// move its selection. Other tables pass them on.
     var ignoresLeftRight = false
@@ -41,9 +43,21 @@ final class ActivatingTableView: NSTableView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        let row = row(at: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point)
+        let column = column(at: point)
+        if tableColumns.indices.contains(column),
+           tableColumns[column].identifier.rawValue == AlbumBlockCell.columnID {
+            return gutterMenu?(row)
+        }
         return contextMenu?(row)
     }
+}
+
+/// The album a gutter menu item looks up.
+private struct AlbumLookUp {
+    let albumID: UInt64
+    let title: String
 }
 
 extension VirtualTrackTable.Coordinator {
@@ -55,6 +69,7 @@ extension VirtualTrackTable.Coordinator {
             list.removeSelected()
         }
         table.contextMenu = { [weak self] row in self?.menu(forRow: row) }
+        table.gutterMenu = { [weak self] row in self?.gutterMenu(forRow: row) }
     }
 
     /// ⌘L: select the playing row and bring it into view.
@@ -94,6 +109,15 @@ extension VirtualTrackTable.Coordinator {
         return menu
     }
 
+    private func gutterMenu(forRow row: Int) -> NSMenu? {
+        guard row >= 0, let album = layout.albumKey(atDisplayIndex: row) else { return nil }
+        let title = parent.list.facts.summary(album).map(DisplayFormat.albumFacts)?.first ?? "Album"
+        let menu = NSMenu(title: "Album")
+        add(to: menu, "Look Up on MusicBrainz…", "album-menu-musicbrainz", #selector(menuLookUp), enabled: parent.player.connected)
+        menu.items.first?.representedObject = AlbumLookUp(albumID: album, title: title)
+        return menu
+    }
+
     private func add(to menu: NSMenu, _ title: String, _ identifier: String, _ action: Selector, enabled: Bool) {
         let item = NSMenuItem(title: title, action: enabled ? action : nil, keyEquivalent: "")
         item.target = self
@@ -107,6 +131,10 @@ extension VirtualTrackTable.Coordinator {
     @objc private func menuAddToUpNext() { parent.list.activateSelected(.addToUpNext) }
     @objc private func menuAddToPlaylist() { parent.list.requestPlaylistPicker() }
     @objc private func menuRemove() { parent.list.removeSelected() }
+    @objc private func menuLookUp(_ sender: Any?) {
+        guard let target = (sender as? NSMenuItem)?.representedObject as? AlbumLookUp else { return }
+        parent.player.tagging.begin(albumID: target.albumID, title: target.title)
+    }
     @objc private func menuShowAlbum() { parent.list.showInAlbum() }
     @objc private func menuShowArtist() { parent.list.showInArtist() }
 }

@@ -40,6 +40,7 @@ import Testing
             ("album-sort date_added", .albumSort, ["date_added"]),
             ("cover-size 128.5", .coverSize, ["128.5"]),
             ("album-expand", .albumExpand, []), ("album-collapse", .albumCollapse, []),
+            ("musicbrainz", .musicbrainz, []),
             ("browser-genre 42", .browserGenre, ["42"]), ("browser-artist all", .browserArtist, ["all"]),
             ("browser-album 9", .browserAlbum, ["9"]),
             ("up-next-policy replace", .upNextPolicy, ["replace"]),
