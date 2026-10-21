@@ -38,6 +38,7 @@ struct TrackFilterHelp: View {
 
 /// The name prompt of New Playlist and Rename….
 struct PlaylistNameSheet: View {
+    @Environment(\.themeColours) private var colours
     enum Mode { case create, rename(Playlist) }
 
     let playlists: PlaylistsModel
@@ -65,7 +66,7 @@ struct PlaylistNameSheet: View {
             Text("Names must be unique and contain 1–256 UTF-8 bytes.")
                 .font(.caption).foregroundStyle(.secondary)
             if let failure {
-                Text(failure).font(.callout).foregroundStyle(.red)
+                Text(failure).font(.callout).foregroundStyle(colours.error)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("playlist-name-error")
@@ -118,6 +119,7 @@ struct PlaylistNameSheet: View {
 /// New Smart Playlist… and Edit Rule…. The rule is searched against the whole library, with a
 /// live preview of the first 100 matches.
 struct SmartPlaylistEditor: View {
+    @Environment(\.themeColours) private var colours
     let playlists: PlaylistsModel
     let player: PlayerModel
     /// nil creates a new smart playlist.
@@ -167,7 +169,7 @@ struct SmartPlaylistEditor: View {
                 TrackFilterHelp(identifier: "smart-filter-help")
             }
             if let previewError {
-                Text(previewError).foregroundStyle(.orange).textSelection(.enabled)
+                Text(previewError).foregroundStyle(colours.warning).textSelection(.enabled)
                     .accessibilityIdentifier("smart-preview-error")
             }
             if ready, let preview {
@@ -189,7 +191,7 @@ struct SmartPlaylistEditor: View {
             } else {
                 Spacer(minLength: 0)
             }
-            if let saveError { Text(saveError).foregroundStyle(.orange).textSelection(.enabled) }
+            if let saveError { Text(saveError).foregroundStyle(colours.warning).textSelection(.enabled) }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).accessibilityIdentifier("smart-cancel")
@@ -238,6 +240,7 @@ struct SmartPlaylistEditor: View {
 
 /// Create Regular Playlist from Results…: copies a smart playlist's results.
 struct SmartPlaylistSnapshotSheet: View {
+    @Environment(\.themeColours) private var colours
     let playlists: PlaylistsModel
     let playlist: Playlist
     var created: (Playlist) -> Void = { _ in }
@@ -253,7 +256,7 @@ struct SmartPlaylistSnapshotSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             TextField("Playlist name", text: $name).textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("snapshot-name")
-            if let failure { Text(failure).foregroundStyle(.orange).textSelection(.enabled) }
+            if let failure { Text(failure).foregroundStyle(colours.warning).textSelection(.enabled) }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -289,6 +292,7 @@ struct SmartPlaylistSnapshotSheet: View {
 
 /// The add-to-playlist picker: the regular playlists, or a new one, for a track selection.
 struct AddToPlaylistSheet: View {
+    @Environment(\.themeColours) private var colours
     let playlists: PlaylistsModel
     let selection: TrackSelection
     let count: Int
@@ -320,7 +324,7 @@ struct AddToPlaylistSheet: View {
                     .accessibilityIdentifier("playlist-picker-create-add")
             }
             if let failure {
-                Text(failure).foregroundStyle(.orange).textSelection(.enabled)
+                Text(failure).foregroundStyle(colours.warning).textSelection(.enabled)
                     .accessibilityIdentifier("playlist-picker-create-error")
             }
             Divider()

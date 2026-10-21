@@ -121,7 +121,8 @@ struct TyrannyApp: App {
     @NSApplicationDelegateAdaptor(TyrannyAppDelegate.self) private var appDelegate
     @State private var model = PlayerModel(
         quitSuspensions: .forLaunch(arguments: CommandLine.arguments),
-        importNotes: .forLaunch(arguments: CommandLine.arguments))
+        importNotes: .forLaunch(arguments: CommandLine.arguments),
+        theme: .forLaunch(arguments: CommandLine.arguments))
     @State private var navigation = NavigationModel()
     @State private var started = false
     @Environment(\.openWindow) private var openWindow
@@ -135,6 +136,7 @@ struct TyrannyApp: App {
     var body: some Scene {
         Window("Tyranny", id: "main") {
             MainWindow(model: model, navigation: navigation, appDelegate: appDelegate, started: $started)
+                .colourTheme(model.theme)
         }
         .defaultSize(width: 1180, height: 740)
         .windowResizability(.contentMinSize)
@@ -185,10 +187,12 @@ struct TyrannyApp: App {
         }
         Window("Equalizer", id: "equalizer") {
             EqualizerView(model: model.equalizer)
+                .colourTheme(model.theme)
         }
         .windowResizability(.contentSize)
         Settings {
             SettingsView(model: model, navigation: navigation)
+                .colourTheme(model.theme)
         }
     }
 }

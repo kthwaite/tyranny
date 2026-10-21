@@ -207,7 +207,7 @@ struct AlbumExpansionContent: View {
                     .accessibilityValue("loading")
                     .accessibilityIdentifier(AlbumTrackTable.tracksIdentifier)
             } else {
-                AlbumTrackTable(expansion: expansion, grid: grid, player: player,
+                AlbumTrackTable(expansion: expansion, grid: grid, player: player, colours: player.theme.tableColours,
                                 tracks: expansion.tracks, selected: expansion.selectedRowIDs, total: expansion.total)
             }
         }

@@ -17,6 +17,7 @@ struct AlbumTrackTable: NSViewRepresentable {
     let expansion: AlbumExpansion
     let grid: AlbumGridModel
     let player: PlayerModel
+    let colours: TableColours
     /// Read in the parent's body so SwiftUI updates the table when they change.
     let tracks: [ListRow]
     let selected: Set<UInt64>
@@ -109,6 +110,7 @@ struct AlbumTrackTable: NSViewRepresentable {
         /// The rows the table shows. Replaced only in `update`, with a reload.
         private var rows: [ListRow] = []
         private weak var shownExpansion: AlbumExpansion?
+        private var shownColours: UInt64?
 
         init(_ parent: AlbumTrackTable) { self.parent = parent }
 
@@ -142,6 +144,12 @@ struct AlbumTrackTable: NSViewRepresentable {
                 fitColumns()
                 table.reloadData()
                 if albumChanged { table.scrollRowToVisible(0) }
+            }
+            if parent.colours.revision != shownColours {
+                shownColours = parent.colours.revision
+                table.enumerateAvailableRowViews { view, _ in
+                    (view as? TokenRowView)?.selection = parent.colours.selection
+                }
             }
             let wanted = IndexSet(rows.indices.filter { parent.selected.contains(rows[$0].row_id) })
             if table.selectedRowIndexes != wanted { table.selectRowIndexes(wanted, byExtendingSelection: false) }
@@ -197,8 +205,9 @@ struct AlbumTrackTable: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let reuse = NSUserInterfaceItemIdentifier("album-track-row")
-            let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? NSTableRowView ?? NSTableRowView()
+            let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? TokenRowView ?? TokenRowView()
             view.identifier = reuse
+            view.selection = parent.colours.selection
             view.setAccessibilityIdentifier(rows.indices.contains(row)
                 ? "\(AlbumTrackTable.identifier)-row-\(rows[row].row_id)" : nil)
             return view

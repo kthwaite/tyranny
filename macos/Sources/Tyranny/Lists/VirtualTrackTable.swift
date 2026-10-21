@@ -16,6 +16,7 @@ import TyrannyCore
 struct VirtualTrackTable: NSViewRepresentable {
     let list: ListModel
     let player: PlayerModel
+    let colours: TableColours
     /// Read in the parent's body so SwiftUI updates the table when they change.
     let generation: UInt64
     let epoch: UInt64
@@ -129,6 +130,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var shownEpoch: UInt64?
         private var shownFacts: UInt64?
         private var shownPlaying: UInt64?
+        private var shownColours: UInt64?
         private var shownHidden: Set<String>?
         private var shownBlocks: Bool?
         private var reported: Range<Int>?
@@ -224,6 +226,13 @@ struct VirtualTrackTable: NSViewRepresentable {
                 if !reloadedAll { reloadGutter() }
             }
             shownPlaying = parent.playingTrackID
+            if parent.colours.revision != shownColours {
+                shownColours = parent.colours.revision
+                table.enumerateAvailableRowViews { view, _ in
+                    (view as? TokenRowView)?.selection = parent.colours.selection
+                }
+                if let status = columnIndex(TrackColumns.status) { reloadVisible(columns: IndexSet(integer: status)) }
+            }
             let selected = layout.displayIndexes(ofPositions: parent.list.selectedPositions)
             if table.selectedRowIndexes != selected { table.selectRowIndexes(selected, byExtendingSelection: false) }
             applyReveal(parent.revealToken)
@@ -367,7 +376,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             let identifier = "\(parent.identifier)-cell-\(item.row_id)-\(column.id)"
             if column.id == TrackColumns.status {
                 cell.showPlaying(item.track.id == parent.playingTrackID && parent.playingTrackID != nil,
-                                 identifier: identifier)
+                                 colour: parent.colours.playing, identifier: identifier)
                 cell.toolTip = nil
                 return cell
             }
@@ -407,8 +416,9 @@ struct VirtualTrackTable: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let reuse = NSUserInterfaceItemIdentifier("track-row")
-            let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? NSTableRowView ?? NSTableRowView()
+            let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? TokenRowView ?? TokenRowView()
             view.identifier = reuse
+            view.selection = parent.colours.selection
             let id: String
             switch layout.row(at: row) {
             case .track(let position, _)?:
@@ -579,13 +589,16 @@ extension NSTableView {
 
 /// A table cell: one vertically centred text field, optionally followed by a secondary
 /// detail field (a compilation track's artist), or the playing indicator.
-final class TrackCellView: NSTableCellView {
+final class TrackCellView: NSTableCellView, PlayingIndicatorCell {
     static let reuse = NSUserInterfaceItemIdentifier("track-cell")
     private let field = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let icon = NSImageView()
     /// Built once: creating a symbol image per cell was a measurable part of first-row cost.
     private static let playingImage = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Playing")
+    private var playingColour: NSColor?
+    private var rowSelected = false
+    private var rowStyle = NSView.BackgroundStyle.normal
     private var fieldToEdge: NSLayoutConstraint!
     private var fieldToDetail: NSLayoutConstraint!
 
@@ -601,7 +614,6 @@ final class TrackCellView: NSTableCellView {
         detail.textColor = .secondaryLabelColor
         detail.isHidden = true
         icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.contentTintColor = .controlAccentColor
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
         addSubview(icon)
         textField = field
@@ -647,7 +659,15 @@ final class TrackCellView: NSTableCellView {
         }
     }
 
-    func showPlaying(_ playing: Bool, identifier: String) {
+    func rowChanged(selected: Bool, style: NSView.BackgroundStyle) {
+        rowSelected = selected
+        rowStyle = style
+        icon.tintPlayingIcon(playingColour, selected: selected, style: style)
+    }
+
+    func showPlaying(_ playing: Bool, colour: NSColor, identifier: String) {
+        playingColour = colour
+        icon.tintPlayingIcon(colour, selected: rowSelected, style: rowStyle)
         field.isHidden = true
         field.stringValue = ""
         detail.isHidden = true

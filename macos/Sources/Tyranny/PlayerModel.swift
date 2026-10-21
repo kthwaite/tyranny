@@ -85,7 +85,11 @@ final class PlayerModel {
     @ObservationIgnored private var launchPrefetch: (slot: LaunchPrefetchSlot, deadline: ContinuousClock.Instant,
                                                      endpoint: String, tokenPath: String)?
 
-    init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore) {
+    /// The user's colours. Views read them from the environment.
+    let theme: ColourTheme
+
+    init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore, theme: ColourTheme) {
+        self.theme = theme
         self.quitSuspensions = quitSuspensions
         self.importNotes = importNotes
         let arguments = CommandLine.arguments
@@ -103,6 +107,11 @@ final class PlayerModel {
             startupFailed = true
             message = error.localizedDescription
             configurationError = error.localizedDescription
+        }
+        artwork.onNowPlayingChange = { [weak self] in
+            guard let self else { return }
+            theme.artworkChanged(hasContext: artwork.hasContext, playing: artwork.nowPlayingRequest != nil,
+                                 image: artwork.nowPlaying)
         }
         startLaunchPrefetch()
         wire.onSnapshot = { [weak self] state, instance in self?.accept(state, newInstance: instance != nil) }

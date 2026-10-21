@@ -45,6 +45,7 @@ public enum CommandID: String, CaseIterable, Sendable {
     case browserAlbum = "browser-album"
     case upNextPolicy = "up-next-policy"
     case prompt, help
+    case colour, colours, tint
 }
 
 public struct ParsedCommand: Equatable, Sendable {
@@ -67,6 +68,7 @@ public enum CommandArgumentKind: Equatable, Sendable {
     case volume
     case coverSize
     case command
+    case colour
 }
 
 public struct CommandArgument: Equatable, Sendable {
@@ -122,7 +124,7 @@ public enum CommandLanguage {
         .init(.browser, "Show, hide or toggle the browser.", [.init("on|off|toggle", .choices(toggleValues))]),
         .init(.drawer, "Show, hide or toggle Up Next.", [.init("on|off|toggle", .choices(toggleValues))]),
         .init(.artwork, "Expand, collapse or toggle Now Playing artwork.", [.init("on|off|toggle", .choices(toggleValues))]),
-        .init(.settings, "Open a settings pane.", [.init("pane", .choices(["connection", "library", "playback"]))]),
+        .init(.settings, "Open a settings pane.", [.init("pane", .choices(["connection", "library", "playback", "appearance"]))]),
         .init(.connect, "Connect to the server."),
         .init(.disconnect, "Disconnect from the server."),
         .init(.server, "Control the local server.", [.init("start|restart|stop", .choices(["start", "restart", "stop"]))]),
@@ -167,6 +169,9 @@ public enum CommandLanguage {
         .init(.upNextPolicy, "Choose how new playback treats upcoming entries.", [.init("ask|keep|replace", .choices(["ask", "keep", "replace"]))]),
         .init(.prompt, "Resolve the pending Up Next prompt.", [.init("keep|clear|cancel", .choices(["keep", "clear", "cancel"]))]),
         .init(.help, "Show command help.", [.init("command", .command, optional: true)]),
+        .init(.colour, "Set a colour token, or return it to System.", [.init("token", .choices(ColourToken.allCases.map(\.rawValue))), .init("#rrggbb|system", .colour)]),
+        .init(.colours, "Return every colour to System and turn the cover tint on.", [.init("reset", .choices(["reset"]))]),
+        .init(.tint, "Turn the accent tint from cover art on or off.", [.init("on|off", .choices(["on", "off"]))]),
     ]
 
     public static func parse(_ text: String) throws -> ParsedCommand {
@@ -210,6 +215,7 @@ public enum CommandLanguage {
         case .playlist: candidates = playlistNames.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         case .unsigned(let alternative): candidates = alternative.map { [$0] } ?? []
         case .command: candidates = registry.map { $0.id.rawValue }
+        case .colour: candidates = ["system"]
         default: return []
         }
         let prefix = tokens.removeLast()
@@ -274,6 +280,7 @@ public enum CommandLanguage {
             let number = try quantity(value, units: [])
             valid = !number.relative && AlbumGridGeometry.coverRange.contains(NSDecimalNumber(decimal: number.magnitude).doubleValue)
         case .command: valid = CommandID(rawValue: value) != nil
+        case .colour: valid = value == "system" || RGB(hex: value) != nil
         }
         guard valid else { throw CommandLanguageError("Invalid \(argument.name): \(value).") }
     }
