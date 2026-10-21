@@ -1,4 +1,4 @@
-//! Version 20 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 21 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -14,7 +14,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 20;
+pub const VERSION: u32 = 21;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -1587,7 +1587,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 20);
+        assert_eq!(VERSION, 21);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

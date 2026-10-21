@@ -3,7 +3,7 @@ import Foundation
 /// The local control protocol this client speaks. The server's hello must carry exactly this
 /// version (`src/protocol.rs` `VERSION`; `cargo test` checks that the two agree).
 public enum WireProtocol {
-    public static let version: UInt32 = 20
+    public static let version: UInt32 = 21
 }
 
 public struct PlayerSettings: Codable, Sendable, Equatable {
