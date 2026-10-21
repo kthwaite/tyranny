@@ -158,6 +158,9 @@ impl Decoder {
         initialize_ffmpeg()?;
         let mut options = ffmpeg::Dictionary::new();
         options.set("protocol_whitelist", "file");
+        // One library item plays every tracker subsong once. libopenmpt's
+        // default repeat count is zero; queue repeat remains the owner's job.
+        options.set("subsong", "all");
         let input = ffmpeg::format::input_with_dictionary(path, options)
             .with_context(|| format!("opening audio source {}", path.display()))?;
         Self::from_input(input, path, mode)

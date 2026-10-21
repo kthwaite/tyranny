@@ -94,6 +94,48 @@ class BundleTests(unittest.TestCase):
         subprocess.run([str(relocated / "Contents/MacOS/tyranny-server")], check=True,
                        env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=10)
 
+    def test_tracker_library_closure_uses_only_system_cpp_runtime(self):
+        tracker = self.compile(
+            self.lib / "libopenmpt.0.dylib", "int tracker(void) { return 9; }",
+            ["-lc++"], identity=str(self.lib / "libopenmpt.0.dylib"))
+        demuxer = self.compile(
+            self.lib / "libavformat.63.dylib",
+            "int tracker(void); int demuxer(void) { return tracker(); }",
+            [tracker], identity=str(self.lib / "libavformat.63.dylib"))
+        self.compile(self.macos / "tyranny-server",
+                     "int demuxer(void); int main(void) { return demuxer() == 9 ? 0 : 1; }",
+                     [demuxer])
+        self.invoke()
+        report = json.loads((self.app / "Contents/Resources/native-dependencies.json").read_text())
+        self.assertEqual(report["unresolved"], [])
+        self.assertEqual([node["path"] for node in report["non_system_images"]], [
+            "Contents/Frameworks/libavformat.63.dylib",
+            "Contents/Frameworks/libopenmpt.0.dylib",
+            "Contents/MacOS/tyranny-server",
+        ])
+        self.assertTrue(any(edge["system"] and edge["install_name"] == "/usr/lib/libc++.1.dylib"
+                            for edge in report["dependencies"]))
+        subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
+                        str(self.macos / "tyranny-server")], check=True, capture_output=True)
+        shutil.rmtree(self.prefix)
+        relocated = self.root / "moved tracker app/Tyranny.app"
+        relocated.parent.mkdir()
+        self.app.rename(relocated)
+        subprocess.run([str(relocated / "Contents/MacOS/tyranny-server")], check=True,
+                       env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=10)
+
+    def test_rejects_non_system_cpp_runtime(self):
+        runtime = self.compile(self.lib / "libc++.1.dylib",
+                               "int runtime(void) { return 0; }",
+                               identity=str(self.lib / "libc++.1.dylib"))
+        tracker = self.compile(self.lib / "libopenmpt.0.dylib",
+                               "int runtime(void); int tracker(void) { return runtime(); }",
+                               [runtime], identity=str(self.lib / "libopenmpt.0.dylib"))
+        self.compile(self.macos / "tyranny-server",
+                     "int tracker(void); int main(void) { return tracker(); }", [tracker])
+        self.assertIn("Unapproved non-system dependency", self.invoke(success=False).stderr)
+        self.assertFalse((self.app / "Contents/Frameworks").exists())
+
     def test_rejects_missing_transitive_dependency(self):
         utility, _ = self.chain()
         utility.unlink()

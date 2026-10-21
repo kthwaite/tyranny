@@ -7,10 +7,12 @@ import UniformTypeIdentifiers
 /// plays, adds to Up Next, edits and removes. The header adds a station by URL or imports a
 /// `.pls` or `.m3u` file.
 struct RadioView: View {
+    @Environment(\.themeColours) private var colours
     let model: StationsModel
     let player: PlayerModel
     @State private var selection: Station.ID?
     @State private var sheet: StationSheet.Mode?
+    @State private var finding = false
     @State private var removing: Station?
 
     private var canEdit: Bool { player.canMutate && model.isLoaded }
@@ -28,6 +30,7 @@ struct RadioView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("main-radio")
         .sheet(item: $sheet) { StationSheet(model: model, mode: $0) }
+        .sheet(isPresented: $finding) { DirectorySheet(model: model) }
         .alert("Remove \(removing.map { "“\($0.name)”" } ?? "station")?", isPresented: Binding(
             get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing
         ) { station in
@@ -51,12 +54,15 @@ struct RadioView: View {
                 .accessibilityIdentifier("radio-count")
             if let error = model.error {
                 Text(error)
-                    .font(.callout).foregroundStyle(.red)
+                    .font(.callout).foregroundStyle(colours.error)
                     .lineLimit(2)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("radio-error")
             }
             Spacer(minLength: 0)
+            Button("Find Stations…") { finding = true }
+                .disabled(!canEdit)
+                .accessibilityIdentifier("radio-find")
             Button("Add Station…") { sheet = .add }
                 .disabled(!canEdit)
                 .accessibilityIdentifier("radio-add")
@@ -80,6 +86,9 @@ struct RadioView: View {
         } description: {
             Text("Add a station by its stream URL, or import a .pls or .m3u file.")
         } actions: {
+            Button("Find Stations…") { finding = true }
+                .disabled(!canEdit)
+                .accessibilityIdentifier("radio-empty-find")
             Button("Add Station…") { sheet = .add }
                 .disabled(!canEdit)
                 .accessibilityIdentifier("radio-empty-add")
@@ -148,6 +157,7 @@ struct RadioView: View {
 
 /// Add Station… and Edit…: a stream URL and a name. The server's failure stays in the sheet.
 struct StationSheet: View {
+    @Environment(\.themeColours) private var colours
     enum Mode: Identifiable {
         case add, edit(Station)
 
@@ -189,7 +199,7 @@ struct StationSheet: View {
                 .onSubmit(save)
                 .accessibilityIdentifier("radio-sheet-name")
             if let failure {
-                Text(failure).font(.callout).foregroundStyle(.red)
+                Text(failure).font(.callout).foregroundStyle(colours.error)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("radio-sheet-error")

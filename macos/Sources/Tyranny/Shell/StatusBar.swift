@@ -4,6 +4,7 @@ import TyrannyCore
 /// The one-line status bar: connection on the left, totals or a brief operation
 /// message in the centre, scan progress on the right.
 struct StatusBar: View {
+    @Environment(\.themeColours) private var colours
     let model: PlayerModel
     /// The current view's totals, and the unfiltered count when it is filtered.
     /// Nil shows the library totals.
@@ -85,9 +86,9 @@ struct StatusBar: View {
 
     private var dotColour: Color {
         switch model.connection {
-        case "connected": .green
+        case "connected": colours.success
         case "connecting": .yellow
-        default: .red
+        default: colours.error
         }
     }
 

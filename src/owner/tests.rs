@@ -487,11 +487,11 @@ async fn equalizer_rejects_invalid_values_without_mutating_state_or_storage() {
 
     let fixture = Fixture::new();
     let control = fixture.control();
-    let equalizer = EqualizerSettings {
-        enabled: true,
-        preamp_db: -6.0,
-        bands_db: [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
-    };
+    let equalizer = EqualizerSettings::from_graphic(
+        true,
+        -6.0,
+        [6.0, 4.0, 2.0, 0.0, -1.0, -2.0, 0.0, 1.0, 2.0, 3.0],
+    );
     ok(
         &control,
         Command::SetEqualizer {
@@ -500,7 +500,7 @@ async fn equalizer_rejects_invalid_values_without_mutating_state_or_storage() {
     )
     .await;
     let before = snapshot(&control).await;
-    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -24.01, 12.01] {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -96.01, 12.01] {
         let mut invalid = equalizer.clone();
         invalid.preamp_db = value;
         match ask(&control, Command::SetEqualizer { equalizer: invalid }).await {
@@ -518,15 +518,35 @@ async fn equalizer_rejects_invalid_values_without_mutating_state_or_storage() {
         );
     }
     for band in 0..10 {
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -12.01, 12.01] {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -24.01, 24.01] {
             let mut invalid = equalizer.clone();
-            invalid.bands_db[band] = value;
+            invalid.bands[band].gain_db = value;
             match ask(&control, Command::SetEqualizer { equalizer: invalid }).await {
                 Reply::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidCommand),
                 reply => panic!("accepted invalid band {band} = {value}: {reply:?}"),
             }
             assert_eq!(snapshot(&control).await, before);
         }
+    }
+    for field in 0..5 {
+        let mut invalid = equalizer.clone();
+        invalid.enabled = false;
+        invalid.bands[0].enabled = false;
+        match field {
+            0 => invalid.bands[0].frequency_hz = f64::NAN,
+            1 => invalid.bands[0].q = 18.01,
+            2 => invalid.bands[0].shelf_slope = 0.0,
+            3 => invalid.bands[0].slope_db = 18,
+            _ => invalid.bands.resize(17, invalid.bands[0].clone()),
+        }
+        assert!(matches!(
+            ask(&control, Command::SetEqualizer { equalizer: invalid }).await,
+            Reply::Error {
+                code: ErrorCode::InvalidCommand,
+                ..
+            }
+        ));
+        assert_eq!(snapshot(&control).await, before);
     }
     assert_eq!(
         Store::open(&fixture.root.join("state.sqlite"))
@@ -551,6 +571,14 @@ fn equalizer_persistence_failure_does_not_publish_or_change_settings() {
         },
     })
     .unwrap();
+    assert!(
+        actor
+            .command(Command::SaveEqualizerPreset {
+                name: "Existing".into(),
+                equalizer: Default::default(),
+            })
+            .is_ok()
+    );
     let before = actor.last.clone();
     let connection = rusqlite::Connection::open(&database_path).unwrap();
     connection
@@ -560,19 +588,193 @@ fn equalizer_persistence_failure_does_not_publish_or_change_settings() {
         )
         .unwrap();
     let result = actor.command(Command::SetEqualizer {
-        equalizer: crate::equalizer::EqualizerSettings {
-            enabled: true,
-            preamp_db: -6.0,
-            bands_db: [3.0; 10],
-        },
+        equalizer: crate::equalizer::EqualizerSettings::from_graphic(true, -6.0, [3.0; 10]),
     });
     assert!(result.is_err());
     assert_eq!(actor.last, before);
     assert_eq!(actor.settings, before.settings);
     assert_eq!(actor.store.load().unwrap().settings, before.settings);
+    for command in [
+        Command::SaveEqualizerPreset {
+            name: "Test".into(),
+            equalizer: Default::default(),
+        },
+        Command::RenameEqualizerPreset {
+            name: "Existing".into(),
+            new_name: "Renamed".into(),
+        },
+        Command::RemoveEqualizerPreset {
+            name: "Existing".into(),
+        },
+    ] {
+        assert!(actor.command(command).is_err());
+        assert_eq!(actor.last, before);
+        assert_eq!(actor.settings, before.settings);
+        assert_eq!(actor.store.load().unwrap().settings, before.settings);
+    }
     actor.library.shutdown().unwrap();
     drop(actor.player);
     drop(actor.store);
     drop(connection);
     let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equalizer_presets_are_durable_sorted_and_do_not_recall_on_edit() {
+    let fixture = Fixture::new();
+    let control = fixture.control();
+    let active = snapshot(&control).await.settings.equalizer;
+    let curve = crate::equalizer::EqualizerSettings::from_graphic(true, -6.0, [3.0; 10]);
+    for name in ["Zulu", "Alpha"] {
+        ok(
+            &control,
+            Command::SaveEqualizerPreset {
+                name: name.into(),
+                equalizer: curve.clone(),
+            },
+        )
+        .await;
+    }
+    ok(
+        &control,
+        Command::SaveEqualizerPreset {
+            name: "Zulu".into(),
+            equalizer: active.clone(),
+        },
+    )
+    .await;
+    let settings = snapshot(&control).await.settings;
+    assert_eq!(settings.equalizer, active);
+    assert_eq!(
+        settings
+            .equalizer_presets
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Alpha", "Zulu"]
+    );
+    assert_eq!(settings.equalizer_presets[1].equalizer, active);
+    for command in [
+        Command::RenameEqualizerPreset {
+            name: "Alpha".into(),
+            new_name: "Zulu".into(),
+        },
+        Command::RenameEqualizerPreset {
+            name: "Missing".into(),
+            new_name: "New".into(),
+        },
+        Command::RemoveEqualizerPreset {
+            name: "Missing".into(),
+        },
+    ] {
+        assert!(matches!(
+            ask(&control, command).await,
+            Reply::Error {
+                code: ErrorCode::InvalidCommand,
+                ..
+            }
+        ));
+        assert_eq!(snapshot(&control).await.settings, settings);
+    }
+    for name in [
+        "".to_owned(),
+        " spaced".into(),
+        "spaced ".into(),
+        "bad\nname".into(),
+        "é".repeat(81),
+    ] {
+        assert!(matches!(
+            ask(
+                &control,
+                Command::SaveEqualizerPreset {
+                    name,
+                    equalizer: curve.clone()
+                }
+            )
+            .await,
+            Reply::Error {
+                code: ErrorCode::InvalidCommand,
+                ..
+            }
+        ));
+    }
+    let mut invalid = curve.clone();
+    invalid.bands[0].frequency_hz = 0.0;
+    assert!(matches!(
+        ask(
+            &control,
+            Command::SaveEqualizerPreset {
+                name: "Invalid".into(),
+                equalizer: invalid
+            }
+        )
+        .await,
+        Reply::Error {
+            code: ErrorCode::InvalidCommand,
+            ..
+        }
+    ));
+    ok(
+        &control,
+        Command::RenameEqualizerPreset {
+            name: "Zulu".into(),
+            new_name: "Beta".into(),
+        },
+    )
+    .await;
+    ok(
+        &control,
+        Command::RemoveEqualizerPreset {
+            name: "Alpha".into(),
+        },
+    )
+    .await;
+    let settings = snapshot(&control).await.settings;
+    assert_eq!(settings.equalizer, active);
+    assert_eq!(settings.equalizer_presets.len(), 1);
+    assert_eq!(settings.equalizer_presets[0].name, "Beta");
+    assert_eq!(
+        Store::open(&fixture.root.join("state.sqlite"))
+            .unwrap()
+            .load()
+            .unwrap()
+            .settings,
+        settings
+    );
+    for index in 0..63 {
+        ok(
+            &control,
+            Command::SaveEqualizerPreset {
+                name: format!("Preset {index:02}"),
+                equalizer: active.clone(),
+            },
+        )
+        .await;
+    }
+    assert!(matches!(
+        ask(
+            &control,
+            Command::SaveEqualizerPreset {
+                name: "Overflow".into(),
+                equalizer: active.clone()
+            }
+        )
+        .await,
+        Reply::Error {
+            code: ErrorCode::InvalidCommand,
+            ..
+        }
+    ));
+    ok(
+        &control,
+        Command::SaveEqualizerPreset {
+            name: "Beta".into(),
+            equalizer: curve,
+        },
+    )
+    .await;
+    assert_eq!(
+        snapshot(&control).await.settings.equalizer_presets.len(),
+        64
+    );
 }

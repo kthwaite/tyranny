@@ -24,7 +24,9 @@ final class AlbumGridItem: NSCollectionViewItem {
     }
 
     /// `album` is nil for a row not loaded yet: a blank placeholder of the same size.
-    func show(_ album: AlbumSummary?, position: Int, coverSize: CGFloat, store: ArtworkStore, retainArtwork: Bool) {
+    func show(_ album: AlbumSummary?, position: Int, coverSize: CGFloat, store: ArtworkStore, retainArtwork: Bool,
+              selectionColour: NSColor) {
+        cell.selectionColour = selectionColour
         showing &+= 1
         self.store = store
         let request = retainArtwork ? album.flatMap { store.albumRequest($0.id) } : nil
@@ -85,6 +87,8 @@ final class AlbumGridCellView: NSView {
     private var image: CGImage?
     private var hasAlbum = false
     var onLookUp: (() -> Void)?
+    /// The selected cover's border. Set by `show`.
+    var selectionColour = NSColor.clear { didSet { if selectionColour != oldValue { needsDisplay = true } } }
     var selected = false { didSet { if selected != oldValue { needsDisplay = true } } }
 
     init() {
@@ -180,7 +184,7 @@ final class AlbumGridCellView: NSView {
         let border = NSBezierPath(roundedRect: rect.insetBy(dx: selected ? 1.5 : 0.5, dy: selected ? 1.5 : 0.5),
                                   xRadius: 4, yRadius: 4)
         border.lineWidth = selected ? 3 : 1
-        (selected ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+        (selected ? selectionColour : NSColor.separatorColor).setStroke()
         border.stroke()
     }
 

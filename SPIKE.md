@@ -6,14 +6,14 @@ continuous CoreAudio stream. The native engine, persistent local server,
 durable library, and native SwiftUI controller are implemented and exercised;
 see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations.
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
-Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Saved radio stations arrived in protocol v12. Protocol v12 requires matching client/server processes; the main database is schema 7.
+Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Saved radio stations arrived in protocol v12 and the radio-browser.info station directory in v13. Protocol v13 requires matching client/server processes; the main database is schema 7.
 
 ## Development commands
 
 Install Rust, Xcode command-line tools, Python 3.9+, and optionally `just`
-(`brew install just`). Debug builds also need Homebrew FFmpeg and pkg-config
-(`brew install ffmpeg pkg-config`). Release builds compile pinned FFmpeg from
-source and do not require Homebrew FFmpeg or pkg-config.
+(`brew install just`). Server build/test recipes compile pinned FFmpeg and
+libopenmpt from source; Homebrew FFmpeg and pkg-config are not required. The first
+build needs network access; subsequent builds reuse the verified native cache.
 
 | Command | Action |
 | --- | --- |
@@ -29,18 +29,52 @@ source and do not require Homebrew FFmpeg or pkg-config.
 | `just test` | Test both components. |
 | `just dmg` | Build a self-contained release app and package `target/Tyranny.dmg`. |
 
-Debug Cargo builds use `target/debug` unless overridden by `CARGO_TARGET_DIR`.
-Release recipes isolate their Rust artifacts in `target/portable-rust/release`
-so development headers/libraries cannot be reused accidentally. Swift uses
-`target/swift-client/debug` and `target/swift-client/release`.
+Server recipes isolate both debug and release artifacts in
+`target/portable-rust/{debug,release}` so unrelated FFmpeg headers/libraries cannot
+be reused accidentally. Swift uses `target/swift-client/debug` and
+`target/swift-client/release`.
 The build recipes do not replace `target/Tyranny.app`. Unbundled release Rust
 binaries still reference the pinned build cache; use the app/DMG for relocation.
 
 To package the development app, stop the app/daemon before running
-`scripts/build_macos.sh`; by default it bundles a Homebrew-linked release server
-with a debug client. `scripts/build_macos.sh release` instead builds both
+`scripts/build_macos.sh`; by default it bundles the pinned release server and
+native libraries with a debug client. `scripts/build_macos.sh release` builds both
 components in release mode and assembles a self-contained
 `target/release/Tyranny.app`. An optional second argument selects the app destination.
+
+### Tracker modules
+
+The scanner accepts `.mod`, `.xm`, `.it`, and `.s3m`, case-insensitively. Rescan
+existing music roots to discover these files. Native libopenmpt decoding through
+FFmpeg preserves embedded module titles and shows the format as `Tracker`.
+No BASS runtime or decoder subprocess is used.
+Tracker support integrated at protocol **14**; the current version is **16**.
+The version bump follows the merge policy; the wire shape and database schema
+are unchanged by tracker support.
+
+Each file is one library item: all subsongs play once, in order. Tracker pattern
+and sample loops remain audible, but a song's backward jump does not repeat
+forever. Queue repeat remains independent. libopenmpt supplies a brief end fade;
+its reported duration and row-aligned seeking are approximate, not sample-exact.
+Uncomputable durations remain unknown. These semantics follow the
+[libopenmpt API](https://lib.openmpt.org/doc/group__libopenmpt__c.html) and FFmpeg's
+[`libopenmpt` demuxer](https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavformat/libopenmpt.c).
+The pinned minimal build supports ordinary MOD/XM/IT/S3M; compressed containers
+and unusual MP3/Vorbis-compressed sample variants are not claimed.
+
+For direct Cargo commands, select the same runtime explicitly:
+
+```sh
+prefix="$(python3 scripts/build_ffmpeg.py)"
+FFMPEG_DIR="$prefix" MACOSX_DEPLOYMENT_TARGET=14.0 \
+  cargo test --locked --target-dir target/portable-rust --test ffmpeg_formats
+```
+
+`scripts/make_tracker_fixtures.py --libopenmpt "$prefix/lib/libopenmpt.dylib"`
+regenerates the four self-authored module fixtures and measures independent
+48 kHz stereo frame references. Full fixture regeneration requires
+`TYRANNY_LIBOPENMPT="$prefix/lib/libopenmpt.dylib"` as well as its encoder tools.
+
 
 ### Compilation detection
 
@@ -65,46 +99,87 @@ thread work. Interrupted scans require the existing manual rescan recovery.
 
 ### Audio equalizer
 
-Open **Playback → Equalizer…** (`⌥⌘E`), or use **Settings → Playback → Open
-Equalizer…**. The separate window controls ten octave bands from 31.25 Hz to
-16 kHz (−12…+12 dB), a −24…+12 dB preamp, and enable/bypass. Flat, Bass Boost,
-Treble Boost and Vocal presets replace the whole curve; manual changes show
-Custom. Bypass retains the gains. Settings belong to the server and survive
-client reconnection and daemon restart.
+Open **Playback → Equalizer…** (`⌥⌘E`), or **Settings → Playback → Open
+Equalizer…**. The parametric editor supports up to 16 independently bypassable
+bands: bell, low shelf, high shelf, high-pass, low-pass and notch. Select a band
+to edit its numeric controls, or drag its point on the logarithmic response
+graph to change frequency and gain. Numeric edits apply on Return; steppers
+support incremental keyboard/Accessibility adjustments.
 
-The allocation-free stereo biquad bank runs after decoding/ReplayGain and before
-the output ring, for both local files and live streams. Disabled EQ and an enabled
-all-zero curve leave every PCM sample bit-identical. Filter history spans natural
-gapless track boundaries, but resets on seek, stop, explicit reselection and
-stream reconnection. Changed settings start clean histories; identical settings
-do not reset the filters.
+| Parameter | Range / meaning |
+|---|---|
+| Frequency | 20–20,000 Hz at the 48 kHz engine rate |
+| Bell/shelf gain | −24…+24 dB |
+| Bell/notch Q | 0.1–18 |
+| Pass Q | 0.1–18; scales only the highest-Q section relative to Butterworth Q = 1/√2 |
+| Pass slope | 12, 24, 36 or 48 dB/octave |
+| Shelf slope S | 0.1–1, RBJ shelf slope |
+| Preamp | −96…+12 dB |
+
+Higher-order pass filters use Butterworth section Q values; only the most
+resonant section is adjusted. Their Q control is not the total filter bandwidth.
+Controls irrelevant to a filter type are hidden, but their retained values
+remain validated.
+
+The graph previews the retained curve during global bypass. The combined curve
+includes preamp; the selected-band curve does not. Headroom guidance estimates
+the maximum combined filter boost over 20 Hz–20 kHz, refining narrow peaks.
+**Compensate Preamp** applies the suggested attenuation, bounded at −96 dB;
+an excessive-boost warning explains when that cannot compensate the curve.
+This is not a transient/inter-sample clipping guarantee. There is no limiter.
+
+Flat, Bass Boost, Treble Boost and Vocal retain their original responses.
+Reset removes all bands and restores zero preamp while preserving global bypass.
+Named user presets live on the server (up to 64); save overwrites an exact
+matching name, rename rejects an existing destination, and delete removes only
+the preset. Recall preserves the current global bypass choice. Names contain
+1–80 Unicode scalars, without surrounding whitespace or control characters;
+identity is byte-exact, not case-folded or Unicode-normalized.
+
+The fixed-capacity stereo biquad bank runs after decoding/ReplayGain and before
+the output ring for local files and live streams. A live edit warms an incoming
+bank for 10 ms and crossfades for 20 ms. Rapid edits retain only the newest
+pending bank; the final configuration settles within 60 ms of processed audio
+after the last edit. Coefficients are prepared outside the sample loop. Settled
+bypass and flat curves preserve PCM bits; identical updates preserve histories.
+History spans natural gapless boundaries and resets on seek, stop, explicit
+reselection and stream reconnection.
 
 Edits affect newly processed PCM, not samples already buffered: allow roughly
-1.4 seconds plus decoder/device buffering. Editing while paused does not discard
-the old buffer; it plays before the new settings become audible. There is no
-limiter or transition smoothing. Boosts can clip, so reduce preamp for headroom;
-the preset attenuation is not a guarantee against clipping.
+1.4 seconds plus decoder/device buffering. Pausing does not flush old audio.
+Settings are persisted before applying/publishing; invalid input or a failed
+write does not change audio/settings. Reconnection fetches authoritative server
+state rather than replaying abandoned client edits.
 
-The equalizer arrived in protocol **v11**; client and server builds must match
-(currently v12). `set_equalizer` accepts
-one complete `equalizer` object, also published in `snapshot.settings.equalizer`:
+Parametric EQ integrated at protocol **v15**; the current version is **v16**; upgrade client and server together.
+The merge bumps the version from 14 because the EQ wire shape changed.
+`set_equalizer` takes a complete object, also returned in
+`snapshot.settings.equalizer`:
 
 ```json
-{"id":1,"command":"set_equalizer","equalizer":{"enabled":true,"preamp_db":-6,"bands_db":[5,5,3,1,0,0,0,0,0,0]}}
+{"id":1,"command":"set_equalizer","equalizer":{"enabled":true,"preamp_db":-6,"bands":[{"enabled":true,"kind":"bell","frequency_hz":1000,"gain_db":6,"q":1,"shelf_slope":1,"slope_db":12}]}}
 ```
 
-The ten gains must be finite and within range. Invalid changes are rejected before
-settings or audio mutation. The server persists accepted settings before applying
-them; older databases default to disabled EQ without changing SQLite schema 6.
-Preset names are derived client-side from the persisted gains, not stored separately.
+All EQ fields are required; unknown fields and the old `bands_db` wire shape
+are rejected. Numeric values, including inactive parameters, must be finite
+and within range. Saved graphic settings migrate only when reading storage:
+their frequency-specific Q preserves the original one-octave bandwidth
+correction, including at 16 kHz. No parallel legacy wire interface remains.
+
+`snapshot.settings.equalizer_presets` contains `{name, equalizer}` objects.
+`save_equalizer_preset` takes `name` and `equalizer`;
+`rename_equalizer_preset` takes `name` and `new_name`;
+`remove_equalizer_preset` takes `name`. These return `Applied` without changing
+the active EQ. Use `set_equalizer` to recall a saved curve.
 
 Regression checks: `cargo test --locked equalizer` and
 `swift test --package-path macos --scratch-path target/swift-client --filter EqualizerTests`.
+Use the repository's pinned FFmpeg prefix for Rust builds (see `justfile`).
 The debug client's `--equalizer-smoke-output <directory>` hook exercises native
 controls against an explicitly supplied isolated loopback daemon with empty
 library/queue. Supply `--url`, `--token-file` and `--ui-driver`; add
-`--equalizer-smoke-restore` after restarting that daemon to verify restored state.
-Build the Accessibility driver from current source:
+`--equalizer-smoke-restore` after restarting that daemon to verify settings and
+saved presets. Build the driver from current source:
 `swiftc scripts/native_ui_driver.swift -o target/native-ui-driver`.
 
 ### Client command language
@@ -248,11 +323,14 @@ managed server from the mounted image.
 
 The source builder currently supports native **arm64 macOS**, with a deployment
 target of macOS 14. It downloads [FFmpeg 9.0.2](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz)
-and verifies the pinned SHA256 before extraction. The pin was established by
-verifying the upstream detached signature against FFmpeg's published signing
-fingerprint. The first build needs network access; subsequent builds reuse a
-checksum-verified cache under `target/native`, keyed by source, configuration,
-architecture, builder, compiler, and SDK. Interrupted installs are not reused.
+and verifies the pinned SHA256 before extraction. The FFmpeg pin was established
+by verifying its upstream detached signature against the published signing
+fingerprint. It also verifies pinned official release archives for
+[libopenmpt 0.8.9](https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.8.9+release.autotools.tar.gz)
+and build-only [pkgconf 3.0.10](https://distfiles.ariadne.space/pkgconf/pkgconf-3.0.10.tar.gz).
+The first build needs network access; subsequent builds reuse a checksum-verified
+cache under `target/native`, keyed by dependency sources/options, architecture,
+builder, compiler, and SDK. Interrupted installs are not reused.
 FFmpeg's build system requires a checkout/toolchain path without whitespace or
 shell/make metacharacters; the builder rejects these paths early. The packaged
 app itself supports spaces and Unicode in its installation path.
@@ -263,10 +341,11 @@ nonfree, version-3-only code, external-library autodetection, encoders, muxers,
 devices, filters, and hardware acceleration. It uses macOS system zlib, bzlib,
 iconv and Secure Transport. The only enabled protocols are file, HTTP, HTTPS,
 TCP and TLS; stream entries use verified HTTPS and an MP3/Ogg demuxer whitelist,
-while local playback keeps its file-only protocol whitelist. External decoder
-engines remain outside this configuration.
+while local playback keeps its file-only protocol whitelist. libopenmpt is the
+only external decoder engine; its optional external codec/output dependencies
+are disabled, and its C++ runtime is Apple's system libc++.
 
-Packaging copies the four dylibs to `Contents/Frameworks`, rewrites their
+Packaging copies the five dylibs to `Contents/Frameworks`, rewrites their
 transitive dependencies and install IDs to `@loader_path`, and removes runpaths.
 Unresolved libraries, non-system dependencies outside the pinned prefix,
 unapproved libraries, symlink escapes, and basename collisions fail packaging.
@@ -282,6 +361,9 @@ arguments, and toolchain provenance. The standard About panel's `Credits.rtf`
 points to those resources. Keep these artifacts when distributing the app and
 include FFmpeg attribution/source access on any download page; see
 [FFmpeg's compliance checklist](https://ffmpeg.org/legal.html).
+`FFmpeg/dependencies/libopenmpt` also includes the exact source archive and
+BSD-3-Clause/BSL-1.0 notices; `dependencies/pkgconf` records its build-only ISC
+dependency. pkgconf is not bundled as a runtime executable.
 Dynamic linking and source inclusion are not a blanket codec-patent or legal clearance.
 
 The DMG no longer needs Homebrew at runtime. It is still **ad-hoc signed, not

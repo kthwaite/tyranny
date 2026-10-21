@@ -3,6 +3,7 @@
 use crate::{
     SAMPLE_RATE,
     artwork::{ArtworkWorkers, Handle as ArtworkHandle, Request as ArtworkRequest},
+    directory::{DirectoryWorkers, Handle as DirectoryHandle},
     library::{Library, LibraryHandle},
     library_types::{
         LibraryCommand, LibraryError, LibraryErrorKind, PageRequest, StaleLibraryRevision,
@@ -55,6 +56,7 @@ pub struct Owner {
     artwork: ArtworkWorkers,
     lyrics: LyricsWorkers,
     tagging: TaggingWorkers,
+    directory: DirectoryWorkers,
     thread: thread::JoinHandle<Result<()>>,
 }
 #[derive(Clone)]
@@ -64,6 +66,7 @@ pub struct Controller {
     artwork: ArtworkHandle,
     lyrics: LyricsHandle,
     tagging: TaggingHandle,
+    directory: DirectoryHandle,
     resolver: Arc<Resolver>,
 }
 pub struct Subscription {
@@ -112,6 +115,7 @@ impl Owner {
                 let artwork = ArtworkWorkers::start(database.clone());
                 let lyrics = LyricsWorkers::start(database.clone());
                 let tagging = TaggingWorkers::start(database, library.clone());
+                let directory = DirectoryWorkers::start();
                 Ok(Self {
                     controller: Controller {
                         sender,
@@ -119,11 +123,13 @@ impl Owner {
                         artwork: artwork.handle(),
                         lyrics: lyrics.handle(),
                         tagging: tagging.handle(),
+                        directory: directory.handle(),
                         resolver,
                     },
                     artwork,
                     lyrics,
                     tagging,
+                    directory,
                     thread,
                 })
             }
@@ -147,6 +153,7 @@ impl Owner {
         self.artwork.stop();
         self.lyrics.stop();
         self.tagging.stop();
+        self.directory.stop();
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = self.controller.sender.send(Work::Shutdown(reply_tx)).await;
         let result = if sent.is_ok() {
@@ -160,6 +167,7 @@ impl Owner {
             self.artwork.shutdown();
             self.lyrics.shutdown();
             self.tagging.shutdown();
+            self.directory.shutdown();
             self.thread.join()
         })
         .await
@@ -226,6 +234,19 @@ impl Controller {
                 return self
                     .tagging_request(id, TagRequest::Revert { edit_id })
                     .await;
+            }
+            command @ (Command::SearchDirectory { .. } | Command::CountDirectoryClick { .. }) => {
+                let mut reply = match command {
+                    Command::SearchDirectory { query } => self.directory.search(&query).await,
+                    Command::CountDirectoryClick { station_uuid } => {
+                        self.directory.count_click(&station_uuid)
+                    }
+                    _ => unreachable!("matched directory commands above"),
+                };
+                if let Reply::Error { queue_revision, .. } = &mut reply {
+                    *queue_revision = self.queue_revision(id).await.unwrap_or(0);
+                }
+                return Ok(Message::Reply { id, reply });
             }
             Command::Artwork {
                 album_id,
@@ -401,23 +422,22 @@ impl Controller {
 
     /// The owner's current queue revision, for error replies.
     async fn queue_revision(&self, id: u64) -> Result<u64> {
-        let snapshot = self
+        match self
             .playback_request(Request {
                 id,
                 command: Command::Snapshot,
             })
-            .await?;
-        let Message::Reply {
-            reply:
-                Reply::Ok {
-                    result: Response::Snapshot { snapshot },
-                },
-            ..
-        } = snapshot
-        else {
-            return Err(anyhow!("owner did not return its control snapshot"));
-        };
-        Ok(snapshot.queue_revision)
+            .await?
+        {
+            Message::Reply {
+                reply:
+                    Reply::Ok {
+                        result: Response::Snapshot { snapshot },
+                    },
+                ..
+            } => Ok(snapshot.queue_revision),
+            _ => Err(anyhow!("owner did not return its control snapshot")),
+        }
     }
 
     async fn playback_request(&self, request: Request) -> Result<Message> {
@@ -1686,6 +1706,8 @@ impl Actor {
             | Command::ApplyTags { .. }
             | Command::TagEdits
             | Command::RevertTagEdit { .. }
+            | Command::SearchDirectory { .. }
+            | Command::CountDirectoryClick { .. }
             | Command::AddRoot { .. }
             | Command::Rescan { .. }
             | Command::LibraryRoots { .. }
@@ -1699,7 +1721,7 @@ impl Actor {
             | Command::AlbumSummaries { .. }
             | Command::ListGroups { .. } => {
                 unreachable!(
-                    "library, artwork, lyrics and tagging commands are routed to their own workers"
+                    "library, artwork, lyrics, directory and tagging commands are routed to their own workers"
                 )
             }
             Command::Remove {
@@ -1954,6 +1976,79 @@ impl Actor {
                     .checkpoint(self.checkpoint(), &settings)
                     .map_err(Failure::persistence)?;
                 self.player.set_equalizer(&settings.equalizer);
+                self.settings = settings;
+                self.published(None)
+            }
+            Command::SaveEqualizerPreset { name, equalizer } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .and_then(|()| equalizer.validate())
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                if let Some(preset) = settings
+                    .equalizer_presets
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                {
+                    preset.equalizer = equalizer;
+                } else {
+                    if settings.equalizer_presets.len() >= 64 {
+                        return Err(Failure::invalid("at most 64 equalizer presets are allowed"));
+                    }
+                    settings
+                        .equalizer_presets
+                        .push(crate::protocol::EqualizerUserPreset { name, equalizer });
+                }
+                settings
+                    .equalizer_presets
+                    .sort_by(|a, b| a.name.cmp(&b.name));
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
+            Command::RenameEqualizerPreset { name, new_name } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .and_then(|()| crate::protocol::validate_equalizer_preset_name(&new_name))
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                if settings
+                    .equalizer_presets
+                    .iter()
+                    .any(|p| p.name == new_name)
+                {
+                    return Err(Failure::invalid(
+                        "destination equalizer preset already exists",
+                    ));
+                }
+                let preset = settings
+                    .equalizer_presets
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                    .ok_or_else(|| Failure::invalid("equalizer preset does not exist"))?;
+                preset.name = new_name;
+                settings
+                    .equalizer_presets
+                    .sort_by(|a, b| a.name.cmp(&b.name));
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
+                self.settings = settings;
+                self.published(None)
+            }
+            Command::RemoveEqualizerPreset { name } => {
+                crate::protocol::validate_equalizer_preset_name(&name)
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                let mut settings = self.settings.clone();
+                let index = settings
+                    .equalizer_presets
+                    .iter()
+                    .position(|p| p.name == name)
+                    .ok_or_else(|| Failure::invalid("equalizer preset does not exist"))?;
+                settings.equalizer_presets.remove(index);
+                self.store
+                    .checkpoint(self.checkpoint(), &settings)
+                    .map_err(Failure::persistence)?;
                 self.settings = settings;
                 self.published(None)
             }

@@ -18,7 +18,7 @@ test: test-server test-client
 
 # Build the Rust server and companion command-line tools (debug).
 build-server:
-    cargo build --locked --bins
+    prefix="$(python3 scripts/build_ffmpeg.py)" && FFMPEG_DIR="$prefix" MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --target-dir target/portable-rust --bins
 
 # Build release Rust binaries against pinned, source-built FFmpeg.
 build-server-release:
@@ -26,7 +26,7 @@ build-server-release:
 
 # Run Rust unit and integration tests (hardware tests remain opt-in).
 test-server:
-    cargo test --locked --all-targets
+    prefix="$(python3 scripts/build_ffmpeg.py)" && FFMPEG_DIR="$prefix" MACOSX_DEPLOYMENT_TARGET=14.0 cargo test --locked --target-dir target/portable-rust --all-targets
 
 # Build the SwiftUI client (debug).
 build-client:

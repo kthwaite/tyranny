@@ -3,7 +3,7 @@ import Foundation
 /// The local control protocol this client speaks. The server's hello must carry exactly this
 /// version (`src/protocol.rs` `VERSION`; `cargo test` checks that the two agree).
 public enum WireProtocol {
-    public static let version: UInt32 = 12
+    public static let version: UInt32 = 16
 }
 
 public struct PlayerSettings: Codable, Sendable, Equatable {
@@ -13,14 +13,16 @@ public struct PlayerSettings: Codable, Sendable, Equatable {
     public let `repeat`: RepeatMode
     public let shuffle: Bool
     public let equalizer: EqualizerSettings
+    public let equalizer_presets: [EqualizerUserPreset]
 
-    public init(gain_mode: String, resume_on_start: Bool, volume: UInt8, repeat: RepeatMode, shuffle: Bool, equalizer: EqualizerSettings) {
+    public init(gain_mode: String, resume_on_start: Bool, volume: UInt8, repeat: RepeatMode, shuffle: Bool, equalizer: EqualizerSettings, equalizer_presets: [EqualizerUserPreset] = []) {
         self.gain_mode = gain_mode
         self.resume_on_start = resume_on_start
         self.volume = volume
         self.`repeat` = `repeat`
         self.shuffle = shuffle
         self.equalizer = equalizer
+        self.equalizer_presets = equalizer_presets
     }
 }
 
@@ -959,6 +961,39 @@ public struct StationsApplied: Codable, Sendable, Equatable {
 
     public init(snapshot: ControlState, stations: [Station]) {
         self.snapshot = snapshot
+        self.stations = stations
+    }
+}
+
+/// One station of the radio-browser directory, as `search_directory` returns it.
+public struct DirectoryStation: Codable, Sendable, Equatable, Identifiable {
+    public let uuid: String
+    public let name: String
+    public let url: String
+    public let codec: String
+    public let bitrate: UInt32
+    /// Two ASCII letters, or empty.
+    public let country_code: String
+    public let tags: [String]
+
+    public var id: String { uuid }
+
+    public init(uuid: String, name: String, url: String, codec: String = "", bitrate: UInt32 = 0,
+                country_code: String = "", tags: [String] = []) {
+        self.uuid = uuid
+        self.name = name
+        self.url = url
+        self.codec = codec
+        self.bitrate = bitrate
+        self.country_code = country_code
+        self.tags = tags
+    }
+}
+
+public struct DirectoryResults: Codable, Sendable, Equatable {
+    public let stations: [DirectoryStation]
+
+    public init(stations: [DirectoryStation]) {
         self.stations = stations
     }
 }

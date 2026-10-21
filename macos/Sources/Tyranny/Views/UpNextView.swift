@@ -16,7 +16,7 @@ struct UpNextView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            UpNextTable(model: model, player: player, generation: model.cache.generation, epoch: model.epoch,
+            UpNextTable(model: model, player: player, colours: player.theme.tableColours, generation: model.cache.generation, epoch: model.epoch,
                         context: model.context, selected: model.selection, revealToken: model.revealRequest?.token)
                 .overlay {
                     if model.cache.revision != nil, model.cache.total == 0 {
@@ -74,6 +74,7 @@ struct UpNextView: View {
 
 /// The name prompt of Save as Playlist…. The server's failure stays in the sheet.
 private struct SavePlaylistSheet: View {
+    @Environment(\.themeColours) private var colours
     let model: UpNextModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
@@ -93,7 +94,7 @@ private struct SavePlaylistSheet: View {
             if let failure {
                 Text(failure)
                     .font(.callout)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(colours.error)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("up-next-save-error")
             }
@@ -127,6 +128,7 @@ private struct SavePlaylistSheet: View {
 }
 
 private struct AddStreamSheet: View {
+    @Environment(\.themeColours) private var colours
     let model: UpNextModel
     @Environment(\.dismiss) private var dismiss
     @State private var url = ""
@@ -149,7 +151,7 @@ private struct AddStreamSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("stream-title")
             if let failure {
-                Text(failure).font(.callout).foregroundStyle(.red)
+                Text(failure).font(.callout).foregroundStyle(colours.error)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("stream-error")
             }

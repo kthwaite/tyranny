@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Check the pinned build's protocol/TLS contract without compiling FFmpeg."""
+"""Check pinned native dependencies and protocol/TLS contracts without builds."""
+import copy
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -22,9 +25,14 @@ class ConfigurationTests(unittest.TestCase):
         self.config = "\n".join(
             [f"#define CONFIG_{name} 1" for name in (
                 "ZLIB", "BZLIB", "ICONV", "AVCODEC", "AVFORMAT", "AVUTIL",
-                "SWRESAMPLE", "NETWORK", "SECURETRANSPORT")]
+                "SWRESAMPLE", "NETWORK", "SECURETRANSPORT", "LIBOPENMPT")]
             + [f"#define CONFIG_{name} 0" for name in ("GPL", "NONFREE", "VERSION3")]
         ) + "\n"
+
+    def test_missing_openmpt_library_configuration_is_rejected(self):
+        self.config = self.config.replace("CONFIG_LIBOPENMPT 1", "CONFIG_LIBOPENMPT 0")
+        with self.assertRaisesRegex(RuntimeError, "LIBOPENMPT"):
+            self.check_configuration()
 
     def check_configuration(self):
         (self.root / "config_components.h").write_text(self.components)
@@ -63,6 +71,35 @@ class ConfigurationTests(unittest.TestCase):
         self.config = self.config.replace("CONFIG_SECURETRANSPORT 1", "CONFIG_SECURETRANSPORT 0")
         with self.assertRaisesRegex(RuntimeError, "SECURETRANSPORT"):
             self.check_configuration()
+
+
+class DependencyTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="tyranny-native-config-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def test_cached_dependency_archive_requires_its_own_checksum(self):
+        archive = self.root / "source.tar.gz"
+        archive.write_bytes(b"pinned dependency")
+        expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+        build_ffmpeg.download(archive, {}, "https://invalid.example/source", expected)
+        archive.write_bytes(b"changed dependency")
+        with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+            build_ffmpeg.download(archive, {}, "https://invalid.example/source", expected)
+
+    def test_cache_rejects_dependency_pin_or_installed_library_changes(self):
+        library = self.root / "libopenmpt.0.dylib"
+        library.write_bytes(b"pinned library")
+        identity = {"dependencies": copy.deepcopy(build_ffmpeg.DEPENDENCIES)}
+        marker = {"identity": identity, "files": build_ffmpeg.installed_files(self.root)}
+        (self.root / ".complete.json").write_text(json.dumps(marker))
+        self.assertTrue(build_ffmpeg.reusable(self.root, identity))
+        changed = copy.deepcopy(identity)
+        changed["dependencies"]["libopenmpt"]["source_sha256"] = "0" * 64
+        self.assertFalse(build_ffmpeg.reusable(self.root, changed))
+        library.write_bytes(b"modified library")
+        self.assertFalse(build_ffmpeg.reusable(self.root, identity))
 
 
 if __name__ == "__main__":

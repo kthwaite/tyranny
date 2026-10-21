@@ -1,7 +1,7 @@
 import SwiftUI
 import TyrannyCore
 
-/// The Settings window (⌘,): Connection, Library and Playback.
+/// The Settings window (⌘,): Connection, Library, Playback and Appearance.
 struct SettingsView: View {
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
@@ -17,6 +17,9 @@ struct SettingsView: View {
             PlaybackSettingsPane(transport: model.transport, notifications: model.notifications)
                 .tabItem { Label("Playback", systemImage: "play.circle") }
                 .tag(SettingsTab.playback)
+            AppearanceSettingsPane(theme: model.theme)
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
+                .tag(SettingsTab.appearance)
         }
         .frame(width: 600)
         .accessibilityIdentifier("settings")
@@ -95,6 +98,7 @@ struct ConnectionSettingsPane: View {
 
 /// Music folders: add, rescan and review.
 struct MusicFoldersPane: View {
+    @Environment(\.themeColours) private var colours
     let model: PlayerModel
     var done: (() -> Void)?
     @AppStorage(TaggingModel.acoustIDKeyDefault) private var acoustIDKey = ""
@@ -113,7 +117,7 @@ struct MusicFoldersPane: View {
                             Text("\(scan.phase.capitalized) · \(scan.processed) processed · \(scan.failures) failed")
                                 .font(.caption).foregroundStyle(.secondary)
                             if let error = scan.last_error {
-                                Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                                Text(error).font(.caption).foregroundStyle(colours.warning).textSelection(.enabled)
                             }
                         }
                     }
@@ -180,6 +184,7 @@ struct MusicFoldersPane: View {
 
 /// Gain mode, resume on start, and what playing from a list does to Up Next.
 struct PlaybackSettingsPane: View {
+    @Environment(\.themeColours) private var colours
     let transport: TransportModel
     @Bindable var notifications: TrackNotifications
     @AppStorage("upNextOnPlay") private var upNextOnPlay = UpNextPolicy.ask.rawValue
@@ -219,7 +224,7 @@ struct PlaybackSettingsPane: View {
                 Text(notifications.authorization).font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("notifications-authorization")
                 if let error = notifications.error {
-                    Text(error).font(.caption).foregroundStyle(.red)
+                    Text(error).font(.caption).foregroundStyle(colours.error)
                 }
             }
         }

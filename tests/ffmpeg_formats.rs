@@ -41,6 +41,7 @@ use tyranny::{
     },
     output::OutputConfig,
     owner::{Owner, OwnerConfig},
+    playback::Player,
     protocol::TagField,
     tagging::tags::{
         TagEdit, WritableFormat, edit_tags, read_tags, unwritable_fields, writable_format,
@@ -50,10 +51,12 @@ use tyranny::{
 struct Fixture {
     extension: String,
     file: String,
-    /// Stereo frames the ffmpeg CLI decodes at the engine rate, or, where the
-    /// manifest says `"frames_from": "packet durations"`, that the packet
-    /// durations add up to.
+    /// Stereo reference frames at the engine rate: FFmpeg CLI, packet-duration
+    /// sums where marked, or the independent libopenmpt C API for trackers.
     frames: usize,
+    /// Present on the self-authored tracker fixtures, not filename-derived.
+    title: Option<String>,
+    seconds: f64,
 }
 
 fn fixture_root() -> PathBuf {
@@ -78,8 +81,11 @@ fn manifest() -> (Vec<Fixture>, Vec<Exception>) {
             extension: entry["extension"].as_str().unwrap().to_owned(),
             file: entry["file"].as_str().unwrap().to_owned(),
             frames: entry["frames"].as_u64().expect(
-                "manifest entry lacks frames; regenerate with scripts/make_test_fixtures.py",
+                "manifest entry lacks frames; regenerate with scripts/make_test_fixtures.py \
+                 (trackers only: scripts/make_tracker_fixtures.py --libopenmpt <pinned-library>)",
             ) as usize,
+            title: entry["title"].as_str().map(str::to_owned),
+            seconds: entry["seconds"].as_f64().unwrap(),
         })
         .collect();
     let exceptions = formats["exceptions"]
@@ -145,6 +151,7 @@ fn every_format_fixture_decodes_to_eof() {
     // tone.spx is the exception: the CLI decodes its final Ogg Speex packet
     // whole, while `Decoder` cuts it to the duration the end granule gives, so
     // its reference is the packet durations' sum (the 0.25 s source exactly).
+    // Trackers use a direct libopenmpt reference at 48 kHz stereo, all subsongs.
     let mut failures = Vec::new();
     let mut buffer = vec![Frame::default(); 4096];
     for fixture in &files {
@@ -167,11 +174,16 @@ fn every_format_fixture_decodes_to_eof() {
                     break;
                 }
             }
+            if total > fixture.frames + 4096 {
+                failures.push(format!("{}: did not reach bounded EOF", fixture.file));
+                total = usize::MAX;
+                break;
+            }
         }
         if total != usize::MAX && total != fixture.frames {
             failures.push(format!(
-                "{}: decoded {total} frames, the manifest records {} from the ffmpeg CLI \
-                 (see manifest encoders; regenerate with scripts/make_test_fixtures.py if FFmpeg changed)",
+                "{}: decoded {total} frames, the manifest records {} from its reference decoder \
+                 (see manifest encoders and frames_from; regenerate if the pinned decoder changed)",
                 fixture.file, fixture.frames
             ));
         }
@@ -197,6 +209,35 @@ async fn every_format_fixture_indexes_without_failures() {
     assert_eq!(state.scan.failures, 0, "scan: {:?}", state.scan);
     assert_eq!(state.scan.skipped, 0, "scan: {:?}", state.scan);
     assert_eq!(state.tracks, files.len() as u64, "scan: {:?}", state.scan);
+    for fixture in files.iter().filter(|fixture| fixture.title.is_some()) {
+        let title = fixture.title.as_ref().unwrap();
+        let reply = library
+            .handle()
+            .request(LibraryCommand::Tracks {
+                album_id: None,
+                page: PageRequest {
+                    revision: None,
+                    offset: 0,
+                    limit: 10,
+                    query: title.clone(),
+                },
+            })
+            .await
+            .unwrap();
+        let LibraryReply::Tracks(page) = reply else {
+            panic!("expected tracks query result");
+        };
+        assert_eq!(page.total, 1, "embedded module title: {title}");
+        let track = &page.entries[0];
+        assert_eq!(&track.metadata.title, title);
+        assert!(track.error.is_none(), "{:?}", track.error);
+        let duration = track.metadata.duration_ms.expect("module duration");
+        let expected = (fixture.seconds * 1000.0).round() as u64;
+        assert!(
+            duration.abs_diff(expected) <= 20,
+            "{title}: duration {duration} ms, expected {expected} ms across all subsongs"
+        );
+    }
     library.shutdown().unwrap();
 }
 
@@ -303,9 +344,106 @@ fn expected_format(file: &str) -> Option<WritableFormat> {
         "spx" => Some(WritableFormat::Speex),
         "wav" | "wave" => Some(WritableFormat::Wav),
         "wv" => Some(WritableFormat::WavPack),
-        "ac3" | "amr" | "au" | "awb" | "caf" | "dff" | "dsf" | "dts" | "mka" | "mov" | "oga"
-        | "ra" | "shn" | "tta" | "webm" | "wma" => None,
+        "ac3" | "amr" | "au" | "awb" | "caf" | "dff" | "dsf" | "dts" | "it" | "mka" | "mod"
+        | "mov" | "oga" | "ra" | "s3m" | "shn" | "tta" | "webm" | "wma" | "xm" => None,
         other => panic!("{file}: add .{other} to expected_format"),
+    }
+}
+
+/// Bounded independently of the manifest so a song loop regression cannot hang
+/// the test. Sample-looped triangle notes must be audible, finite, and finite-valued.
+fn tracker_pcm(decoder: &mut Decoder) -> Vec<Frame> {
+    let mut pcm = Vec::new();
+    let mut buffer = [Frame::default(); 4096];
+    loop {
+        let count = decoder.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        assert!(
+            pcm.len() + count <= 5 * 48_000,
+            "tracker repeated past five seconds"
+        );
+        assert!(
+            buffer[..count]
+                .iter()
+                .flatten()
+                .all(|sample| sample.is_finite()),
+            "tracker emitted non-finite PCM"
+        );
+        pcm.extend_from_slice(&buffer[..count]);
+    }
+    assert!(
+        pcm.iter().flatten().any(|sample| sample.abs() > 0.001),
+        "tracker emitted no audible signal"
+    );
+    pcm
+}
+
+#[test]
+fn trackers_stop_backward_jumps_and_seek_after_eof() {
+    let (files, _) = manifest();
+    let trackers: Vec<_> = files
+        .iter()
+        .filter(|fixture| fixture.title.is_some())
+        .collect();
+    assert_eq!(trackers.len(), 4);
+    for fixture in trackers {
+        let path = fixture_root().join(&fixture.file);
+        let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        let duration = decoder.duration_frames().expect("module duration");
+        let expected_duration = (fixture.seconds * 48_000.0).round() as u64;
+        assert!(
+            duration.abs_diff(expected_duration) <= 960,
+            "{}: duration {duration}, expected {expected_duration}",
+            fixture.file
+        );
+        let pcm = tracker_pcm(&mut decoder);
+        assert_eq!(pcm.len(), fixture.frames, "{}", fixture.file);
+        // libopenmpt has a short end fade; the measured frame reference, not
+        // nominal song duration, is the EOF boundary.
+        assert!(pcm.len() as u64 >= duration);
+        if fixture.extension == "it" {
+            assert!(pcm.len() > 86_400, "second subsong was dropped");
+            assert!(
+                pcm[60_000..72_000]
+                    .iter()
+                    .flatten()
+                    .any(|sample| sample.abs() > 0.001),
+                "second subsong is silent"
+            );
+        }
+        let mut buffer = [Frame::default(); 16];
+        assert_eq!(decoder.read(&mut buffer).unwrap(), 0, "EOF must stay EOF");
+        decoder.seek(0).unwrap();
+        assert_eq!(
+            tracker_pcm(&mut decoder).len(),
+            fixture.frames,
+            "restart {}",
+            fixture.file
+        );
+        // IT's target is beyond the first subsong; others seek within the note.
+        // Tracker seeking is row-aligned, not promised to be sample-exact.
+        let target = if fixture.extension == "it" {
+            60_000
+        } else {
+            12_000
+        };
+        decoder.seek(target).unwrap();
+        let remaining = tracker_pcm(&mut decoder);
+        let mut fresh = Decoder::open(&path, GainMode::Off).unwrap();
+        fresh.seek(target).unwrap();
+        assert_eq!(
+            remaining.len(),
+            tracker_pcm(&mut fresh).len(),
+            "seek {}",
+            fixture.file
+        );
+        assert!(
+            remaining.len() < pcm.len(),
+            "seek did not advance {}",
+            fixture.file
+        );
     }
 }
 
@@ -633,4 +771,50 @@ async fn library_reads_written_fields() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn tracker_eof_advances_every_queue_entry_once() {
+    let (files, _) = manifest();
+    let paths: Vec<_> = files
+        .iter()
+        .filter(|fixture| fixture.title.is_some())
+        .map(|fixture| fixture_root().join(&fixture.file))
+        .collect();
+    assert_eq!(paths.len(), 4);
+    let scratch = Scratch::new();
+    let capture = scratch.0.join("trackers.f32");
+    let mut player = Player::new(
+        paths,
+        OutputConfig::Capture {
+            path: capture.clone(),
+            clocked: false,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !player.completed() {
+        assert!(
+            Instant::now() < deadline,
+            "tracker queue did not end: {:?}",
+            player.snapshot()
+        );
+        player.pump().unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    player.pump().unwrap();
+    assert!(player.error().is_none(), "{:?}", player.error());
+    assert_eq!(player.started_entries(), &[1, 2, 3, 4]);
+    drop(player);
+    let captured = fs::read(capture).unwrap();
+    assert!(
+        captured
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|sample| f32::from_le_bytes(*sample).abs() > 0.001),
+        "queue capture is silent"
+    );
 }
