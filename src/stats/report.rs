@@ -1,5 +1,4 @@
 //! Aggregates play rows into a `StatsReport` for one period.
-#![allow(dead_code)] // Task 8 uses this
 use super::{
     period::{Bounds, Zone, buckets, local},
     rows::{LibraryIndex, PlayRow, artist_key},

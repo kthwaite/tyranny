@@ -5,6 +5,7 @@ use crate::library_types::{
     ListTotals, NamedCount, Page, Root, Track, TrackMetadata,
 };
 use crate::listing::ListDescription;
+use crate::stats_types::{PeriodRequest, StatsReport, WrappedReport};
 use crate::{
     decoder::GainMode,
     equalizer::EqualizerSettings,
@@ -56,6 +57,13 @@ pub enum Command {
         entry_id: u64,
         library_revision: u64,
     },
+    Stats {
+        period: PeriodRequest,
+    },
+    Wrapped {
+        year: i32,
+    },
+    StatsYears,
     SearchDirectory {
         query: String,
     },
@@ -739,6 +747,17 @@ pub enum Response {
     },
     Lyrics {
         lyrics: Lyrics,
+    },
+    Stats {
+        stats_revision: u64,
+        report: Box<StatsReport>,
+    },
+    Wrapped {
+        stats_revision: u64,
+        report: Box<WrappedReport>,
+    },
+    StatsYears {
+        years: Vec<i32>,
     },
     DirectoryResults {
         stations: Vec<DirectoryStation>,
@@ -1451,6 +1470,57 @@ mod tests {
             serde_json::json!({"kind":"history","revision":4,"total":1,"offset":0,
                 "entries":[{"id":4,"played_at":1_700_000_000_i64,"track_id":null,"title":"Loose",
                     "artist":"","album":"","duration_ms":null,"source":null}]})
+        );
+    }
+
+    #[test]
+    fn stats_commands_require_every_field_and_reply_with_a_report() {
+        let command = serde_json::json!({
+            "id":1,"command":"stats","period":{"kind":"week","anchor":"2026-10-21"}
+        });
+        let request = serde_json::from_value::<Request>(command.clone()).unwrap();
+        match request.command {
+            Command::Stats { period } => {
+                assert_eq!(period.kind, crate::stats_types::PeriodKind::Week);
+                assert_eq!(period.anchor, "2026-10-21");
+            }
+            other => panic!("not stats: {other:?}"),
+        }
+        let mut missing = command.clone();
+        missing.as_object_mut().unwrap().remove("period");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+        for bad in [
+            serde_json::json!({"kind":"week"}),
+            serde_json::json!({"anchor":"2026-10-21"}),
+            serde_json::json!({"kind":"Week","anchor":"2026-10-21"}),
+            serde_json::json!({"kind":"week","anchor":"2026-10-21","zone":"UTC"}),
+        ] {
+            let mut invalid = command.clone();
+            invalid["period"] = bad;
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
+        let wrapped = serde_json::json!({"id":2,"command":"wrapped","year":2025});
+        assert!(matches!(
+            serde_json::from_value::<Request>(wrapped.clone())
+                .unwrap()
+                .command,
+            Command::Wrapped { year: 2025 }
+        ));
+        let mut missing = wrapped;
+        missing.as_object_mut().unwrap().remove("year");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+        assert!(matches!(
+            serde_json::from_value::<Request>(serde_json::json!({"id":3,"command":"stats_years"}))
+                .unwrap()
+                .command,
+            Command::StatsYears
+        ));
+        assert_eq!(
+            serde_json::to_value(Response::StatsYears {
+                years: vec![2025, 2026]
+            })
+            .unwrap(),
+            serde_json::json!({"kind":"stats_years","years":[2025,2026]})
         );
     }
 }

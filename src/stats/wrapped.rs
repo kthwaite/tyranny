@@ -1,5 +1,4 @@
 //! Builds the `WrappedReport` for one calendar year from the play rows.
-#![allow(dead_code)] // Task 8 uses this
 use super::{
     period::{Date, Zone, bounds, local},
     report::{

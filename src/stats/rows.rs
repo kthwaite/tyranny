@@ -1,5 +1,4 @@
 //! Play rows and the library index, loaded from the store for aggregation.
-#![allow(dead_code)] // Task 8 uses `load`
 use crate::store::EndReason;
 use anyhow::Result;
 use rusqlite::Connection;

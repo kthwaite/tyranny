@@ -1,5 +1,4 @@
 //! Local-time calendar maths for stats periods. Pure: the zone is a parameter.
-#![allow(dead_code)] // Tasks 6-8 use this
 
 use crate::stats_types::PeriodKind;
 

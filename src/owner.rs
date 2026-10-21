@@ -17,6 +17,7 @@ use crate::{
         NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
         StreamSpec, TrackSelection, Transport,
     },
+    stats::{Handle as StatsHandle, Request as StatsRequest, StatsWorkers},
     store::{
         Checkpoint, Edit, EndReason, EntryTrack, HistoryEvent, LoadedEntry, PendingHistory,
         PlayRecord, PlaylistChange, PlaylistEdit, PlaylistFailure, StaleStationsRevision,
@@ -55,6 +56,7 @@ pub struct Owner {
     controller: Controller,
     artwork: ArtworkWorkers,
     lyrics: LyricsWorkers,
+    stats: StatsWorkers,
     directory: DirectoryWorkers,
     thread: thread::JoinHandle<Result<()>>,
 }
@@ -64,6 +66,7 @@ pub struct Controller {
     library: LibraryHandle,
     artwork: ArtworkHandle,
     lyrics: LyricsHandle,
+    stats: StatsHandle,
     directory: DirectoryHandle,
     resolver: Arc<Resolver>,
 }
@@ -111,7 +114,8 @@ impl Owner {
             Ok((library, capture)) => {
                 let resolver = Arc::new(Resolver::new(database.clone(), capture));
                 let artwork = ArtworkWorkers::start(database.clone());
-                let lyrics = LyricsWorkers::start(database);
+                let lyrics = LyricsWorkers::start(database.clone());
+                let stats = StatsWorkers::start(database);
                 let directory = DirectoryWorkers::start();
                 Ok(Self {
                     controller: Controller {
@@ -119,11 +123,13 @@ impl Owner {
                         library,
                         artwork: artwork.handle(),
                         lyrics: lyrics.handle(),
+                        stats: stats.handle(),
                         directory: directory.handle(),
                         resolver,
                     },
                     artwork,
                     lyrics,
+                    stats,
                     directory,
                     thread,
                 })
@@ -147,6 +153,7 @@ impl Owner {
     pub async fn shutdown(self) -> Result<()> {
         self.artwork.stop();
         self.lyrics.stop();
+        self.stats.stop();
         self.directory.stop();
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = self.controller.sender.send(Work::Shutdown(reply_tx)).await;
@@ -160,6 +167,7 @@ impl Owner {
         let joined = tokio::task::spawn_blocking(move || {
             self.artwork.shutdown();
             self.lyrics.shutdown();
+            self.stats.shutdown();
             self.directory.shutdown();
             self.thread.join()
         })
@@ -192,6 +200,21 @@ impl Controller {
                         library_revision,
                     })
                     .await;
+                return Ok(Message::Reply { id, reply });
+            }
+            command @ (Command::Stats { .. } | Command::Wrapped { .. } | Command::StatsYears) => {
+                let mut reply = self
+                    .stats
+                    .request(match command {
+                        Command::Stats { period } => StatsRequest::Stats(period),
+                        Command::Wrapped { year } => StatsRequest::Wrapped(year),
+                        Command::StatsYears => StatsRequest::Years,
+                        _ => unreachable!("matched stats commands above"),
+                    })
+                    .await;
+                if let Reply::Error { queue_revision, .. } = &mut reply {
+                    *queue_revision = self.queue_revision(id).await.unwrap_or(0);
+                }
                 return Ok(Message::Reply { id, reply });
             }
             command @ (Command::SearchDirectory { .. } | Command::CountDirectoryClick { .. }) => {
@@ -1780,6 +1803,9 @@ impl Actor {
             }
             Command::Artwork { .. }
             | Command::Lyrics { .. }
+            | Command::Stats { .. }
+            | Command::Wrapped { .. }
+            | Command::StatsYears
             | Command::SearchDirectory { .. }
             | Command::CountDirectoryClick { .. }
             | Command::AddRoot { .. }
@@ -1795,7 +1821,7 @@ impl Actor {
             | Command::AlbumSummaries { .. }
             | Command::ListGroups { .. } => {
                 unreachable!(
-                    "library, artwork, lyrics and directory commands are routed to their own workers"
+                    "library, artwork, lyrics, stats and directory commands are routed to their own workers"
                 )
             }
             Command::Remove {

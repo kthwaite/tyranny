@@ -1053,3 +1053,85 @@ async fn search_directory_rejects_empty_query() {
     socket.close(None).await.unwrap();
     running.stop().await;
 }
+
+async fn stats_plays(client: &mut PlaybackClient) -> u64 {
+    match client
+        .request(serde_json::json!({
+            "command":"stats","period":{"kind":"all","anchor":"2026-10-21"}
+        }))
+        .await
+    {
+        Reply::Ok {
+            result: Response::Stats { report, .. },
+        } => report.plays,
+        reply => panic!("stats failed: {reply:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stats_reply_reflects_recorded_plays() {
+    let scratch = Scratch::new();
+    let source = scratch.path("short.wav");
+    tagged_wav(&source, 9_600, b"Short");
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    assert_eq!(stats_plays(&mut client).await, 0);
+    client.append(&source).await;
+    client
+        .apply(serde_json::json!({"command": "play", "entry_id": 1}))
+        .await;
+    timeout(DEADLINE, async {
+        loop {
+            if stats_plays(&mut client).await == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the finished play never reached stats");
+    match client
+        .request(serde_json::json!({"command":"stats_years"}))
+        .await
+    {
+        Reply::Ok {
+            result: Response::StatsYears { years },
+        } => assert_eq!(years.len(), 1),
+        reply => panic!("stats_years failed: {reply:?}"),
+    }
+    match client
+        .request(serde_json::json!({"command":"wrapped","year":2000}))
+        .await
+    {
+        Reply::Ok {
+            result: Response::Wrapped { report, .. },
+        } => assert_eq!(report.plays, 0),
+        reply => panic!("wrapped failed: {reply:?}"),
+    }
+    client.socket.close(None).await.unwrap();
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_anchor_is_an_error_reply() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    for anchor in ["2026-02-30", "yesterday", "2026-1-1"] {
+        match client
+            .request(serde_json::json!({
+                "command":"stats","period":{"kind":"week","anchor":anchor}
+            }))
+            .await
+        {
+            Reply::Error {
+                code: ErrorCode::InvalidCommand,
+                message,
+                ..
+            } => assert_eq!(message, "invalid period anchor"),
+            reply => panic!("{anchor} was not rejected: {reply:?}"),
+        }
+    }
+    client.socket.close(None).await.unwrap();
+    running.stop().await;
+}

@@ -13,6 +13,7 @@ pub enum PeriodKind {
 
 /// A period kind plus a local anchor date (`YYYY-MM-DD`).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PeriodRequest {
     pub kind: PeriodKind,
     pub anchor: String,
