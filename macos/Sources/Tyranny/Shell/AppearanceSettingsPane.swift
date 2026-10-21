@@ -58,6 +58,11 @@ struct AppearanceSettingsPane: View {
                     .accessibilityLabel(label(token))
                     .accessibilityIdentifier("settings-colour-\(token.rawValue)-well")
             }
+            if token == .accent, custom != nil, theme.settings.tintFromArtwork {
+                Text("While a track with artwork plays, the cover tint replaces this colour.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("settings-colour-accent-tint-note")
+            }
             if let custom, let warning = Contrast.warning(for: custom) {
                 Text(warning).font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("settings-colour-\(token.rawValue)-contrast")
@@ -74,14 +79,29 @@ struct AppearanceSettingsPane: View {
             settings.custom[token] = nil
         case .custom:
             guard settings.custom[token] == nil else { return }
-            settings.custom[token] = Self.rgb(theme.nsColour(token)) ?? RGB(red: 0, green: 0, blue: 0)
+            settings.custom[token] = Self.rgb(untinted(token)) ?? RGB(red: 0, green: 0, blue: 0)
         }
         theme.update(settings)
     }
 
+    /// The colour for `token` without the cover tint: the stored custom colour, else (for the
+    /// accent-following tokens) the custom accent or the system accent, else the current colour.
+    private func untinted(_ token: ColourToken) -> NSColor {
+        if let rgb = theme.settings.custom[token] {
+            return NSColor(srgbRed: rgb.red, green: rgb.green, blue: rgb.blue, alpha: 1)
+        }
+        if token == .accent || token == .playing {
+            if let rgb = theme.settings.custom[.accent] {
+                return NSColor(srgbRed: rgb.red, green: rgb.green, blue: rgb.blue, alpha: 1)
+            }
+            return .controlAccentColor
+        }
+        return theme.nsColour(token)
+    }
+
     private func wellBinding(_ token: ColourToken) -> Binding<Color> {
         Binding(
-            get: { Color(nsColor: theme.nsColour(token)) },
+            get: { Color(nsColor: theme.settings.custom[token] == nil ? theme.nsColour(token) : untinted(token)) },
             set: { colour in
                 guard let rgb = Self.rgb(NSColor(colour)) else { return }
                 var settings = theme.settings
