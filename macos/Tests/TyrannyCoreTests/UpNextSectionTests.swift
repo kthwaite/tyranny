@@ -16,7 +16,7 @@ func snapshot(currentID: UInt64?, currentIndex: Int?, upcoming: Int, shuffle: Bo
          "current_id":\(current),"can_next":true,"can_previous":true,"now_playing":\(playing),
          "position_frames":0,"sample_rate":48000,"transport":"paused",
          "settings":{"gain_mode":"off","resume_on_start":false,"volume":100,"repeat":"off","shuffle":\(shuffle),
-                     "equalizer":{"enabled":false,"preamp_db":0,"bands_db":[0,0,0,0,0,0,0,0,0,0]}},
+                     "equalizer":{"enabled":false,"preamp_db":0,"bands":[]},"equalizer_presets":[]},
          "error":null,"underruns":0,
          "library":{"revision":1,"roots":0,"tracks":0,"duration_ms":0,"size_bytes":0,
                     "scan":{"root_id":null,"phase":"idle","discovered":0,"processed":0,"total":null,"updated":0,"unchanged":0,"failures":0,"skipped":0,"last_error":null}},

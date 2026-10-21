@@ -3,7 +3,7 @@ import Foundation
 /// The local control protocol this client speaks. The server's hello must carry exactly this
 /// version (`src/protocol.rs` `VERSION`; `cargo test` checks that the two agree).
 public enum WireProtocol {
-    public static let version: UInt32 = 14
+    public static let version: UInt32 = 15
 }
 
 public struct PlayerSettings: Codable, Sendable, Equatable {
@@ -13,14 +13,16 @@ public struct PlayerSettings: Codable, Sendable, Equatable {
     public let `repeat`: RepeatMode
     public let shuffle: Bool
     public let equalizer: EqualizerSettings
+    public let equalizer_presets: [EqualizerUserPreset]
 
-    public init(gain_mode: String, resume_on_start: Bool, volume: UInt8, repeat: RepeatMode, shuffle: Bool, equalizer: EqualizerSettings) {
+    public init(gain_mode: String, resume_on_start: Bool, volume: UInt8, repeat: RepeatMode, shuffle: Bool, equalizer: EqualizerSettings, equalizer_presets: [EqualizerUserPreset] = []) {
         self.gain_mode = gain_mode
         self.resume_on_start = resume_on_start
         self.volume = volume
         self.`repeat` = `repeat`
         self.shuffle = shuffle
         self.equalizer = equalizer
+        self.equalizer_presets = equalizer_presets
     }
 }
 

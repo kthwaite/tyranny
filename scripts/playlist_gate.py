@@ -56,12 +56,12 @@ def main():
         report['cases'].append({'name': name, 'passed': True, **details})
         print('Passed ' + name, flush=True)
 
-    def connect(version=14):
+    def connect(version=15):
         client = WebSocket(ready['address'], Path(ready['token_path']).read_text().strip(), expected_version=version)
         connections.append(client)
         return client
 
-    def start(binary, version=14):
+    def start(binary, version=15):
         nonlocal process, ready
         index = len(report['launches'])
         command = [str(Path(binary).resolve()), '--state-dir', str(state), '--bind', '127.0.0.1:0',

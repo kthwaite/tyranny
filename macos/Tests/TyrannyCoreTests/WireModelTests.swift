@@ -175,7 +175,7 @@ private let nowPlayingBase = #""entry_id":1,"title":"T","artist":"A","album":"B"
          "current_id":null,"can_next":false,"can_previous":false,"now_playing":null,
          "position_frames":0,"sample_rate":48000,"transport":"paused",
          "settings":{"gain_mode":"off","resume_on_start":false,"volume":100,"repeat":"off","shuffle":false,
-                    "equalizer":{"enabled":false,"preamp_db":0,"bands_db":[0,0,0,0,0,0,0,0,0,0]}},
+                    "equalizer":{"enabled":false,"preamp_db":0,"bands":[]},"equalizer_presets":[]},
          "error":null,"underruns":0,
          "library":{"revision":1,"roots":0,"tracks":0,"duration_ms":0,"size_bytes":0,
                     "scan":{"root_id":null,"phase":"idle","discovered":0,"processed":0,"total":null,"updated":0,"unchanged":0,"failures":0,"skipped":0,"last_error":null}},

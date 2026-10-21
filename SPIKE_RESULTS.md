@@ -2,6 +2,79 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Parametric equalizer (2026-10-21)
+
+Implemented `TSK-knobby-iris-fg8hk` in `../tyranny-knobby-iris`, branch
+`feature/knobby-iris-parametric-eq`, from `dev` at `48ba232`, commit `71d3709`.
+The feature retained protocol **14**; integration into `dev` bumps it to **15**.
+The changed wire shape requires matching client/server builds.
+
+Integration verification on `dev`: **343 Rust tests passed, 2 ignored** and
+**391 Swift tests passed in 52 suites**, with warnings denied. Rust binary
+builds, Clippy and formatting checks passed. The rebuilt protocol-15 client
+and daemon passed the complete native EQ smoke and a separate restart/restore
+pass; screenshots of the restored curve and narrow notch were inspected.
+The previous protocol-14 CLI correctly rejected the protocol-15 daemon.
+Integration evidence: `target/eq-integration-ui/run-ea6em3c0/` in the main
+worktree. Private build/app/state paths were used; the running app/daemon and
+pre-existing uncommitted files were not replaced or included in the merge.
+
+- Six filter types, up to 16 independently bypassable bands, 12–48 dB/octave
+  pass slopes, frequency/gain/Q/shelf-slope editing, global preamp and bypass.
+  Pass Q scales only the highest-Q Butterworth section; Q = 1/√2 gives
+  Butterworth response at every slope.
+- Three preallocated banks hold current, incoming and latest pending curves.
+  At most two process audio; 10 ms warm-up plus 20 ms crossfade gives a bounded
+  60 ms final-settle delay under rapid edits, excluding existing PCM buffering.
+  Settled flat/bypass is bit-exact. No coefficient work or allocation occurs
+  in the sample loop; gapless histories and explicit discontinuity resets remain.
+- Storage-only migration preserves the old graphic response using
+  frequency-specific Q, including its 16 kHz bandwidth correction. Factory
+  presets retain their responses; the active curve and named user presets are
+  server-owned. Preset CRUD persists before publication without changing audio.
+- Native response graph, selectable/bypassable band rows, numeric controls,
+  graph dragging, saved-preset CRUD, and manual headroom compensation.
+  Graph sampling includes exact centers and refined maxima/minima, including
+  narrow notches. Headroom remains an estimate, not a limiter.
+
+Verification:
+
+- Rust full suite: **343 passed, 2 ignored**. Clippy with warnings denied and
+  formatting checks passed. The corrected storage fixture also passed its
+  focused regression after the lint cleanup.
+- Swift full suite: **391 tests passed in 52 suites**, warnings treated as
+  errors. The native executable built with warnings denied.
+- Real isolated daemon and production capture consumer: all six filter types
+  and every pass slope matched independent response calculations at 1 kHz and
+  250 Hz. A +6 dB bell measured **+6.00000001 dB** at its center; each Butterworth
+  pass slope measured approximately **−3.0103 dB** at cutoff. Enabled flat and
+  disabled nonflat curves each preserved **96,000 frames** bit-for-bit.
+- Actual live editing retained all **288,000 frames**, preserved early buffered
+  PCM at unity, and reached **+6.00000001 dB** late in the capture, with zero
+  reported underruns. Real-daemon smoke also verified legacy database migration,
+  preset save/rename/delete/restart, invalid input, and injected persistence
+  failures leaving active and published settings unchanged.
+  Evidence: `target/parametric-smoke/run-6w9nqeb9/report.json`.
+- Native Accessibility smoke and daemon/app restart passed: graph mouse drag,
+  all filter controls/slopes, band rows and independent bypass, 16-band limit,
+  remove/reset, exact untouched numeric values, compensation, preset overwrite/
+  rename/recall/delete, disconnect cancellation and authoritative restoration.
+  Two byte-distinct NFC/NFD preset names recalled their distinct curves.
+  Final evidence: `target/parametric-ui/run-rzppxip4/`; initial/restored windows
+  and a 19.5 kHz, Q=18 notch were captured and visually inspected. Axis labels
+  follow their logarithmic positions without overlapping the gain labels.
+- Independent standards/spec reviews found and then confirmed fixes for
+  canonical-Unicode preset identity and undersampled narrow graph extrema.
+  Native smoke caught a SwiftUI stale-index crash when resetting populated
+  presets; picker/list rendering now captures its input collection, and the
+  full native sequence passes.
+  Throwaway orchestration scripts were removed; the native smoke hook and
+  regression tests remain reproducible.
+
+Evidence paths are local to the feature worktree. Capture output is not acoustic
+listening or hardware-loopback proof; no release-package/DMG claim. The user's
+running app, daemon, database and original working-tree changes were untouched.
+
 ## Tracker modules (2026-10-21)
 
 Implemented `TSK-blithe-vat-1f8b1` on `feature/blithe-vat-trackers`, branched from
