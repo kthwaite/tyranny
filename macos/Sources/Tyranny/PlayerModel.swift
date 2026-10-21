@@ -18,6 +18,7 @@ final class PlayerModel {
     private(set) var playbackSession: UInt64 = 0
     let artwork = ArtworkStore()
     let lyrics = LyricsStore()
+    let devices = DeviceSyncModel()
     let notifications = TrackNotifications()
     /// Transport commands and the player bar display. Owns the system media controls.
     let transport = TransportModel()
@@ -256,6 +257,7 @@ final class PlayerModel {
     }
 
     func start() {
+        devices.start()
         guard !wantsConnection else { return }
         wantsConnection = true
         connectLoop()
@@ -377,6 +379,7 @@ final class PlayerModel {
     private func accept(_ state: ControlState, newInstance: Bool) {
         if !newInstance, let previous = snapshot, state.sequence < previous.sequence { return }
         let previous = snapshot
+        if newInstance || previous?.library.revision != state.library.revision { devices.libraryChanged() }
         snapshot = state
         notifications.receive(state, newSession: newInstance, artwork: artwork)
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
@@ -686,7 +689,8 @@ extension PlayerModel {
 
     /// Starts a track-list drag. The rows travel as a selection: IDs for a small loaded
     /// selection, otherwise the list description with ranges (spec 5.2).
-    func beginSelectionDrag(_ selection: TrackSelection, count: Int, label: String, trackIDs: [UInt64]? = nil) -> String? {
+    func beginSelectionDrag(_ selection: TrackSelection, count: Int, label: String, trackIDs: [UInt64]? = nil,
+                            paths: [String]? = nil) -> String? {
         guard canMutate, count > 0, snapshot != nil else { return nil }
         let revision: UInt64
         switch selection {
@@ -695,7 +699,7 @@ extension PlayerModel {
         }
         let drag = TrackDrag(token: UUID().uuidString, connection: playlistSession, source: .library,
             ids: [], positions: [], revision: revision, libraryRevision: revision,
-            selection: selection, count: count, label: label, trackIDs: trackIDs)
+            selection: selection, count: count, label: label, trackIDs: trackIDs, paths: paths)
         activeDrag = drag
         return drag.token
     }
@@ -793,6 +797,49 @@ extension PlayerModel {
         guard validateTrackDrop(token: token, destination: destination), let drag = activeDrag,
               let selection = drag.selection else { return false }
         return dropSelection(selection, of: drag, on: destination)
+    }
+
+    var hasLocalLibrary: Bool {
+        guard let url = URLComponents(string: endpoint) else { return false }
+        return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(url.host ?? "")
+    }
+
+    /// Device drops copy files; they never reorder or remove the source selection.
+    @discardableResult
+    func dropTracksOnDevice(token: String, deviceID: String) -> Bool {
+        guard hasLocalLibrary, !devices.busy, devices.device(deviceID) != nil,
+              validateTrackDrop(token: token, destination: nil), let drag = activeDrag,
+              let selection = drag.selection else { return false }
+        activeDrag = nil
+        Task {
+            do {
+                guard snapshot?.library.revision == drag.libraryRevision else {
+                    throw DeviceSyncFailure("The library changed. Start a new drag; nothing was copied.")
+                }
+                let paths: [String]
+                if let loaded = drag.paths {
+                    paths = loaded
+                } else {
+                    paths = try await DeviceTrackResolver.paths(selection: selection) { list, revision, offset, limit in
+                        guard self.connected, self.playlistSession == drag.connection else {
+                            throw DeviceSyncFailure("The server connection changed. Nothing was copied.")
+                        }
+                        return try await self.listTracks([
+                            "list": try JSONValue.encoding(list), "revision": .uint(revision),
+                            "offset": .int(offset), "limit": .int(limit)])
+                    }
+                }
+                guard connected, playlistSession == drag.connection,
+                      snapshot?.library.revision == drag.libraryRevision else {
+                    throw DeviceSyncFailure("The library changed while resolving the selection. Nothing was copied.")
+                }
+                guard !paths.isEmpty else { throw DeviceSyncFailure("No local songs were selected.") }
+                await devices.sync(deviceID: deviceID, paths: paths)
+            } catch {
+                devices.error = error.localizedDescription
+            }
+        }
+        return true
     }
 }
 

@@ -24,6 +24,8 @@ struct TrackDrag {
     var label = ""
     /// The track IDs of the dragged rows, when all were loaded and there are at most 500.
     var trackIDs: [UInt64]?
+    /// Captured only when every selected row is loaded and locally available.
+    var paths: [String]?
 }
 
 /// Public native destinations also work in toolbar items and during AppKit tracking.

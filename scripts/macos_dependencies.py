@@ -76,7 +76,8 @@ def inventory(executables, approve=None):
 
 # Only these source-built libraries are approved for release redistribution.
 # libopenmpt uses Apple's system libc++; no external C++ runtime is permitted.
-NATIVE_DYLIB = re.compile(r"lib(?:avcodec|avformat|avutil|swresample|openmpt)(?:\.\d+)*\.dylib")
+NATIVE_DYLIB = re.compile(r"lib(?:avcodec|avformat|avutil|swresample|openmpt|usb-1\.0)(?:\.\d+)*\.dylib")
+USB_DYLIB = re.compile(r"libusb-1\.0(?:\.\d+)*\.dylib")
 
 
 def within(path, directory):
@@ -93,12 +94,18 @@ def mutate(arguments, path):
                    stdout=sys.stderr, stderr=sys.stderr, timeout=30)
 
 
-def bundle(app, prefix):
+def bundle(app, prefix, mtp_prefix=None):
     app = app.resolve(strict=True)
     prefix = prefix.resolve(strict=True)
     library_root = (prefix / "lib").resolve(strict=True)
     if not within(library_root, prefix) or not library_root.is_dir():
         raise ValueError(f"FFmpeg library directory escapes prefix: {library_root}")
+    usb_root = None
+    if mtp_prefix is not None:
+        mtp_prefix = mtp_prefix.resolve(strict=True)
+        usb_root = (mtp_prefix / "lib").resolve(strict=True)
+        if not within(usb_root, mtp_prefix) or not usb_root.is_dir():
+            raise ValueError(f"libusb library directory escapes prefix: {usb_root}")
     macos = app / "Contents/MacOS"
     frameworks = app / "Contents/Frameworks"
     resources = app / "Contents/Resources"
@@ -115,15 +122,21 @@ def bundle(app, prefix):
     for path in existing:
         if not path.is_file() or path.is_symlink() or not NATIVE_DYLIB.fullmatch(path.name):
             raise ValueError(f"Unapproved existing Frameworks entry: {path}")
-    roots = executables + existing
+    # Follow live executable dependencies, not obsolete copies from a prior build.
+    # Already-bundled executables still reach Frameworks through their load commands.
+    roots = executables
     executable_set = set(executables)
     existing_set = set(existing)
 
     def approve_source(path):
         if path in executable_set or path in existing_set:
             return
+        if USB_DYLIB.fullmatch(path.name):
+            if usb_root is not None and within(path, usb_root):
+                return
+            raise ValueError(f"Unapproved libusb dependency (expected pinned MTP prefix): {path}")
         if not within(path, library_root) or not NATIVE_DYLIB.fullmatch(path.name):
-            raise ValueError(f"Unapproved non-system dependency (expected pinned FFmpeg/libopenmpt under {library_root}): {path}")
+            raise ValueError(f"Unapproved non-system dependency (expected pinned native prefixes): {path}")
 
     original = inventory(roots, approve=approve_source)
     if original["unresolved"]:
@@ -137,7 +150,7 @@ def bundle(app, prefix):
         previous = owners.get(destination)
         if previous is not None and previous != source:
             raise ValueError(f"Dylib basename collision: {previous} and {source}")
-        if destination != source and destination.exists():
+        if destination != source and destination.exists() and destination not in existing_set:
             raise ValueError(f"Dylib destination already exists: {destination}")
         owners[destination] = source
         destinations[source] = destination
@@ -201,6 +214,10 @@ def bundle(app, prefix):
             if edge["install_name"] != expected:
                 raise ValueError(f"Nonportable bundled dependency: {edge}")
 
+    # Only previously validated native build outputs can be obsolete here.
+    for path in existing_set - set(owners):
+        path.unlink()
+
     # Validate before signing: install_name_tool invalidates existing signatures.
     for path in sorted(owners):
         if path.parent == frameworks:
@@ -239,18 +256,19 @@ def main():
     parser.add_argument("--output")
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--prefix", type=Path)
+    parser.add_argument("--mtp-prefix", type=Path)
     parser.add_argument("binaries", nargs="*")
     args = parser.parse_args()
     if args.bundle is not None:
         if args.prefix is None or args.output is not None or args.binaries:
             parser.error("--bundle requires --prefix and cannot be combined with --output or binaries")
         try:
-            report = bundle(args.bundle, args.prefix)
+            report = bundle(args.bundle, args.prefix, args.mtp_prefix)
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             raise SystemExit(f"Native dependency bundling failed: {error}") from error
         print(f"Bundled native dependencies: {len(report['non_system_images'])} images", file=sys.stderr)
         return
-    if args.prefix is not None or args.output is None or not args.binaries:
+    if args.prefix is not None or args.mtp_prefix is not None or args.output is None or not args.binaries:
         parser.error("inventory requires --output and one or more binaries")
     report = inventory([Path(value) for value in args.binaries])
     Path(args.output).write_text(json.dumps(report, indent=2) + "\n")

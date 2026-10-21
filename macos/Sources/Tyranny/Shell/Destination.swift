@@ -4,6 +4,7 @@ import TyrannyCore
 /// and preferences (`group.<key>`).
 enum Destination: Hashable {
     case songs, albums, artists, genres, recent, upNext, history, stats, radio, playlist(UInt64)
+    case device(String)
 
     static let library: [Destination] = [.songs, .albums, .artists, .genres, .recent]
     static let playing: [Destination] = [.upNext, .history, .stats, .radio]
@@ -20,6 +21,7 @@ enum Destination: Hashable {
         case .stats: "stats"
         case .radio: "radio"
         case .playlist(let id): "playlist-\(id)"
+        case .device(let id): "device-\(id)"
         }
     }
 
@@ -37,6 +39,7 @@ enum Destination: Hashable {
         case .stats: "Stats"
         case .radio: "Radio"
         case .playlist: "Playlist"
+        case .device: "Device"
         }
     }
 
@@ -52,6 +55,7 @@ enum Destination: Hashable {
         case .stats: "chart.bar"
         case .radio: "dot.radiowaves.left.and.right"
         case .playlist: "music.note.list"
+        case .device: "ipod"
         }
     }
 
@@ -60,7 +64,7 @@ enum Destination: Hashable {
     var defaultGrouping: Grouping {
         switch self {
         case .recent, .artists, .genres: .album
-        case .songs, .albums, .upNext, .history, .stats, .radio, .playlist: .none
+        case .songs, .albums, .upNext, .history, .stats, .radio, .playlist, .device: .none
         }
     }
 
