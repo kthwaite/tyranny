@@ -1,5 +1,5 @@
 //! Aggregates play rows into a `StatsReport` for one period.
-#![allow(dead_code)] // Task 7 uses this
+#![allow(dead_code)] // Task 8 uses this
 use super::{
     period::{Bounds, Zone, buckets, local},
     rows::{LibraryIndex, PlayRow, artist_key},
@@ -52,9 +52,9 @@ impl Default for Thresholds {
 
 /// How often each spelling of one key was played, and when it last was.
 #[derive(Default)]
-struct Names(HashMap<String, (u64, i64)>);
+pub(crate) struct Names(HashMap<String, (u64, i64)>);
 impl Names {
-    fn add(&mut self, spelling: &str, played_at: i64) {
+    pub(crate) fn add(&mut self, spelling: &str, played_at: i64) {
         let slot = self
             .0
             .entry(spelling.trim().to_string())
@@ -63,7 +63,7 @@ impl Names {
         slot.1 = slot.1.max(played_at);
     }
     /// The most frequent spelling. Ties go to the latest play.
-    fn display(&self) -> String {
+    pub(crate) fn display(&self) -> String {
         self.0
             .iter()
             .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
@@ -73,27 +73,121 @@ impl Names {
 }
 
 #[derive(Default)]
-struct ArtistTally {
-    plays: u64,
-    listened_ms: u64,
+pub(crate) struct ArtistTally {
+    pub plays: u64,
+    pub listened_ms: u64,
     last_played: i64,
-    names: Names,
+    pub names: Names,
     /// Counted plays by track key, for plays with a title.
     tracks: HashMap<String, (u64, Names)>,
 }
 
 #[derive(Default)]
-struct TrackTally {
-    plays: u64,
-    listened_ms: u64,
-    started: u64,
-    skips: u64,
-    artist: Names,
-    title: Names,
+pub(crate) struct TrackTally {
+    pub plays: u64,
+    pub listened_ms: u64,
+    pub started: u64,
+    pub skips: u64,
+    pub artist: Names,
+    pub title: Names,
+}
+
+/// Per-key tallies of a set of rows. Plays count only counted rows. Listened time sums every
+/// timed row.
+#[derive(Default)]
+pub(crate) struct Tallies {
+    pub artists: HashMap<String, ArtistTally>,
+    pub tracks: HashMap<(String, String), TrackTally>,
+}
+impl Tallies {
+    /// Tallies one row. Returns whether the play started and whether it was a skip.
+    /// A play is started unless it is radio, from before schema 8, or a skim.
+    pub(crate) fn add(&mut self, row: &PlayRow, thresholds: &Thresholds) -> (bool, bool) {
+        let artist = artist_key(&row.artist);
+        let title = artist_key(&row.title);
+        let ms = row.listened_ms.unwrap_or(0);
+        if !artist.is_empty() {
+            let tally = self.artists.entry(artist.clone()).or_default();
+            tally.plays += u64::from(row.counted);
+            tally.listened_ms += ms;
+            tally.names.add(&row.artist, row.played_at);
+        }
+        let started = !row.radio && row.listened_ms.is_some_and(|ms| ms >= thresholds.skim_ms);
+        let skipped = started && !row.counted && row.end_reason == Some(EndReason::Skipped);
+        if !title.is_empty() {
+            let tally = self.tracks.entry((artist, title)).or_default();
+            tally.plays += u64::from(row.counted);
+            tally.listened_ms += ms;
+            tally.started += u64::from(started);
+            tally.skips += u64::from(skipped);
+            tally.artist.add(&row.artist, row.played_at);
+            tally.title.add(&row.title, row.played_at);
+        }
+        (started, skipped)
+    }
+}
+
+/// By plays, only entries with a counted play. By time, any entry with listened time.
+pub(crate) fn listed(plays: u64, listened_ms: u64, by_time: bool) -> bool {
+    plays > 0 || (by_time && listened_ms > 0)
+}
+
+/// A ranking entry for a track: its sort key, plays, listened time and the wire value.
+pub(crate) fn ranked_track(
+    key: &(String, String),
+    tally: &TrackTally,
+    library: &LibraryIndex,
+) -> (String, u64, u64, RankedTrack) {
+    (
+        format!("{}\n{}", key.0, key.1),
+        tally.plays,
+        tally.listened_ms,
+        RankedTrack {
+            title: tally.title.display(),
+            artist: tally.artist.display(),
+            plays: tally.plays,
+            listened_ms: tally.listened_ms,
+            track_id: library.tracks.get(key).copied(),
+        },
+    )
+}
+
+/// Listened time per station, most first, ties by name.
+pub(crate) fn station_list(stations: HashMap<&str, u64>) -> Vec<StationTime> {
+    let mut stations: Vec<_> = stations
+        .into_iter()
+        .map(|(name, listened_ms)| StationTime {
+            name: name.to_string(),
+            listened_ms,
+        })
+        .collect();
+    stations.sort_by(|a, b| {
+        b.listened_ms
+            .cmp(&a.listened_ms)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    stations
+}
+
+/// Whole days from the first counted play to `now`.
+pub(crate) fn span_days(first_play: Option<i64>, now: i64) -> u64 {
+    first_play.map_or(0, |first| (now - first).max(0) as u64 / 86_400)
+}
+
+/// The lapsed-love gap G, in days, for a history of `span_days`.
+pub(crate) fn lapsed_gap_days(span_days: u64, thresholds: &Thresholds) -> u64 {
+    (span_days / 4).clamp(
+        thresholds.lapsed_gap_min_days,
+        thresholds.lapsed_gap_max_days,
+    )
 }
 
 /// Ranks `items` by plays or by time, each breaking ties by the other and then by key.
-fn rank<T>(mut items: Vec<(String, u64, u64, T)>, by_time: bool, limit: usize) -> Vec<T> {
+pub(crate) fn rank<T>(
+    mut items: Vec<(String, u64, u64, T)>,
+    by_time: bool,
+    limit: usize,
+) -> Vec<T> {
     items.sort_by(|a, b| {
         let (a_main, a_other, b_main, b_other) = if by_time {
             (a.2, a.1, b.2, b.1)
@@ -130,13 +224,10 @@ pub(crate) fn report(
     let mut heatmap = vec![[0u64; 24]; 7];
     let (mut plays, mut listened_ms, mut untimed_plays) = (0, 0, 0);
     let (mut started, mut skips) = (0u64, 0u64);
-    let mut artists: HashMap<String, ArtistTally> = HashMap::new();
-    let mut tracks: HashMap<(String, String), TrackTally> = HashMap::new();
+    let mut tallies = Tallies::default();
     let mut stations: HashMap<&str, u64> = HashMap::new();
 
     for row in rows.iter().filter(in_period) {
-        let artist = artist_key(&row.artist);
-        let title = artist_key(&row.title);
         if let Some(ms) = row.listened_ms {
             listened_ms += ms;
             let bucket = buckets.partition_point(|&start| start <= row.played_at);
@@ -149,33 +240,15 @@ pub(crate) fn report(
                 *stations.entry(station).or_default() += ms;
             }
         }
-        let ms = row.listened_ms.unwrap_or(0);
         if row.counted {
             plays += 1;
             untimed_plays += u64::from(row.listened_ms.is_none());
         }
-        // Plays count only counted rows, but listened time sums every timed row.
-        if !artist.is_empty() {
-            let tally = artists.entry(artist.clone()).or_default();
-            tally.plays += u64::from(row.counted);
-            tally.listened_ms += ms;
-            tally.names.add(&row.artist, row.played_at);
-        }
-        // A play is started unless it is radio, from before schema 8, or a skim.
-        let play_started = !row.radio && row.listened_ms.is_some_and(|ms| ms >= thresholds.skim_ms);
-        let skipped = play_started && !row.counted && row.end_reason == Some(EndReason::Skipped);
+        let (play_started, skipped) = tallies.add(row, thresholds);
         started += u64::from(play_started);
         skips += u64::from(skipped);
-        if !title.is_empty() {
-            let tally = tracks.entry((artist, title)).or_default();
-            tally.plays += u64::from(row.counted);
-            tally.listened_ms += ms;
-            tally.started += u64::from(play_started);
-            tally.skips += u64::from(skipped);
-            tally.artist.add(&row.artist, row.played_at);
-            tally.title.add(&row.title, row.played_at);
-        }
     }
+    let Tallies { artists, tracks } = tallies;
 
     let ranked_artist = |key: &String, tally: &ArtistTally| {
         (
@@ -190,9 +263,6 @@ pub(crate) fn report(
             },
         )
     };
-    // By plays, only entries with a counted play. By time, any entry with listened time.
-    let listed =
-        |plays: u64, listened_ms: u64, by_time: bool| plays > 0 || (by_time && listened_ms > 0);
     let artist_list = |by_time| {
         let items = artists
             .iter()
@@ -202,25 +272,11 @@ pub(crate) fn report(
         rank(items, by_time, limit)
     };
     let counted_tracks: Vec<_> = tracks.iter().filter(|(_, tally)| tally.plays > 0).collect();
-    let ranked_track = |key: &(String, String), tally: &TrackTally| {
-        (
-            format!("{}\n{}", key.0, key.1),
-            tally.plays,
-            tally.listened_ms,
-            RankedTrack {
-                title: tally.title.display(),
-                artist: tally.artist.display(),
-                plays: tally.plays,
-                listened_ms: tally.listened_ms,
-                track_id: library.tracks.get(key).copied(),
-            },
-        )
-    };
     let track_list = |by_time| {
         let items = tracks
             .iter()
             .filter(|(_, t)| listed(t.plays, t.listened_ms, by_time))
-            .map(|(k, t)| ranked_track(k, t))
+            .map(|(k, t)| ranked_track(k, t, library))
             .collect();
         rank(items, by_time, limit)
     };
@@ -286,30 +342,16 @@ pub(crate) fn report(
         })
         .collect();
 
-    let mut stations: Vec<_> = stations
-        .into_iter()
-        .map(|(name, listened_ms)| StationTime {
-            name: name.to_string(),
-            listened_ms,
-        })
-        .collect();
-    stations.sort_by(|a, b| {
-        b.listened_ms
-            .cmp(&a.listened_ms)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    let stations = station_list(stations);
 
-    let span_days = first_play.map_or(0, |first| (now - first).max(0) as u64 / 86_400);
+    let span_days = span_days(first_play, now);
     let scaled = thresholds.scale_plays * span_days.min(thresholds.scale_span_days)
         / thresholds.scale_span_days;
     let artist_id = |key: &String| library.artists.get(key).copied();
 
     let mut lapsed: Vec<_> = Vec::new();
     if span_days >= thresholds.lapsed_min_span_days {
-        let gap_days = (span_days / 4).clamp(
-            thresholds.lapsed_gap_min_days,
-            thresholds.lapsed_gap_max_days,
-        );
+        let gap_days = lapsed_gap_days(span_days, thresholds);
         let cutoff = now - gap_days as i64 * 86_400;
         let min_plays = thresholds.lapsed_plays_floor.max(scaled);
         lapsed = history

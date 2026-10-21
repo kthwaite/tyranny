@@ -105,3 +105,63 @@ pub struct StatsReport {
     pub shallow_dives: Vec<ShallowDive>,
     pub history_span_days: u64,
 }
+
+/// An artist in the Wrapped top list. `share` is the artist's part of the year's listened time.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct WrappedArtist {
+    pub name: String,
+    pub plays: u64,
+    pub listened_ms: u64,
+    pub share: f64,
+}
+
+/// The artist first heard this year with the most listened time. `first_played` is UTC seconds.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Discovery {
+    pub name: String,
+    pub first_played: i64,
+    pub plays: u64,
+    pub listened_ms: u64,
+}
+
+/// The busiest weekday (0 = Monday) and the busiest 3-hour band, which starts at 0, 3, ... 21.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PeakTime {
+    pub weekday: u8,
+    pub band_start_hour: u8,
+}
+
+/// A lapsed love that returned this year after `gap_days` of silence.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Comeback {
+    pub name: String,
+    pub plays: u64,
+    pub gap_days: u64,
+}
+
+/// One month of the year. `month` is 1 to 12.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MonthTop {
+    pub month: u8,
+    pub listened_ms: u64,
+    pub top_artist: Option<String>,
+}
+
+/// Every candidate data point for one calendar year. `through` is UTC seconds.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct WrappedReport {
+    pub year: i32,
+    pub through: i64,
+    pub listened_ms: u64,
+    pub plays: u64,
+    pub artists: u64,
+    pub tracks: u64,
+    pub top_artists: Vec<WrappedArtist>,
+    pub top_tracks: Vec<RankedTrack>,
+    pub discovery: Option<Discovery>,
+    pub peak_time: Option<PeakTime>,
+    pub most_skipped: Option<SkippedTrack>,
+    pub comeback: Option<Comeback>,
+    pub top_station: Option<StationTime>,
+    pub months: Option<Vec<MonthTop>>,
+}
