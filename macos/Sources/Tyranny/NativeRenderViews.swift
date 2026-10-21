@@ -271,10 +271,10 @@ enum NativeRenderViews {
     /// Settings lives in its own scene; render its tabs in an off-screen hosting view.
     private static func renderSettings(_ model: PlayerModel, _ navigation: NavigationModel, into output: URL) -> String {
         var lines: [String] = []
-        for (tab, name) in [(SettingsTab.connection, "12-settings-connection"), (.library, "13-settings-library"),
-                            (.playback, "14-settings-playback")] {
+        func renderTab(_ tab: SettingsTab, _ name: String, appearance: NSAppearance? = nil) {
             navigation.settingsTab = tab
             let host = NSHostingView(rootView: SettingsView(model: model, navigation: navigation).colourTheme(model.theme))
+            host.appearance = appearance
             let size = host.fittingSize
             host.frame = NSRect(origin: .zero, size: NSSize(width: max(size.width, 600), height: max(size.height, 200)))
             let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
@@ -282,6 +282,20 @@ enum NativeRenderViews {
             host.layoutSubtreeIfNeeded()
             lines.append(write(host, name, into: output))
         }
+        for (tab, name) in [(SettingsTab.connection, "12-settings-connection"), (.library, "13-settings-library"),
+                            (.playback, "14-settings-playback")] {
+            renderTab(tab, name)
+        }
+        let light = NSAppearance(named: .aqua)
+        renderTab(.appearance, "26-settings-appearance", appearance: light)
+        let saved = model.theme.settings
+        var custom = ColourSettings()
+        custom[.accent] = RGB(hex: "#FFE066")
+        custom[.error] = RGB(hex: "#000080")
+        model.theme.update(custom)
+        renderTab(.appearance, "27-settings-appearance-custom", appearance: light)
+        renderTab(.appearance, "28-settings-appearance-dark", appearance: NSAppearance(named: .darkAqua))
+        model.theme.update(saved)
         return lines.joined(separator: "\n")
     }
 }

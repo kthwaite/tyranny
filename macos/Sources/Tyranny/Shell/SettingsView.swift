@@ -1,7 +1,7 @@
 import SwiftUI
 import TyrannyCore
 
-/// The Settings window (⌘,): Connection, Library and Playback.
+/// The Settings window (⌘,): Connection, Library, Playback and Appearance.
 struct SettingsView: View {
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
@@ -17,6 +17,9 @@ struct SettingsView: View {
             PlaybackSettingsPane(transport: model.transport, notifications: model.notifications)
                 .tabItem { Label("Playback", systemImage: "play.circle") }
                 .tag(SettingsTab.playback)
+            AppearanceSettingsPane(theme: model.theme)
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
+                .tag(SettingsTab.appearance)
         }
         .frame(width: 600)
         .accessibilityIdentifier("settings")
