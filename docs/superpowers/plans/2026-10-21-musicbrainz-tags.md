@@ -10,10 +10,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-21-musicbrainz-tags-design.md` (binding; read it with this plan).
 
+**Spec amendments** (accepted at preflight; the controller amends the spec separately):
+
+- **ID3 in FLAC.** The spec says to remove a written field from "ID3 in FLAC". lofty 0.25.4 can only strip ID3v2 in FLAC, APE and Musepack (and ID3v1 in Musepack) whole. So a file whose read-only tag holds a changed field is not writable (decision 3).
+- **Normalisation.** lofty's normalisation of untouched items is accepted (decision 5), although the spec says "Other fields are never touched". Their values must survive.
+- **Fixtures.** The MusicBrainz and AcoustID fixtures are hand-written to the documented response shapes. They are not recorded from live traffic, although the spec's Verification says "recorded".
+
 **Decisions this plan adds where the spec leaves room** (a reviewer may reject any of them):
 
 1. **Current value of a field** = the value at the field's primary key in the primary tag. When that is absent, the first alias or other-tag copy (lofty tag order) is used. The journal "before" is the primary value only. The copies that will be removed are journalled separately.
-2. **ID3v2 recording ID** lives in `TXXX:MusicBrainz Track Id`, because FFmpeg reads it there. `UFID:http://musicbrainz.org` is treated as its alias, as the spec's alias example implies.
+2. **ID3v2 recording ID** lives in `TXXX:MusicBrainz Track Id`, because FFmpeg reads it there. `UFID:http://musicbrainz.org` is treated as its alias, as the spec's alias example implies. lofty already maps `ItemKey::MusicBrainzRecordingId` to that UFID frame, so the alias is the field's `CopyKey::Field` copy, not a raw alias.
 3. **Read-only secondary tags.** lofty can only strip ID3v2 in FLAC, APE and Musepack whole. If such a tag holds a field the proposal changes, the file is not writable. Its reason reads "Has an old ID3 tag Tyranny can't edit".
 4. **MOV** is MP4 to lofty. A file whose `ftyp` major brand is `qt  ` is not writable.
 5. **lofty's own normalisation of untouched items is accepted.** Examples: canonical key spelling such as `TOTALTRACKS` → `TRACKTOTAL`, and ID3v2.4 output. Their values must survive. ID3v2.3 files stay v2.3.
@@ -32,12 +38,12 @@
 - Work only in the worktree `/Users/kit/Source/_p.music/tyranny-musicbrainz`, on branch `feature/musicbrainz-tags` (cut from `dev`). It merges back into `dev` after the final review. Never commit to `prod`.
 - Dependencies, added to `Cargo.toml` exactly as written: `lofty = "0.25.4"` and `rusty-chromaprint = "0.3.0"`. `base64` and `serde_json` are already present. Add no other crates.
 - Protocol version goes 12 → 13 in Task 10, in the same commit as every hard-coded 12:
-  - `src/protocol.rs:16` and the `assert_eq!(VERSION, 12)` in `v9_list_commands_require_every_field`;
+  - `src/protocol.rs:1` (the module comment "Version 12 local control protocol"), `src/protocol.rs:16`, and the `assert_eq!(VERSION, 12)` in `v9_list_commands_require_every_field`;
   - `macos/Sources/TyrannyCore/WireModels.swift:6` (`tests/swift_constants.rs` checks it);
   - `scripts/playlist_gate.py:59,64`, `scripts/server_gate.py:26` and `scripts/smart_playlist_gate.py:63`;
   - `SPIKE.md:9,89`;
-  - the comment in `macos/Sources/TyrannyCore/StationCatalog.swift:4`, left as "(protocol v12)" because stations arrived in v12.
-  - Find them with `grep -rn "v12\|version=12\|VERSION: u32 = 12\|version: UInt32 = 12" src macos/Sources scripts SPIKE.md`.
+  - the comment in `macos/Sources/TyrannyCore/StationCatalog.swift:4`, left as "(protocol v12)" because stations arrived in v12. `src/bin/tyrannyctl.rs:46` "(protocol 12)" is historical in the same way and also stays.
+  - Find them with `grep -rn "v12\|Version 12\|version=12\|VERSION: u32 = 12\|version: UInt32 = 12" src macos/Sources scripts SPIKE.md`.
 - Wire names (snake_case JSON):
   - commands: `musicbrainz_lookup`, `apply_tags`, `tag_edits`, `revert_tag_edit`;
   - reply kinds: `tag_proposal`, `tag_apply`, `tag_edits`;
@@ -68,7 +74,8 @@
   - "lookup expired, look the album up again" and "changed since the lookup";
   - "Write Tags to N Files" (singular "Write Tags to 1 File") and "Identify by Audio Fingerprint";
   - "AcoustID API key", "Get a key at acoustid.org/new-application" and "Recent Tag Edits".
-- Until Task 10 routes the module, `src/tagging/mod.rs` starts with `#![cfg_attr(not(test), allow(dead_code))]`. Without it, clippy `-D warnings` fails on crate-private items that only tests use. Task 10 removes the attribute and fixes any dead code left.
+- Until Task 10 routes the module, `src/tagging/mod.rs` starts with an unconditional `#![allow(dead_code)]`. Without it, clippy `-D warnings` fails in two cases: crate-private items that only tests use, and items that nothing uses until Task 10 (for example `MusicBrainz::new`, `AcoustId::new`, `TaggingWorkers::start` and the `Handle.library` field). The second case also fails the `cfg(test)` build. Task 10 removes the attribute and fixes any dead code left.
+- `cargo test` accepts one `[TESTNAME]` filter. To run several filters, pass them after `--`, for example `cargo test --locked --lib -- tagging::acoustid tagging::fingerprint`.
 - Commits: one plain imperative sentence, no prefix, no attribution or Co-Authored-By lines.
 - **Gates.** Every task ends with all of these green. Run them from the worktree root.
 
@@ -118,7 +125,7 @@ Server (`src/tagging/`, declared `pub mod tagging;` in `src/lib.rs`; only `tags`
 | `test_support.rs` (cfg(test)) | loopback HTTP fixture, fixture JSON loader, tone WAV writer, library fixture |
 | `tests.rs` (cfg(test)) | engine and worker tests |
 
-Also touched: `src/protocol.rs`, `src/owner.rs`, `src/server.rs`, `src/library/{mod.rs,db.rs}`, `src/library_types.rs`, `src/scanner.rs`, `tests/ffmpeg_formats.rs`, `tests/server_transport.rs`, `tests/fixtures/musicbrainz/*.json`.
+Also touched: `src/cancel.rs` (new, shared `Cancellation`), `src/lyrics/mod.rs`, `src/protocol.rs`, `src/owner.rs`, `src/server.rs`, `src/library/{mod.rs,db.rs}`, `src/library_types.rs`, `src/scanner.rs`, `tests/ffmpeg_formats.rs`, `tests/server_transport.rs`, `tests/fixtures/musicbrainz/*.json`, `tests/fixtures/tag_roundtrip_values.json`.
 
 Client: `macos/Sources/TyrannyCore/Tagging.swift` + `macos/Tests/TyrannyCoreTests/TaggingTests.swift`; `macos/Sources/Tyranny/Models/TaggingModel.swift`; `macos/Sources/Tyranny/Views/TagLookupSheet.swift`; edits to `WireClient.swift`, `PlayerModel.swift`, `Shell/MainWindowView.swift`, `Shell/SettingsView.swift`, `Albums/AlbumGridItem.swift`, `Albums/AlbumGridView.swift`, `Lists/TrackTableInput.swift`, `Lists/VirtualTrackTable.swift`, `TyrannyCore/CommandLanguage.swift`, `CommandDispatcher.swift`.
 
@@ -129,7 +136,8 @@ Client: `macos/Sources/TyrannyCore/Tagging.swift` + `macos/Tests/TyrannyCoreTest
 **Files:**
 - Modify: `Cargo.toml`, `Cargo.lock` (via `cargo add`)
 - Modify: `src/lib.rs` (`pub mod tagging;`)
-- Create: `src/tagging/mod.rs` (only `pub mod tags;` for now), `src/tagging/tags.rs`
+- Create: `src/tagging/mod.rs` (for now only `#![allow(dead_code)]`, from the Global Constraints, and `pub mod tags;`), `src/tagging/tags.rs`
+- Create: `tests/fixtures/tag_roundtrip_values.json` (the round-trip values below)
 - Modify: `src/protocol.rs` (add `TagField` only)
 - Modify: `tests/ffmpeg_formats.rs` (round-trip tests)
 
@@ -155,8 +163,10 @@ Client: `macos/Sources/TyrannyCore/Tagging.swift` + `macos/Tests/TyrannyCoreTest
   pub enum CopyKey { Field, Year, Raw(String) } // the field's ItemKey; ItemKey::Year (a Date alias); a raw key
   #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
   pub struct TagCopy { pub tag: TagKind, pub field: TagField, pub key: CopyKey, pub value: String, pub read_only: bool }
-  pub struct FileTags { pub format: WritableFormat, pub primary_kind: TagKind,
+  pub struct FileTags { pub format: WritableFormat, pub primary_kind: TagKind, pub id3v23: bool,
       pub primary: BTreeMap<TagField, String>, pub copies: Vec<TagCopy> }
+  /// `unwritable_fields(format)` plus `ID3V23_UNWRITABLE` when `id3v23`. Lookups use this one.
+  pub fn unwritable_fields_in(tags: &FileTags) -> Vec<TagField>
   impl FileTags {
       pub fn current(&self, field: TagField) -> Option<&str>          // decision 1
       pub fn copies_of(&self, fields: &BTreeSet<TagField>) -> Vec<TagCopy>
@@ -167,7 +177,7 @@ Client: `macos/Sources/TyrannyCore/Tagging.swift` + `macos/Tests/TyrannyCoreTest
   ```
 - Raw aliases. This table is the data the spec pins; copy it as written. Raw key spelling:
   - Vorbis and APE use the item key.
-  - ID3v2 uses `TXXX:<description>` or `UFID:<owner>`.
+  - ID3v2 uses `TXXX:<description>`.
   - MP4 uses `----:<mean>:<name>`.
 
   ```rust
@@ -179,7 +189,6 @@ Client: `macos/Sources/TyrannyCore/Tagging.swift` + `macos/Tests/TyrannyCoreTest
       (TagKind::Ape, TagField::TrackTotal, "TRACKTOTAL"), (TagKind::Ape, TagField::TrackTotal, "TOTALTRACKS"),
       (TagKind::Ape, TagField::DiscTotal, "DISCTOTAL"), (TagKind::Ape, TagField::DiscTotal, "TOTALDISCS"),
       (TagKind::Ape, TagField::OriginalDate, "ORIGINALDATE"),
-      (TagKind::Id3v2, TagField::MusicbrainzRecordingId, "UFID:http://musicbrainz.org"),
       (TagKind::Id3v2, TagField::MusicbrainzReleaseId, "TXXX:MusicBrainz Release Id"),
       (TagKind::Id3v2, TagField::TrackTotal, "TXXX:TRACKTOTAL"), (TagKind::Id3v2, TagField::TrackTotal, "TXXX:TOTALTRACKS"),
       (TagKind::Id3v2, TagField::DiscTotal, "TXXX:DISCTOTAL"), (TagKind::Id3v2, TagField::DiscTotal, "TXXX:TOTALDISCS"),
@@ -194,9 +203,17 @@ Client: `macos/Sources/TyrannyCore/Tagging.swift` + `macos/Tests/TyrannyCoreTest
   ```
   `ItemKey::Year` (`CopyKey::Year`) is an alias of `Date` in every tag kind.
 
+  UFID is not a raw alias. lofty maps `ItemKey::MusicBrainzRecordingId` to the `UFID` frame owned by `http://musicbrainz.org` (`id3/v2/tag.rs:775-780`), so it is already the field's `CopyKey::Field` copy. A raw entry would list the same frame twice. Never remove UFID frames with `FrameList::remove(&FrameId)`: that removes the frames of every owner.
+
+  ```rust
+  /// ID3v2.3 writes TDOR as TORY (year only), so these fields cannot round-trip in a v2.3 file.
+  /// Step 2's v2.3 test decides the list; it starts as [OriginalDate].
+  const ID3V23_UNWRITABLE: &[TagField] = &[TagField::OriginalDate];
+  ```
+
 - [ ] **Step 1: Add the dependencies**
 
-Run `cargo add lofty@0.25.4 rusty-chromaprint@0.3.0`. If the index is unreachable, add `--offline`; both crates are in the local registry. Then check that `Cargo.toml` reads `lofty = "0.25.4"` and `rusty-chromaprint = "0.3.0"`, and that `cargo build --locked` succeeds.
+Run `cargo add lofty@0.25.4 rusty-chromaprint@0.3.0`. This needs network: the local registry has both crates but not their dependencies (`lofty_attr`, `ogg_pager`, `rubato`, `rustfft`, …). Do not use `--offline`. If the index is unreachable, stop and report it. Then check that `Cargo.toml` reads `lofty = "0.25.4"` and `rusty-chromaprint = "0.3.0"`, and that `cargo build --locked` succeeds.
 
 - [ ] **Step 2: Write the failing unit tests in `src/tagging/tags.rs`**
 
@@ -208,26 +225,33 @@ Each test copies a fixture from `tests/fixtures/formats/` into a temp dir. The t
   - After setting the 3 fields: the returned removed copies equal the pre-read `copies_of`.
   - `crate::metadata::probe` returns title "New Title", artist "New Artist", album "New Album".
   - lofty finds no copies.
-- `vorbis_release_id_alias_is_removed`: FLAC with raw `MUSICBRAINZ_RELEASEID=old`; after setting `MusicbrainzReleaseId`, `probe(..).musicbrainz_release_id == Some(new)` and the raw key is gone.
-- `id3_recording_id_is_written_as_txxx_and_ufid_is_removed`: MP3 tagged through lofty's generic `ItemKey::MusicBrainzRecordingId`, which lofty writes as a UFID `http://musicbrainz.org` frame. After writing, the `TXXX:MusicBrainz Track Id` value equals the new ID, no UFID frame remains, and `probe(..).musicbrainz_recording_id == Some(new)`.
+- `vorbis_release_id_alias_is_removed`: FLAC with raw `MUSICBRAINZ_RELEASEID=old`. Before writing, `read_tags(..).copies` lists it as a `CopyKey::Raw` copy. After setting `MusicbrainzReleaseId`, the returned removed copies contain it, `probe(..).musicbrainz_release_id == Some(new)`, and the raw key is gone.
+- `unmapped_items_survive_in_vorbis_and_ape`: a FLAC with Vorbis comment `ASIN=B000TEST` and an APE file with APE item `ASIN=B000TEST`. lofty maps neither key to an `ItemKey`. After setting `Title`, each file still has `ASIN=B000TEST`, read through the concrete tag.
+- `id3_recording_id_is_written_as_txxx_and_ufid_is_removed`: MP3 tagged through lofty's generic `ItemKey::MusicBrainzRecordingId`, which lofty writes as a UFID `http://musicbrainz.org` frame. After writing, the `TXXX:MusicBrainz Track Id` value equals the new ID, no UFID frame owned by `http://musicbrainz.org` remains, a UFID frame with another owner survives, and `probe(..).musicbrainz_recording_id == Some(new)`.
 - `restore_puts_removed_copies_back`: after the MP3 edit above, `edit_tags` with `set` = the before primary values and `restore` = the removed copies. The ID3v1 and APE copies read back as before.
 - `untouched_items_and_pictures_survive`: genre "Keep Genre", comment "Keep Comment" and a 1×1 PNG front cover survive setting only `Title`.
 - `read_only_id3_in_flac_is_flagged`:
   - Setup: a copy of `tone.flac` with a leading ID3v2 tag. Build an `Id3v2Tag` with title "Old Title", serialise it with `TagExt::dump_to`, and prepend the bytes.
   - `read_tags` reports a copy with `tag == TagKind::Id3v2, read_only == true`.
   - `edit_tags` that sets `Title` returns an error, and the file is unchanged.
-- `id3v23_files_stay_v23`: an MP3 whose ID3 header byte 3 is `3` still has byte 3 `== 3` after writing a title.
+- `id3v23_files_stay_v23`: `tone.mp3` is ID3v2.4 (header byte 3 is `4`). So first make a v2.3 copy: save an `Id3v2Tag` with `WriteOptions::default().use_id3v23(true)`. After writing a title, header byte 3 is still `3` and `read_tags(..).id3v23` is true.
+- `id3v23_round_trip_follows_its_deny_list`: on that v2.3 copy, `edit_tags` with every round-trip value.
+  - Every field outside `ID3V23_UNWRITABLE` reads back equal through `read_tags(..).primary`.
+  - Every field in `ID3V23_UNWRITABLE` really reads back different. For `OriginalDate` it reads back "1999".
+  - If `Date` also reads back different, add it to `ID3V23_UNWRITABLE` with a one-line comment.
 
-Round-trip values (also used in Step 6):
+Round-trip values (also used in Step 6). They live once, in `tests/fixtures/tag_roundtrip_values.json`: a JSON object keyed by the `TagField` wire names. The unit tests here and `tests/ffmpeg_formats.rs` both load it into a `BTreeMap<TagField, String>` from `env!("CARGO_MANIFEST_DIR")`. Neither copies the values into code.
 
-```rust
-const VALUES: [(TagField, &str); 16] = [(Title, "Round Trip Title ü"), (Artist, "Round Artist"), (Album, "Round Album"),
-  (AlbumArtist, "Round Album Artist"), (TrackNumber, "3"), (TrackTotal, "12"), (DiscNumber, "1"), (DiscTotal, "2"),
-  (Date, "2001-05-14"), (OriginalDate, "1999-02-01"),
-  (MusicbrainzRecordingId, "b1000000-0000-4000-8000-000000000001"), (MusicbrainzTrackId, "a1000000-0000-4000-8000-000000000001"),
-  (MusicbrainzReleaseId, "11111111-1111-4111-8111-111111111111"), (MusicbrainzReleaseGroupId, "99999999-9999-4999-8999-999999999999"),
-  (MusicbrainzArtistId, "c1000000-0000-4000-8000-000000000001"), (MusicbrainzAlbumArtistId, "c1000000-0000-4000-8000-000000000002")];
+```json
+{"title": "Round Trip Title ü", "artist": "Round Artist", "album": "Round Album",
+ "album_artist": "Round Album Artist", "track_number": "3", "track_total": "12", "disc_number": "1", "disc_total": "2",
+ "date": "2001-05-14", "original_date": "1999-02-01",
+ "musicbrainz_recording_id": "b1000000-0000-4000-8000-000000000001", "musicbrainz_track_id": "a1000000-0000-4000-8000-000000000001",
+ "musicbrainz_release_id": "11111111-1111-4111-8111-111111111111", "musicbrainz_release_group_id": "99999999-9999-4999-8999-999999999999",
+ "musicbrainz_artist_id": "c1000000-0000-4000-8000-000000000001", "musicbrainz_album_artist_id": "c1000000-0000-4000-8000-000000000002"}
 ```
+
+Below, `VALUES` means this loaded map.
 
 - [ ] **Step 3: Run them and see them fail**
 
@@ -237,10 +261,20 @@ Expected: compile errors for the missing `tags` items.
 - [ ] **Step 4: Implement `src/tagging/tags.rs`**
 
 - **Parsing:** use `Probe::new(BufReader::new(File::open(path)?)).guess_file_type()?.read()`. This detects the type from content only, never from the extension. Keep `ParseOptions` defaults: `read_cover_art` must stay on, or pictures are dropped on save. Do not call `apply_global_options`; `preserve_format_specific_items` must stay true.
+- **Vorbis comments and APE tags never go through the generic `Tag` alone.** In lofty 0.25.4, `From<VorbisComments> for Tag` and `From<ApeTag> for Tag` keep only `split_tag().1` and drop every unmapped key (`ogg/tag.rs:686-690`, `ape/tag/mod.rs:611-615`). Only ID3v2 and MP4 keep such items, in a companion tag. `TaggedFile` is built through these conversions. So a `TaggedFile` cannot see the Vorbis/APE raw aliases, and saving its generic tag deletes unmapped items such as `ASIN`.
+  - Read these tags from the concrete `AudioFile` type with `AudioFile::read_from(&mut reader, ParseOptions::new())`, through its `LoftyFile` accessors (for example `vorbis_comments()`/`vorbis_comments_mut()`, `ape()`/`ape_mut()`):
+    - Vorbis comments from `FlacFile`, `VorbisFile`, `OpusFile` or `SpeexFile`;
+    - APE tags from `ApeFile`, `MpcFile`, `WavPackFile` or `MpegFile`.
+  - Edit raw keys on the concrete tag (`VorbisComments::{get_all, remove, push}`, `ApeTag::{get, remove, insert}`).
+  - Edit `ItemKey` fields through `SplitTag::split_tag` → generic `Tag` → `MergeTag::merge_tag`. Unmapped items then stay in the remainder.
+  - Save the concrete tag with `TagExt::save_to`.
+  - FLAC keeps its pictures in `FlacFile`, not in the tag. Saving Vorbis comments to FLAC rewrites every PICTURE block from the tag's pictures (`flac/write.rs:76-80`). So first move the file's pictures into the Vorbis comments with `OggPictureStorage::insert_picture`.
+  - ID3v2, ID3v1, MP4 ilst, RIFF INFO and AIFF text use the generic `Tag` from the `TaggedFile`.
 - **`writable_format`:** map lofty `FileType` to `WritableFormat`. Return `None` for anything else, and for `Mp4` whose bytes 8..12 are `qt  `.
 - **`read_tags`:**
   - The primary tag is `TaggedFileExt::primary_tag_type()`.
-  - Read raw keys through concrete conversions of a clone of each tag: `VorbisComments::from`, `ApeTag::from`, `Id3v2Tag::from` (deref to `FrameList`: `get_user_text`, `remove_user_text`, `insert_user_text`, `remove(&FrameId)`), and `Ilst::from` (`AtomIdent::Freeform`).
+  - `id3v23` is true when the file starts with `ID3` and byte 3 is `3`.
+  - Read raw ID3v2 and MP4 keys through concrete conversions of a clone of the generic tag. Use `Id3v2Tag::from`, which derefs to `FrameList` (`get_user_text`, `remove_user_text`, `insert_user_text`), and `Ilst::from` (`AtomIdent::Freeform`). Read raw Vorbis and APE keys from the concrete tags above.
   - `read_only` is `file_type.tag_support(tag_type) == TagSupport::ReadOnly`.
   - Extra items of the primary key in the primary tag become `CopyKey::Field` copies.
 - **`edit_tags`, for each field in `set`:**
@@ -249,7 +283,7 @@ Expected: compile errors for the missing `tags` items.
   - A `None` value only removes.
 - **`edit_tags`, `restore`:** each copy goes back to its tag (create the tag when absent; `push` for `Field`/`Year`, raw insert for `Raw`).
 - **Read-only copies:** if a read-only tag holds a copy of a field in `set`, return an error. Never modify a read-only tag.
-- **Saving:** open the file read+write once. For each modified tag, `rewind` and then `TagExt::save_to(&mut file, options)`. An empty tag is saved empty, so lofty strips it. Use `options = WriteOptions::default()`, plus `.use_id3v23(true)` when the file starts with `ID3` and byte 3 is `3`. Return the copies actually removed.
+- **Saving:** open the file read+write once. For each modified tag, `rewind` and then `TagExt::save_to(&mut file, options)` on that tag (the concrete tag for Vorbis comments and APE). An empty tag is saved empty, so lofty strips it. Use `options = WriteOptions::default()`, plus `.use_id3v23(true)` when the file starts with `ID3` and byte 3 is `3`. Return the copies actually removed.
 - **`unwritable_fields`:** an empty match for now. Step 7 fills it.
 
 - [ ] **Step 5: Run the unit tests and see them pass**
@@ -296,7 +330,7 @@ Expected: PASS. A field that differs only under the release FFmpeg also goes in 
 - [ ] **Step 9: Run all gates, then commit**
 
 ```bash
-git add Cargo.toml Cargo.lock src/lib.rs src/tagging src/protocol.rs tests/ffmpeg_formats.rs
+git add Cargo.toml Cargo.lock src/lib.rs src/tagging src/protocol.rs tests/ffmpeg_formats.rs tests/fixtures/tag_roundtrip_values.json
 git commit -m "Read and write MusicBrainz tag fields with lofty"
 ```
 
@@ -394,8 +428,8 @@ git commit -m "Write tags through a verified clone and rename"
   }
   ```
 - Storage:
-  - **File:** opened like `src/lyrics/cache.rs::Cache::open`: mode 0600, `O_NOFOLLOW | O_CLOEXEC`, must be a regular file.
-  - **Identity:** `PRAGMA application_id = 0x7479_7467`, `user_version = 1`. Any other identity is refused.
+  - **File:** opened like `src/lyrics/cache.rs::Cache::open`: mode 0600, `O_NOFOLLOW | O_CLOEXEC`, must be a regular file. The open code may be duplicated from the lyrics cache; that duplication is accepted.
+  - **Identity:** `PRAGMA application_id = 0x7479_7467`, `user_version = 1`. A fresh file (`application_id` 0 and `user_version` 0) is accepted and stamped with this identity, as `lyrics/cache.rs:39` does. Any other identity is refused.
   - **Pragmas:** `journal_mode=DELETE`, `synchronous=FULL`, `foreign_keys=ON`.
   - **Tables:**
     - `edits(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, release_id TEXT NOT NULL, release_title TEXT NOT NULL, reverted INTEGER NOT NULL DEFAULT 0)`;
@@ -409,7 +443,7 @@ git commit -m "Write tags through a verified clone and rename"
 - `only_the_latest_200_edits_are_kept`: after 205 `begin`s, `load(1..=5)` is `None`, `load(6)` is `Some`, and `recent(50).len() == 50` with the newest first.
 - `file_count_excludes_failed_files`.
 - `mark_reverted_sets_the_flag`.
-- `journal_is_private_and_refuses_symlinks_and_foreign_databases`: mode 0600; a symlink path errors; a SQLite file with another `application_id` errors.
+- `journal_is_private_and_refuses_symlinks_and_foreign_databases`: mode 0600; a symlink path errors; a SQLite file with another `application_id` errors; an empty new path opens and then reads back `application_id = 0x7479_7467`.
 - `reopen_keeps_edits`.
 
 - [ ] **Step 2: Run them and see them fail**
@@ -437,19 +471,31 @@ git commit -m "Journal tag edits for revert"
 
 **Files:**
 - Create: `src/tagging/http.rs`, `src/tagging/musicbrainz.rs`, `src/tagging/test_support.rs`
+- Create: `src/cancel.rs` (declared `mod cancel;` in `src/lib.rs`)
 - Create: `tests/fixtures/musicbrainz/release-a.json`, `release-b.json`, `release-c.json`, `search.json`, `search-empty.json`
-- Modify: `src/tagging/mod.rs` (`Cancellation`, `LookupError`, module declarations)
+- Modify: `src/lyrics/mod.rs` (use `crate::cancel`), `src/tagging/mod.rs` (`check_lookup`, `LookupError`, module declarations)
 
 **Interfaces:**
-- Produces, in `mod.rs`. `Cancellation` is the same shape as `src/lyrics/mod.rs:37-62`.
+- Produces, in `src/cancel.rs` (crate-private). `Cancellation` and `CancelOnDrop` move here from `src/lyrics/mod.rs:37-68`, and lyrics and tagging both use them. Lyrics' behaviour, messages and tests stay unchanged. Lyrics keeps its own inherent `fn check(&self, deadline) -> anyhow::Result<()>`, with today's two messages, in `lyrics/mod.rs`, built on `stopped`. `use crate::cancel::{CancelOnDrop, Cancellation};` in `lyrics/mod.rs` keeps `super::Cancellation` and `Cancellation::new()` working in `discovery.rs`, `provider.rs` and the lyrics tests.
   ```rust
   #[derive(Clone)] pub(crate) struct Cancellation { stop: Arc<AtomicBool>, abandoned: Arc<AtomicBool> }
-  impl Cancellation { #[cfg(test)] pub(super) fn new() -> Self; pub(super) fn cancelled(&self) -> bool;
-      pub(super) fn check(&self, deadline: Instant) -> Result<(), LookupError> }
+  pub(crate) enum Stop { Cancelled, Expired }
+  impl Cancellation {
+      pub(crate) fn with_flags(stop: Arc<AtomicBool>, abandoned: Arc<AtomicBool>) -> Self;
+      #[cfg(test)] pub(crate) fn new() -> Self;                       // both flags false
+      pub(crate) fn cancelled(&self) -> bool;                         // stop || abandoned
+      pub(crate) fn stopped(&self, deadline: Instant) -> Option<Stop> // Cancelled first, then Expired at/after deadline
+  }
+  pub(crate) struct CancelOnDrop(pub(crate) Arc<AtomicBool>);       // sets the flag on drop
+  ```
+- Produces, in `src/tagging/mod.rs`:
+  ```rust
+  impl Cancellation { pub(super) fn check_lookup(&self, deadline: Instant) -> Result<(), LookupError> } // Cancelled / TimedOut
   #[derive(Debug)] pub(super) enum LookupError { Busy(&'static str), Cancelled, TimedOut, Failed(String) }
   // Display: Busy(s) => "{s} is busy, try again shortly", Cancelled => "lookup cancelled",
   //          TimedOut => "lookup took too long", Failed(m) => m
   ```
+  Wherever this plan says `cancel.check(deadline)` for tagging code, it means `check_lookup`.
 - Produces, in `http.rs`:
   ```rust
   pub(super) const USER_AGENT: &str = concat!("Tyranny/", env!("CARGO_PKG_VERSION"), " (https://github.com/kthwaite/tyranny)");
@@ -457,8 +503,8 @@ git commit -m "Journal tag edits for revert"
   #[derive(Clone)] pub(super) struct StartGate { next: Arc<Mutex<Instant>>, interval: Duration }
   impl StartGate { pub(super) fn new(interval: Duration) -> Self;
       pub(super) fn wait(&self, cancel: &Cancellation, deadline: Instant) -> Result<(), LookupError> }
-  pub(super) fn client(https_only: bool) -> reqwest::Result<reqwest::blocking::Client> // UA, no redirects, 3 s/6 s
-  pub(super) fn loopback_origin(origin: &str) -> anyhow::Result<Url>                    // for_test validation
+  pub(super) fn client(https_only: bool) -> reqwest::blocking::ClientBuilder // UA, no redirects, 3 s/6 s; callers .build()
+  pub(super) fn loopback_origin(origin: &str) -> anyhow::Result<Url>          // for_test validation (may duplicate lyrics' check; accepted)
   pub(super) fn get_json(client: &Client, gate: &StartGate, url: Url, service: &'static str,
       cancel: &Cancellation, deadline: Instant) -> Result<Vec<u8>, LookupError>
   ```
@@ -497,12 +543,12 @@ git commit -m "Journal tag edits for revert"
   pub(super) struct SearchHit { pub id: String, pub score: u32 }
   pub(super) fn credit_name(credits: &[Credit]) -> String              // name + joinphrase, concatenated
   impl Release { pub fn artist(&self) -> String; pub fn track_count(&self) -> u32;
-      pub fn duration_ms(&self) -> Option<u64> }                       // None if any track length is missing
+      pub fn duration_ms(&self) -> Option<u64> }  // sum of track.length.or(recording.length); None if any track has neither
   ```
   - Release URL: `<origin>ws/2/release/<id>?inc=recordings+artist-credits+release-groups+media&fmt=json`. A non-MBID `id` is refused before any request.
   - Search URL: `<origin>ws/2/release?query=<lucene>&limit=5&fmt=json`.
   - Lucene query: `release:"<title>" AND artist:"<artist>"`, plus ` AND tracks:<n>` when `tracks` is `Some`. Inside the quotes, escape `\` and `"` with a backslash.
-  - `for_test` uses `http::client(false)` with `.no_proxy()` and `loopback_origin`.
+  - `new` uses `http::client(true).build()`. `for_test` uses `http::client(false).no_proxy().build()` and `loopback_origin`.
 - Produces, in `test_support.rs` (cfg(test)):
   ```rust
   pub(super) struct HttpFixture { /* TcpListener thread, Arc<Mutex<Vec<Seen>>> */ }
@@ -522,7 +568,7 @@ git commit -m "Journal tag edits for revert"
     - one medium with 3 tracks, ids `a1000000-…-00000000000N` and recordings `b1000000-…-00000000000N`, each 250 ms;
     - track 2 credited "Fixture Artist" + " feat. " + "Guest".
   - `release-b.json`: `22222222-2222-4222-8222-222222222222`, same title, date `2003`, country `US`, 4 tracks, `first-release-date: ""`, and one track with `length: null`.
-  - `release-c.json`: `33333333-3333-4333-8333-333333333333`, 2 media of 2 tracks each.
+  - `release-c.json`: `33333333-3333-4333-8333-333333333333`, 2 media of 2 tracks each. Disc 2 track 1 has `length: null` on both the track and its recording (Task 6 tests this).
   - `search.json`: `releases` = [A score 100, B score 90].
   - `search-empty.json`: `{"created":"2026-10-21T00:00:00.000Z","count":0,"offset":0,"releases":[]}`.
 
@@ -541,23 +587,25 @@ git commit -m "Journal tag edits for revert"
 - `cancelled_lookups_send_nothing`: a pre-cancelled `Cancellation` gives `Cancelled` and the fixture saw nothing.
 - `empty_dates_are_absent`: release B has `release_group.first_release_date == None`; a `"date": ""` variant parses to `None`.
 - `non_mbid_ids_are_refused_before_http` and `for_test_rejects_non_loopback_origins`.
+- `duration_falls_back_to_recording_length`: a release whose track has `length: null` and whose recording has a length counts the recording length. Release C (no length on either) gives `None`.
+- In `src/cancel.rs`: `stopped_reports_cancel_before_deadline`: a fresh `Cancellation` before its deadline gives `None`; after `stop` it gives `Cancelled`, even past the deadline; a fresh one past its deadline gives `Expired`; dropping a `CancelOnDrop` sets its flag.
 
 - [ ] **Step 2: Run them and see them fail**
 
-Run: `cargo test --locked --lib tagging::musicbrainz`
+Run: `cargo test --locked --lib -- tagging::musicbrainz cancel`
 Expected: compile errors.
 
-- [ ] **Step 3: Implement `mod.rs` additions, `http.rs`, `musicbrainz.rs` and `test_support.rs`**
+- [ ] **Step 3: Implement `src/cancel.rs`, the lyrics switch to it, the `mod.rs` additions, `http.rs`, `musicbrainz.rs` and `test_support.rs`**
 
 - [ ] **Step 4: Run them and see them pass**
 
-Run: `cargo test --locked --lib tagging::musicbrainz`
-Expected: PASS.
+Run: `cargo test --locked --lib -- tagging::musicbrainz cancel lyrics`
+Expected: PASS, including every existing lyrics test, unchanged.
 
 - [ ] **Step 5: Run all gates, then commit**
 
 ```bash
-git add src/tagging tests/fixtures/musicbrainz
+git add src/cancel.rs src/lib.rs src/lyrics src/tagging tests/fixtures/musicbrainz
 git commit -m "Add the MusicBrainz provider with a one-second gate"
 ```
 
@@ -568,10 +616,18 @@ git commit -m "Add the MusicBrainz provider with a one-second gate"
 **Files:**
 - Create: `src/tagging/acoustid.rs`, `src/tagging/fingerprint.rs`
 - Create: `tests/fixtures/musicbrainz/acoustid.json`, `acoustid-error.json`
-- Modify: `src/tagging/test_support.rs` (`write_tone_wav`), `src/tagging/mod.rs`
+- Modify: `src/tagging/test_support.rs` (`write_tone_wav`), `src/tagging/mod.rs`, `src/tagging/http.rs` (`get_json_or_error`)
 
 **Interfaces:**
-- Consumes: `http::{StartGate, get_json, client, loopback_origin}`, `Cancellation`, `LookupError`.
+- Consumes: `http::{StartGate, get_json, client, loopback_origin}`, `Cancellation` (`check_lookup`), `LookupError`.
+- Adds, in `http.rs`:
+  ```rust
+  /// As `get_json`, but a 4xx reply whose content type is JSON returns `Ok((status, body))` instead of `Failed`.
+  /// Busy statuses, redirects, size and transport errors map exactly as in `get_json`.
+  pub(super) fn get_json_or_error(client: &Client, gate: &StartGate, url: Url, service: &'static str,
+      cancel: &Cancellation, deadline: Instant) -> Result<(u16, Vec<u8>), LookupError>
+  ```
+  AcoustID sends its error JSON with an HTTP 4xx status (verify against the API docs; a 400 for an invalid key is expected), so `AcoustId::lookup` uses `get_json_or_error`.
 - Produces:
   ```rust
   // fingerprint.rs
@@ -599,7 +655,8 @@ git commit -m "Add the MusicBrainz provider with a one-second gate"
     - Return `None` when there are no sub-fingerprints. Check `cancel` every 1 s of audio.
   - **Request:** `GET <origin>v2/lookup?client=<key>&meta=recordingids+releaseids&duration=<s>&fingerprint=<fp>&format=json`.
     - `"status":"ok"` → `results[].recordings[].releases[].id`.
-    - `"status":"error"` → `Failed("AcoustID: <error.message>")`.
+    - `"status":"error"`, with HTTP 200 or a JSON 4xx → `Failed("AcoustID: <error.message>")`. A 4xx without that JSON shape gives the `get_json` message.
+    - `fingerprint` returns `anyhow::Error`. The engine maps an error that wraps a `LookupError` (cancel, timeout) to that `LookupError`, and any other error to `Failed`.
     - The key never appears in an error message.
   - **Fixtures**, hand-written to the AcoustID v2 lookup response shape:
     - `acoustid.json`: one result whose recordings list releases B and A;
@@ -608,21 +665,21 @@ git commit -m "Add the MusicBrainz provider with a one-second gate"
 - [ ] **Step 1: Write the failing tests**
 - `fingerprint_of_a_generated_tone_is_url_safe_chromaprint`: `write_tone_wav(p, 10)`. Then `fingerprint(..)` is `Some` with `duration_s == 10`, `encoded.starts_with("AQ")`, and every char in `[A-Za-z0-9_-]`.
 - `lookup_request_shape_and_release_ids`: the target contains `client=KEY123`, `meta=recordingids+releaseids`, `duration=10`, `format=json` and `fingerprint=`. The result is `[B, A]`.
-- `acoustid_errors_are_readable_and_never_echo_the_key`: Display is "AcoustID: invalid API key" and does not contain "KEY123".
+- `acoustid_errors_are_readable_and_never_echo_the_key`: `acoustid-error.json` served with HTTP 400, and again with HTTP 200. Each time the Display is "AcoustID: invalid API key" and does not contain "KEY123".
 - `gate_spaces_acoustid_requests_by_334_ms`: three lookups, gaps ≥ 334 ms.
 - `busy_acoustid_stops`: a 503 gives "AcoustID is busy, try again shortly".
 - `rank_releases_counts_votes_and_keeps_five`: `[[A,B],[B],[B,C],[D],[E],[F],[G]]` gives `[(B,3),(A,1),(C,1),(D,1),(E,1)]`.
 
 - [ ] **Step 2: Run them and see them fail**
 
-Run: `cargo test --locked --lib tagging::acoustid tagging::fingerprint`
+Run: `cargo test --locked --lib -- tagging::acoustid tagging::fingerprint`
 Expected: compile errors.
 
 - [ ] **Step 3: Implement `acoustid.rs`, `fingerprint.rs` and `write_tone_wav`**
 
 - [ ] **Step 4: Run them and see them pass**
 
-Run: `cargo test --locked --lib tagging::acoustid tagging::fingerprint`
+Run: `cargo test --locked --lib -- tagging::acoustid tagging::fingerprint`
 Expected: PASS.
 
 - [ ] **Step 5: Run all gates, then commit**
@@ -808,18 +865,18 @@ git commit -m "Score releases and match files to release tracks"
      - `read_tags` errors → reason `"Tyranny couldn't read this file's tags: {error}"`.
      - No `TrackRef` → `matched: false`, reason "No matching track on this release".
      - A changed field with a `read_only` copy → `writable: false`, reason "Has an old ID3 tag Tyranny can't edit".
-     - Changed fields in `unwritable_fields(format)` go to `unwritable_fields` and out of `changes`.
+     - Changed fields in `unwritable_fields_in(&tags)` go to `unwritable_fields` and out of `changes`. This covers the per-format deny list and, for ID3v2.3 files, `ID3V23_UNWRITABLE`.
      - `removes_other_copies` is `!tags.copies_of(changed fields).is_empty()`.
      - The `stamp` is taken when the file is read.
   6. **Store** the proposal (writable files with changes only), then reply.
 
-  `cancel.check(deadline)` runs before each network call and each file. Every `LookupError` maps to `ErrorCode::Lookup` with its Display. Each `Failure` fills `queue_revision` from `SELECT revision FROM control WHERE singleton=1` (0 on error), as `src/lyrics/mod.rs:281-287` does.
+  `cancel.check_lookup(deadline)` (from Task 4) runs before each network call and each file. Every `LookupError` maps to `ErrorCode::Lookup` with its Display. Each `Failure` fills `queue_revision` from `SELECT revision FROM control WHERE singleton=1` (0 on error), as `src/lyrics/mod.rs:281-287` does.
 - `LibraryFixture` (cfg(test), sync):
   ```rust
   pub(super) struct LibraryFixture { pub root: PathBuf, pub database: PathBuf, pub album_id: u64, pub revision: u64, pub files: Vec<PathBuf> }
   impl LibraryFixture { pub fn new(files: &[(&str /*fixture or "tone10.wav"*/, &[(TagField, &str)])]) -> Self }
   ```
-  It copies each file into `<root>/Album/`. `"tone10.wav"` means `write_tone_wav(.., 10)`. It then tags each copy with `tags::edit_tags`, plus album "Old Album" and album artist "Old Artist". An entry ending `.mka` is instead created by the `ffmpeg` CLI with the same tags as `-metadata` (as `src/lyrics/tests.rs:52-91` does), because lofty cannot write Matroska. It creates the DB with `crate::store::Store::open`, scans it with `Library` on an internal tokio runtime, and reads the album ID and revision. Finally it shuts the library down.
+  It copies each file into `<root>/Album/`. `"tone10.wav"` means `write_tone_wav(.., 10)`. It then tags each copy with `tags::edit_tags`, plus album "Old Album" and album artist "Old Artist". A value given for an entry replaces these defaults. An entry ending `.mka` is instead created by the `ffmpeg` CLI with the same tags as `-metadata` (as `src/lyrics/tests.rs:52-91` does), because lofty cannot write Matroska. It creates the DB with `crate::store::Store::open`, scans it with `Library` on an internal tokio runtime, and reads the album ID and revision. Finally it shuts the library down.
 
 - [ ] **Step 1: Write the failing tests (in `src/tagging/tests.rs`)**
 
@@ -828,10 +885,13 @@ MusicBrainz and AcoustID are `for_test(fixture.origin(), Duration::ZERO)` on rou
   - `seen()` is exactly one target, the release A URL.
   - `candidates.len() == 1`, and every track is matched and writable.
   - The changes include `Album: Some("Old Album") → "Fixture Album"`.
-- `lookup_by_search_scores_and_chooses_best`: no stored IDs. The requests are the search, then A, then B. The chosen release is A, candidate A scores 1600, B comes second, and its label fields match the fixture.
+- `lookup_by_search_scores_and_chooses_best`: three `tone.flac` copies with no stored IDs, each tagged with album "Fixture Album". The requests are the search, then A, then B. The chosen release is A. Candidate A scores 1600 (1000 + 300 + 200 + 100). B comes second with 290 (0 + 0 + 200 + 90), and its label fields match the fixture.
 - `empty_search_retries_without_track_count_then_reports_no_match`: two search targets, the second without `tracks%3A`. The result is `Failure { code: Lookup, message: "MusicBrainz has no matching release" }`.
 - `explicit_release_id_is_the_only_candidate` and `invalid_release_id_is_refused_before_http`.
-- `lookup_by_fingerprint_ranks_acoustid_votes`: three `"tone10.wav"` files with key `KEY123`. There are three AcoustID requests, each containing `client=KEY123`. Candidates are ordered B then A.
+- `lookup_by_fingerprint_ranks_acoustid_votes`: three `"tone10.wav"` files with key `KEY123`. There are three AcoustID requests, each containing `client=KEY123`.
+  - Every file votes for B and A, so the vote ranking is B then A (Task 5 tests `rank_releases` order).
+  - Candidates are sorted by score: A first (1192 = 1000 for 3 tracks + 92 for "Old Album" vs "Fixture Album" + 100 for votes), then B (192).
+  - The chosen release is A.
 - `fingerprint_requires_a_valid_key`: both messages above.
 - `stale_revision_and_unknown_album_fail_before_network`: the codes are `StaleLibraryRevision` and `InvalidCommand "unknown album"`, and `seen()` is empty.
 - `current_values_come_from_the_file_not_the_database`: a file with no title tag. The DB title is the file stem, but `changes` has `Title` with `old: None`.
@@ -842,9 +902,9 @@ MusicBrainz and AcoustID are `for_test(fixture.origin(), Duration::ZERO)` on rou
 - `musicbrainz_busy_stops_the_lookup`: a 503 gives `Lookup "MusicBrainz is busy, try again shortly"`, with exactly one request.
 - `proposals_expire_after_15_minutes_and_evict_the_oldest`: `take(now + PROPOSAL_TTL + 1 s, id)` is `None`. After 9 inserts the first ID is gone.
 - `abandoned_lookup_stops_the_worker`:
-  - Setup: through `TaggingWorkers::with_providers`; the first MusicBrainz reply has `delay: 2 s`. Drop the `request` future after 100 ms.
-  - A second lookup still completes.
-  - `seen()` shows no follow-up release fetch for the abandoned lookup.
+  - Setup: through `TaggingWorkers::with_providers`, on the search path (files without stored IDs). The first search reply has `delay: 2 s`. Drop the `request` future after 100 ms.
+  - A second lookup (explicit `release_id` B) still completes.
+  - `seen()` holds the first search and then only release B's fetch. No `/ws/2/release/1111…` (A) target appears, so the abandoned lookup made no follow-up fetch.
 
 - [ ] **Step 2: Run them and see them fail**
 
@@ -888,6 +948,7 @@ git commit -m "Look up an album on MusicBrainz into a stored proposal"
       Edits(Vec<TagEditSummary>) }
   ```
   Apply and Revert work ignores `abandoned`. It checks only the worker `stop` flag, and only between files.
+  Change Task 7's worker rule so that only `Lookup` work is dropped when its reply is closed or it is already cancelled. `Handle::request` sets `abandoned` through `CancelOnDrop` when its future is dropped. If the rule also covered Apply, an Apply still in the queue would be discarded. Apply, Revert and Edits work always runs, and its reply may go to a closed channel.
 - Extends `engine.rs`:
   ```rust
   pub(super) fn apply(&mut self, request: &ApplyRequest, stop: &AtomicBool) -> Result<(TagApplyResult, Vec<PathBuf>), Failure>
@@ -897,7 +958,7 @@ git commit -m "Look up an album on MusicBrainz into a stored proposal"
   - **Apply:**
     - An empty `track_ids` gives `InvalidCommand "choose at least one file"`.
     - `take` returns `None` → `InvalidCommand "lookup expired, look the album up again"`.
-    - A track ID outside the proposal's album → `InvalidCommand "track {id} is not part of this lookup"`, with nothing written. Decision 10: the proposal is still consumed.
+    - A track ID that is not in `proposal.files` → `InvalidCommand "track {id} is not part of this lookup"`, with nothing written. `proposal.files` holds only writable files with changes. Decision 10: the proposal is still consumed.
     - Per requested file in proposal order:
       - no proposed values left after `omit_fields` → skipped "nothing to write";
       - `stamp ≠ proposal stamp`, or the file is gone → skipped "changed since the lookup".
@@ -905,7 +966,7 @@ git commit -m "Look up an album on MusicBrainz into a stored proposal"
     - If any file remains:
       - Open the journal. If it is unavailable: `Persistence "tag journal unavailable: …"`, and nothing is written.
       - `begin`, then `write_safely` each file and `set_status`.
-      - `Changed` → skipped "changed since the lookup". `Failed(m)` → failed `m`.
+      - `Changed` → skipped "changed since the lookup", and its journal status is `Failed`, so it is not counted and not revertible. `Failed(m)` → failed `m`, with status `Failed`.
     - `edit_id` is `None` when nothing reached `begin`. The returned paths are the written ones.
   - **Revert:**
     - Unknown → `InvalidCommand "unknown tag edit"`. Already reverted → `InvalidCommand "this tag edit was already reverted"`.
@@ -918,10 +979,15 @@ git commit -m "Look up an album on MusicBrainz into a stored proposal"
   - `Journal::load(edit_id)` holds the before and after values, with statuses `Written`.
   - The returned paths equal the 3 files.
   - A second `apply` with the same ID gives "lookup expired, look the album up again".
-- `omitted_fields_and_client_choices_never_add_values`: apply with `omit_fields: [Title]` leaves the title unchanged and writes the other fields. `ApplyRequest` has no value-carrying field; Task 10 adds the wire-level refusal.
+- `omitted_fields_are_left_unchanged_and_the_rest_written`:
+  - Setup: 3 `tone.flac` copies tagged with release A's ID, track numbers 1–3 and title "Old Title", so the proposal changes `Title` and `Album`.
+  - Apply with `omit_fields: [Title]`.
+  - Each file's title still reads "Old Title", and `Album` reads "Fixture Album".
+  - `Journal::load(edit_id)` has no `Title` key in any file's `before` or `after`.
+
+  The wire-level refusal of client values is Task 10's test.
 - `unknown_track_rejects_the_whole_apply`: no file changes on disk.
-- `apply_skips_a_file_changed_since_the_lookup`: append a byte to one file. That file is skipped with "changed since the lookup"; the others are written.
-- `deleted_file_between_lookup_and_apply_is_skipped` (Review Focus 3).
+- `apply_skips_a_file_changed_since_the_lookup`: append a byte to one file. That file is skipped with "changed since the lookup"; the others are written.- `deleted_file_between_lookup_and_apply_is_skipped` (Review Focus 3).
 - `unwritable_directory_fails_every_file_and_leaves_originals` (Review Focus 2): directory at 0555; every outcome is `Failed`, the originals are identical, and the journal statuses are `Failed`.
 - `revert_restores_before_values_and_removes_added_fields`:
   - Setup: MP3 copies with ID3v1 copies of the title and no MB IDs. Apply, then revert.
@@ -970,30 +1036,38 @@ git commit -m "Apply and revert tag proposals"
   // scanner.rs
   impl Scanner { pub fn start_paths(paths: Vec<PathBuf>) -> Result<Self> }
   // library/db.rs
-  pub(super) fn finish_paths(connection: &mut Connection, serial: u64, status: &mut ScanStatus) -> Result<()>
+  pub(super) fn begin_paths(transaction: &Transaction<'_>) -> Result<u64>   // bumps scan_serial only; saves no status
+  pub(super) fn finish_paths(connection: &mut Connection, serial: u64, status: &ScanStatus) -> Result<()>
   ```
+  - **Scan status stays as it was.** A Reindex must leave `library_roots.last_scan` and `library_state.scan` exactly as they were. It may change only the library revision (bumped by installs and grouping, as in every scan) and track rows.
+    - In `ScanScope::Paths` the scan's `ScanStatus` lives only in `Active.status`.
+    - Today's code writes the status in `db::begin_scan`, `db::discover`, `db::next_batch`, `db::probed`, `db::finish`, `advance`'s `Enumerated` arm, `scan_tick`'s failure arm, `launch`'s failure arm and `run`'s shutdown arm. Each of these call sites skips `save_status`/`persist` for `Paths`. The `db` functions take a `persist_status: bool` (true for `Root`) to do this.
+    - A failed Reindex logs `eprintln!("tyranny: re-index failed: {error:#}")` instead of saving a `Failed` status. The pending paths are then dropped.
+    - A crash or shutdown mid-Reindex leaves no trace: the pending paths are in memory only, and `discard_old_work` removes their worklist rows. Those files keep their old metadata until the next rescan.
+    - The client sees no scan progress for a Reindex.
   - `From<LibraryReply> for Response` maps `ReindexQueued` to `unreachable!("Reindex is internal to tagging and never reaches the wire")` (decision 14).
   - **`Coordinator::command(Reindex)`:** every path must be absolute and UTF-8, else `Invalid "reindex paths must be absolute UTF-8 paths"`. Paths are deduplicated into `pending_reindex: Vec<PathBuf>`. More than `MAX_PENDING_REINDEX` gives `Busy "too many files are waiting to be re-indexed"`. The reply is `ReindexQueued`. It never starts a scan directly.
   - **`Coordinator::run`:** when `active.is_none()` and `pending_reindex` is non-empty, it calls `reindex_step()`, before `upgrade_step`.
   - **`reindex_step`:**
     - Look up each pending path's `root_id` in `library_assets`; drop paths with no row.
     - Take the root of the first known path, and every pending path in that root.
-    - `db::begin_scan`, `grouping::begin(root)`, `Scanner::start_paths`, `Active { scope: Paths, .. }`.
+    - `db::begin_paths`, `grouping::begin(root)`, `Scanner::start_paths`, `Active { scope: Paths, status: ScanStatus { root_id: Some(root), phase: Discovering, .. }, .. }`.
   - **`Scanner::start_paths`:**
     - It emits `Candidates`, 128 per batch, for paths that are regular files with a candidate extension. Each candidate gets a fingerprint as in `enumerate`.
     - Every other path is counted as an enumeration failure with its message.
     - `Enumerated { complete: false, .. }` follows. `complete` must be false, so grouping keeps `completed_scan` visibility.
     - Probing is unchanged.
-  - **`advance()`:** at completion, `ScanScope::Root` calls `db::finish` as today. `ScanScope::Paths` calls `db::finish_paths`, which checks the worklist is empty and `total == processed`, sets `phase = Complete`, and saves the status. It never moves `completed_scan`.
+  - **`advance()`:** at completion, `ScanScope::Root` calls `db::finish` as today. `ScanScope::Paths` calls `db::finish_paths`, which checks the worklist is empty and `total == processed`. It saves no status and never moves `completed_scan`.
 
 - [ ] **Step 1: Write the failing tests (in `src/library/tests.rs`)**
 
-They use the existing `flac`, `add`, `finished`, `tracks` and `albums` helpers.
+They use the existing `flac`, `add`, `finished`, `tracks` and `albums` helpers. A Reindex does not change the scan phase, so `finished` cannot wait for it. Wait instead by polling `tracks` until the expected metadata appears (deadline 10 s).
 - `reindex_updates_only_named_files_and_keeps_track_ids`:
   - Setup: two FLACs; rewrite one with `flac(path, &[("title","New")])`; send `Reindex { paths: [it] }`.
   - The reply is `ReindexQueued { paths: 1 }`.
-  - After `finished`: the title is "New", the revision is greater, the track ID is unchanged, the other track is unchanged and visible, `library_roots.completed_scan` is unchanged, and the phase is `Complete`.
-- `reindex_during_a_scan_waits_for_the_scan`: `Rescan` then `Reindex` at once. Both complete, and the metadata is updated.
+  - Once the title is "New": the revision is greater, the track ID is unchanged, the other track is unchanged and visible, and `library_roots.completed_scan` is unchanged.
+  - `library_roots.last_scan` and `library_state.scan` hold exactly the JSON they held before the Reindex.
+- `reindex_during_a_scan_waits_for_the_scan`: `Rescan` then `Reindex` at once. Both complete, and the metadata is updated. The final `library_state.scan` is the Rescan's `Complete` status.
 - `reindex_moves_an_album_to_release_identity`: add a `MUSICBRAINZ_ALBUMID` tag and reindex. The album ID changes; the track ID does not.
 - `reindex_ignores_unknown_paths_and_rejects_relative_paths`.
 
@@ -1046,8 +1120,12 @@ git commit -m "Re-index named files without a root scan"
   - `{"kind":"tag_apply","edit_id":3,"files":[…]}`;
   - `{"kind":"tag_edits","edits":[…]}`.
 - Changes in `tagging/mod.rs`:
-  - Remove the `#![cfg_attr(not(test), allow(dead_code))]` attribute.
-  - When `Handle` has `Some(library)` and gets `TagOutcome::Applied` with non-empty `written`, it awaits `library.request(LibraryCommand::Reindex { paths: written })`. A failure there does not change the reply; log it with `eprintln!("tyranny: re-index after tag write failed: …")`.
+  - Remove the `#![allow(dead_code)]` attribute.
+  - The re-index must not depend on the requester's future. A dropped future, a client disconnect or a server shutdown after the write must still re-index.
+    - For Apply and Revert, when `Handle` has `Some(library)`, `Handle::request` uses `tokio::spawn` to start a detached task. That task awaits the worker's reply.
+    - On `TagOutcome::Applied` with non-empty `written`, the task awaits `library.request(LibraryCommand::Reindex { paths: written })`.
+    - The task then sends the outcome to the requester through a `oneshot`. If the requester is gone, that send fails, and this is harmless.
+    - A Reindex failure does not change the reply. The task logs it with `eprintln!("tyranny: re-index after tag write failed: …")`.
   - Add `pub(crate) fn reply(outcome: Result<TagOutcome, Failure>) -> Reply`, which maps to `Response::{TagProposal, TagApply, TagEdits}` or `Reply::Error`.
 - Changes in `owner.rs`:
   - `Owner { tagging: TaggingWorkers, .. }` and `Controller { tagging: TaggingHandle, .. }`, started after lyrics with `TaggingWorkers::start(database, library.clone())`. `shutdown` calls `stop` and then `shutdown`, as for lyrics.
@@ -1067,6 +1145,7 @@ git commit -m "Re-index named files without a root scan"
   - Setup: a live `Library` on the fixture DB and `TaggingWorkers::with_providers(.., Some(library.handle()))`.
   - After lookup and apply, poll `LibraryCommand::Tracks` until the album title is "Fixture Album".
   - The track IDs are unchanged and the revision is greater.
+- In `src/tagging/tests.rs`, `dropped_apply_future_still_reindexes`: the same setup, but drop the apply `request` future right after sending. Polling `LibraryCommand::Tracks` still reaches album title "Fixture Album" (deadline 10 s).
 - In `tests/server_transport.rs`, `tag_commands_answer_without_network`:
   - `tag_edits` gives `tag_edits` with `[]`.
   - A lookup with `library_revision: 0` gives `stale_library_revision`.
@@ -1076,12 +1155,12 @@ git commit -m "Re-index named files without a root scan"
 
 - [ ] **Step 2: Run them and see them fail**
 
-Run: `cargo test --locked --lib protocol tagging && cargo test --locked --test server_transport tag_commands`
+Run: `cargo test --locked --lib -- protocol tagging && cargo test --locked --test server_transport tag_commands`
 Expected: compile errors.
 
 - [ ] **Step 3: Implement the protocol, owner, server and tagging changes. Bump every version reference in the Global Constraints list**
 
-In `SPIKE.md:9`, change "Protocol v12 requires" to "Protocol v13 requires", and append the sentence: "Protocol v13 adds on-demand MusicBrainz tag lookup, reviewed tag writing into files, and revert." At `:89`, write "(currently v13)".
+In `src/protocol.rs:1`, change "Version 12 local control protocol" to "Version 13 local control protocol". In `SPIKE.md:9`, change "Protocol v12 requires" to "Protocol v13 requires", and append the sentence: "Protocol v13 adds on-demand MusicBrainz tag lookup, reviewed tag writing into files, and revert." At `:89`, write "(currently v13)".
 
 - [ ] **Step 4: Run them and see them pass**
 
@@ -1219,6 +1298,7 @@ git commit -m "Decode tag lookup replies in TyrannyCore"
       var target: Target?                          // the sheet's item; setting nil closes and disconnects lookups
       private(set) var phase: Phase
       private(set) var proposal: TagProposal?
+      private(set) var candidates: [TagCandidate]  // the picker's list: the first lookup's candidates for this target
       var selection: TagSelection?
       private(set) var edits: [TagEditSummary]
       private(set) var editsError: String?
@@ -1237,12 +1317,13 @@ git commit -m "Decode tag lookup replies in TyrannyCore"
   - A new lookup cancels the old one by `lookupWire.disconnect()` and a ticket check, as `LyricsStore.refresh` does.
   - A `stale_library_revision` failure retries once with the current `snapshot.library.revision`.
   - Errors become `.failed(TagLookupMessage.text(for:))`.
-  - The key is read from `UserDefaults.standard.string(forKey: acoustIDKeyDefault)`.
+  - The key is read from `UserDefaults.standard.string(forKey: acoustIDKeyDefault)`. `lookUp` passes it to `TagRequests.lookup(acoustIDKey:)` only when `fingerprint == true`, and passes `nil` otherwise. `TagRequests.lookup` sends `fingerprint: true` whenever a key is given, so a key passed on every lookup would fingerprint every lookup.
+  - **Candidates.** An explicit `release_id` makes the server return only that candidate. So the first lookup for a target (`releaseID == nil`) sets `candidates`. A fingerprint lookup without a `releaseID` also replaces them. A re-run with a picked `releaseID` keeps `candidates` and replaces only `proposal`. The picker always lists `candidates` and selects `proposal.release_id`.
   - After apply or undo, call `refreshEdits()`.
 - Sheet (`TagLookupSheet`, width 640):
   - Title "Look Up on MusicBrainz" and the album title.
   - `.lookingUp`: `ProgressView` plus "Asking MusicBrainz…".
-  - `.reviewing`: a `Picker("Release")` of `candidate.label`. A new pick calls `lookUp(releaseID:, fingerprint: false)`.
+  - `.reviewing`: a `Picker("Release")` of `candidates[].label` (the model's kept list, not `proposal.candidates`). A new pick calls `lookUp(releaseID:, fingerprint: false)`.
   - Rows: a toggle (disabled when `!isEnabled`), the track number, the file name, the `changes[].line` lines and the `notes` (secondary style).
   - Buttons: "Identify by Audio Fingerprint" (only when `hasAcoustIDKey`), "Cancel", and `selection.writeButtonTitle` (default action, disabled when nothing is selected).
   - `.applied`: the `files[].line` lines, plus "Undo" and "Done".
