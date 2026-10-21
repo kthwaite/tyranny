@@ -153,7 +153,17 @@ impl Engine {
         request: &ApplyRequest,
         stop: &AtomicBool,
     ) -> Result<(TagApplyResult, Vec<PathBuf>), Failure> {
-        self.write_proposal(request, stop)
+        self.apply_until(request, || stop.load(Ordering::Acquire))
+    }
+
+    /// `apply`, asking `stopped` once before the journal is written and once
+    /// before each file.
+    pub(super) fn apply_until(
+        &mut self,
+        request: &ApplyRequest,
+        mut stopped: impl FnMut() -> bool,
+    ) -> Result<(TagApplyResult, Vec<PathBuf>), Failure> {
+        self.write_proposal(request, &mut stopped)
             .map_err(|refusal| self.failure(refusal))
     }
 
@@ -188,7 +198,7 @@ impl Engine {
     fn write_proposal(
         &mut self,
         request: &ApplyRequest,
-        stop: &AtomicBool,
+        stopped: &mut dyn FnMut() -> bool,
     ) -> Result<(TagApplyResult, Vec<PathBuf>), Refusal> {
         if request.track_ids.is_empty() {
             return Err(Refusal::invalid("choose at least one file"));
@@ -228,12 +238,12 @@ impl Engine {
                 Step::Done(_) => None,
             })
             .collect();
-        if journaled.is_empty() || stop.load(Ordering::Acquire) {
+        if journaled.is_empty() || stopped() {
             let files = steps
                 .into_iter()
                 .map(|step| match step {
                     Step::Done(result) => result,
-                    Step::Write { file, .. } => stopped(&file),
+                    Step::Write { file, .. } => stopped_result(&file),
                 })
                 .collect();
             return Ok((
@@ -258,9 +268,12 @@ impl Engine {
                 }
                 Step::Write { file, stamp } => (file, stamp),
             };
-            if stop.load(Ordering::Acquire) {
-                let _ = journal.set_status(edit_id, file.track_id, FileStatus::Failed);
-                files.push(stopped(&file));
+            if stopped() {
+                logged(
+                    edit_id,
+                    journal.set_status(edit_id, file.track_id, FileStatus::Failed),
+                );
+                files.push(stopped_result(&file));
                 continue;
             }
             let edit = TagEdit {
@@ -281,7 +294,7 @@ impl Engine {
             };
             // A file left `pending` is still checked by revert, so a failed
             // status update loses nothing.
-            let _ = journal.set_status(edit_id, file.track_id, status);
+            logged(edit_id, journal.set_status(edit_id, file.track_id, status));
             if outcome == TagFileOutcome::Written {
                 written.push(file.path.clone());
             }
@@ -319,27 +332,34 @@ impl Engine {
             }
             if stop.load(Ordering::Acquire) {
                 finished = false;
-                files.push(stopped(&file));
+                files.push(stopped_result(&file));
                 continue;
             }
             let (outcome, message) = match revert_file(&file) {
                 Ok(()) => {
-                    let _ = journal.set_status(edit_id, file.track_id, FileStatus::Reverted);
+                    logged(
+                        edit_id,
+                        journal.set_status(edit_id, file.track_id, FileStatus::Reverted),
+                    );
                     written.push(file.path.clone());
                     (TagFileOutcome::Written, None)
                 }
+                // Final: the file holds someone else's values now.
                 Err(WriteError::Changed) => {
                     (TagFileOutcome::Skipped, Some(CHANGED_SINCE_EDIT.to_owned()))
                 }
-                Err(WriteError::Failed(message)) => (TagFileOutcome::Failed, Some(message)),
+                Err(WriteError::Failed(message)) => {
+                    finished = false;
+                    (TagFileOutcome::Failed, Some(message))
+                }
             };
             files.push(file_result(file.track_id, &file.path, outcome, message));
         }
-        // A stopped revert stays open, so a second revert finishes it. If the
-        // mark fails, the files are reverted already, and a second revert
-        // skips them: `reverted`, or no longer holding the "after" values.
+        // A stopped or failed revert stays open, so a second revert finishes
+        // it; files already reverted have status `reverted` and are skipped.
+        // If the mark fails, a second revert skips every file the same way.
         if finished {
-            let _ = journal.mark_reverted(edit_id);
+            logged(edit_id, journal.mark_reverted(edit_id));
         }
         Ok((
             TagApplyResult {
@@ -671,12 +691,12 @@ fn propose_file(
         unwritable_fields: Vec::new(),
         changes: Vec::new(),
     };
-    let unreadable = |error: &dyn std::fmt::Display| Some(unreadable(error));
+    let unreadable_reason = |error: &dyn std::fmt::Display| Some(unreadable(error));
     // A symlink or a non-regular file is refused here, not at apply.
     let stamp = match stamp(&track.path) {
         Ok(stamp) => stamp,
         Err(error) => {
-            row.reason = unreadable(&error);
+            row.reason = unreadable_reason(&error);
             return (row, None);
         }
     };
@@ -687,14 +707,14 @@ fn propose_file(
             return (row, None);
         }
         Err(error) => {
-            row.reason = unreadable(&format!("{error:#}"));
+            row.reason = unreadable_reason(&format!("{error:#}"));
             return (row, None);
         }
     }
     let tags = match read_tags(&track.path) {
         Ok(tags) => tags,
         Err(error) => {
-            row.reason = unreadable(&format!("{error:#}"));
+            row.reason = unreadable_reason(&format!("{error:#}"));
             return (row, None);
         }
     };
@@ -753,7 +773,14 @@ fn file_result(
     }
 }
 
-fn stopped(file: &JournalFile) -> TagFileResult {
+/// The files are written already; a journal that can't record it is logged.
+fn logged(edit_id: u64, result: anyhow::Result<()>) {
+    if let Err(error) = result {
+        eprintln!("tyranny: tag journal, edit {edit_id}: {error:#}");
+    }
+}
+
+fn stopped_result(file: &JournalFile) -> TagFileResult {
     file_result(
         file.track_id,
         &file.path,
@@ -794,8 +821,9 @@ fn prepare(file: &ProposedFile, omitted: &BTreeSet<TagField>) -> Step {
         Ok(tags) => tags,
         Err(error) => return done(TagFileOutcome::Failed, &unreadable(&format!("{error:#}"))),
     };
+    // A refusal, not a disk error.
     if let Some(reason) = unpaired_total(&tags, &values) {
-        return done(TagFileOutcome::Failed, reason);
+        return done(TagFileOutcome::Skipped, reason);
     }
     let fields: BTreeSet<TagField> = values.keys().copied().collect();
     Step::Write {

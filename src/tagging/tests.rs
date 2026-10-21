@@ -997,6 +997,87 @@ fn a_stopped_worker_writes_nothing() {
 }
 
 #[test]
+fn a_stop_between_files_finishes_the_started_file_only() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let original = bytes(&album);
+    // Asked before the journal, then before each file: stop after file 1.
+    let mut asked = 0;
+    let (result, written) = engine
+        .apply_until(&apply_request(&proposal, &[]), || {
+            asked += 1;
+            asked > 2
+        })
+        .unwrap();
+    let stopped = (
+        TagFileOutcome::Skipped,
+        Some("the server stopped before writing this file"),
+    );
+    assert_eq!(outcomes(&result), [WRITTEN, stopped, stopped]);
+    assert_eq!(written, album.files[..1]);
+    assert_ne!(std::fs::read(&album.files[0]).unwrap(), original[0]);
+    assert_eq!(bytes(&album)[1..], original[1..]);
+    let record = journal(&album)
+        .load(result.edit_id.unwrap())
+        .unwrap()
+        .unwrap();
+    let statuses: Vec<_> = record.files.iter().map(|(_, s)| *s).collect();
+    assert_eq!(
+        statuses,
+        [FileStatus::Written, FileStatus::Failed, FileStatus::Failed]
+    );
+}
+
+#[test]
+fn a_failed_revert_stays_open_until_a_second_revert_finishes_it() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    let edit_id = applied.edit_id.unwrap();
+    let applied_bytes = bytes(&album);
+    let folder = album.files[0].parent().unwrap().to_owned();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let restore = Writable(folder);
+    let (failed, written) = engine.revert(edit_id, &running()).unwrap();
+    assert!(written.is_empty());
+    assert!(
+        failed
+            .files
+            .iter()
+            .all(|f| f.outcome == TagFileOutcome::Failed),
+        "{failed:?}"
+    );
+    assert_eq!(bytes(&album), applied_bytes);
+    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    assert!(!record.reverted);
+    assert!(record.files.iter().all(|(_, s)| *s == FileStatus::Written));
+
+    drop(restore);
+    let (reverted, written) = engine.revert(edit_id, &running()).unwrap();
+    assert_eq!(outcomes(&reverted), [WRITTEN; 3]);
+    assert_eq!(written, album.files);
+    for path in &album.files {
+        let tags = read_tags(path).unwrap();
+        assert_eq!(tags.current(TagField::Album), Some("Old Album"));
+        assert_eq!(tags.current(TagField::MusicbrainzReleaseId), Some(A));
+        assert_eq!(tags.current(TagField::Title), None);
+    }
+    let record = journal(&album).load(edit_id).unwrap().unwrap();
+    assert!(record.reverted);
+    assert!(record.files.iter().all(|(_, s)| *s == FileStatus::Reverted));
+}
+
+#[test]
 fn an_unavailable_journal_writes_nothing() {
     let album = stored_a();
     std::fs::create_dir(album.database.with_extension("tagging.sqlite")).unwrap();
@@ -1039,7 +1120,7 @@ fn a_track_total_without_its_number_is_not_written_to_id3v2() {
     assert_eq!(
         outcomes(&result),
         [(
-            TagFileOutcome::Failed,
+            TagFileOutcome::Skipped,
             Some("can't write the track total without the track number")
         )]
     );
