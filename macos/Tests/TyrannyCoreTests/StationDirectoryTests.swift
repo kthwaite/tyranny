@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import TyrannyCore
 
-/// A server that records each request. A request named in `held` waits until `release` runs it.
+/// A server that records each request. With `parkSearches` set, each `search_directory` waits in `parked` until the test resumes it.
 @MainActor
 private final class FakeDirectoryServer {
     var requests: [CommandRequest] = []
@@ -13,9 +13,11 @@ private final class FakeDirectoryServer {
     /// Parked `search_directory` requests, in arrival order.
     var parked: [CheckedContinuation<Void, Never>] = []
     var parkSearches = false
+    var failure: (any Error)?
 
     func send(_ request: CommandRequest) async throws -> Data {
         requests.append(request)
+        if let failure { throw failure }
         if parkSearches, request.name == "search_directory" {
             await withCheckedContinuation { parked.append($0) }
         }
@@ -189,6 +191,29 @@ private func syncedCatalog(_ server: FakeDirectoryServer) async throws -> Statio
         #expect(directory.error == "Station name is too long.")
     }
 
+    @Test func failedSaveWithoutCatalogMessageGetsGenericError() async throws {
+        let server = FakeDirectoryServer()
+        let catalog = try await syncedCatalog(server)
+        let directory = server.directory(catalog)
+        // A reset during the request leaves the catalog without a message.
+        server.respond = { _ in
+            catalog.reset()
+            return .failure(ServerFailure(code: "internal", message: "Dropped."))
+        }
+        #expect(await directory.save(groove) == false)
+        #expect(directory.error == "The station could not be saved.")
+    }
+
+    @Test func cancelledSearchShowsNoError() async {
+        let server = FakeDirectoryServer()
+        let directory = server.directory(server.catalog())
+        server.failure = CancellationError()
+        directory.query = "groove"
+        await directory.search()
+        #expect(directory.error == nil)
+        #expect(directory.searching == false)
+    }
+
     @Test func playAddsStreamThenCountsClick() async {
         let server = FakeDirectoryServer()
         let directory = server.directory(server.catalog())
@@ -211,7 +236,7 @@ private func syncedCatalog(_ server: FakeDirectoryServer) async throws -> Statio
         #expect(directory.error == "Cannot open the stream.")
     }
 
-    @Test func clickErrorsAreIgnored() async throws {
+    @Test func clickErrorsAreIgnored() async {
         let server = FakeDirectoryServer()
         let directory = server.directory(server.catalog())
         server.replies = [.failure(ServerFailure(code: "unavailable", message: "Directory unreachable."))]

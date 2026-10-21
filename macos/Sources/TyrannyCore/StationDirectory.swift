@@ -62,6 +62,9 @@ public final class StationDirectory {
             let found = try decoder.decode(DirectoryResults.self, from: data)
             guard token == mine else { return }
             results = found.stations
+        } catch is CancellationError {
+            if token == mine { searching = false }
+            return
         } catch {
             guard token == mine else { return }
             self.error = (error as? ServerFailure)?.message ?? error.localizedDescription
@@ -74,7 +77,7 @@ public final class StationDirectory {
         let started = token
         error = nil
         guard await catalog.add(name: station.name, url: station.url) else {
-            if token == started { error = catalog.error }
+            if token == started { error = catalog.error ?? "The station could not be saved." }
             return false
         }
         await countClick(station)
