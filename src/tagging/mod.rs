@@ -24,13 +24,13 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 pub(crate) const MAX_ALBUM_TRACKS: usize = 500;
 pub(crate) const LOOKUP_DEADLINE: Duration = Duration::from_secs(50);
@@ -104,6 +104,28 @@ pub(crate) struct Handle {
     stop: Arc<AtomicBool>,
     /// Re-indexes the files that an apply or a revert wrote.
     library: Option<LibraryHandle>,
+    detached: Arc<Detached>,
+}
+/// Counts the detached apply and revert tasks that are still running.
+#[derive(Default)]
+struct Detached {
+    running: AtomicUsize,
+    idle: Notify,
+}
+/// One detached task. Dropping it, even in a panic, ends the count.
+struct DetachedTask(Arc<Detached>);
+impl DetachedTask {
+    fn start(detached: &Arc<Detached>) -> Self {
+        detached.running.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(detached))
+    }
+}
+impl Drop for DetachedTask {
+    fn drop(&mut self) {
+        if self.0.running.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
 }
 pub(crate) struct TaggingWorkers {
     handle: Handle,
@@ -133,6 +155,7 @@ impl TaggingWorkers {
                 sender,
                 stop,
                 library,
+                detached: Arc::default(),
             },
             thread,
         }
@@ -240,7 +263,9 @@ impl Handle {
             return receive.await.unwrap_or_else(|_| Err(stopped()));
         };
         let (forward, forwarded) = oneshot::channel();
+        let task = DetachedTask::start(&self.detached);
         tokio::spawn(async move {
+            let _task = task;
             let outcome = receive.await.unwrap_or_else(|_| Err(stopped()));
             if let Ok(TagOutcome::Applied { written, .. }) = &outcome
                 && !written.is_empty()
@@ -254,6 +279,23 @@ impl Handle {
             let _ = forward.send(outcome);
         });
         forwarded.await.unwrap_or_else(|_| Err(stopped()))
+    }
+    /// Waits until every detached apply and revert task has ended, or until
+    /// `limit` passes. Shutdown calls it after the worker has stopped, so each
+    /// re-index reaches the library before the library shuts down.
+    pub async fn settle(&self, limit: Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            // Made before the check, so a notify after the check is not missed.
+            let idle = self.detached.idle.notified();
+            if self.detached.running.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, idle).await.is_err() {
+                eprintln!("tyranny: shutdown stopped waiting for a re-index after a tag write");
+                return;
+            }
+        }
     }
 }
 

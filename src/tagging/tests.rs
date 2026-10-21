@@ -1793,3 +1793,59 @@ fn dropped_apply_future_still_reindexes() {
     workers.shutdown();
     library.shutdown().unwrap();
 }
+
+#[test]
+fn settle_waits_for_a_detached_apply() {
+    let album = stored_a();
+    let server = musicbrainz("search.json");
+    let library = Library::start(album.database.clone()).unwrap();
+    let workers = TaggingWorkers::with_providers(
+        album.database.clone(),
+        Some(providers(&server, None)),
+        Some(library.handle()),
+    );
+    let handle = workers.handle();
+    block_on(async {
+        let Ok(TagOutcome::Proposal(proposal)) =
+            handle.request(TagRequest::Lookup(request(&album))).await
+        else {
+            panic!("lookup failed");
+        };
+        // One poll queues the apply; the future is then dropped.
+        let apply = handle.request(TagRequest::Apply(apply_request(&proposal, &[])));
+        let gone = tokio::time::timeout(Duration::ZERO, apply).await;
+        assert!(gone.is_err(), "the apply is still waiting");
+        handle.settle(Duration::from_secs(10)).await;
+    });
+    // The library shuts down at once, as the owner does after `settle`. It
+    // re-indexes only what reached it, and its queue lives only in memory.
+    workers.shutdown();
+    library.shutdown().unwrap();
+    let reopened = Library::start(album.database.clone()).unwrap();
+    let page = block_on(async {
+        let reply = reopened
+            .handle()
+            .request(LibraryCommand::Tracks {
+                album_id: None,
+                page: PageRequest {
+                    revision: None,
+                    offset: 0,
+                    limit: 500,
+                    query: String::new(),
+                },
+            })
+            .await
+            .unwrap();
+        let LibraryReply::Tracks(page) = reply else {
+            panic!("unexpected reply {reply:?}");
+        };
+        page
+    });
+    let albums: Vec<&str> = page
+        .entries
+        .iter()
+        .map(|t| t.metadata.album.as_str())
+        .collect();
+    assert_eq!(albums, ["Fixture Album"; 3]);
+    reopened.shutdown().unwrap();
+}

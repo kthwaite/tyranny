@@ -33,6 +33,8 @@ use tokio::sync::{mpsc, oneshot};
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 /// Bounds the in-memory Reindex queue; it is never persisted.
 pub(crate) const MAX_PENDING_REINDEX: usize = 4096;
+/// Bounds the Reindex work that shutdown finishes.
+const SHUTDOWN_REINDEX_LIMIT: Duration = Duration::from_secs(10);
 struct Work {
     command: LibraryCommand,
     reply: oneshot::Sender<std::result::Result<LibraryReply, LibraryError>>,
@@ -304,6 +306,21 @@ impl Coordinator {
                 thread::park_timeout(Duration::from_millis(5));
             }
         }
+        // The Reindex queue lives only in memory, so shutdown finishes it.
+        // A Root scan is interrupted first; it can be rescanned.
+        let interrupted =
+            if self.active.as_ref().map(|active| active.scope) == Some(ScanScope::Root) {
+                self.interrupt()
+            } else {
+                Ok(())
+            };
+        let drained = self.drain_reindex(Instant::now() + SHUTDOWN_REINDEX_LIMIT);
+        let stopped = self.interrupt();
+        interrupted.and(drained).and(stopped)
+    }
+    /// Stops the active scan. A Root scan is saved as interrupted; a Paths
+    /// scan is dropped.
+    fn interrupt(&mut self) -> Result<()> {
         if let Some(mut active) = self.active.take() {
             let stopped = active.scanner.take().map(Scanner::shutdown).transpose();
             if active.scope == ScanScope::Root {
@@ -314,6 +331,30 @@ impl Coordinator {
             }
             self.publish(true)?;
             stopped?;
+        }
+        Ok(())
+    }
+    /// Runs at shutdown, after any Root scan has stopped. Finishes the active
+    /// Paths scan, then every pending path, until `deadline`. What is left is
+    /// dropped.
+    fn drain_reindex(&mut self, deadline: Instant) -> Result<()> {
+        while self.active.is_some() || !self.pending_reindex.is_empty() {
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "tyranny: shutdown dropped an unfinished re-index and {} queued file(s)",
+                    self.pending_reindex.len()
+                );
+                return Ok(());
+            }
+            let worked = if self.active.is_some() {
+                self.scan_tick()?
+            } else {
+                self.reindex_step();
+                true
+            };
+            if !worked {
+                thread::park_timeout(Duration::from_millis(5));
+            }
         }
         Ok(())
     }

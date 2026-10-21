@@ -3270,3 +3270,22 @@ async fn reindex_of_a_deleted_file_finishes_and_keeps_its_track() {
     assert_eq!(scan_rows(&scratch), rows);
     library.shutdown().unwrap();
 }
+
+#[tokio::test]
+async fn shutdown_finishes_a_queued_reindex() {
+    let scratch = Scratch::new();
+    let named = scratch.path("music/a.flac");
+    flac(&named, &[("title", "Old")]);
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    flac(&named, &[("title", "New")]);
+    reindex(&library, vec![named.clone()]).await.unwrap();
+    library.shutdown().unwrap();
+    // The queue lived only in memory, so the new metadata is in the database
+    // only if shutdown finished the Reindex.
+    let reopened = scratch.library();
+    let page = tracks(&reopened).await;
+    assert_eq!(track_at(&page, &named).metadata.title, "New");
+    reopened.shutdown().unwrap();
+}
