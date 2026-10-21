@@ -145,6 +145,12 @@ import Testing
         #expect(text("other", "plain") == "plain")
     }
 
+    @Test func editListTimeoutMessage() {
+        func text(_ code: String, _ message: String) -> String { TagEditMessage.listText(for: ServerFailure(code: code, message: message)) }
+        #expect(text("request_timeout", "x") == "Recent tag edits took too long to load. Try again.")
+        #expect(text("lookup", "MusicBrainz is busy, try again shortly") == "MusicBrainz is busy, try again shortly")
+    }
+
     @Test func requestDeadlines() {
         // Writes are never cancelled, so the edit lane waits far longer than a lookup.
         #expect(TagRequests.lookupDeadlineSeconds == 60)

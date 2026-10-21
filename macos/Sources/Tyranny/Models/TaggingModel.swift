@@ -141,7 +141,11 @@ final class TaggingModel {
             edits = try JSONDecoder().decode(TagEditsResponse.self, from: data).edits
             editsError = nil
         } catch {
-            editsError = Self.message(for: error)
+            if let failure = error as? ServerFailure {
+                editsError = TagEditMessage.listText(for: failure)
+            } else {
+                editsError = error.localizedDescription
+            }
         }
     }
 
