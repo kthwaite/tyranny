@@ -41,7 +41,7 @@ struct TrackListView: View {
             }
             Divider()
             if navigation.columnBrowserVisible, list.usesBrowser, case .page = chrome {
-                ColumnBrowser(list: list)
+                ColumnBrowser(list: list, colours: player.theme.tableColours)
                 Divider()
             }
             VirtualTrackTable(

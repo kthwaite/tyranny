@@ -145,6 +145,7 @@ func namedCountFetch(player: @escaping @MainActor () -> PlayerModel?, command: S
 /// Genre | Artist | Album, above the track table (⌘B).
 struct ColumnBrowser: View {
     let list: ListModel
+    let colours: TableColours
 
     var body: some View {
         let browser = list.browser
@@ -156,7 +157,7 @@ struct ColumnBrowser: View {
                 generation: browser.genres.cache.generation, total: browser.genres.cache.total,
                 compilations: nil, label: { $0.name.isEmpty ? "Unknown Genre" : $0.name },
                 help: { "\($0.name) · \(DisplayFormat.count($0.album_count)) albums · \(DisplayFormat.songs($0.track_count))" },
-                select: list.setBrowserGenres)
+                select: list.setBrowserGenres, colours: colours)
             Divider()
             BrowserColumnTable(
                 column: browser.artists, identifier: "browser-artists", title: "Artists",
@@ -165,7 +166,7 @@ struct ColumnBrowser: View {
                 compilations: browser.artists.compilations,
                 label: { $0.name.isEmpty ? "Unknown Artist" : $0.name },
                 help: { "\($0.name) · \(DisplayFormat.count($0.album_count)) albums · \(DisplayFormat.songs($0.track_count))" },
-                select: list.setBrowserArtists)
+                select: list.setBrowserArtists, colours: colours)
             Divider()
             BrowserColumnTable(
                 column: browser.albums, identifier: "browser-albums", title: "Albums",
@@ -176,7 +177,7 @@ struct ColumnBrowser: View {
                     [album.title, album.album_artist, album.year.map(String.init)].compactMap { $0 }
                         .filter { !$0.isEmpty }.joined(separator: " · ")
                 },
-                select: list.setBrowserAlbums)
+                select: list.setBrowserAlbums, colours: colours)
         }
         .frame(height: 168)
         .accessibilityElement(children: .contain)
@@ -200,6 +201,7 @@ struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresentable whe
     let help: (Row) -> String
     let select: (Set<UInt64>) -> Void
     /// Row 0 is "All"; choosing it clears the selection.
+    let colours: TableColours
     var showsAll = true
     var allowsMultiple = true
 
@@ -251,6 +253,7 @@ struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresentable whe
         private var shownCount = 0
         private var shownCompilations: NamedCount?
         private var shownSelection: Set<UInt64>?
+        private var shownColours: UInt64?
 
         init(_ parent: BrowserColumnTable) { self.parent = parent }
 
@@ -280,6 +283,12 @@ struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresentable whe
                 shownSelection = parent.selected
                 let indexes = selectedIndexes()
                 if table.selectedRowIndexes != indexes { table.selectRowIndexes(indexes, byExtendingSelection: false) }
+            }
+            if parent.colours.revision != shownColours {
+                shownColours = parent.colours.revision
+                table.enumerateAvailableRowViews { view, _ in
+                    (view as? TokenRowView)?.selection = parent.colours.selection
+                }
             }
             reportVisible()
         }
@@ -313,6 +322,14 @@ struct BrowserColumnTable<Row: Sendable & Identifiable>: NSViewRepresentable whe
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { count }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            let reuse = NSUserInterfaceItemIdentifier("browser-row")
+            let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? TokenRowView ?? TokenRowView()
+            view.identifier = reuse
+            view.selection = parent.colours.selection
+            return view
+        }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let cell = tableView.makeView(withIdentifier: TrackCellView.reuse, owner: nil) as? TrackCellView

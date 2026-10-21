@@ -115,7 +115,8 @@ struct HistoryView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             Divider()
-            HistoryTable(model: model, generation: model.cache.generation, epoch: model.epoch, selectedID: model.selectedID)
+            HistoryTable(model: model, generation: model.cache.generation, epoch: model.epoch, selectedID: model.selectedID,
+                         colours: player.theme.tableColours)
                 .overlay {
                     if model.cache.revision != nil, model.cache.total == 0 {
                         Text("Nothing played yet")
@@ -159,6 +160,7 @@ struct HistoryTable: NSViewRepresentable {
     let generation: UInt64
     let epoch: UInt64
     let selectedID: UInt64?
+    let colours: TableColours
 
     private struct Column {
         let id: String
@@ -242,6 +244,7 @@ struct HistoryTable: NSViewRepresentable {
         private var shownEpoch: UInt64?
         private var shownCount = 0
         private var shownRefreshes: UInt64 = 0
+        private var shownColours: UInt64?
         private var anchor: (id: UInt64, offset: Int)?
         private var updating = false
 
@@ -266,6 +269,12 @@ struct HistoryTable: NSViewRepresentable {
                     table.reloadData(forRowIndexes: table.preparedRows, columnIndexes: IndexSet(0..<table.numberOfColumns))
                 }
                 restoreAnchor(table)
+            }
+            if parent.colours.revision != shownColours {
+                shownColours = parent.colours.revision
+                table.enumerateAvailableRowViews { view, _ in
+                    (view as? TokenRowView)?.selection = parent.colours.selection
+                }
             }
             let selected = parent.selectedID.flatMap { cache.position(of: $0) }.map { IndexSet(integer: $0) } ?? []
             if table.selectedRowIndexes != selected { table.selectRowIndexes(selected, byExtendingSelection: false) }
@@ -310,6 +319,14 @@ struct HistoryTable: NSViewRepresentable {
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { cache.total }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            let reuse = NSUserInterfaceItemIdentifier("history-row")
+            let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? TokenRowView ?? TokenRowView()
+            view.identifier = reuse
+            view.selection = parent.colours.selection
+            return view
+        }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let id = tableColumn?.identifier.rawValue,

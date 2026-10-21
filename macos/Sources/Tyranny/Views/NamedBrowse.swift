@@ -171,7 +171,7 @@ struct NamedBrowseView: View {
                 compilations: kind == .artists ? model.column.compilations : nil,
                 label: { $0.name.isEmpty ? kind.unknown : $0.name },
                 help: { "\($0.name) · \(DisplayFormat.count($0.album_count)) albums · \(DisplayFormat.songs($0.track_count))" },
-                select: model.select, showsAll: false, allowsMultiple: false)
+                select: model.select, colours: player.theme.tableColours, showsAll: false, allowsMultiple: false)
                 .frame(width: Self.listWidth)
             Divider()
             detail
