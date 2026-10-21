@@ -155,8 +155,16 @@ pub(crate) struct PendingHistory {
 impl PendingHistory {
     /// Adds `event` last. Returns the oldest event, dropped to make room. A
     /// play whose close is dropped is forgotten; its row stays open until
-    /// startup closes it.
+    /// startup closes it. A checkpoint replaces its play's unwritten one, so
+    /// checkpoints during a long outage never push out a count or a close.
     pub fn push(&mut self, event: HistoryEvent) -> Option<HistoryEvent> {
+        if let HistoryEvent::Checkpoint { play, .. } = event
+            && let Some(index) = self.events.iter().rposition(|queued| {
+                matches!(queued, HistoryEvent::Checkpoint { play: queued, .. } if *queued == play)
+            })
+        {
+            self.events.remove(index);
+        }
         let dropped = if self.events.len() >= MAX_PENDING_PLAYS {
             self.events.pop_front()
         } else {
@@ -690,6 +698,34 @@ mod tests {
     }
 
     #[test]
+    fn a_long_outage_of_checkpoints_keeps_the_count() -> Result<()> {
+        let (database, mut store) = Database::open();
+        let mut pending = PendingHistory::default();
+        pending.push(HistoryEvent::Open {
+            play: 1,
+            record: play(1, Some(3), "Long", 100),
+        });
+        pending.push(HistoryEvent::Count { play: 1 });
+        // Ten hours of 30 s checkpoints while every write fails.
+        for listened_ms in (1..=1_200).map(|tick| tick * 30_000) {
+            assert_eq!(
+                pending.push(HistoryEvent::Checkpoint {
+                    play: 1,
+                    listened_ms
+                }),
+                None
+            );
+        }
+        // Only the newest checkpoint waits.
+        assert_eq!(pending.len(), 3);
+        let result = pending.write(&mut store);
+        assert!(result.wrote && result.counted && result.error.is_none());
+        assert_eq!(timing(&database, 1), (Some(36_000_000), None, None));
+        assert_eq!(database.stats(), [(3, 1, Some(100))]);
+        Ok(())
+    }
+
+    #[test]
     fn pending_history_drops_events_of_a_play_whose_open_was_dropped() {
         let (database, mut store) = Database::open();
         let mut pending = PendingHistory::default();
@@ -700,9 +736,10 @@ mod tests {
             }),
             None
         );
-        for _ in 0..MAX_PENDING_PLAYS - 2 {
+        // Checkpoints of other plays, which have no rows.
+        for play in 0..MAX_PENDING_PLAYS as u64 - 2 {
             pending.push(HistoryEvent::Checkpoint {
-                play: 9,
+                play: 10 + play,
                 listened_ms: 1,
             });
         }
