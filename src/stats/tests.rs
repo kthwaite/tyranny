@@ -77,6 +77,50 @@ async fn stats_are_served_by_the_worker_without_an_owner() {
     workers.shutdown();
 }
 
+fn listened_ms(reply: Reply) -> u64 {
+    match reply {
+        Reply::Ok {
+            result: Response::Stats { report, .. },
+        } => report.listened_ms,
+        reply => panic!("unexpected reply: {reply:?}"),
+    }
+}
+
+fn year_2026() -> Request {
+    Request::Stats(PeriodRequest {
+        kind: PeriodKind::Year,
+        anchor: "2026-01-01".into(),
+    })
+}
+
+#[tokio::test]
+async fn all_runs_from_the_earliest_row_not_the_first_counted_play() {
+    let database = Database::new();
+    // A skip before the first counted play.
+    database.execute(
+        "INSERT INTO play_history(played_at,entry_id,track_id,path,title,artist,album,duration_ms,source_kind,source_name,listened_ms,ended_at,end_reason,counted) VALUES
+        (1789990000,2,NULL,'/m/2','Other','Band','A',200000,NULL,NULL,30000,1789990030,'skipped',0);",
+    );
+    database.execute(PLAY);
+    let workers = StatsWorkers::start(database.0.clone());
+    let all = listened_ms(workers.handle().request(all()).await);
+    let year = listened_ms(workers.handle().request(year_2026()).await);
+    assert_eq!((all, year), (180_000, 180_000));
+    workers.shutdown();
+}
+
+#[tokio::test]
+async fn all_counts_radio_time_when_nothing_has_counted() {
+    let database = Database::new();
+    database.execute(
+        "INSERT INTO play_history(played_at,entry_id,track_id,path,title,artist,album,duration_ms,source_kind,source_name,listened_ms,ended_at,end_reason,counted) VALUES
+        (1790000000,1,NULL,'http://s','','','',NULL,'stream','FM',45000,1790000045,'stopped',0);",
+    );
+    let workers = StatsWorkers::start(database.0.clone());
+    assert_eq!(listened_ms(workers.handle().request(all()).await), 45_000);
+    workers.shutdown();
+}
+
 #[tokio::test]
 async fn a_bad_anchor_is_an_invalid_command() {
     let database = Database::new();

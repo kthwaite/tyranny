@@ -180,16 +180,14 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
     let thresholds = Thresholds::default();
     let result = match request {
         Request::Stats(period) => {
-            let first_play = rows
-                .iter()
-                .filter(|row| row.counted)
-                .map(|row| row.played_at)
-                .min();
+            // All starts at the earliest row of any kind, so skips, radio and open rows
+            // before the first counted play still count towards its listened time.
+            let earliest = rows.first().map(|row| row.played_at);
             let bounds = period::bounds(
                 &zone,
                 period.kind,
                 anchor.expect("parsed above"),
-                first_play,
+                earliest,
                 now,
             );
             Response::Stats {

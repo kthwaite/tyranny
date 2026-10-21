@@ -107,18 +107,19 @@ pub(crate) struct Bounds {
     pub end: i64,
 }
 
-/// Normalises `anchor` to the start of its period (weeks start on Monday).
+/// Normalises `anchor` to the start of its period (weeks start on Monday). All runs from
+/// `earliest`, the first play row of any kind, to `now` inclusive.
 pub(crate) fn bounds(
     zone: &dyn Zone,
     kind: PeriodKind,
     anchor: Date,
-    first_play: Option<i64>,
+    earliest: Option<i64>,
     now: i64,
 ) -> Bounds {
     let (first, next) = match kind {
         PeriodKind::All => {
             return Bounds {
-                start: first_play.unwrap_or(now),
+                start: earliest.unwrap_or(now),
                 end: now + 1,
             };
         }
@@ -305,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn all_runs_from_first_play_to_now_inclusive() {
+    fn all_runs_from_the_earliest_row_to_now_inclusive() {
         let z = FixedZone(0);
         let first = utc_secs(2024, 5, 10, 12);
         let now = utc_secs(2026, 10, 21, 9);
