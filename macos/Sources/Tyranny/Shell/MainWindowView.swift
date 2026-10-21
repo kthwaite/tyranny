@@ -4,6 +4,7 @@ import TyrannyCore
 /// The library window: toolbar filter, source list, main view, the full-width player bar,
 /// and the status bar.
 struct MainWindowView: View {
+    @Environment(\.themeColours) private var colours
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
     @Environment(\.openSettings) private var openSettings
@@ -112,7 +113,7 @@ struct MainWindowView: View {
             .focused($filterFocused)
             .overlay {
                 RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(Color.red, lineWidth: filterError == nil ? 0 : 1.5)
+                    .strokeBorder(colours.error, lineWidth: filterError == nil ? 0 : 1.5)
                     .allowsHitTesting(false)
             }
             .help(filterError ?? "Filter title, artist or album with phrases, AND (&), OR (|), NOT (!), parentheses and field lists. ⌘F")

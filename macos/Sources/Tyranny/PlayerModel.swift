@@ -85,7 +85,11 @@ final class PlayerModel {
     @ObservationIgnored private var launchPrefetch: (slot: LaunchPrefetchSlot, deadline: ContinuousClock.Instant,
                                                      endpoint: String, tokenPath: String)?
 
-    init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore) {
+    /// The user's colours. Views read them from the environment.
+    let theme: ColourTheme
+
+    init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore, theme: ColourTheme) {
+        self.theme = theme
         self.quitSuspensions = quitSuspensions
         self.importNotes = importNotes
         let arguments = CommandLine.arguments

@@ -6,6 +6,7 @@ import TyrannyCore
 /// gain, the Up Next drawer toggle, and volume. The left and right sections are fixed; the
 /// scrubber shrinks first. A playback error replaces the left section.
 struct PlayerBar: View {
+    @Environment(\.themeColours) private var colours
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
     let sidebarVisible: Bool
@@ -60,7 +61,7 @@ struct PlayerBar: View {
                         .accessibilityIdentifier("now-playing-title")
                         if let warning = transport.metadataError {
                             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10))
-                                .foregroundStyle(.orange).help("Track metadata: \(warning)")
+                                .foregroundStyle(colours.warning).help("Track metadata: \(warning)")
                                 .accessibilityIdentifier("now-playing-metadata-warning")
                         }
                     }
@@ -111,7 +112,7 @@ struct PlayerBar: View {
     private func errorSummary(_ error: String) -> some View {
         Button { showingError = true } label: {
             HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 16)).foregroundStyle(.red)
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 16)).foregroundStyle(colours.error)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Playback Error").font(.system(size: 13, weight: .semibold))
                     Text(error).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
@@ -141,7 +142,7 @@ struct PlayerBar: View {
             HStack(spacing: 20) {
                 Toggle(isOn: Binding(get: { transport.shuffle }, set: { transport.setShuffle($0) })) {
                     Label("Shuffle", systemImage: "shuffle")
-                        .foregroundStyle(transport.shuffle ? Color.accentColor : Color.secondary)
+                        .foregroundStyle(transport.shuffle ? colours.accent : Color.secondary)
                 }
                 .toggleStyle(.button)
                 .disabled(!transport.canChangeModes)
@@ -170,7 +171,7 @@ struct PlayerBar: View {
                 .accessibilityIdentifier("transport-next")
                 Button(action: transport.cycleRepeat) {
                     Label(repeatTitle, systemImage: transport.repeat == .one ? "repeat.1" : "repeat")
-                        .foregroundStyle(transport.repeat == .off ? Color.secondary : Color.accentColor)
+                        .foregroundStyle(transport.repeat == .off ? Color.secondary : colours.accent)
                 }
                 .disabled(!transport.canChangeModes)
                 .help(repeatTitle)
@@ -219,7 +220,7 @@ struct PlayerBar: View {
             .accessibilityIdentifier("now-playing-format")
             Toggle(isOn: Binding(get: { model.lyrics.isVisible }, set: { model.lyrics.setVisible($0) })) {
                 Label("Lyrics", systemImage: "quote.bubble")
-                    .foregroundStyle(model.lyrics.isVisible ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(model.lyrics.isVisible ? colours.accent : Color.secondary)
             }
             .toggleStyle(.button)
             .buttonStyle(.borderless)
@@ -230,7 +231,7 @@ struct PlayerBar: View {
             .accessibilityIdentifier("lyrics-toggle")
             Toggle(isOn: $navigation.upNextDrawerVisible) {
                 Label("Up Next Drawer", systemImage: "sidebar.right")
-                    .foregroundStyle(navigation.upNextDrawerVisible ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(navigation.upNextDrawerVisible ? colours.accent : Color.secondary)
             }
             .toggleStyle(.button)
             .buttonStyle(.borderless)

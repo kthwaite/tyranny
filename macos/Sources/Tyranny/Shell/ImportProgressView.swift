@@ -3,6 +3,7 @@ import TyrannyCore
 
 /// The main area while the first music folder imports, and after it ends.
 struct ImportProgressView: View {
+    @Environment(\.themeColours) private var colours
     let progress: ImportProgress
     /// The session root's path, abbreviated. Nil until the root list has it.
     let folder: String?
@@ -29,7 +30,7 @@ struct ImportProgressView: View {
         VStack(spacing: 12) {
             Image(systemName: symbol)
                 .font(.system(size: 56))
-                .foregroundStyle(progress.stage == .done ? Color.green : Color.secondary)
+                .foregroundStyle(progress.stage == .done ? colours.success : Color.secondary)
                 .accessibilityHidden(true)
             Text(progress.title).font(.title2.weight(.semibold))
             if let folder {

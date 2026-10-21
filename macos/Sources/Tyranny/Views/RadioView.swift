@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 /// plays, adds to Up Next, edits and removes. The header adds a station by URL or imports a
 /// `.pls` or `.m3u` file.
 struct RadioView: View {
+    @Environment(\.themeColours) private var colours
     let model: StationsModel
     let player: PlayerModel
     @State private var selection: Station.ID?
@@ -51,7 +52,7 @@ struct RadioView: View {
                 .accessibilityIdentifier("radio-count")
             if let error = model.error {
                 Text(error)
-                    .font(.callout).foregroundStyle(.red)
+                    .font(.callout).foregroundStyle(colours.error)
                     .lineLimit(2)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("radio-error")
@@ -148,6 +149,7 @@ struct RadioView: View {
 
 /// Add Station… and Edit…: a stream URL and a name. The server's failure stays in the sheet.
 struct StationSheet: View {
+    @Environment(\.themeColours) private var colours
     enum Mode: Identifiable {
         case add, edit(Station)
 
@@ -189,7 +191,7 @@ struct StationSheet: View {
                 .onSubmit(save)
                 .accessibilityIdentifier("radio-sheet-name")
             if let failure {
-                Text(failure).font(.callout).foregroundStyle(.red)
+                Text(failure).font(.callout).foregroundStyle(colours.error)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("radio-sheet-error")

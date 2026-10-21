@@ -3,6 +3,7 @@ import SwiftUI
 import TyrannyCore
 
 struct EqualizerView: View {
+    @Environment(\.themeColours) private var colours
     let model: EqualizerModel
 
     var body: some View {
@@ -46,7 +47,7 @@ struct EqualizerView: View {
                     .foregroundStyle(.secondary).accessibilityIdentifier("equalizer-disconnected")
             }
             if let error = model.error {
-                Text(error).foregroundStyle(.red).font(.callout)
+                Text(error).foregroundStyle(colours.error).font(.callout)
                     .textSelection(.enabled).accessibilityIdentifier("equalizer-error")
             }
         }

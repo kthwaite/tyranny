@@ -28,6 +28,7 @@ struct TrackDrag {
 
 /// Public native destinations also work in toolbar items and during AppKit tracking.
 private struct TrackDragHover: ViewModifier {
+    @Environment(\.themeColours) private var colours
     let model: PlayerModel
     let enabled: Bool
     let destination: TrackDragSource?
@@ -37,7 +38,7 @@ private struct TrackDragHover: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(targeted ? Color.accentColor.opacity(0.2) : Color.clear)
+            .background(targeted ? colours.accent.opacity(0.2) : Color.clear)
             .overlay(Region(model: model, enabled: enabled, destination: destination,
                 hover: hover, drop: drop, targeted: $targeted))
     }

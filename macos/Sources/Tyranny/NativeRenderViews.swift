@@ -274,7 +274,7 @@ enum NativeRenderViews {
         for (tab, name) in [(SettingsTab.connection, "12-settings-connection"), (.library, "13-settings-library"),
                             (.playback, "14-settings-playback")] {
             navigation.settingsTab = tab
-            let host = NSHostingView(rootView: SettingsView(model: model, navigation: navigation))
+            let host = NSHostingView(rootView: SettingsView(model: model, navigation: navigation).colourTheme(model.theme))
             let size = host.fittingSize
             host.frame = NSRect(origin: .zero, size: NSSize(width: max(size.width, 600), height: max(size.height, 200)))
             let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)

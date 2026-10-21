@@ -2,6 +2,7 @@ import SwiftUI
 import TyrannyCore
 
 struct LyricsPane: View {
+    @Environment(\.themeColours) private var colours
     let store: LyricsStore
     let transport: TransportModel
 
@@ -95,7 +96,7 @@ struct LyricsPane: View {
                         let line = store.timeline.lines[index]
                         Text(line.text.isEmpty ? " " : line.text)
                             .font(.body.weight(active.contains(index) ? .semibold : .regular))
-                            .foregroundStyle(active.contains(index) ? Color.accentColor : Color.secondary)
+                            .foregroundStyle(active.contains(index) ? colours.accent : Color.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                             .accessibilityValue(active.contains(index) ? "Current lyric" : "")
