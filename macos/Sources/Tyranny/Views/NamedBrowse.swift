@@ -64,7 +64,7 @@ final class NamedBrowseModel {
             }
             return
         }
-        let filter = navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filter = navigation.effectiveFilter
         let library = snapshot.library.revision
         if session != generation || loadedQuery == nil {
             session = generation
@@ -186,7 +186,7 @@ struct NamedBrowseView: View {
 
     private var syncKey: SyncKey {
         SyncKey(connected: player.connected, session: player.playlistConnectionGeneration,
-                library: player.snapshot?.library.revision, filter: navigation.filter)
+                library: player.snapshot?.library.revision, filter: navigation.effectiveFilter)
     }
 
     private struct SyncKey: Equatable {

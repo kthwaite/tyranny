@@ -38,10 +38,12 @@ enum Field {
     AlbumArtist,
     Genre,
     Year,
+    Liked,
 }
 enum Expr {
     Term(Field, String),
     Years(u16, u16),
+    Liked(bool),
     Not(Box<Expr>),
     And(Vec<Expr>),
     Or(Vec<Expr>),
@@ -222,10 +224,11 @@ impl Parser {
                 "albumartist" => Field::AlbumArtist,
                 "genre" => Field::Genre,
                 "year" => Field::Year,
+                "liked" => Field::Liked,
                 _ => {
                     return Err(invalid(
                         position,
-                        "unknown field; expected title, artist, album, albumartist, genre or year",
+                        "unknown field; expected title, artist, album, albumartist, genre, year or liked",
                     ));
                 }
             };
@@ -266,6 +269,15 @@ impl Parser {
             };
             self.cursor += 1;
             return self.node(Expr::Years(low, high));
+        }
+        if matches!(field, Field::Liked) {
+            let liked = match value.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(invalid(position, "expected true or false for liked")),
+            };
+            self.cursor += 1;
+            return self.node(Expr::Liked(liked));
         }
         self.cursor += 1;
         self.node(Expr::Term(field, value))
@@ -322,6 +334,11 @@ impl Filter {
     }
     fn compile(&mut self, expression: Expr, first: usize) {
         match expression {
+            Expr::Liked(liked) => {
+                let parameter = first + self.values.len();
+                self.values.push(Value::Integer(i64::from(liked)));
+                write!(self.sql, "t.liked=?{parameter}").unwrap();
+            }
             Expr::Years(low, high) => {
                 let parameter = first + self.values.len();
                 self.values.push(Value::Integer(low.into()));
@@ -361,7 +378,7 @@ impl Filter {
                     Field::Artist => artist,
                     Field::Album => album,
                     Field::AlbumArtist => album_artist,
-                    Field::Genre | Field::Year => unreachable!(),
+                    Field::Genre | Field::Year | Field::Liked => unreachable!(),
                 };
                 write!(self.sql, "instr({column},?{parameter})>0").unwrap();
             }

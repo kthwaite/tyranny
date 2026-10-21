@@ -33,6 +33,7 @@ enum TrackColumns {
         TrackColumn(id: "number", title: "#", width: 34, sort: .albumOrder, alignment: .right,
                     monospacedDigits: true) { $0.track_number == 0 ? "" : String($0.track_number) },
         TrackColumn(id: "title", title: "Title", width: 200, minWidth: 80, sort: .title, hideable: false) { $0.title },
+        TrackColumn(id: "liked", title: "Liked", width: 44, alignment: .center) { _ in "" },
         TrackColumn(id: "artist", title: "Artist", width: 140, sort: .artist) { $0.artist },
         TrackColumn(id: "album", title: "Album", width: 150, sort: .album) { $0.album },
         TrackColumn(id: "time", title: "Time", width: 52, sort: .duration, alignment: .right, monospacedDigits: true) {

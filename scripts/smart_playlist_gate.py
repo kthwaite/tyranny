@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import selectors
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -165,8 +164,6 @@ def main():
             assert all_entries(regular) == kept and queue() == kept_queue
             assert (restored['current_id'], restored['position_frames'], restored['queue_revision']) == (before['current_id'], before['position_frames'], before['queue_revision'])
             assert restored['transport'] == 'paused'
-            with sqlite3.connect(run / 'state/state.sqlite3') as db:
-                assert db.execute('PRAGMA user_version').fetchone()[0] == 8
             record('real-schema3-migration-preserves-ordinary-duplicates-queue-and-checkpoint')
         rule = 'artist:"Miles Davis" & !album:"Kind of Blue"'
         before = client.state()

@@ -206,6 +206,192 @@ impl Gate {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn liked_commands_route_to_library_and_smart_membership_updates_live() {
+    let fixture = Fixture::new();
+    fixture.index(&["a", "b"]).await;
+    let control = fixture.control();
+    let state = snapshot(&control).await;
+    let Response::LibraryTracks { page } = ok(
+        &control,
+        Command::LibraryTracks {
+            album_id: None,
+            revision: Some(state.library.revision),
+            offset: 0,
+            limit: 10,
+            query: String::new(),
+        },
+    )
+    .await
+    else {
+        panic!("expected tracks");
+    };
+    let track_id = page.entries[0].id;
+    let Response::PlaylistApplied {
+        playlist: Some(smart),
+        ..
+    } = ok(
+        &control,
+        Command::CreateSmartPlaylist {
+            expected_revision: state.playlists_revision,
+            name: "Liked".into(),
+            query: "liked:true".into(),
+        },
+    )
+    .await
+    else {
+        panic!("expected smart playlist");
+    };
+    let smart_page = |revision| Command::PlaylistEntries {
+        playlist_id: smart.id,
+        revision: Some(smart.revision),
+        library_revision: Some(revision),
+        offset: 0,
+        limit: 10,
+        query: String::new(),
+    };
+    let Response::PlaylistEntries { page, .. } =
+        ok(&control, smart_page(state.library.revision)).await
+    else {
+        panic!("expected smart entries");
+    };
+    assert_eq!(page.total, 0);
+    let Response::TrackLiked {
+        library_revision,
+        liked: true,
+        track_id: changed,
+    } = ok(
+        &control,
+        Command::SetTrackLiked {
+            track_id,
+            liked: true,
+            library_revision: state.library.revision,
+        },
+    )
+    .await
+    else {
+        panic!("expected liked reply");
+    };
+    assert_eq!(changed, track_id);
+    assert_eq!(library_revision, state.library.revision + 1);
+    let after = snapshot(&control).await;
+    assert_eq!(after.library.revision, library_revision);
+    assert_eq!(after.queue_revision, state.queue_revision);
+    let Response::PlaylistEntries { page, .. } = ok(&control, smart_page(library_revision)).await
+    else {
+        panic!("expected smart entries");
+    };
+    assert_eq!(page.total, 1);
+    assert_eq!(page.entries[0].track_id, track_id);
+    let list = ListDescription {
+        source: ListSource::Smart {
+            id: smart.id,
+            revision: smart.revision,
+        },
+        browser: Browser::default(),
+        query: "liked:true".into(),
+        sort: Vec::new(),
+        group: Grouping::None,
+    };
+    let Response::ListTracks { page, .. } = ok(
+        &control,
+        Command::ListTracks {
+            list,
+            revision: Some(library_revision),
+            offset: 0,
+            limit: 10,
+        },
+    )
+    .await
+    else {
+        panic!("expected smart list tracks");
+    };
+    assert_eq!(page.total, 1);
+    assert!(page.entries[0].track.liked);
+    for liked in [false, true] {
+        assert!(matches!(
+            ask(
+                &control,
+                Command::SetTrackLiked {
+                    track_id,
+                    liked,
+                    library_revision: state.library.revision,
+                }
+            )
+            .await,
+            Reply::Error {
+                code: ErrorCode::StaleLibraryRevision,
+                ..
+            }
+        ));
+    }
+    assert!(matches!(
+        ask(
+            &control,
+            Command::SetTrackLiked {
+                track_id: u64::MAX,
+                liked: true,
+                library_revision,
+            }
+        )
+        .await,
+        Reply::Error {
+            code: ErrorCode::InvalidCommand,
+            ..
+        }
+    ));
+    let Response::TrackLiked {
+        library_revision: same,
+        ..
+    } = ok(
+        &control,
+        Command::SetTrackLiked {
+            track_id,
+            liked: true,
+            library_revision,
+        },
+    )
+    .await
+    else {
+        panic!("expected no-op reply");
+    };
+    assert_eq!(same, library_revision);
+    let Response::TrackLiked {
+        library_revision, ..
+    } = ok(
+        &control,
+        Command::SetTrackLiked {
+            track_id,
+            liked: false,
+            library_revision,
+        },
+    )
+    .await
+    else {
+        panic!("expected unlike reply");
+    };
+    let Response::PlaylistEntries { page, .. } = ok(&control, smart_page(library_revision)).await
+    else {
+        panic!("expected smart entries");
+    };
+    assert_eq!(page.total, 0);
+    assert!(matches!(
+        ask(
+            &control,
+            Command::UpdateSmartPlaylist {
+                playlist_id: smart.id,
+                expected_revision: smart.revision,
+                query: "liked:yes".into(),
+            }
+        )
+        .await,
+        Reply::Error {
+            code: ErrorCode::InvalidFilter,
+            ..
+        }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn controls_answer_while_a_selection_resolves() {
     let fixture = Fixture::new();
     fixture.index(&["a", "b", "c"]).await;

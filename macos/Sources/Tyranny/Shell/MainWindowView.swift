@@ -114,11 +114,17 @@ struct MainWindowView: View {
 
     // MARK: - Toolbar
 
-    /// The split view supplies the sidebar toggle; the toolbar holds only the filter. macOS puts
-    /// primary actions at the leading edge, so a flexible space pushes the filter to the trailing edge.
+    /// The split view supplies the sidebar toggle; the toolbar holds the liked toggle and text filter.
+    /// A flexible space pushes both filtering controls to the trailing edge.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             Spacer()
+            Toggle(isOn: $navigation.likedOnly) {
+                Label("Liked only", systemImage: "heart.fill")
+            }
+            .toggleStyle(.button)
+            .help("Show only liked songs, combined with the current filter")
+            .accessibilityIdentifier("library-liked-only")
             filterField
         }
     }
@@ -133,7 +139,7 @@ struct MainWindowView: View {
                     .strokeBorder(colours.error, lineWidth: filterError == nil ? 0 : 1.5)
                     .allowsHitTesting(false)
             }
-            .help(filterError ?? "Filter title, artist or album with phrases, AND (&), OR (|), NOT (!), parentheses and field lists. ⌘F")
+            .help(filterError ?? "Filter title, artist, album or liked:true / liked:false with phrases, AND (&), OR (|), NOT (!), parentheses and field lists. ⌘F")
             .accessibilityIdentifier("library-filter")
             .popover(isPresented: Binding(
                 get: { filterError != nil && dismissedFilterError != filterError },

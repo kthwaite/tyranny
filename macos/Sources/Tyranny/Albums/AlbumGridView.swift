@@ -34,7 +34,7 @@ struct AlbumGridView: View {
 
     private var syncKey: SyncKey {
         SyncKey(connected: player.connected, session: player.playlistConnectionGeneration,
-                library: player.snapshot?.library.revision, filter: navigation.filter)
+                library: player.snapshot?.library.revision, filter: navigation.effectiveFilter)
     }
 
     private struct SyncKey: Equatable {

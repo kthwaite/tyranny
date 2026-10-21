@@ -653,12 +653,14 @@ public struct TrackSummary: Codable, Sendable, Equatable {
     public let last_played: Int64?
     public let date_added: Int64
     public let path: String
+    public let liked: Bool
 
     public init(
         id: UInt64, album_id: UInt64, artist_id: UInt64, album_artist_id: UInt64, title: String, artist: String,
         album: String, album_artist: String, compilation: Bool, disc_number: UInt32, track_number: UInt32,
         duration_ms: UInt64?, year: Int32?, genre: String, format: String, sample_rate: UInt32,
-        bitrate_kbps: UInt32?, play_count: UInt64, last_played: Int64?, date_added: Int64, path: String
+        bitrate_kbps: UInt32?, play_count: UInt64, last_played: Int64?, date_added: Int64, path: String,
+        liked: Bool
     ) {
         self.id = id
         self.album_id = album_id
@@ -681,7 +683,14 @@ public struct TrackSummary: Codable, Sendable, Equatable {
         self.last_played = last_played
         self.date_added = date_added
         self.path = path
+        self.liked = liked
     }
+}
+
+public struct TrackLiked: Decodable, Sendable {
+    public let track_id: UInt64
+    public let liked: Bool
+    public let library_revision: UInt64
 }
 
 public struct ListRow: Codable, Sendable, Equatable, Identifiable {

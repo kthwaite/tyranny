@@ -535,6 +535,16 @@ final class PlayerModel {
             refresh()
         }
     }
+
+    /// Hearts reflect authoritative list rows, never an optimistic local toggle.
+    func setTrackLiked(_ trackID: UInt64, liked: Bool, libraryRevision: UInt64) {
+        mutate { [self] in
+            let _: TrackLiked = try await send("set_track_liked", [
+                "track_id": .uint(trackID), "liked": .bool(liked),
+                "library_revision": .uint(libraryRevision),
+            ])
+        }
+    }
     /// Runs one user mutation: marks the model busy, reports failure in `message`,
     /// afterwards.
     func mutate(_ action: @escaping @MainActor () async throws -> Void) {

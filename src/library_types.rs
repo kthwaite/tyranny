@@ -148,6 +148,7 @@ pub struct Track {
     pub path: String,
     pub metadata: TrackMetadata,
     pub error: Option<String>,
+    pub liked: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Page<T> {
@@ -181,6 +182,7 @@ pub struct TrackSummary {
     pub last_played: Option<i64>,
     pub date_added: i64,
     pub path: String,
+    pub liked: bool,
 }
 /// One row of a list. `row_id` is the playlist occurrence for playlist
 /// sources and the track ID otherwise.
@@ -267,6 +269,11 @@ pub enum LibraryCommand {
     Rescan {
         root_id: u64,
     },
+    SetTrackLiked {
+        track_id: u64,
+        liked: bool,
+        library_revision: u64,
+    },
     Roots(PageRequest),
     Artists(PageRequest),
     Albums {
@@ -317,6 +324,11 @@ pub enum LibraryReply {
     RootAdded(Root),
     ScanAccepted {
         root_id: u64,
+    },
+    TrackLiked {
+        track_id: u64,
+        liked: bool,
+        library_revision: u64,
     },
     Roots(Page<Root>),
     Artists(Page<AlbumArtist>),

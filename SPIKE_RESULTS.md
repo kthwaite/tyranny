@@ -2,6 +2,48 @@
 
 Generated reports and screenshots under `spike-results/` are local, ignored artifacts, not versioned deliverables. References below describe historical verification runs; their artifact paths may be absent in a fresh checkout. Previously committed artifacts have been removed from Git history. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
 
+## Song likes (2026-10-21)
+
+Implemented on `feature/song-likes`, branched from `dev` at `88c1ede`, in
+`../tyranny-song-likes`. SQLite schema 9 stores per-track likes independently
+of file tags. Protocol stays at 17 on this branch; integration must bump it
+and ship matching client/server builds.
+
+Verification:
+
+- Rust: **584 passed, 2 ignored** across all targets; debug binaries built.
+  Formatting and Clippy with warnings denied passed. Used the existing pinned
+  FFmpeg 9.0.2/libopenmpt prefix.
+- Swift: **435 tests passed in 59 suites**; debug native executable built.
+- Isolated real daemon with three tagged FLACs: default-unliked state,
+  desired-state/no-op semantics, stale-revision rejection, invalid filters,
+  Boolean composition, duplicate playlist occurrences, live smart-rule
+  membership, rescan preservation and daemon restart preservation passed.
+  Backend cases are recorded in `target/run-jzl01gbi/report.json`; its initial
+  combined verdict was interrupted by a native automation failure.
+- Final native smoke passed all six scenarios: heart clicks without selecting
+  or playing; Liked only AND-composed with OR text; removal on unlike; visible
+  malformed-filter errors and retained text; hide/show with persisted column
+  preferences; grouped-table and album-expansion updates. Connection generation
+  stayed unchanged and no client error remained.
+  Evidence: `target/run-jzl01gbi/native-final/report.json`.
+  Final liked-only and album screenshots were inspected.
+- Existing real-file structured-filter gate passed all seven cases:
+  `target/filter-gate/run-1if9qm8b/report.json`.
+
+Native verification caught an omitted `track_liked` reply whitelist entry:
+the server committed but the client disconnected on the reply. Both reply
+validation paths were updated, and the smoke now rejects connection resets
+or surfaced errors. Its Columns interaction also now selects the menu item,
+not the identically titled table header.
+
+The retained DEBUG hook is `--likes-smoke-output <directory>` with an explicit
+isolated server URL/token and `--ui-driver <path>`. Supply three initially
+unliked tracks titled Alpha, Beta and Gamma in Likes Album, and an empty queue.
+The run used a separate `local.tyranny.likes-smoke` bundle identifier, private
+state and clock-paced capture. No installed app, user library, running daemon,
+release package or hardware audio device was changed or tested.
+
 ## Parametric equalizer (2026-10-21)
 
 Implemented `TSK-knobby-iris-fg8hk` in `../tyranny-knobby-iris`, branch
