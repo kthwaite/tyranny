@@ -1,7 +1,7 @@
 //! The worker's state, the lookup that turns an album into a stored proposal,
 //! and the apply and revert that write tags.
 use super::{
-    ApplyRequest, Failure, LOOKUP_DEADLINE, LookupError, LookupRequest, MAX_ALBUM_TRACKS,
+    ApplyRequest, Failure, LookupError, LookupRequest, MAX_ALBUM_TRACKS,
     acoustid::{AcoustId, rank_releases},
     fingerprint::fingerprint,
     journal::{FileStatus, Journal, JournalFile},
@@ -133,12 +133,14 @@ impl Engine {
         })
     }
 
+    /// `deadline` is set when the request is queued, so time spent waiting
+    /// counts.
     pub(super) fn lookup(
         &mut self,
         request: &LookupRequest,
         cancel: &Cancellation,
+        deadline: Instant,
     ) -> Result<TagProposal, Failure> {
-        let deadline = Instant::now() + LOOKUP_DEADLINE;
         self.find(request, cancel, deadline)
             .map_err(|refusal| self.failure(refusal))
     }
@@ -376,21 +378,29 @@ impl Engine {
             .musicbrainz
             .as_ref()
             .map_err(Refusal::lookup)?;
+        // From a search or fingerprints, a candidate that fails to load is
+        // left out. A lone candidate (explicit or stored) must load. A busy
+        // service, a cancel or the deadline always stops the lookup.
+        let several = candidates.len() > 1;
         let mut scored: Vec<(u32, Release)> = Vec::with_capacity(candidates.len());
+        let mut first_failure = None;
         for (id, evidence) in candidates {
-            let release = fetch(musicbrainz, &mut self.releases, &id, cancel, deadline)?;
-            scored.push((score(&album, &release, evidence), release));
-        }
-        // The best score wins; on a tie, the earlier candidate. An explicit
-        // release is the only candidate.
-        let mut chosen = 0;
-        for (index, (points, _)) in scored.iter().enumerate() {
-            if *points > scored[chosen].0 {
-                chosen = index;
+            match fetch(musicbrainz, &mut self.releases, &id, cancel, deadline) {
+                Ok(release) => scored.push((score(&album, &release, evidence), release)),
+                Err(LookupError::Failed(message)) if several => {
+                    first_failure.get_or_insert(message);
+                }
+                Err(error) => return Err(error.into()),
             }
         }
-        let release = scored[chosen].1.clone();
+        if scored.is_empty() {
+            return Err(Refusal::lookup(
+                first_failure.unwrap_or_else(|| NO_RELEASE.into()),
+            ));
+        }
+        // Stable: on a tie, the earlier candidate comes first.
         scored.sort_by_key(|(points, _)| std::cmp::Reverse(*points));
+        let release = scored[0].1.clone();
 
         let matches = match_files(&tracks, &release);
         let mut rows = Vec::with_capacity(tracks.len());

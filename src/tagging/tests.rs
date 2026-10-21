@@ -1,7 +1,7 @@
 //! Lookups against scanned fixture albums and loopback providers. Tests never
 //! touch the network.
 use super::{
-    ApplyRequest, Failure, LookupRequest, TagOutcome, TagRequest, TaggingWorkers,
+    ApplyRequest, Failure, LOOKUP_DEADLINE, LookupRequest, TagOutcome, TagRequest, TaggingWorkers,
     acoustid::AcoustId,
     engine::{Engine, Providers},
     journal::{FileStatus, Journal},
@@ -68,9 +68,14 @@ fn lookup(
     providers: Providers,
     request: &LookupRequest,
 ) -> Result<TagProposal, Failure> {
-    Engine::open(&album.database, providers)
-        .unwrap()
-        .lookup(request, &Cancellation::new())
+    Engine::open(&album.database, providers).unwrap().lookup(
+        request,
+        &Cancellation::new(),
+        deadline(),
+    )
+}
+fn deadline() -> Instant {
+    Instant::now() + LOOKUP_DEADLINE
 }
 fn targets(fixture: &HttpFixture) -> Vec<String> {
     fixture.seen().into_iter().map(|s| s.target).collect()
@@ -186,6 +191,52 @@ fn empty_search_retries_without_track_count_then_reports_no_match() {
         (
             ErrorCode::Lookup,
             "MusicBrainz has no matching release".into()
+        )
+    );
+}
+
+#[test]
+fn a_search_candidate_that_fails_to_load_is_left_out() {
+    let album = unidentified();
+    let missing = HttpFixture::new(|target| {
+        if target.contains(B) {
+            return json(404, b"{}".to_vec());
+        }
+        releases_or(target, "search.json")
+    });
+    let proposal = lookup(&album, providers(&missing, None), &request(&album)).unwrap();
+    assert_eq!(
+        targets(&missing)[1..],
+        [release_target(A), release_target(B)]
+    );
+    let ids: Vec<_> = proposal.candidates.iter().map(|c| &c.release_id).collect();
+    assert_eq!(ids, [A]);
+    assert_eq!(proposal.release_id, A);
+
+    // Every candidate failing gives the first failure.
+    let none = HttpFixture::new(|target| {
+        if target.starts_with("/ws/2/release?") {
+            return json(200, fixture("search.json"));
+        }
+        json(404, b"{}".to_vec())
+    });
+    assert_eq!(
+        refused(lookup(&album, providers(&none, None), &request(&album))),
+        (ErrorCode::Lookup, "MusicBrainz has no such record".into())
+    );
+
+    // A busy reply still stops the lookup.
+    let busy = HttpFixture::new(|target| {
+        if target.contains(B) {
+            return json(503, b"{}".to_vec());
+        }
+        releases_or(target, "search.json")
+    });
+    assert_eq!(
+        refused(lookup(&album, providers(&busy, None), &request(&album))),
+        (
+            ErrorCode::Lookup,
+            "MusicBrainz is busy, try again shortly".into()
         )
     );
 }
@@ -521,16 +572,26 @@ fn abandoned_lookup_stops_the_worker() {
         }
         reply
     });
-    let workers =
-        TaggingWorkers::with_providers(album.database.clone(), providers(&server, None), None);
+    let workers = TaggingWorkers::with_providers(
+        album.database.clone(),
+        Some(providers(&server, None)),
+        None,
+    );
     let handle = workers.handle();
     let proposal = block_on(async {
-        let abandoned = tokio::time::timeout(
-            Duration::from_millis(100),
-            handle.request(TagRequest::Lookup(request(&album))),
-        )
-        .await;
-        assert!(abandoned.is_err(), "the first lookup is still waiting");
+        let first = {
+            let handle = handle.clone();
+            let request = request(&album);
+            tokio::spawn(async move { handle.request(TagRequest::Lookup(request)).await })
+        };
+        // Drop the first lookup's future once its search is on the wire.
+        let waited = Instant::now();
+        while server.seen().is_empty() {
+            assert!(waited.elapsed() < Duration::from_secs(5), "no search sent");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        first.abort();
+        assert!(first.await.is_err_and(|error| error.is_cancelled()));
         let explicit = LookupRequest {
             release_id: Some(B.into()),
             ..request(&album)
@@ -561,8 +622,11 @@ fn a_full_queue_is_busy() {
         reply.delay = Duration::from_secs(1);
         reply
     });
-    let workers =
-        TaggingWorkers::with_providers(album.database.clone(), providers(&server, None), None);
+    let workers = TaggingWorkers::with_providers(
+        album.database.clone(),
+        Some(providers(&server, None)),
+        None,
+    );
     let handle = workers.handle();
     let failure = block_on(async {
         // One lookup runs and four wait; the sixth finds the queue full.
@@ -671,7 +735,7 @@ fn apply_writes_proposal_values_and_journals_before_and_after() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let before: Vec<FileTags> = album.files.iter().map(|p| read_tags(p).unwrap()).collect();
     let apply = apply_request(&proposal, &[]);
@@ -731,7 +795,7 @@ fn omitted_fields_are_left_unchanged_and_the_rest_written() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     for track in &proposal.tracks {
         let fields: Vec<_> = track.changes.iter().map(|c| c.field).collect();
@@ -767,7 +831,7 @@ fn unknown_track_rejects_the_whole_apply() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let original = bytes(&album);
     let mut apply = apply_request(&proposal, &[]);
@@ -794,7 +858,7 @@ fn empty_and_repeated_track_lists_are_refused() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let mut apply = apply_request(&proposal, &[]);
     apply.track_ids.clear();
@@ -823,7 +887,7 @@ fn apply_skips_a_file_changed_since_the_lookup() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let mut changed = std::fs::OpenOptions::new()
         .append(true)
@@ -858,7 +922,7 @@ fn deleted_file_between_lookup_and_apply_is_skipped() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     std::fs::remove_file(&album.files[0]).unwrap();
     let (result, written) = engine
@@ -883,7 +947,7 @@ fn unwritable_directory_fails_every_file_and_leaves_originals() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let original = bytes(&album);
     let folder = album.files[0].parent().unwrap().to_owned();
@@ -917,7 +981,7 @@ fn a_stopped_worker_writes_nothing() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let original = bytes(&album);
     let (result, written) = engine
@@ -939,7 +1003,7 @@ fn an_unavailable_journal_writes_nothing() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let original = bytes(&album);
     let (code, message) = refused_apply(engine.apply(&apply_request(&proposal, &[]), &running()));
@@ -958,7 +1022,7 @@ fn a_track_total_without_its_number_is_not_written_to_id3v2() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let fields: Vec<_> = proposal.tracks[0].changes.iter().map(|c| c.field).collect();
     assert!(
@@ -1016,7 +1080,7 @@ fn revert_restores_before_values_and_removes_added_fields() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     assert!(proposal.tracks.iter().all(|t| t.removes_other_copies));
     let (applied, _) = engine
@@ -1058,7 +1122,7 @@ fn double_revert_is_refused() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let (applied, _) = engine
         .apply(&apply_request(&proposal, &[]), &running())
@@ -1086,7 +1150,7 @@ fn revert_skips_files_changed_since_the_edit() {
     let server = musicbrainz("search.json");
     let mut engine = engine(&album, &server);
     let proposal = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let (applied, _) = engine
         .apply(&apply_request(&proposal, &[]), &running())
@@ -1138,7 +1202,7 @@ fn edits_lists_latest_first_with_counts() {
     let mut engine = engine(&album, &server);
     assert!(engine.edits().unwrap().is_empty());
     let first = engine
-        .lookup(&request(&album), &Cancellation::new())
+        .lookup(&request(&album), &Cancellation::new(), deadline())
         .unwrap();
     let (first, _) = engine
         .apply(&apply_request(&first, &[]), &running())
@@ -1147,7 +1211,9 @@ fn edits_lists_latest_first_with_counts() {
         release_id: Some(B.into()),
         ..request(&album)
     };
-    let second = engine.lookup(&explicit, &Cancellation::new()).unwrap();
+    let second = engine
+        .lookup(&explicit, &Cancellation::new(), deadline())
+        .unwrap();
     let mut apply = apply_request(&second, &[]);
     apply.track_ids.truncate(2);
     let (second, _) = engine.apply(&apply, &running()).unwrap();
@@ -1179,8 +1245,11 @@ fn apply_is_not_cancelled_when_the_requester_goes_away() {
         }
         reply
     });
-    let workers =
-        TaggingWorkers::with_providers(album.database.clone(), providers(&server, None), None);
+    let workers = TaggingWorkers::with_providers(
+        album.database.clone(),
+        Some(providers(&server, None)),
+        None,
+    );
     let handle = workers.handle();
     let proposal = block_on(async {
         let Ok(TagOutcome::Proposal(proposal)) =

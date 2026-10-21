@@ -84,6 +84,8 @@ struct Work {
     request: TagRequest,
     reply: oneshot::Sender<Result<TagOutcome, Failure>>,
     cancel: Cancellation,
+    /// A lookup's deadline, from the moment it was queued.
+    deadline: Instant,
 }
 impl Work {
     /// Only a lookup is dropped when its requester has left (F2). Other work
@@ -109,11 +111,12 @@ pub(crate) struct TaggingWorkers {
 }
 impl TaggingWorkers {
     pub(crate) fn start(database: PathBuf, library: LibraryHandle) -> Self {
-        Self::with_providers(database, engine::Providers::live(), Some(library))
+        Self::with_providers(database, None, Some(library))
     }
+    /// `None` builds the live providers in the worker, on first use.
     fn with_providers(
         database: PathBuf,
-        providers: engine::Providers,
+        providers: Option<engine::Providers>,
         library: Option<LibraryHandle>,
     ) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Work>(QUEUE_CAPACITY);
@@ -153,10 +156,11 @@ impl Drop for TaggingWorkers {
     }
 }
 
-/// The worker loop. The engine opens on the first request.
+/// The worker loop. The engine, and the live providers when none are given,
+/// are made on the first request.
 fn run(
     database: &std::path::Path,
-    providers: engine::Providers,
+    providers: Option<engine::Providers>,
     receiver: &mpsc::Receiver<Work>,
     stop: &AtomicBool,
 ) {
@@ -172,14 +176,17 @@ fn run(
             continue;
         }
         let engine = engine.get_or_insert_with(|| match providers.take() {
-            Some(providers) => engine::Engine::open(database, providers)
-                .map_err(|error| format!("tag lookups are unavailable: {error:#}")),
+            Some(providers) => {
+                let providers = providers.unwrap_or_else(engine::Providers::live);
+                engine::Engine::open(database, providers)
+                    .map_err(|error| format!("tag lookups are unavailable: {error:#}"))
+            }
             None => Err("tag lookups are unavailable".into()),
         });
         let result = match engine {
             Ok(engine) => match &work.request {
                 TagRequest::Lookup(request) => engine
-                    .lookup(request, &work.cancel)
+                    .lookup(request, &work.cancel, work.deadline)
                     .map(TagOutcome::Proposal),
                 // Writes check only `stop`, and only between files.
                 TagRequest::Apply(request) => engine
@@ -212,6 +219,7 @@ impl Handle {
             request,
             reply,
             cancel,
+            deadline: Instant::now() + LOOKUP_DEADLINE,
         };
         match self.sender.try_send(work) {
             Ok(()) => {}
