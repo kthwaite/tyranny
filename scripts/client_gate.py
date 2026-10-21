@@ -17,11 +17,10 @@ import signal
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket, fixture
+from server_gate import UnixSocket, fixture, run_directory
 
 
 def main():
@@ -54,7 +53,7 @@ def main():
         args.app = str(Path(args.app) / "Contents" / "MacOS" / "Tyranny")
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+    run = run_directory(work)
     root = run / "Music – 日本語"
     root.mkdir()
     source = run / "source.wav"
@@ -62,7 +61,7 @@ def main():
     for index in range(3 if args.commands_only else 105):
         os.link(source, root / f"Track {index:03}.wav")
     state_dir = run / "state"
-    server_command = [str(Path(args.server).resolve()), "--state-dir", str(state_dir), "--bind", "127.0.0.1:0"]
+    server_command = [str(Path(args.server).resolve()), "--state-dir", str(state_dir)]
     if not args.coreaudio:
         server_command += ["--capture", str(run / "output.f32")]
     report = {"run_directory": str(run), "output": "coreaudio" if args.coreaudio else "clocked_pcm", "cases": [], "server_command": server_command,
@@ -75,12 +74,10 @@ def main():
             assert select.select([server.stdout], [], [], 15)[0], "server startup timed out"
             ready = json.loads(server.stdout.readline())
             report["ready"] = ready
-            port = int(ready["address"].rsplit(":", 1)[1])
-            token = Path(ready["token_path"]).read_text().strip()
-            controller = WebSocket(ready["address"], token)
+            controller = UnixSocket(ready["socket_path"])
             app = str(Path(args.app).resolve())
             if args.commands_only:
-                command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+                command = [app, "--socket", ready["socket_path"],
                            "--command-smoke-output", str(run / "commands.json"),
                            "--command-smoke-folder", str(root)]
                 with (run / "commands.stdout").open("w") as stdout, (run / "commands.stderr").open("w") as stderr:
@@ -92,7 +89,7 @@ def main():
                 report["passed"] = True
                 return
             if args.model_only:
-                command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+                command = [app, "--socket", ready["socket_path"],
                            "--model-gate-output", str(run / "native-model.json"), "--model-gate-folder", str(root),
                            "--model-gate-server-pid", str(server.pid)]
                 with (run / "model-gate.stdout").open("w") as stdout, (run / "model-gate.stderr").open("w") as stderr:
@@ -103,45 +100,45 @@ def main():
                 report["passed"] = True
                 return
             if args.scenario == "shell":
-                shell(report, run, app, port, ready, root, controller, Path(args.screenshots))
+                shell(report, run, app, ready, root, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             if args.scenario in ("songs", "scroll-memory"):
-                songs(report, run, app, port, ready, source, controller, Path(args.screenshots), args.scenario)
+                songs(report, run, app, ready, source, controller, Path(args.screenshots), args.scenario)
                 report["passed"] = True
                 return
             if args.scenario == "grouping":
-                grouping(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                grouping(report, run, app, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             if args.scenario == "albums":
-                albums(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                albums(report, run, app, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             if args.scenario == "artists":
-                artists(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                artists(report, run, app, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             if args.scenario == "history":
-                history(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                history(report, run, app, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             if args.scenario == "upnext":
-                upnext(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                upnext(report, run, app, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             if args.scenario == "runs":
-                runs(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                runs(report, run, app, ready, source, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             if args.scenario == "stats":
-                stats(report, run, app, port, ready, root, controller, Path(args.screenshots))
+                stats(report, run, app, ready, root, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             paused_at = None
             for mode in ["initial", "relaunch"]:
                 output = run / mode
-                command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"], "--ui-smoke-output", str(output)]
+                command = [app, "--socket", ready["socket_path"], "--ui-smoke-output", str(output)]
                 command += ["--ui-driver", str(Path("target/native-ui-driver").resolve())]
                 command += ["--ui-smoke-folder", str(root)] if mode == "initial" else ["--ui-smoke-relaunch"]
                 with (run / f"{mode}.stdout").open("w") as stdout, (run / f"{mode}.stderr").open("w") as stderr:
@@ -178,11 +175,11 @@ def main():
         print(json.dumps({"report": str(run / "report.json"), "passed": report.get("passed", False)}))
 
 
-def shell(report, run, app, port, ready, root, controller, screenshots):
+def shell(report, run, app, ready, root, controller, screenshots):
     """Drive the library window shell: source list, player bar transport, status bar, Settings."""
     report["scenario"] = "shell"
     output = run / "shell"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--shell-smoke-output", str(output), "--ui-smoke-folder", str(root),
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
@@ -234,7 +231,7 @@ def songs_fixture(music, source):
         os.link(source, untagged / f"Untagged {index:04}.wav")
 
 
-def songs(report, run, app, port, ready, source, controller, screenshots, scenario):
+def songs(report, run, app, ready, source, controller, screenshots, scenario):
     """Drive the complete Songs workflow or its focused scroll-memory scenario."""
     report["scenario"] = scenario
     music = run / "Songs fixture"
@@ -243,7 +240,7 @@ def songs(report, run, app, port, ready, source, controller, screenshots, scenar
     controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
                     and state["library"]["tracks"] == 1129, seconds=180)
     output = run / "songs"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--songs-smoke-output", str(output), "--songs-smoke-scenario", scenario,
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
@@ -266,7 +263,7 @@ def songs(report, run, app, port, ready, source, controller, screenshots, scenar
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("songs*.png"))]
 
 
-def grouping(report, run, app, port, ready, source, controller, screenshots):
+def grouping(report, run, app, ready, source, controller, screenshots):
     """Drive grouping: Artist › Album against the server's spans, a block selection, and a
     rescan that adds an album (staged outside the root; the app moves it in) under the anchor."""
     report["scenario"] = "grouping"
@@ -283,7 +280,7 @@ def grouping(report, run, app, port, ready, source, controller, screenshots):
     controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
                     and state["library"]["tracks"] == 1129, seconds=180)
     output = run / "grouping"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--songs-smoke-output", str(output), "--songs-smoke-scenario", "grouping",
                "--songs-smoke-extra", str(extra), "--songs-smoke-root", str(music),
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
@@ -304,7 +301,7 @@ def grouping(report, run, app, port, ready, source, controller, screenshots):
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("grouped*.png"))]
 
 
-def albums(report, run, app, port, ready, source, controller, screenshots):
+def albums(report, run, app, ready, source, controller, screenshots):
     """Drive the album grid: scroll to the end, open the last album, check its tracks against
     `album_summaries`, double-click its first track, select its first two tracks and press
     Add to Up Next, and close the panel with Escape."""
@@ -315,7 +312,7 @@ def albums(report, run, app, port, ready, source, controller, screenshots):
     controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
                     and state["library"]["tracks"] == 1129, seconds=180)
     output = run / "albums"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--albums-smoke-output", str(output),
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
@@ -363,7 +360,7 @@ def compilation_track(path, title, artist, album, track):
                     "-metadata", f"track={track}", str(path)], check=True, timeout=30)
 
 
-def artists(report, run, app, port, ready, source, controller, screenshots):
+def artists(report, run, app, ready, source, controller, screenshots):
     """Drive Artists and Genres: the Compilations row lists the compilation album, a track
     artist on it shows the tracks under Appears On, and a genre narrows to its albums.
     The fixture is the songs library plus one four-track compilation album."""
@@ -380,7 +377,7 @@ def artists(report, run, app, port, ready, source, controller, screenshots):
     controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
                     and state["library"]["tracks"] == 1133, seconds=180)
     output = run / "artists"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--artists-smoke-output", str(output),
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
@@ -409,7 +406,7 @@ def artists(report, run, app, port, ready, source, controller, screenshots):
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
 
 
-def history(report, run, app, port, ready, source, controller, screenshots):
+def history(report, run, app, ready, source, controller, screenshots):
     """Drive Recently Added and History: the new library lists newest first, one short track
     plays to its end on the clocked capture output, its History row appears, a double-click
     plays it again from Songs named History, and Songs shows Plays 1."""
@@ -420,7 +417,7 @@ def history(report, run, app, port, ready, source, controller, screenshots):
     controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
                     and state["library"]["tracks"] == 1129, seconds=180)
     output = run / "history"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--history-smoke-output", str(output),
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
@@ -445,7 +442,7 @@ def history(report, run, app, port, ready, source, controller, screenshots):
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("history*.png"))]
 
 
-def upnext(report, run, app, port, ready, source, controller, screenshots):
+def upnext(report, run, app, ready, source, controller, screenshots):
     """Drive Up Next: two album runs and a playlist-sourced run show their Added From labels
     behind the playing track, Clear keeps that track playing with nothing upcoming, Save as
     Playlist creates a playlist, and the drawer lists the queue and takes a drop."""
@@ -456,7 +453,7 @@ def upnext(report, run, app, port, ready, source, controller, screenshots):
     controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
                     and state["library"]["tracks"] == 1129, seconds=180)
     output = run / "upnext"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--upnext-smoke-output", str(output),
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
@@ -485,7 +482,7 @@ def upnext(report, run, app, port, ready, source, controller, screenshots):
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
 
 
-def runs(report, run, app, port, ready, source, controller, screenshots):
+def runs(report, run, app, ready, source, controller, screenshots):
     """Drive runs from the Songs table: a double-click with Up Next empty plays the run from that
     row; with entries upcoming it asks (Keep), or follows the Replace and Keep policies; Don't
     ask again stores the policy; Select All then Add to Playlist adds every row in one playlist
@@ -497,7 +494,7 @@ def runs(report, run, app, port, ready, source, controller, screenshots):
     controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
                     and state["library"]["tracks"] == 1129, seconds=180)
     output = run / "runs"
-    command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+    command = [app, "--socket", ready["socket_path"],
                "--runs-smoke-output", str(output),
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
@@ -523,7 +520,7 @@ def runs(report, run, app, port, ready, source, controller, screenshots):
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
 
 
-def stats(report, run, app, port, ready, root, controller, screenshots):
+def stats(report, run, app, ready, root, controller, screenshots):
     """Drive the Stats page and Wrapped, one app launch per history:
     - empty: ⌘8 opens the page, the header shows this week's label, ‹ and › step the period,
       every panel shows its empty state, and Go › Wrapped is disabled;
@@ -544,7 +541,7 @@ def stats(report, run, app, port, ready, root, controller, screenshots):
         elif phase == "full":
             seed_year(database, rng, plays=240, skips=10, radio=4)
         output = run / f"stats-{phase}"
-        command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+        command = [app, "--socket", ready["socket_path"],
                    "--stats-smoke-output", str(output), "--stats-smoke-phase", phase,
                    "--ui-driver", str(Path("target/native-ui-driver").resolve())]
         report[f"app_command_{phase}"] = command

@@ -8,7 +8,15 @@ final class DeviceSyncModel {
     private(set) var devices: [MTPDevice] = []
     private(set) var busy = false
     private(set) var status = ""
-    var error: String?
+    private var operationError: String?
+    private var discoveryError: String?
+    var error: String? {
+        get { operationError ?? discoveryError }
+        set {
+            operationError = newValue
+            discoveryError = nil
+        }
+    }
     var selectedStorage: [String: UInt32] = [:]
     private(set) var generation: UInt64 = 0
     @ObservationIgnored private var working = false
@@ -54,6 +62,9 @@ final class DeviceSyncModel {
         do {
             let response = try await MTPHelper.run(MTPRequest(operation: "discover"))
             if let problem = response.error { throw DeviceSyncFailure(problem) }
+            // A recovered connection must not keep a stale discovery error, or
+            // erase a failed copy/delete that still needs the user's attention.
+            discoveryError = nil
             let discovered = response.devices ?? []
             let ids = Set(discovered.map(\.id))
             let previous = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
@@ -78,7 +89,7 @@ final class DeviceSyncModel {
                 inventoried = []
                 generation &+= 1
             }
-            self.error = error.localizedDescription
+            discoveryError = error.localizedDescription
         }
     }
 

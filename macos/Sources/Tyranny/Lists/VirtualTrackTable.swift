@@ -374,7 +374,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         }
 
         private func checkVisibleDeviceStatus() {
-            guard !dismantled, parent.player.hasLocalLibrary, !parent.player.devices.devices.isEmpty,
+            guard !dismantled, !parent.player.devices.devices.isEmpty,
                   let table else { return }
             let visible = table.rows(in: table.visibleRect)
             guard visible.length > 0 else { return }
@@ -480,8 +480,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             }
             let text: String
             if column.id.hasPrefix(TrackColumns.devicePrefix) {
-                text = !parent.player.hasLocalLibrary ? "Local files only"
-                    : !item.available ? "Unavailable" : column.value(item.track)
+                text = !item.available ? "Unavailable" : column.value(item.track)
             } else {
                 text = column.value(item.track)
             }

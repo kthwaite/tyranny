@@ -10,7 +10,7 @@ import Testing
         body(defaults)
     }
 
-    private let note = ImportNote(endpoint: "ws://a", rootID: 7)
+    private let note = ImportNote(socketPath: "/private/tmp/a/control.sock", rootID: 7)
 
     @Test func takeReturnsTheNoteOnce() {
         withFreshDefaults { defaults in

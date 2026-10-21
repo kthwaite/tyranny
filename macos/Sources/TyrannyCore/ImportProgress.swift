@@ -110,11 +110,11 @@ public struct ImportSession: Equatable, Sendable {
     }
 
     /// Session for the first authoritative snapshot of a launch, or nil. A note for the same
-    /// endpoint and root restores the session while that root's scan is active. Without a
+    /// socket and root restores the session while that root's scan is active. Without a
     /// matching note, only an import that has no tracks yet counts.
-    public static func atLaunch(library: LibraryState, note: ImportNote?, endpoint: String) -> ImportSession? {
+    public static func atLaunch(library: LibraryState, note: ImportNote?, socketPath: String) -> ImportSession? {
         let active = library.scan.phase == "discovering" || library.scan.phase == "indexing"
-        if let note, note.endpoint == endpoint, library.scan.root_id == note.rootID, active {
+        if let note, note.socketPath == socketPath, library.scan.root_id == note.rootID, active {
             return ImportSession(rootID: note.rootID, baseline: nil)
         }
         return atLaunch(library: library)

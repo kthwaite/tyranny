@@ -150,7 +150,6 @@ class BundleTests(unittest.TestCase):
                      "int tracker(void); int main(void) { return tracker(); }", [tracker])
         self.assertIn("Unapproved non-system dependency", self.invoke(success=False).stderr)
         self.assertFalse((self.app / "Contents/Frameworks").exists())
-
     def test_rejects_missing_transitive_dependency(self):
         utility, _ = self.chain()
         utility.unlink()

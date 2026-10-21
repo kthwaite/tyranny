@@ -15,12 +15,11 @@ import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket, fixture
+from server_gate import UnixSocket, fixture, private_socket, run_directory
 
 
 def main():
@@ -31,10 +30,12 @@ def main():
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--upgrade-only", action="store_true",
                         help="Check automatic app migration and ownership protection without explicit-control AX actions")
+    parser.add_argument("--legacy-app",
+                        help="Preserved WebSocket app bundle for an isolated real running-helper upgrade")
     args = parser.parse_args()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+    run = run_directory(work)
     os.chmod(run, 0o700)
     app = run / "Tyranny.app"
     source_app = Path(args.app).resolve()
@@ -46,18 +47,15 @@ def main():
     label = "dev.tyranny.spike." + uuid.uuid4().hex
     agents = run / "agents"
     state = run / "state"
-    with socket.socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        port = reservation.getsockname()[1]
-    address = f"127.0.0.1:{port}"
+    socket_path = str(state / "control.sock")
     target = f"{domain}/{label}"
     plist = agents / f"{label}.plist"
-    report = {"run_directory": str(run), "label": label, "address": address,
+    report = {"run_directory": str(run), "label": label, "socket_path": socket_path,
               "launch_method": "/usr/bin/open -n -W (LaunchServices)",
               "environment": environment, "output": "coreaudio" if args.coreaudio else "clocked_pcm",
               "cases": [], "commands": [], "native": [],
               "limitations": ["Development per-user LaunchAgent, not SMAppService distribution or sandbox certification.",
-                              "Homebrew runtime libraries remain external; only copied Mach-O load commands are mutated.",
+                              "Native libraries remain inside isolated bundle copies; missing-decoder checks mutate only copied Mach-O load commands.",
                               "Unavailable/permission-denied folders are exercised, not a claim of TCC/FDA grant automation.",
                               "launchctl diagnostic output is retained as evidence; app ownership checks fail closed if its format changes.",
                               "Clocked PCM is real production decoding/playback, not human acoustic verification."]}
@@ -101,7 +99,7 @@ def main():
         argv = ["/usr/bin/open", "-n", "-W",
                 "--stdout", str(run / f"native-{name}.stdout"), "--stderr", str(run / f"native-{name}.stderr"),
                 str(bundle), "--args",
-                "--managed-state-dir", str(managed_state), "--managed-bind", address,
+                "--managed-state-dir", str(managed_state),
                 "--managed-label", managed_label, "--managed-agent-dir", str(agents),
                 "--lifecycle-output", str(output), "--lifecycle-action", action, "--ui-driver", str(driver)]
         if not args.coreaudio:
@@ -126,7 +124,7 @@ def main():
                         if request["kind"] == "drive":
                             pid = int(request["pid"])
                             assert pidfile.is_file() and pid == int(pidfile.read_text().strip()), "UI request PID is not this copied app"
-                            assert request["action"] in ("activate", "press", "press-title"), "Unsupported lifecycle UI action"
+                            assert request["action"] in ("activate", "press", "press-title", "click-title"), "Unsupported lifecycle UI action"
                             bridge_argv = [str(driver), str(pid), request["action"]]
                             if request.get("identifier") is not None:
                                 bridge_argv.append(str(request["identifier"]))
@@ -167,8 +165,7 @@ def main():
         native = json.loads(output.read_text())
         report["native"].append({"name": name, "path": str(output), "report": native})
         assert native["action"] == action and native["managedLabel"] == managed_label, native
-        assert native["endpoint"] == f"ws://{address}/ws", native
-        assert native["tokenPath"] == str(managed_state / "token"), native
+        assert native["socketPath"] == str(managed_state / "control.sock"), native
         assert native["connected"] == expect_connected, native
         screenshot = output.with_suffix(".png")
         assert screenshot.is_file() and screenshot.stat().st_size > 0, f"Actual native window capture missing: {screenshot}"
@@ -188,9 +185,7 @@ def main():
         error = None
         while time.monotonic() < deadline:
             try:
-                token = (state / "token").read_text().strip()
-                client = WebSocket(address, token)
-                assert client.status == 101, "Real daemon did not authenticate"
+                client = UnixSocket(socket_path)
                 if previous is not None and client.hello["instance_id"] == previous:
                     client.close()
                     time.sleep(0.1)
@@ -200,7 +195,7 @@ def main():
             except (OSError, AssertionError, ConnectionError) as caught:
                 error = str(caught)
                 time.sleep(0.15)
-        raise AssertionError(f"Authenticated daemon readiness timed out: {error}")
+        raise AssertionError(f"Peer-verified daemon readiness timed out: {error}")
 
     def scan(client, root_id=None):
         if root_id is not None:
@@ -227,14 +222,71 @@ def main():
         assert configured["Label"] == label and str(helper) in configured["ProgramArguments"]
         assert configured["KeepAlive"] is True and configured["Umask"] == 63
         assert state.stat().st_mode & 0o777 == 0o700
-        assert (state / "token").stat().st_mode & 0o777 == 0o600
+        private_socket(socket_path)
         assert (state / "server.log").stat().st_mode & 0o777 == 0o600
-        unauthorized = WebSocket(address)
-        assert unauthorized.status == 401
-        wrong = WebSocket(address, "not-the-token")
-        assert wrong.status == 401
-        record("absent-daemon-installed-by-launchservices-app-and-authenticated-v4", hello=control.hello,
-               launchd=ctl("print", target).stdout, unauthorized_status=401)
+        record("absent-daemon-installed-by-launchservices-app-and-peer-verified-v23", hello=control.hello,
+               launchd=ctl("print", target).stdout, socket_path=socket_path)
+
+        if args.legacy_app:
+            legacy_app = run / "Legacy Tyranny.app"
+            shutil.copytree(Path(args.legacy_app).resolve(), legacy_app, symlinks=True)
+            legacy_helper = legacy_app / "Contents/MacOS/tyranny-server"
+            legacy_state = run / "legacy-state"
+            legacy_state.mkdir(mode=0o700)
+            legacy_label = label + ".legacy"
+            legacy_target = f"{domain}/{legacy_label}"
+            jobs.add(legacy_target)
+            legacy_plist = agents / f"{legacy_label}.plist"
+            legacy_log = legacy_state / "server.log"
+            legacy_log.touch(mode=0o600)
+            # Reserve an unused loopback port only for the old helper fixture.
+            # Never probe or connect to the user's retired transport.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                legacy_port = reservation.getsockname()[1]
+            legacy_job = dict(configured)
+            legacy_job.update(Label=legacy_label, WorkingDirectory=str(legacy_state),
+                              StandardOutPath=str(legacy_log), StandardErrorPath=str(legacy_log))
+            legacy_arguments = list(configured["ProgramArguments"])
+            legacy_arguments[5] = str(legacy_helper)
+            legacy_arguments[7] = str(legacy_state)
+            if not args.coreaudio:
+                legacy_arguments[9] = str(legacy_state / "output.f32")
+            legacy_arguments[8:8] = ["--bind", f"127.0.0.1:{legacy_port}"]
+            legacy_job["ProgramArguments"] = legacy_arguments
+            legacy_plist.write_bytes(plistlib.dumps(legacy_job))
+            legacy_plist.chmod(0o600)
+            ctl("bootstrap", domain, legacy_plist)
+            deadline = time.monotonic() + 30
+            legacy_ready = None
+            while legacy_ready is None:
+                for line in legacy_log.read_text().splitlines():
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if message.get("type") == "ready":
+                        legacy_ready = message
+                        break
+                assert time.monotonic() < deadline, "Legacy helper did not announce readiness"
+                time.sleep(0.1)
+            assert legacy_ready["address"] == f"127.0.0.1:{legacy_port}", legacy_ready
+            legacy_loaded = ctl("print", legacy_target).stdout
+            assert "state = running" in legacy_loaded and str(legacy_helper) in legacy_loaded
+            assert (legacy_state / "state.sqlite3").is_file()
+            launch("running-legacy-upgrade", managed_state=legacy_state, managed_label=legacy_label)
+            with_socket = UnixSocket(str(legacy_state / "control.sock"))
+            try:
+                assert with_socket.hello["instance_id"] != legacy_ready["instance_id"]
+                assert with_socket.state()["library"]["tracks"] == 0
+                upgraded_job = plistlib.loads(legacy_plist.read_bytes())
+                assert "--bind" not in upgraded_job["ProgramArguments"]
+                assert str(helper) in upgraded_job["ProgramArguments"]
+                record("real-running-legacy-helper-replaced-by-unix-daemon",
+                       previous=legacy_ready, hello=with_socket.hello, previous_job=legacy_loaded)
+            finally:
+                with_socket.close()
+            ctl("bootout", legacy_target)
 
         root = run / "Music – 日本語"
         root.mkdir()
@@ -307,7 +359,7 @@ def main():
         upgraded = run / "Updated Tyranny – 日本語.app"
         shutil.copytree(app, upgraded, symlinks=True)
         upgraded_helper = upgraded / "Contents/MacOS/tyranny-server"
-        token_before = (state / "token").read_bytes()
+        private_socket(socket_path)
 
         # A loaded KeepAlive job whose app disappeared cannot restart its helper.
         previous = control.hello["instance_id"]
@@ -323,7 +375,7 @@ def main():
             control = connect(previous=previous)
             assert str(upgraded_helper) in plistlib.loads(plist.read_bytes())["ProgramArguments"]
             assert control.state()["queue_length"] == 1 and tracks(control)["total"] == 1
-            assert (state / "token").read_bytes() == token_before
+            private_socket(socket_path)
             record("missing-loaded-app-job-migrates-on-startup", hello=control.hello)
         finally:
             removed.rename(app)
@@ -335,7 +387,7 @@ def main():
             control = connect()
             assert str(helper) in plistlib.loads(plist.read_bytes())["ProgramArguments"]
             assert control.state()["queue_length"] == 1 and tracks(control)["total"] == 1
-            assert (state / "token").read_bytes() == token_before
+            private_socket(socket_path)
             record("missing-previous-app-plist-migrates-on-startup", hello=control.hello)
         finally:
             retired.rename(upgraded)
@@ -372,9 +424,10 @@ def main():
 
         launch("after-upgrade-checks")
         control = connect()
+        before_restart = control.hello["instance_id"]
 
         launch("restart", action="restart")
-        control = connect(previous=initial_instance)
+        control = connect(previous=before_restart)
         record("native-explicit-clean-restart-preserves-queue-library", hello=control.hello)
         assert control.state()["queue_length"] == 1 and tracks(control)["total"] == 1
 
@@ -414,11 +467,11 @@ def main():
 
         launch("uninstall", action="uninstall", expect_connected=False)
         assert not plist.exists() and ctl("print", target, check=False).returncode != 0
-        assert (state / "state.sqlite3").is_file() and (state / "token").is_file() and song.is_file()
+        assert (state / "state.sqlite3").is_file() and song.is_file()
         record("native-explicit-uninstall-removes-only-job-and-preserves-data")
 
         # Start a real manually-owned process; the copied app must reuse, never kill it.
-        manual_argv = [str(helper), "--state-dir", str(state), "--bind", address]
+        manual_argv = [str(helper), "--state-dir", str(state)]
         if not args.coreaudio:
             manual_argv += ["--capture", str(state / "manual-output.f32")]
         with (run / "manual.stderr").open("w") as stderr:

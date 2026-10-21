@@ -237,34 +237,34 @@ import Testing
         #expect(ImportSession.atLaunch(library: library(scan("indexing", root: nil))) == nil)
     }
 
-    private let note = ImportNote(endpoint: "ws://a", rootID: 7)
+    private let note = ImportNote(socketPath: "/private/tmp/a/control.sock", rootID: 7)
 
     @Test func noteRestoresWhileTheRootIsScanning() {
         let lib = library(scan("indexing", processed: 3, total: 10), tracks: 40)
-        #expect(ImportSession.atLaunch(library: lib, note: note, endpoint: "ws://a")?.rootID == 7)
+        #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/a/control.sock")?.rootID == 7)
         #expect(ImportSession.atLaunch(library: library(scan("discovering"), tracks: 2), note: note,
-                                       endpoint: "ws://a")?.rootID == 7)
+                                       socketPath: "/private/tmp/a/control.sock")?.rootID == 7)
     }
 
-    @Test func noteForAnotherEndpointIsIgnored() {
+    @Test func noteForAnotherSocketIsIgnored() {
         let lib = library(scan("indexing"), tracks: 40)
-        #expect(ImportSession.atLaunch(library: lib, note: note, endpoint: "ws://b") == nil)
+        #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/b/control.sock") == nil)
     }
 
     @Test func noteForAnotherRootIsIgnored() {
         let lib = library(scan("indexing", root: 9), tracks: 40)
-        #expect(ImportSession.atLaunch(library: lib, note: note, endpoint: "ws://a") == nil)
+        #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/a/control.sock") == nil)
     }
 
     @Test func noteIsIgnoredWhenTheScanIsNotActive() {
         for phase in ["complete", "idle", "failed", "interrupted"] {
             let lib = library(scan(phase), tracks: 40)
-            #expect(ImportSession.atLaunch(library: lib, note: note, endpoint: "ws://a") == nil)
+            #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/a/control.sock") == nil)
         }
     }
 
     @Test func withoutANoteTheNoTracksRuleApplies() {
-        #expect(ImportSession.atLaunch(library: library(scan("indexing")), note: nil, endpoint: "ws://a")?.rootID == 7)
-        #expect(ImportSession.atLaunch(library: library(scan("indexing"), tracks: 5), note: nil, endpoint: "ws://a") == nil)
+        #expect(ImportSession.atLaunch(library: library(scan("indexing")), note: nil, socketPath: "/private/tmp/a/control.sock")?.rootID == 7)
+        #expect(ImportSession.atLaunch(library: library(scan("indexing"), tracks: 5), note: nil, socketPath: "/private/tmp/a/control.sock") == nil)
     }
 }

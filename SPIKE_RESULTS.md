@@ -1,6 +1,58 @@
 # Spike results: native audio, persistent server, durable library, and SwiftUI controller
 
-Generated reports and screenshots under `spike-results/` are generally local, ignored artifacts. The five onboarding captures preserved during the 2026-10-22 worktree integration are versioned exceptions. References below describe historical verification runs; other artifact paths may be absent in a fresh checkout. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories.
+Generated reports and screenshots under `spike-results/` are generally local, ignored artifacts. The five onboarding captures preserved during worktree integration are versioned exceptions. References below describe historical verification runs; other artifact paths may be absent in a fresh checkout. Keep the written findings here, and regenerate current evidence with the gate scripts in `scripts/` (create `spike-results/` first when using `--record`). Per-run fixtures, logs, databases, and build products stay under ignored `target/` or `.build/` directories. Unix-socket gates use short canonical temporary directories, with discovery symlinks beneath the requested work directory, to respect socket-path length limits.
+
+## Worktree integration (protocol 23)
+
+Integrated the outstanding song-likes/scroll-memory history and pending worktree
+snapshots for app upgrades, source-download mirrors, album ordering, artwork
+providers, onboarding captures, and Unix-domain transport on top of Walkman sync.
+Separate merges advance `dev` from protocol 18 through 23; matching client and
+server builds are required. Control transport is now socket-only, while USB
+management remains independent.
+
+The real legacy-app migration exposed Foundation rewriting `/private/tmp` to
+`/tmp` during ownership validation. Lexical validation now preserves canonical
+paths without weakening the loaded-job/plist checks. A rapid native-app relaunch
+also exposed a stale USB discovery error after contention had cleared; discovery
+and operation errors are now separate so recovery cannot erase a failed transfer.
+Native acceptance drivers retain saved column layouts, scroll hearts into view,
+and use one real pointer click for destructive confirmations. Restart checks
+require a new authoritative server instance.
+
+Verification on 2026-10-22:
+
+| Check | Observed result |
+| --- | --- |
+| Rust all-targets suite | 611 passed; 2 opt-in tests ignored |
+| Swift suite | 451 passed in 62 suites |
+| MTP transport engine | 9 passed |
+| Source-build and Mach-O packaging regressions | 19 passed |
+| Real daemon/CLI and native client-model gates | 13 and 19 passed |
+| Managed lifecycle, including running WebSocket-helper upgrade | 17 passed; all temporary LaunchAgents removed |
+| Library / filter / regular-playlist / smart-playlist process gates | 13 / 7 / 13 / 5 passed |
+| Artwork process gate | 6 passed, including live Cover Art Archive and offline cache reuse |
+| Native UI | Likes 6, Songs scroll restoration 3, read-only Walkman 3; artwork settings inspected |
+| Packaging and static checks | Debug app assembled; strict deep signature, Rust formatting/Clippy, Python compilation passed |
+
+Reports are discoverable under `target/all-branches-{server-gate,model-gate,
+lifecycle,library,filter,playlist,smart-playlist,artwork,scroll}/`. Successful
+lifecycle evidence is `tyr-joqwgavl/report.json`; scroll evidence is
+`tyr-7i_tlr9b/report.json`, with inspected screenshots in
+`target/all-branches-scroll-ui/`.
+
+The likes/device reports under
+`target/all-branches-features/tyr-6kdc5vvt/{likes,device}/report.json` passed.
+Their combined launcher then hit the screenshot script's missing execute bit;
+the separate settings run invoked it through Bash and passed at
+`target/all-branches-features/tyr-hp_deyed/report.json`. Its actual Artwork
+settings screenshot and the liked-only and SD-card screenshots were inspected.
+The device exposed 7,779 songs across both storages; this integration rerun
+performed no device writes. Earlier authorized upload/deduplication/deletion
+evidence remains in [device sync](docs/device-sync.md).
+
+No installed app or user daemon was replaced. This is not a Linux, acoustic,
+50,000-track performance, or live authenticated Discogs/Deezer verification claim.
 
 ## Song likes (2026-10-21)
 
@@ -461,6 +513,38 @@ swift test --package-path macos --scratch-path target/swift-client --filter Stat
 
 **The live UI check was not done.** The Find Stations sheet is compiled but has not been run in the app.
 
+## Unix-domain control transport — 2026-10-20
+
+Replaced loopback WebSocket control with protocol-v9 JSON over Unix-domain streams across the Rust server, CLI, Swift client, managed LaunchAgent, connection settings, artwork connections, and Python gates. Frames are a four-byte big-endian length plus UTF-8 JSON; request/reply limits remain 16 KiB/8 MiB. Hello, request IDs, authoritative state ordering, deadlines, disconnect behavior, and no-mutation-replay semantics are unchanged. There is no TCP/WebSocket compatibility listener or bearer-token machinery.
+
+The socket is `<state-dir>/control.sock`, mode `0600`, beneath an owned `0700` directory with trusted canonical ancestors. Rust checks same-effective-UID peers; Swift uses filesystem ownership and permission checks. The instance lock protects stale-socket recovery and inode-checked shutdown cleanup. Live listeners and unsafe filesystem entries are never silently replaced. Existing token files remain inert.
+
+Integration exposed and fixed three transport-specific issues:
+
+- Darwin's default `SO_SNDLOWAT=2048` prevented writable readiness for a peer with a 1024-byte receive buffer, timing out before Hello. Setting the send low-water mark to 1 on macOS fixed a failing real-server regression and the unread-controller gate.
+- Foundation canonicalization rewrote `/private/tmp` back to the `/tmp` symlink. POSIX `realpath` and lexical managed-path normalization preserve the actual socket path.
+- A missing socket initially shared the unsafe-path error, bypassing managed first-launch bootstrap. Missing parent/socket now reports `socket_unavailable`; insecure existing directories and socket entries remain `invalid_socket` and do not authorize replacement.
+
+### Exercised verification
+
+| Check | Result |
+| --- | --- |
+| Rust unit/integration tests | 231 passed; 1 hardware test ignored |
+| Rust binaries and Clippy with warnings denied | Passed |
+| Swift tests and debug build with warnings as errors | 243 passed; build passed |
+| Real daemon/CLI transport gate | 13 passed |
+| Native model/transport gate | 19 passed |
+| Packaged app/LaunchAgent lifecycle gate | 12 passed |
+| Library / filter / regular-playlist / smart-playlist process gates | 13 / 7 / 13 / 5 passed |
+
+The lifecycle run used an isolated, ad-hoc-signed `target/Tyranny-Unix.app`: first-launch bootstrap, reuse, quit/resume, clean restart, crash recovery, safe uninstall, manual-server protection, and missing-decoder preflight all passed. Its temporary LaunchAgents were removed. The Connection settings window was exercised through external Accessibility and captured at `target/unix-settings.png`; it shows the Unix socket field and a connected local server.
+
+Local reports: `/private/tmp/tyr-cb821_m5/report.json` (server), `/private/tmp/tyr-wokhy74d/report.json` (native model), `/private/tmp/tyr-1k7bpzyw/report.json` (lifecycle), `/private/tmp/tyr-lqilopfk/report.json` (library), `/private/tmp/tyr-zt3b_0ln/report.json` (filter), `/private/tmp/tyr-9yv3wxft/report.json` (playlists), and `/private/tmp/tyr-hsxywjp5/report.json` (smart playlists). These are local artifacts, not repository prerequisites.
+
+**Limits:** verification ran on macOS with clock-paced PCM capture, not Linux or human listening. The broader core playback UI smoke did not complete: one run timed out on AX increment; a diagnostic run preserved paused seeks through that step but its mouse drag targeted the track's last frame instead of the intended position. No duplicate or unexpected play command appeared in that diagnostic trace. Production slider/playback behavior was left unchanged, and temporary tracing was removed. This is not a claim that the full playback UI gate passes.
+
+Historical WebSocket measurements below remain historical; they are not re-labelled as Unix-socket performance results. See **Run the app** for the old-LaunchAgent cutover instructions.
+
 ## Album artwork
 
 Artwork is implemented and verified in Rust and SwiftUI. The matching protocol-v8 development bundle is installed at `target/Tyranny.app`; the prior protocol-v7 bundle is preserved at `target/artwork/Tyranny.app`. The directories were atomically exchanged, preserving the old executable inodes; both bundle signatures verified. The user's running daemon/database were not changed. To load matching processes: **Connection Settings → Stop…, quit the client, then reopen `target/Tyranny.app`**.
@@ -505,18 +589,17 @@ The mixed catalog distinguishes regular playlists from **Smart playlist · Live 
 
 Smart results use the library's deterministic disc/track/title/path/ID order. The server evaluates stored rule AND transient entry query in one revision-bound transaction and materializes only the requested metadata page. Catalog records have `kind`, nullable `query`, and nullable `entry_count`: regular playlists carry a count and no rule; smart playlists carry a rule and no catalog count. Opening the catalog does not evaluate every rule just to display counts. Smart row `id` equals `track_id`, not an editable persisted occurrence ID.
 
-Protocol **v7**, SQLite **schema 4**. The transactional migration adds a nullable rule column while retaining ordinary playlist identities, duplicate occurrence order, revisions, queue selection and checkpoints. Existing v6/schema-3 state is exercised through the old executable before migration, not fabricated by rewriting a new schema. Older executables cannot reopen schema 4: preserving the prior app bundle is not a database downgrade.
+That slice introduced protocol **v7**, SQLite **schema 4**. Its transactional migration added a nullable rule column while retaining ordinary playlist identities, duplicate occurrence order, revisions, queue selection and checkpoints. The historical run exercised v6/schema-3 state through the old executable before migration, not by rewriting a new schema. The current Unix-socket gate exercises restart preservation instead; it no longer connects to historical WebSocket executables. Older executables cannot reopen schema 4: preserving the prior app bundle is not a database downgrade.
 
 Reproduce with a separately built matching debug bundle:
 
 ```sh
 python3 scripts/smart_playlist_gate.py \
   --server target/Tyranny.app/Contents/MacOS/tyranny-server \
-  --app target/Tyranny.app/Contents/MacOS/Tyranny \
-  --legacy-server /path/to/prior-v6-server
+  --app target/Tyranny.app/Contents/MacOS/Tyranny
 ```
 
-Omit `--legacy-server` to skip the old-executable migration scenario; omit `--app` for server-only checks. The gate uses 508 generated tagged real FLAC paths, then imports a new matching album through native Rescan. It verifies 506-result snapshots/enqueue, rule changes and missing files, stale authorities, read-only enforcement, independent copies, and native/daemon relaunch. Verification uses isolated clock-paced PCM capture, never the user's daemon, database or output device. Dynamic queue autofill and numeric/date rule fields remain separate work.
+Omit `--app` for server-only checks. The gate uses 508 generated tagged real FLAC paths, then imports a new matching album through native Rescan. It verifies 506-result snapshots/enqueue, rule changes and missing files, stale authorities, read-only enforcement, independent copies, and native/daemon relaunch. Verification uses isolated clock-paced PCM capture, never the user's daemon, database or output device. Dynamic queue autofill and numeric/date rule fields remain separate work.
 
 Verification: **72 Rust tests passed, 1 ignored**, Clippy with warnings denied, and Swift debug/release/model-driver builds with warnings as errors. The smart gate passed **7 end-to-end checks including 8 native workflows**; existing coverage passed **14 regular-playlist checks / 21 native cases**, **8 native filter cases**, and **19 transport/model cases**. Native screenshots verify stable editor positioning on syntax errors and an unclipped catalog after clearing its filter. Reports, source hashes and before/after captures are retained in `spike-results/smart-playlists.json` and `spike-results/smart-playlists-ui/`.
 
@@ -668,7 +751,7 @@ python3 scripts/playlist_gate.py \
   --app target/Tyranny.app/Contents/MacOS/Tyranny
 ```
 
-Omit `--app` for API-only verification. `--legacy-server /path/to/prior-v3-server` additionally creates and migrates a real prior-version database. Native verification includes real multi-row dragging, spring navigation, page-boundary moves, cancellation and the existing playlist/double-click workflows; it requires an unlocked desktop and Accessibility/Screen Recording permissions. Dynamic queue autofill, import/export and production-scale playlist-reorder benchmarking remain separate work.
+Omit `--app` for API-only verification. The current gate exercises persistence through current-server restarts; historical old-executable migration runs are recorded above, not supported by a WebSocket compatibility path. Native verification includes real multi-row dragging, spring navigation, page-boundary moves, cancellation and the existing playlist/double-click workflows; it requires an unlocked desktop and Accessibility/Screen Recording permissions. Dynamic queue autofill, import/export and production-scale playlist-reorder benchmarking remain separate work.
 
 ## Playback controls: implemented and exercised
 
@@ -810,25 +893,27 @@ The build includes the real Rust helper. On first normal launch, the app install
 
 Choose a music folder, wait for tracks to appear, select an artist and album or browse all tracks, then select tracks and use **Enqueue** or **Play Selection**. Play Selection appends the selection in displayed order and starts its first new queue occurrence; it does not replace the existing queue. Queue controls play, remove, move, and clear occurrences. Transport supports play/pause, stop, and a seek position in seconds, plus ReplayGain and the server's persisted resume-on-start preference.
 
-Defaults match the server: `ws://127.0.0.1:9865/ws` and `~/Library/Application Support/tyranny/token`. Connection Settings can change them for this session. An isolated server can also be selected at launch:
+The native default is `~/Library/Application Support/tyranny/control.sock`. Connection Settings can select another private Unix socket for this session. An isolated server can also be selected at launch:
 
 ```sh
 open -n target/Tyranny.app --args \
-  --url ws://127.0.0.1:PORT/ws --token-file /absolute/private/state/token
+  --socket /absolute/private/state/control.sock
 ```
 
-Providing `--url` or `--token-file` selects an **unmanaged** connection: the app will not install or restart a server for it. Connection Settings on a normal managed launch exposes Start, Restart, and Stop. Restart/Stop require confirmation. Stop removes the owned job and plist, not your music/database; opening the app again enables bootstrap. Manually started servers are never stopped or replaced by those controls.
+Providing `--socket PATH` selects an **unmanaged** connection: the app will not install or restart a server for it. Connection Settings on a normal managed launch exposes Start, Restart, and Stop. Restart/Stop require confirmation. Stop removes the owned job and plist, not your music/database; opening the app again enables bootstrap. Manually started servers are never stopped or replaced by those controls. For isolated managed launches, supply `--managed-state-dir`, `--managed-label`, and `--managed-agent-dir` together.
+
+Upgrading from a WebSocket build automatically replaces a recognized Tyranny LaunchAgent, including one whose old app moved or was deleted. Recognition requires the same label, state paths, launch policy and environment, a bundled `tyranny-server` path, and the exact retired loopback-bind shape; loaded-job arguments must still match the saved plist. Foreign jobs and manually owned servers remain untouched. Old `--url`, `--token-file`, and `--managed-bind` options are rejected; existing token files are ignored. The cutover does not migrate or delete the music database.
 
 This is an ad-hoc-signed, non-sandboxed development `.app`, built with Swift 6 for macOS 14+. Choosing a folder does not grant the separate daemon sandbox or TCC access. The server must independently be able to read it. Closing the client disconnects control only; it does not stop playback.
 
 ### Client boundaries and invariants
 
-- [`macos/Sources/Tyranny/WireClient.swift`](macos/Sources/Tyranny/WireClient.swift): authenticated protocol-v8 WebSocket, strict literal-loopback endpoint and private-token validation, finite request/message bounds and deadlines, generation guards, monotonic authoritative snapshots, and explicit uncertain outcomes. No automatic mutation replay.
+- [`macos/Sources/Tyranny/WireClient.swift`](macos/Sources/Tyranny/WireClient.swift): protocol-v23 framed JSON over a Unix stream, private-socket validation, finite request/message bounds and deadlines, generation guards, monotonic authoritative snapshots, and explicit uncertain outcomes. No automatic mutation replay.
 - [`PlayerModel.swift`](macos/Sources/Tyranny/PlayerModel.swift): connection/reconnect ownership, serialized mutations, 100-row replacement pages for every collection, stable selection IDs, superseded-query rejection, debounced filtering, and scan-refresh coalescing. It never hydrates the whole queue or library. Moving an entry across a page boundary reads at most one additional neighbor under the same queue revision.
 - [`ContentView.swift`](macos/Sources/Tyranny/ContentView.swift): native lists/tables, a nonblocking folder-picker sheet, roots/rescan controls, discovery/indexing progress, explicit disconnected/empty/error states, queue edits, and transport/settings. Unknown duration remains unknown rather than showing a fabricated seek range.
 - [`TyrannyApp.swift`](macos/Sources/Tyranny/TyrannyApp.swift), [`macos/Package.swift`](macos/Package.swift), and [`scripts/build_macos.sh`](scripts/build_macos.sh): the standalone native application and reproducible development bundle.
 
-The toolbar's Enqueue/Play Selection actions remain sequences of acknowledged single-track edits, with partial outcomes reported. Drag insertions instead use one atomic `insert_tracks` command. Reconnect clears cached pages and selections, fetches fresh state, invalidates old drag snapshots, and never resends prior mutations. Invalid credentials and unavailable servers remain visible while the connection loop backs off.
+Reconnect clears cached pages and selections, fetches fresh state, invalidates old drag snapshots, and never resends prior mutations. Unsafe socket paths and unavailable servers remain visible while the connection loop backs off.
 
 ### Reproduce the native gates
 
@@ -839,13 +924,6 @@ scripts/build_macos.sh
 python3 scripts/client_gate.py
 python3 scripts/client_gate.py --coreaudio
 
-swiftc -swift-version 6 -warnings-as-errors -parse-as-library \
-  macos/Sources/Tyranny/WireModels.swift macos/Sources/Tyranny/WireClient.swift \
-  macos/Sources/Tyranny/ManagedServer.swift macos/Sources/Tyranny/PlayerModel.swift \
-  macos/Sources/Tyranny/SystemMediaControls.swift macos/Sources/Tyranny/TrackDrag.swift \
-  macos/Sources/Tyranny/ArtworkStore.swift \
-  scripts/native_model_gate.swift \
-  -o target/native-model-gate
 python3 scripts/client_gate.py --model-only
 python3 scripts/client_gate.py --model-only --coreaudio
 
@@ -855,7 +933,7 @@ swift build --package-path macos --scratch-path target/swift-client \
 
 The UI gate needs an **unlocked graphical session** and Accessibility/Screen Recording permission for the launching terminal. It drives actual SwiftUI controls with an external public Accessibility client, confirms the actual native folder picker, and captures composited windows. No Apple Events permission, synthetic server, direct database mutation, or model-call substitute for UI actions is used. Debug-only smoke hooks choose the isolated fixture's initial picker directory and observe state; release builds exclude them.
 
-The separate model gate makes no visual-verification claim. It covers unsafe endpoint rejection, authentication, bounded pages, selection, transport/settings, queue edits, debounced queries, reconnect, controller-independent playback, stale revisions, cross-page queue moves, and a deliberately suspended server's lost-reply timeout without replay. The cross-page move regression failed before the neighbor lookup fix and passed afterward.
+The separate model gate makes no visual-verification claim. It covers unsafe socket-path/type rejection, bounded pages, selection, transport/settings, queue edits, debounced queries, reconnect, controller-independent playback, stale revisions, cross-page queue moves, and a deliberately suspended server's lost-reply timeout without replay. The cross-page move regression failed before the neighbor lookup fix and passed afterward.
 
 ### Native verification results
 
@@ -937,16 +1015,16 @@ The native folder picker, managed process, and scale fixture are exercised in th
 
 ## Server authority: implemented and exercised
 
-The Rust server owns playback independently of its controllers, with a durable SQLite queue and authenticated loopback WebSocket control. **The original two real-process server runs passed 12/12 acceptance cases:** one with clock-paced PCM capture and one with actual CoreAudio output. The numerical/device audio gate passed **22/22** after the playback extensions. At completion of that server-only slice, formatting, Clippy with warnings denied, and **21 Rust tests** passed; current library-stage verification is recorded above.
+The Rust server owns playback independently of its controllers, with a durable SQLite queue. **The original WebSocket-era real-process server runs passed 12/12 acceptance cases:** one with clock-paced PCM capture and one with actual CoreAudio output. The numerical/device audio gate passed **22/22** after the playback extensions. At completion of that server-only slice, formatting, Clippy with warnings denied, and **21 Rust tests** passed. These are historical results, not Unix-transport performance or device certification.
 
 Implemented files:
 
 - [`src/owner.rs`](src/owner.rs): dedicated playback/SQLite thread, bounded command ingress, atomic snapshot/subscription, ordered state publication, checkpoints, and restart policy.
 - [`src/store.rs`](src/store.rs): versioned SQLite schema, WAL with full synchronous commits, stable occurrence IDs/order/revisions, settings, and selected-position checkpoints. Failed transactions leave the engine unchanged.
-- [`src/protocol.rs`](src/protocol.rs): version-3 JSON commands, replies, errors, state, and bounded revision-bound queue/library pages.
-- [`src/server.rs`](src/server.rs): direct Tokio/tungstenite transport; private state files, exclusive instance lock, bearer authentication, browser-origin rejection, finite message/connection/send limits, and signal-driven shutdown.
+- [`src/protocol.rs`](src/protocol.rs): version-9 JSON commands, replies, errors, state, and bounded revision-bound pages.
+- [`src/server.rs`](src/server.rs) and [`src/transport.rs`](src/transport.rs): Tokio Unix transport; private state/socket files, exclusive instance lock, same-UID peers, bounded cancellation-safe framing, finite connection/send limits, and signal-driven shutdown.
 - [`src/bin/tyranny-server.rs`](src/bin/tyranny-server.rs) and [`src/bin/tyrannyctl.rs`](src/bin/tyrannyctl.rs): actual server and development controller executables.
-- [`scripts/server_gate.py`](scripts/server_gate.py): stdlib-only process/WebSocket harness. Uses the real playback owner and SQLite database, not mocks.
+- [`scripts/server_gate.py`](scripts/server_gate.py): stdlib-only process/Unix-socket harness. Uses the real playback owner and SQLite database, not mocks.
 
 ### Run the server
 
@@ -957,7 +1035,7 @@ cargo build --locked --bins
 target/debug/tyranny-server
 ```
 
-The default is `127.0.0.1:9865` with real CoreAudio output. State lives in `$HOME/Library/Application Support/tyranny`: directory mode `0700`; `token`, `server.lock`, and `state.sqlite3` mode `0600`. A second server cannot own that directory. The ready JSON reports the bound address, fresh instance ID, and token **path**, never the secret.
+On macOS, state defaults to `$HOME/Library/Application Support/tyranny`, with real CoreAudio output. On Linux, state defaults to `$XDG_STATE_HOME/tyranny` when that variable is absolute, otherwise `$HOME/.local/state/tyranny`. The state directory is `0700`; `control.sock`, `server.lock`, and `state.sqlite3` are `0600`. A second server cannot own that directory. Ready JSON reports `socket_path` and a fresh `instance_id`; there is no address or token. The socket path must fit the platform byte limit (under 104 bytes on macOS, under 108 on Linux).
 
 In another terminal:
 
@@ -969,7 +1047,7 @@ target/debug/tyrannyctl '{"id":2,"command":"append","expected_revision":1,"path"
 target/debug/tyrannyctl --watch '{"id":3,"command":"play","entry_id":1}'
 ```
 
-Quitting `tyrannyctl` does not stop playback. SIGINT/SIGTERM to the server checkpoints and shuts it down, including connected controllers. `--state-dir PATH` selects another private directory; `--bind 127.0.0.1:0` requests an ephemeral port. Match it with the controller's `--url ws://127.0.0.1:PORT/ws` and `--token-file PATH/token`. The controller accepts literal loopback IPs, not DNS names or credential-bearing URLs.
+Quitting `tyrannyctl` does not stop playback. SIGINT/SIGTERM to the server checkpoints and shuts it down, including connected controllers, then removes its socket. `--state-dir PATH` selects another private directory; match it with the controller's `--socket PATH/control.sock`. A crash can leave a stale socket: restart removes it only while holding the directory lock and after checking its ownership, type, permissions, lack of a live listener, and unchanged inode. There is no TCP listener or WebSocket fallback.
 
 For silent verification, server `--capture /absolute/output.f32` selects the same clock-paced PCM consumer instead of CoreAudio. Existing capture files are overwritten, but server state files and queued sources—including hard-link aliases—are rejected as capture destinations. Capture output cannot subsequently be enqueued as an input.
 

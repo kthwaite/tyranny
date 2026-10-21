@@ -2,11 +2,11 @@ import Foundation
 
 /// Recorded while an import session is live, so a relaunch mid-import can show the screen again.
 public struct ImportNote: Codable, Equatable, Sendable {
-    public let endpoint: String
+    public let socketPath: String
     public let rootID: UInt64
 
-    public init(endpoint: String, rootID: UInt64) {
-        self.endpoint = endpoint
+    public init(socketPath: String, rootID: UInt64) {
+        self.socketPath = socketPath
         self.rootID = rootID
     }
 }

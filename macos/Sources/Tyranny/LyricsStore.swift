@@ -8,8 +8,7 @@ import TyrannyCore
 final class LyricsStore {
     enum State: String { case loading, ready, missing, unavailable, instrumental }
     private struct Context: Equatable {
-        let endpoint: String
-        let tokenPath: String
+        let socketPath: String
         let instance: String
         let revision: UInt64
         let entryID: UInt64
@@ -39,10 +38,10 @@ final class LyricsStore {
         refresh()
     }
 
-    func synchronize(endpoint: String, tokenPath: String, instance: String?, revision: UInt64?, entryID: UInt64?, invalidate: Bool = false) {
+    func synchronize(socketPath: String, instance: String?, revision: UInt64?, entryID: UInt64?, invalidate: Bool = false) {
         let next: Context?
         if let instance, let revision, let entryID {
-            next = Context(endpoint: endpoint, tokenPath: tokenPath, instance: instance, revision: revision, entryID: entryID)
+            next = Context(socketPath: socketPath, instance: instance, revision: revision, entryID: entryID)
         } else { next = nil }
         let isConnected = instance != nil
         guard next != context || connected != isConnected || invalidate else { return }
@@ -66,7 +65,7 @@ final class LyricsStore {
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                try await wire.connect(endpoint: context.endpoint, tokenPath: context.tokenPath)
+                try await wire.connect(socketPath: context.socketPath)
                 guard wire.instanceID == context.instance else {
                     throw ServerFailure(code: "lyrics_session_changed", message: "Lyrics belong to a different server session.")
                 }

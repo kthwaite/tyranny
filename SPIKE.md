@@ -6,7 +6,7 @@ continuous CoreAudio stream. The native engine, persistent local server,
 durable library, and native SwiftUI controller are implemented and exercised;
 see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations.
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
-Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Saved radio stations arrived in protocol v12 and the radio-browser.info station directory in v13. Protocol v13 requires matching client/server processes; the main database is schema 7.
+Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Artwork providers, parametric EQ, song likes, listening statistics, and local Sony Walkman USB management are implemented. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects, saved radio stations, and radio-browser.info discovery. The private Unix-domain control transport requires matching protocol **23** client/server processes; the main database is schema **9**.
 
 ## Song likes
 
@@ -144,7 +144,7 @@ The scanner accepts `.mod`, `.xm`, `.it`, and `.s3m`, case-insensitively. Rescan
 existing music roots to discover these files. Native libopenmpt decoding through
 FFmpeg preserves embedded module titles and shows the format as `Tracker`.
 No BASS runtime or decoder subprocess is used.
-Tracker support integrated at protocol **14**; the current version is **22**.
+Tracker support integrated at protocol **14**; the current version is **23**.
 The version bump follows the merge policy; the wire shape and database schema
 are unchanged by tracker support.
 
@@ -247,7 +247,7 @@ Settings are persisted before applying/publishing; invalid input or a failed
 write does not change audio/settings. Reconnection fetches authoritative server
 state rather than replaying abandoned client edits.
 
-Parametric EQ integrated at protocol **v15**; the current version is **v22**; upgrade client and server together.
+Parametric EQ integrated at protocol **v15**; the current version is **v23**; upgrade client and server together.
 The merge bumps the version from 14 because the EQ wire shape changed.
 `set_equalizer` takes a complete object, also returned in
 `snapshot.settings.equalizer`:
@@ -272,8 +272,8 @@ Regression checks: `cargo test --locked equalizer` and
 `swift test --package-path macos --scratch-path target/swift-client --filter EqualizerTests`.
 Use the repository's pinned FFmpeg prefix for Rust builds (see `justfile`).
 The debug client's `--equalizer-smoke-output <directory>` hook exercises native
-controls against an explicitly supplied isolated loopback daemon with empty
-library/queue. Supply `--url`, `--token-file` and `--ui-driver`; add
+controls against an explicitly supplied isolated Unix-socket daemon with empty
+library/queue. Supply `--socket` and `--ui-driver`; add
 `--equalizer-smoke-restore` after restarting that daemon to verify settings and
 saved presets. Build the driver from current source:
 `swiftc scripts/native_ui_driver.swift -o target/native-ui-driver`.
@@ -511,6 +511,113 @@ Verification on 2026-10-20:
   `release-client.png`. This was a sandboxed same-host check, **not** a clean-Mac,
   macOS 14, notarization, or acoustic-output test.
 
+## Development commands
+
+Install Rust, Xcode command-line tools, Python 3.9+, and optionally `just`
+(`brew install just`). Debug builds also need Homebrew FFmpeg and pkg-config
+(`brew install ffmpeg pkg-config`). Release builds compile pinned FFmpeg from
+source and do not require Homebrew FFmpeg or pkg-config.
+
+| Command | Action |
+| --- | --- |
+| `just` | List available recipes. |
+| `just build-server` | Build the Rust server and companion CLI tools (debug). |
+| `just build-server-release` | Build release Rust binaries against pinned, source-built FFmpeg. |
+| `just test-server` | Run all Rust unit and integration tests; hardware tests remain opt-in. |
+| `just build-client` | Build the SwiftUI client (debug). |
+| `just build-client-release` | Build the SwiftUI client with release optimizations. |
+| `just test-client` | Run the Swift client test suite. |
+| `just build` | Build both components (debug). |
+| `just build-release` | Build both components with release optimizations. |
+| `just test` | Test both components. |
+| `just dmg` | Build a self-contained release app and package `target/Tyranny.dmg`. |
+
+Debug Cargo builds use `target/debug` unless overridden by `CARGO_TARGET_DIR`.
+Release recipes isolate their Rust artifacts in `target/portable-rust/release`
+so development headers/libraries cannot be reused accidentally. Swift uses
+`target/swift-client/debug` and `target/swift-client/release`.
+The build recipes do not replace `target/Tyranny.app`. Unbundled release Rust
+binaries still reference the pinned build cache; use the app/DMG for relocation.
+
+To package the development app, stop the app/daemon before running
+`scripts/build_macos.sh`; by default it bundles a Homebrew-linked release server
+with a debug client. `scripts/build_macos.sh release` instead builds both
+components in release mode and assembles a self-contained
+`target/release/Tyranny.app`. An optional second argument selects the app destination.
+
+### Release disk image
+
+Run `just dmg` or `scripts/build_dmg.sh` to build the release client and server,
+assemble and ad-hoc sign a fresh app bundle, and create a compressed
+`target/Tyranny.dmg`. The image contains `Tyranny.app` (including its server,
+FFmpeg libraries, icon, and source/license artifacts) and an Applications
+shortcut. Drag the app to Applications before launching it; do not run the
+managed server from the mounted image.
+
+The source builder currently supports native **arm64 macOS**, with a deployment
+target of macOS 14. It downloads [FFmpeg 9.0.2](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz)
+and verifies the pinned SHA256 before extraction. The pin was established by
+verifying the upstream detached signature against FFmpeg's published signing
+fingerprint. The first build needs network access; subsequent builds reuse a
+checksum-verified cache under `target/native`, keyed by source, configuration,
+architecture, builder, compiler, and SDK. Interrupted installs are not reused.
+FFmpeg's build system requires a checkout/toolchain path without whitespace or
+shell/make metacharacters; the builder rejects these paths early. The packaged
+app itself supports spaces and Unicode in its installation path.
+
+The controlled configuration retains native decoders/demuxers and embedded image
+support, builds shared avcodec/avformat/avutil/swresample, and disables GPL,
+nonfree, version-3-only code, external-library autodetection, encoders, muxers,
+devices, filters, hardware acceleration, and networking. It uses macOS system
+zlib, bzlib, and iconv. This preserves the current local-file playback path;
+it does not add the external decoder engines or streaming features in the requirements.
+
+Packaging copies the four dylibs to `Contents/Frameworks`, rewrites their
+transitive dependencies and install IDs to `@loader_path`, and removes runpaths.
+Unresolved libraries, non-system dependencies outside the pinned prefix,
+unapproved libraries, symlink escapes, and basename collisions fail packaging.
+`Contents/Resources/native-dependencies.json` records the closed, bundle-relative
+dependency graph. Libraries are signed after relocation, followed by the helper
+and app. Temporary staging leaves the development app untouched; an existing
+DMG is replaced only after the new image passes checksum verification.
+
+This software uses libraries from the FFmpeg project under LGPL-2.1-or-later.
+`Contents/Resources/FFmpeg` includes the exact source archive, license texts,
+configuration headers, and `build-info.json` with source checksum, configure
+arguments, and toolchain provenance. The standard About panel's `Credits.rtf`
+points to those resources. Keep these artifacts when distributing the app and
+include FFmpeg attribution/source access on any download page; see
+[FFmpeg's compliance checklist](https://ffmpeg.org/legal.html).
+Dynamic linking and source inclusion are not a blanket codec-patent or legal clearance.
+
+The DMG no longer needs Homebrew at runtime. It is still **ad-hoc signed, not
+Developer ID signed or notarized**, and is not a universal binary. Gatekeeper
+may block downloaded copies.
+
+Verification on 2026-10-20:
+
+- `just dmg`: built the source libraries, release binaries, and verified DMG;
+  a second source-builder invocation reused the verified cache.
+- `python3 -m unittest discover -s scripts -p test_macos_dependencies.py`:
+  six real Mach-O fixture tests passed, including transitive relocation after
+  removing the source libraries and rejection of invalid dependency graphs.
+- Rust tests against the pinned prefix (`FFMPEG_DIR=<prefix>
+  MACOSX_DEPLOYMENT_TARGET=14.0 cargo test --locked --release --all-targets
+  --target-dir target/portable-rust`): 223 passed; one hardware test ignored.
+- Copied the signed app out of the mounted DMG to a path containing spaces and
+  Unicode, then unmounted the image. With sandbox reads denied for `/opt/homebrew`,
+  `/usr/local`, and the entire repository, the helper imported 12 fixtures and
+  preserved Unicode metadata. FLAC, MP3, Vorbis, Opus, AAC, ALAC, WavPack, and WMA
+  playback passed; two FLAC tracks produced exactly 48,000 stereo frames with
+  bit-exact samples and no gap, overlap, or underruns. ReplayGain and paused
+  seeking passed.
+- The relocated release client rendered the imported library and connected over
+  protocol v9 under the same sandbox. The RTF attribution parsed successfully;
+  opening About automatically was blocked by Apple Events permissions.
+- Local evidence: `target/portable-release-verification/report.json` and
+  `release-client.png`. This was a sandboxed same-host check, **not** a clean-Mac,
+  macOS 14, notarization, or acoustic-output test.
+
 ## Goal and scope
 
 Prove one complete local workflow: launch the app, choose a music directory, see scan progress, browse an artist/album/track library, queue music, and hear continuous playback. Close and reopen the client without interrupting playback or losing authoritative state.
@@ -554,12 +661,12 @@ Keep one Rust package with internal modules initially, plus a separate native ma
 - **Library module:** owns roots, asynchronous indexing, metadata, album grouping, bounded queries, and scan progress. SQLite with migrations, transactional batches, and indexes; no full import on startup.
 - **Playback module:** owns queue order, current entry, transport state, next-item preparation, gain, and resume policy. Serialize commands through one owner. Native decoding and filesystem access stay on that worker; the continuous output callback consumes only preallocated PCM. SwiftUI, database work, and network requests must not block the audio callback.
 - **Artwork module:** two bounded workers own embedded/folder discovery, ordered Cover Art Archive/Deezer/Discogs lookup, image normalization and source-specific retention. Separate artwork connections prevent slow image requests from queuing ahead of main transport controls.
-- **Protocol module:** exposes commands, queries, and authoritative state without leaking FFmpeg types or SQLite rows. The implemented server uses Tokio, tungstenite, Serde, and rusqlite; the audio engine uses ffmpeg-next, a native CoreAudio DefaultOutput AudioUnit, and bounded SPSC rings.
+- **Protocol module:** exposes commands, queries, and authoritative state without leaking FFmpeg types or SQLite rows. The implemented server uses Tokio Unix streams, Serde, and rusqlite; the audio engine uses ffmpeg-next, a native CoreAudio DefaultOutput AudioUnit, and bounded SPSC rings.
 - **SwiftUI client:** owns navigation, selection, view caches, and connection presentation. Uses native tables/split views and a folder picker. Does not decode audio, scan the directory, or decide which track plays next.
 
 ### Small initial interface
 
-Use versioned JSON over loopback WebSockets, accessible from Swift through `URLSessionWebSocketTask`. Use request IDs for replies and typed events. The native client keeps its main control connection separate from two reusable artwork connections; no MPD compatibility layer or Rust/Swift FFI.
+Use versioned UTF-8 JSON over filesystem Unix-domain stream sockets, accessible from Swift through Network.framework `NWConnection`. Each message has a four-byte unsigned big-endian byte-length prefix; reject empty messages and lengths above 16 KiB for requests or 8 MiB for replies before allocating payload storage. Preserve partial frames across asynchronous reads. Use request IDs for replies and typed events. The native client keeps its main control connection separate from two reusable artwork connections; no HTTP/WebSocket, MPD compatibility layer, or Rust/Swift FFI.
 
 - Library: add root, request rescan, observe scan status, and list album artists/albums/tracks with one shared structured track filter and bounded pages.
 - Artwork: request a bounded thumbnail/display image for an authoritative album or durable queue occurrence at a library revision, with an explicit ordered provider list and optional Discogs credential. The client cannot supply an image path or provider URL.
@@ -573,7 +680,7 @@ At connection, send a protocol version, a fresh server-instance ID, and an autho
 
 Position updates are low-rate observations; the UI may interpolate between them using a local monotonic clock, then correct on seek/pause/track change. A successful command receipt is not proof audio has started: engine events determine actual playback state.
 
-Bind only to loopback, authenticate using a per-user token stored with restrictive permissions, and reject unexpected browser origins. Do not open a LAN listener as part of this spike.
+Listen only at `<state-dir>/control.sock`: a socket owned by the current user with mode `0600`, inside an owned `0700` directory. Validate canonical ancestors against foreign ownership and unsafe write permissions, allowing root-owned sticky temporary directories. Rust verifies same-effective-UID peers; the native client validates the private directory and socket because Network.framework does not expose peer credentials. Hold the state-directory lock while checking/removing an owned stale socket and through owner shutdown and inode-checked socket cleanup. Refuse live listeners, symlinks, non-sockets, unsafe permissions, and paths exceeding the platform socket-address byte limit. No bearer tokens, TCP listeners, or network fallback. Existing token files are inert and left untouched.
 
 ### Saved radio stations
 

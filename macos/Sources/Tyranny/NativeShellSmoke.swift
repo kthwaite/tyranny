@@ -166,7 +166,7 @@ enum NativeShellSmoke {
             }
         }.value
         try await press("status-connection")
-        try await drive("exists", "connection-url")
+        try await drive("exists", "connection-socket-path")
         cases.append("native-status-connection-opens-connection-settings")
         try await drive("press-title", "Library")
         guard let root = model.roots?.entries.first else { throw Failure(message: "Imported root missing") }

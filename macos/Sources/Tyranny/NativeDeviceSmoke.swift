@@ -62,9 +62,7 @@ enum NativeDeviceSmoke {
 
     private static func exerciseWrite(_ kit: NativePlaylistKit, target: MTPDevice, fixture: String) async throws {
         let model = kit.model
-        let url = URLComponents(string: model.endpoint)
-        try kit.check(url?.host == "127.0.0.1" && url?.port != nil && url?.port != 9865 && !model.managesServer,
-                      "Write smoke requires an isolated loopback daemon")
+        try kit.requireIsolatedDaemon()
         try await kit.wait("fixture library") { model.connected && model.snapshot?.library.tracks == 1 }
         let rows = try await kit.songs(1)
         guard let row = rows.first else { throw DeviceSyncFailure("Fixture library is empty") }

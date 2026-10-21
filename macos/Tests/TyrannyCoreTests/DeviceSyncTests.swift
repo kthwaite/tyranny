@@ -9,7 +9,8 @@ import Testing
                 title: "Song \(id)", artist: "Artist", album: "Album", album_artist: "Artist",
                 compilation: false, disc_number: 1, track_number: 1, duration_ms: 1000,
                 year: nil, genre: "", format: "FLAC", sample_rate: 44100, bitrate_kbps: nil,
-                play_count: 0, last_played: nil, date_added: 0, path: path ?? "/music/\(id).flac"))
+                play_count: 0, last_played: nil, date_added: 0, path: path ?? "/music/\(id).flac",
+                liked: false))
     }
 
     @Test func pagedSelectionExcludesRowsAndDeduplicatesFiles() async throws {

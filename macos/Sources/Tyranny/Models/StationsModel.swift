@@ -60,7 +60,7 @@ final class StationsModel {
     /// Follows the connection and `stations_revision`. A new connection forgets the catalog.
     func sync() {
         guard let player else { return }
-        lane.synchronize(endpoint: player.endpoint, tokenPath: player.tokenPath, instance: player.serverInstance)
+        lane.synchronize(socketPath: player.socketPath, instance: player.serverInstance)
         let generation = player.playlistConnectionGeneration
         if session != generation {
             session = generation

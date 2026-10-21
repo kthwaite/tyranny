@@ -1,65 +1,43 @@
-//! Authenticated, bounded loopback transport. The owner, not any socket, owns playback.
+//! Private, bounded Unix transport. The owner, not any socket, owns playback.
 use crate::{
     output::OutputConfig,
     owner::{Controller, Owner, OwnerConfig},
     protocol::{Command, Message, Reply, Request, Response, VERSION},
+    transport::{
+        FrameReader, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, prepare_socket, socket_metadata,
+        validate_ancestors, validate_directory, validate_socket_path, write_frame,
+    },
 };
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
-use futures_util::{SinkExt, StreamExt};
 use std::{
     fs::{self, DirBuilder, File, Metadata, OpenOptions},
     future::Future,
-    io::{Read, Write},
-    net::{IpAddr, SocketAddr},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-use subtle::ConstantTimeEq;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::{UnixListener, UnixStream},
     sync::watch,
     task::JoinSet,
     time::timeout,
 };
-use tokio_tungstenite::{
-    WebSocketStream, accept_hdr_async_with_config,
-    tungstenite::{
-        Message as Frame,
-        client::IntoClientRequest,
-        handshake::{
-            client::Request as ClientRequest,
-            server::{ErrorResponse, Request as UpgradeRequest, Response as UpgradeResponse},
-        },
-        http::{
-            HeaderValue, StatusCode, Uri,
-            header::{AUTHORIZATION, ORIGIN},
-        },
-        protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
-    },
-};
 use uuid::Uuid;
 
-pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
-/// Queue pages can contain 500 paths, so replies have a separate finite ceiling.
-pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
-const TOKEN_BYTES: usize = 64;
 
 pub struct ServerConfig {
     pub state_dir: PathBuf,
-    pub bind: SocketAddr,
     pub output: OutputConfig,
 }
 
 pub struct Server {
-    listener: TcpListener,
-    address: SocketAddr,
+    listener: UnixListener,
     owner: Owner,
+    socket: SocketGuard,
     state: StateDirectory,
     instance_id: String,
 }
@@ -67,36 +45,36 @@ pub struct Server {
 impl Server {
     /// Acquires the lifetime lock before starting the single playback owner.
     pub async fn start(config: ServerConfig) -> Result<Self> {
-        ensure!(
-            config.bind.ip().is_loopback(),
-            "server bind address must be loopback"
-        );
         let state = StateDirectory::open(&config.state_dir)?;
-        let listener = TcpListener::bind(config.bind)
-            .await
-            .context("bind local control socket")?;
-        let address = listener.local_addr()?;
+        let path = state.root.join("control.sock");
+        validate_socket_path(&path)?;
+        remove_stale_socket(&path).await?;
+        let listener = UnixListener::bind(&path).context("bind local control socket")?;
+        let metadata = fs::symlink_metadata(&path)?;
+        let socket = SocketGuard {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        fs::set_permissions(&socket.path, fs::Permissions::from_mode(0o600))?;
         let owner = Owner::start(OwnerConfig {
             database_path: state.root.join("state.sqlite3"),
             output: config.output,
         })?;
         Ok(Self {
             listener,
-            address,
+            socket,
             owner,
             state,
             instance_id: Uuid::new_v4().to_string(),
         })
     }
 
-    pub fn address(&self) -> SocketAddr {
-        self.address
+    pub fn socket_path(&self) -> &Path {
+        &self.socket.path
     }
     pub fn instance_id(&self) -> &str {
         &self.instance_id
-    }
-    pub fn token_path(&self) -> &Path {
-        &self.state.token_path
     }
 
     /// Stops accepting, closes controllers, checkpoints and joins the owner before
@@ -105,6 +83,7 @@ impl Server {
         let Self {
             listener,
             owner,
+            socket,
             state,
             instance_id,
             ..
@@ -124,16 +103,16 @@ impl Server {
                     }
                 }
                 accepted = listener.accept() => {
-                    let (socket, peer) = match accepted {
+                    let (socket, _) = match accepted {
                         Ok(connection) => connection,
                         Err(error) => break Err(error).context("accept local controller"),
                     };
-                    if !peer.ip().is_loopback() || connections.len() >= MAX_CONNECTIONS {
+                    if connections.len() >= MAX_CONNECTIONS || prepare_socket(&socket).is_err() {
                         drop(socket);
                         continue;
                     }
                     connections.spawn(serve_connection(
-                        socket, controller.clone(), state.token.clone(), instance_id.clone(), stopped.clone(),
+                        socket, controller.clone(), instance_id.clone(), stopped.clone(),
                     ));
                 }
             }
@@ -143,6 +122,7 @@ impl Server {
         while connections.join_next().await.is_some() {}
         drop(controller);
         let shutdown_result = owner.shutdown().await;
+        drop(socket);
         drop(state);
         match (network_result, shutdown_result) {
             (Ok(()), result) => result,
@@ -155,16 +135,28 @@ impl Server {
 }
 
 pub fn default_state_dir() -> Result<PathBuf> {
-    Ok(
-        PathBuf::from(std::env::var_os("HOME").context("HOME is not set; supply --state-dir")?)
-            .join("Library/Application Support/tyranny"),
+    #[cfg(target_os = "macos")]
+    let suffix = "Library/Application Support/tyranny";
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(root) = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            return Ok(root.join("tyranny"));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let suffix = ".local/state/tyranny";
+    Ok(PathBuf::from(
+        std::env::var_os("HOME")
+            .context("HOME is not set; supply an explicit state/socket path")?,
     )
+    .join(suffix))
 }
 
 struct StateDirectory {
     root: PathBuf,
-    token_path: PathBuf,
-    token: Arc<str>,
     _lock: File,
     _directory: File,
 }
@@ -196,20 +188,12 @@ impl StateDirectory {
             .context("open private state directory without following symlinks")?;
         validate_directory(&directory.metadata()?)?;
         let root = fs::canonicalize(path).context("resolve state directory")?;
+        validate_ancestors(&root)?;
         // All children stay under the private directory. Reject insecure existing
         // files, including SQLite sidecars, rather than silently repairing them.
         let lock = open_private_file(&root.join("server.lock"), true)?;
         lock.try_lock_exclusive()
             .context("state directory is already locked by another server")?;
-        let token_path = root.join("token");
-        match fs::symlink_metadata(&token_path) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                create_token(&root, &directory)?
-            }
-            Err(error) => return Err(error).context("inspect authentication token"),
-        }
-        let token = read_token(&token_path)?.into();
         drop(open_private_file(&root.join("state.sqlite3"), true)?);
         for name in [
             "state.sqlite3-wal",
@@ -228,28 +212,10 @@ impl StateDirectory {
         directory.sync_all().context("sync state directory")?;
         Ok(Self {
             root,
-            token_path,
-            token,
             _lock: lock,
             _directory: directory,
         })
     }
-}
-
-fn validate_directory(metadata: &Metadata) -> Result<()> {
-    ensure!(
-        metadata.is_dir() && !metadata.file_type().is_symlink(),
-        "state directory must be a real directory, not a symlink"
-    );
-    ensure!(
-        metadata.uid() == unsafe { libc::geteuid() },
-        "state directory must be owned by the current user"
-    );
-    ensure!(
-        metadata.mode() & 0o777 == 0o700,
-        "state directory permissions must be 0700"
-    );
-    Ok(())
 }
 
 fn validate_file(metadata: &Metadata) -> Result<()> {
@@ -262,7 +228,7 @@ fn validate_file(metadata: &Metadata) -> Result<()> {
         "state file must be owned by the current user"
     );
     ensure!(
-        metadata.mode() & 0o777 == 0o600,
+        metadata.mode() & 0o7777 == 0o600,
         "state file permissions must be 0600"
     );
     Ok(())
@@ -281,152 +247,18 @@ fn open_private_file(path: &Path, create: bool) -> Result<File> {
     Ok(file)
 }
 
-fn create_token(root: &Path, directory: &File) -> Result<()> {
-    let temporary = root.join(format!(".token-{}", Uuid::new_v4()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&temporary)
-        .context("create private authentication token")?;
-    let result = (|| -> Result<()> {
-        let mut entropy = [0_u8; 32];
-        File::open("/dev/urandom")?.read_exact(&mut entropy)?;
-        let mut encoded = [0_u8; TOKEN_BYTES];
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for (byte, pair) in entropy.into_iter().zip(encoded.as_chunks_mut::<2>().0) {
-            pair[0] = HEX[usize::from(byte >> 4)];
-            pair[1] = HEX[usize::from(byte & 15)];
-        }
-        file.write_all(&encoded)?;
-        file.sync_all()?;
-        fs::rename(&temporary, root.join("token"))?;
-        directory.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result.context("persist authentication token")
-}
-
-/// Opens without following a final symlink; the token never appears in diagnostics.
-pub fn read_token(path: &Path) -> Result<String> {
-    let mut file = open_private_file(path, false)?;
-    ensure!(
-        file.metadata()?.len() == TOKEN_BYTES as u64,
-        "authentication token has invalid length"
-    );
-    let mut bytes = [0_u8; TOKEN_BYTES];
-    file.read_exact(&mut bytes)
-        .context("read authentication token")?;
-    ensure!(
-        bytes
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)),
-        "authentication token has invalid encoding"
-    );
-    Ok(String::from_utf8(bytes.to_vec()).expect("validated ASCII token"))
-}
-
-/// Validates the destination before adding the secret. Literal IPs avoid DNS
-/// rebinding and no userinfo, query string or redirect can carry credentials.
-pub fn client_request(url: &str, token: &str) -> Result<ClientRequest> {
-    let uri: Uri = url.parse().context("invalid WebSocket URL")?;
-    ensure!(uri.scheme_str() == Some("ws"), "control URL must use ws://");
-    let authority = uri.authority().context("control URL needs an authority")?;
-    ensure!(
-        !authority.as_str().contains('@'),
-        "control URL must not contain userinfo"
-    );
-    let host = uri.host().context("control URL needs a host")?;
-    let host = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host);
-    let ip: IpAddr = host
-        .parse()
-        .context("control URL must use a literal loopback IP address")?;
-    ensure!(
-        ip.is_loopback(),
-        "control URL must be loopback; refusing to send credentials"
-    );
-    ensure!(
-        uri.path() == "/ws" && uri.query().is_none(),
-        "control URL path must be /ws without a query"
-    );
-    let mut request = url
-        .into_client_request()
-        .context("invalid WebSocket request")?;
-    let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
-        .map_err(|_| anyhow::anyhow!("invalid authentication token"))?;
-    authorization.set_sensitive(true);
-    request.headers_mut().insert(AUTHORIZATION, authorization);
-    Ok(request)
-}
-
-struct Authenticate(Arc<str>);
-
-impl tokio_tungstenite::tungstenite::handshake::server::Callback for Authenticate {
-    fn on_request(
-        self,
-        request: &UpgradeRequest,
-        response: UpgradeResponse,
-    ) -> std::result::Result<UpgradeResponse, ErrorResponse> {
-        let rejection = if request.headers().contains_key(ORIGIN) {
-            Some(StatusCode::FORBIDDEN)
-        } else if request.uri().path() != "/ws" || request.uri().query().is_some() {
-            Some(StatusCode::NOT_FOUND)
-        } else {
-            let mut authorization = request.headers().get_all(AUTHORIZATION).iter();
-            let supplied = authorization
-                .next()
-                .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
-            let authenticated = authorization.next().is_none()
-                && supplied.is_some_and(|supplied| bool::from(supplied.ct_eq(self.0.as_bytes())));
-            (!authenticated).then_some(StatusCode::UNAUTHORIZED)
-        };
-        match rejection {
-            Some(status) => {
-                let mut response = ErrorResponse::new(None);
-                *response.status_mut() = status;
-                Err(response)
-            }
-            None => Ok(response),
-        }
-    }
-}
-
 async fn serve_connection(
-    socket: TcpStream,
+    mut socket: UnixStream,
     controller: Controller,
-    token: Arc<str>,
     instance: Arc<str>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let configuration = WebSocketConfig::default()
-        .read_buffer_size(MAX_REQUEST_BYTES)
-        .write_buffer_size(0)
-        .max_write_buffer_size(MAX_RESPONSE_BYTES + 1024)
-        .max_message_size(Some(MAX_REQUEST_BYTES))
-        .max_frame_size(Some(MAX_REQUEST_BYTES));
-    let handshake = accept_hdr_async_with_config(socket, Authenticate(token), Some(configuration));
-    let mut socket = tokio::select! {
-        biased;
-        _ = shutdown.changed() => return,
-        result = timeout(IO_TIMEOUT, handshake) => match result {
-            Ok(Ok(socket)) => socket,
-            _ => return,
-        },
-    };
     let subscription = tokio::select! {
         biased;
         _ = shutdown.changed() => None,
         result = controller.subscribe() => result.ok(),
     };
     let Some(mut subscription) = subscription else {
-        close_socket(&mut socket, CloseCode::Away, "server stopping").await;
         return;
     };
     let mut sequence = subscription.snapshot.sequence;
@@ -438,76 +270,50 @@ async fn serve_connection(
     if !send_message(&mut socket, &hello, &mut shutdown).await {
         return;
     }
+    let mut reader = FrameReader::default();
     let mut deferred = None;
-    let (code, reason) = 'connection: loop {
+    loop {
         tokio::select! {
-            _ = shutdown.changed() => break (CloseCode::Away, "server stopping"),
+            _ = shutdown.changed() => return,
             received = async {
-                if let Some(frame) = deferred.take() { Some(Ok(frame)) } else { socket.next().await }
+                if let Some(request) = deferred.take() { Ok(Some(request)) }
+                else { read_request(&mut reader, &mut socket).await }
             } => {
-                match received {
-                    Some(Ok(Frame::Text(text))) => {
-                        let request: Request = match serde_json::from_str(&text) {
-                            Ok(request) => request,
-                            Err(_) => break (CloseCode::Invalid, "invalid request JSON"),
-                        };
-                        // Artwork, lyrics, tag lookups and directory searches have no mutations to replay. Observe
-                        // socket closure while waiting so abandoned discovery
-                        // work is cancelled. At most one
-                        // next frame is retained, preserving pipelined requests
-                        // in order without running them before this reply.
-                        // Invariant the client's launch prefetch relies on: no `state` message
-                        // is written between reading a request and writing its reply. Events
-                        // are polled only after the reply (below), so a reply's connection
-                        // saw no state change in between.
-                        let discovery = matches!(&request.command, Command::Artwork { .. }
-                                | Command::Lyrics { .. }
-                                | Command::MusicbrainzLookup { .. }
-                                | Command::SearchDirectory { .. }
-                        );
-                        let pending = controller.request(request);
-                        tokio::pin!(pending);
-                        let reply = loop {
-                            tokio::select! {
-                                biased;
-                                _ = shutdown.changed() => break 'connection (CloseCode::Away, "server stopping"),
-                                incoming = socket.next(), if discovery && deferred.is_none() => match incoming {
-                                    Some(Ok(Frame::Ping(_) | Frame::Pong(_))) => {},
-                                    Some(Ok(Frame::Close(_))) | None => break 'connection (CloseCode::Normal, "controller disconnected"),
-                                    Some(Ok(frame)) => deferred = Some(frame),
-                                    Some(Err(_)) => break 'connection (CloseCode::Policy, "invalid or oversized WebSocket message"),
-                                },
-                                result = &mut pending => break match result {
-                                    Ok(reply) => reply,
-                                    Err(_) => break 'connection (CloseCode::Error, "playback owner unavailable"),
-                                },
-                            }
-                        };
-                        if let Some(new_sequence) = reply_sequence(&reply) {
-                            sequence = sequence.max(new_sequence);
-                        }
-                        if !send_message(&mut socket, &reply, &mut shutdown).await { return; }
+                let request = match received { Ok(Some(request)) => request, _ => return };
+                // Observe abandoned discovery work without losing a fragmented
+                // next frame when the pending reply wins the select. Retain at
+                // most one pipelined request, without running it before this reply.
+                // Launch prefetch relies on no state message being written
+                // between reading a request and writing its reply.
+                let discovery = matches!(&request.command,
+                    Command::Artwork { .. }
+                        | Command::Lyrics { .. }
+                        | Command::MusicbrainzLookup { .. }
+                        | Command::SearchDirectory { .. }
+                );
+                let pending = controller.request(request);
+                tokio::pin!(pending);
+                let reply = loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => return,
+                        incoming = read_request(&mut reader, &mut socket), if discovery && deferred.is_none() => match incoming {
+                            Ok(Some(request)) => deferred = Some(request),
+                            _ => return,
+                        },
+                        result = &mut pending => break match result {
+                            Ok(reply) => reply,
+                            Err(_) => return,
+                        },
                     }
-                    Some(Ok(Frame::Ping(_))) => {
-                        let flushed = tokio::select! {
-                            biased;
-                            _ = shutdown.changed() => false,
-                            result = timeout(IO_TIMEOUT, socket.flush()) => matches!(result, Ok(Ok(()))),
-                        };
-                        if !flushed { return; }
-                    }
-                    Some(Ok(Frame::Pong(_))) => {}
-                    Some(Ok(Frame::Close(_))) | None => break (CloseCode::Normal, "controller disconnected"),
-                    Some(Ok(_)) => break (CloseCode::Unsupported, "text requests required"),
-                    Some(Err(_)) => break (CloseCode::Policy, "invalid or oversized WebSocket message"),
+                };
+                if let Some(new_sequence) = reply_sequence(&reply) {
+                    sequence = sequence.max(new_sequence);
                 }
+                if !send_message(&mut socket, &reply, &mut shutdown).await { return; }
             }
             event = subscription.events.recv() => {
-                let snapshot = match event {
-                    Ok(snapshot) => snapshot,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break (CloseCode::Policy, "controller lagged; reconnect for snapshot"),
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break (CloseCode::Away, "playback owner stopped"),
-                };
+                let snapshot = match event { Ok(snapshot) => snapshot, Err(_) => return };
                 // Replies may advance past queued events. Never send state backwards.
                 if snapshot.sequence > sequence {
                     sequence = snapshot.sequence;
@@ -515,8 +321,19 @@ async fn serve_connection(
                 }
             }
         }
-    };
-    close_socket(&mut socket, code, reason).await;
+    }
+}
+
+async fn read_request(
+    reader: &mut FrameReader,
+    socket: &mut UnixStream,
+) -> Result<Option<Request>> {
+    reader
+        .read(socket, MAX_REQUEST_BYTES)
+        .await?
+        .map(serde_json::from_slice)
+        .transpose()
+        .context("invalid request JSON")
 }
 
 fn reply_sequence(message: &Message) -> Option<u64> {
@@ -537,11 +354,11 @@ fn reply_sequence(message: &Message) -> Option<u64> {
 }
 
 async fn send_message(
-    socket: &mut WebSocketStream<TcpStream>,
+    socket: &mut UnixStream,
     message: &Message,
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool {
-    let serialized = match serde_json::to_string(message) {
+    let serialized = match serde_json::to_vec(message) {
         Ok(serialized) if serialized.len() <= MAX_RESPONSE_BYTES => serialized,
         _ => return false,
     };
@@ -551,21 +368,48 @@ async fn send_message(
     tokio::select! {
         biased;
         _ = shutdown.changed() => false,
-        result = timeout(IO_TIMEOUT, socket.send(Frame::Text(serialized.into()))) => matches!(result, Ok(Ok(()))),
+        result = timeout(IO_TIMEOUT, write_frame(socket, &serialized, MAX_RESPONSE_BYTES)) => matches!(result, Ok(Ok(()))),
     }
 }
 
-async fn close_socket(
-    socket: &mut WebSocketStream<TcpStream>,
-    code: CloseCode,
-    reason: &'static str,
-) {
-    let _ = timeout(
-        CLOSE_TIMEOUT,
-        socket.close(Some(CloseFrame {
-            code,
-            reason: reason.into(),
-        })),
-    )
-    .await;
+struct SocketGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        if let Ok(metadata) = fs::symlink_metadata(&self.path)
+            && metadata.file_type().is_socket()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Called only while holding the directory's lifetime lock. A live socket is
+/// never removed, including a listener which does not participate in our lock.
+async fn remove_stale_socket(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect existing control socket"),
+        Ok(_) => {}
+    }
+    let before = socket_metadata(path)?;
+    match timeout(IO_TIMEOUT, UnixStream::connect(path)).await {
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+        Ok(Ok(_)) => bail!("control socket already has a live listener"),
+        Ok(Err(error)) => return Err(error).context("probe existing control socket"),
+        Err(_) => bail!("existing control socket probe timed out; refusing to remove it"),
+    }
+    let after = socket_metadata(path)?;
+    ensure!(
+        before.dev() == after.dev() && before.ino() == after.ino(),
+        "control socket changed during stale check"
+    );
+    fs::remove_file(path).context("remove stale control socket")
 }

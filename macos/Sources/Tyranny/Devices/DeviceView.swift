@@ -190,7 +190,7 @@ struct DeviceView: View {
                     .accessibilityIdentifier("device-storage-unavailable")
             }
         }
-        .trackDragHover(model: player, enabled: player.hasLocalLibrary && !model.busy && storage != nil, destination: nil,
+        .trackDragHover(model: player, enabled: !model.busy && storage != nil, destination: nil,
                         hover: {}, drop: { player.dropTracksOnDevice(token: $0, deviceID: deviceID) })
     }
 

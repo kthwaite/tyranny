@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Exercise real daemon processes and independent RFC 6455 clients; stdlib only.
+"""Exercise real daemon processes and independent framed Unix socket clients.
 
 Capture mode uses the production PCM consumer, paced in real time. --coreaudio
 instead emits modest-amplitude audio. No mock owner, database, or playback path.
 """
 import argparse
 import array
-import base64
+import ctypes
 import json
 import math
 import os
@@ -14,6 +14,7 @@ from pathlib import Path
 import selectors
 import socket
 import sqlite3
+import stat
 import struct
 import subprocess
 import tempfile
@@ -22,38 +23,60 @@ import time
 import wave
 
 
-class WebSocket:
-    def __init__(self, address, token=None, origin=None, receive_buffer=None, expected_version=22):
-        host, port = address.rsplit(":", 1)
-        self.socket = socket.create_connection((host, int(port)), timeout=8)
-        if receive_buffer:
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
-        self.buffer = bytearray()
-        self.sequence = -1
-        self.snapshot = None
-        self.counter = 0
-        key = base64.b64encode(os.urandom(16)).decode()
-        headers = ["GET /ws HTTP/1.1", f"Host: {address}", "Upgrade: websocket", "Connection: Upgrade", f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13"]
-        if token is not None:
-            headers.append(f"Authorization: Bearer {token}")
-        if origin is not None:
-            headers.append(f"Origin: {origin}")
-        self.socket.sendall(("\r\n".join(headers) + "\r\n\r\n").encode())
-        while b"\r\n\r\n" not in self.buffer:
-            chunk = self.socket.recv(4096)
-            if not chunk:
-                raise ConnectionError("closed during handshake")
-            self.buffer.extend(chunk)
-            assert len(self.buffer) < 65536
-        header, rest = bytes(self.buffer).split(b"\r\n\r\n", 1)
-        self.buffer = bytearray(rest)
-        self.status = int(header.split(b" ", 2)[1])
-        if self.status != 101:
-            self.hello = None
-            self.close()
-            return
-        self.hello = self.receive()
-        assert self.hello["type"] == "hello" and self.hello["protocol_version"] == expected_version
+def private_socket(socket_path):
+    path = Path(socket_path)
+    assert path.is_absolute(), "socket path must be absolute"
+    # Ancestors may be shared (/tmp), but must not redirect through symlinks.
+    assert path.parent.resolve() == path.parent, "symlink in socket directory"
+    directory = path.parent.lstat()
+    assert stat.S_ISDIR(directory.st_mode) and directory.st_uid == os.geteuid()
+    assert stat.S_IMODE(directory.st_mode) == 0o700, "state directory must be private"
+    info = path.lstat()
+    assert stat.S_ISSOCK(info.st_mode) and info.st_uid == os.geteuid()
+    assert stat.S_IMODE(info.st_mode) == 0o600, "socket must be private"
+    return info
+
+
+def run_directory(work):
+    # Reports stay discoverable in work; sockets use short canonical /tmp paths.
+    run = Path(tempfile.mkdtemp(prefix="tyr-", dir="/tmp")).resolve()
+    (work / run.name).symlink_to(run, target_is_directory=True)
+    return run
+
+
+class UnixSocket:
+    def __init__(self, socket_path, receive_buffer=None, expected_version=23):
+        before = private_socket(socket_path)
+        limit = 104 if os.sys.platform == "darwin" else 108
+        assert len(os.fsencode(socket_path)) < limit, "Unix socket path too long"
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.settimeout(8)
+        try:
+            if receive_buffer:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
+            self.socket.connect(str(socket_path))
+            if os.sys.platform == "darwin":
+                uid, gid = ctypes.c_uint(), ctypes.c_uint()
+                libc = ctypes.CDLL(None, use_errno=True)
+                if libc.getpeereid(self.socket.fileno(), ctypes.byref(uid), ctypes.byref(gid)) != 0:
+                    raise OSError(ctypes.get_errno(), "getpeereid")
+                peer_uid = uid.value
+            elif os.sys.platform.startswith("linux"):
+                _, peer_uid, _ = struct.unpack("3i", self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            else:
+                raise RuntimeError("peer credential checks require macOS or Linux")
+            assert peer_uid == os.geteuid(), "foreign socket peer"
+            after = private_socket(socket_path)
+            assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino), "socket replaced during connect"
+            self.buffer = bytearray()
+            self.sequence = -1
+            self.snapshot = None
+            self.counter = 0
+            self.hello = self.receive()
+            assert self.hello["type"] == "hello" and self.hello["protocol_version"] == expected_version
+        except BaseException:
+            self.socket.close()
+            raise
 
     def take(self, count):
         while len(self.buffer) < count:
@@ -65,55 +88,27 @@ class WebSocket:
         del self.buffer[:count]
         return result
 
-    def send_frame(self, opcode, payload):
-        mask = os.urandom(4)
-        length = len(payload)
-        prefix = bytes([0x80 | opcode])
-        if length < 126:
-            prefix += bytes([0x80 | length])
-        elif length < 65536:
-            prefix += bytes([0xFE]) + struct.pack("!H", length)
-        else:
-            prefix += bytes([0xFF]) + struct.pack("!Q", length)
-        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
-        self.socket.sendall(prefix + mask + masked)
-
     def send(self, request):
-        self.send_frame(1, json.dumps(request, separators=(",", ":")).encode())
+        payload = json.dumps(request, separators=(",", ":")).encode()
+        assert 0 < len(payload) <= 16 * 1024, "request frame too large"
+        self.socket.sendall(struct.pack("!I", len(payload)) + payload)
 
     def receive(self, timeout=8):
         self.socket.settimeout(timeout)
-        while True:
-            first, second = self.take(2)
-            assert first & 0x80 and not second & 0x80, "unexpected fragmented or masked server frame"
-            length = second & 0x7F
-            if length == 126:
-                length = struct.unpack("!H", self.take(2))[0]
-            elif length == 127:
-                length = struct.unpack("!Q", self.take(8))[0]
-            assert length <= 8 * 1024 * 1024
-            payload = self.take(length)
-            opcode = first & 0xF
-            if opcode == 8:
-                raise ConnectionError("WebSocket closed")
-            if opcode == 9:
-                self.send_frame(10, payload)
-                continue
-            if opcode == 10:
-                continue
-            assert opcode == 1
-            message = json.loads(payload)
-            snapshot = message.get("snapshot")
-            if message["type"] == "reply" and message.get("status") == "ok":
-                snapshot = message["result"].get("snapshot")
-            if snapshot:
-                sequence = snapshot["sequence"]
-                assert sequence >= self.sequence, (sequence, self.sequence, message)
-                if message["type"] == "state":
-                    assert sequence > self.sequence, "superseded state event arrived after newer reply"
-                self.sequence = sequence
-                self.snapshot = snapshot
-            return message
+        length = struct.unpack("!I", self.take(4))[0]
+        assert 0 < length <= 8 * 1024 * 1024, "invalid reply frame length"
+        message = json.loads(self.take(length).decode("utf-8"))
+        snapshot = message.get("snapshot")
+        if message["type"] == "reply" and message.get("status") == "ok":
+            snapshot = message["result"].get("snapshot")
+        if snapshot:
+            sequence = snapshot["sequence"]
+            assert sequence >= self.sequence, (sequence, self.sequence, message)
+            if message["type"] == "state":
+                assert sequence > self.sequence, "superseded state event arrived after newer reply"
+            self.sequence = sequence
+            self.snapshot = snapshot
+        return message
 
     def request(self, command, expect_error=None, **fields):
         self.counter += 1
@@ -166,7 +161,7 @@ def main():
     client = str(Path(args.client).resolve())
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+    run = run_directory(work)
     state_dir = run / "state"
     state_dir.mkdir(mode=0o700)
     source = run / "continuous.wav"
@@ -184,7 +179,7 @@ def main():
     def start():
         nonlocal process, launch_count
         launch_count += 1
-        argv = [server, "--state-dir", str(state_dir), "--bind", "127.0.0.1:0"]
+        argv = [server, "--state-dir", str(state_dir)]
         if not args.coreaudio:
             argv += ["--capture", str(run / f"output-{launch_count}.f32")]
         log = (run / f"server-{launch_count}.stderr").open("w")
@@ -208,6 +203,10 @@ def main():
                 process.terminate()
             code = process.wait(timeout=12)
             assert code == (-9 if crash else 0), f"unexpected shutdown: {code}"
+            if crash:
+                private_socket(state_dir / "control.sock")
+            else:
+                assert not (state_dir / "control.sock").exists(), "clean shutdown left its socket behind"
             process.stdout.close()
             process = None
         for connection in clients:
@@ -215,8 +214,7 @@ def main():
         clients.clear()
 
     def connect(ready, **kwargs):
-        connection = WebSocket(ready["address"], token, **kwargs)
-        assert connection.status == 101
+        connection = UnixSocket(ready["socket_path"], **kwargs)
         clients.append(connection)
         return connection
 
@@ -227,20 +225,25 @@ def main():
 
     try:
         ready = start()
-        token_path = Path(ready["token_path"])
-        token = token_path.read_text().strip()
-        assert token_path.stat().st_mode & 0o777 == 0o600
-        assert state_dir.stat().st_mode & 0o777 == 0o700
-        unauthorized = WebSocket(ready["address"])
-        incorrect = WebSocket(ready["address"], "wrong-token")
-        browser = WebSocket(ready["address"], token, origin="http://localhost")
-        assert unauthorized.status == 401 and incorrect.status == 401 and browser.status == 403
-        record("local-authentication-and-origin-rejection", statuses=[unauthorized.status, incorrect.status, browser.status])
-        duplicate = subprocess.run([server, "--state-dir", str(state_dir), "--bind", "127.0.0.1:0", "--capture", str(run / "duplicate.f32")], capture_output=True, text=True, timeout=10)
+        private_socket(ready["socket_path"])
+        assert Path(ready["socket_path"]) == state_dir / "control.sock"
+        record("owned-private-unix-socket", socket_path=ready["socket_path"])
+        duplicate = subprocess.run([server, "--state-dir", str(state_dir), "--capture", str(run / "duplicate.f32")], capture_output=True, text=True, timeout=10)
         assert duplicate.returncode != 0
-        nonlocal_bind = subprocess.run([server, "--state-dir", str(run / "bad-bind"), "--bind", "0.0.0.0:0"], capture_output=True, text=True, timeout=10)
-        assert nonlocal_bind.returncode != 0
-        record("single-owner-lock-and-loopback-only", duplicate_stderr=duplicate.stderr, nonlocal_stderr=nonlocal_bind.stderr)
+        record("single-owner-lock", duplicate_stderr=duplicate.stderr)
+        for length in (0, 16 * 1024 + 1, 0xFFFFFFFF):
+            malformed = connect(ready)
+            try:
+                malformed.socket.sendall(struct.pack("!I", length))
+                try:
+                    malformed.receive()
+                except (ConnectionError, ConnectionResetError):
+                    pass
+                else:
+                    raise AssertionError(f"server accepted invalid frame length {length}")
+            finally:
+                malformed.close()
+        record("invalid-request-lengths-rejected-before-payload")
 
         a, b = connect(ready), connect(ready)
         assert a.hello["instance_id"] == b.hello["instance_id"]
@@ -290,15 +293,15 @@ def main():
         a.request("set_gain", mode="track")
         record("real-pause-seek-resume-and-gain-setting", paused_frame=paused["position_frames"])
 
-        cli_command = [client, "--url", "ws://" + ready["address"] + "/ws", "--token-file", str(token_path), '{"id":900,"command":"snapshot"}']
+        cli_command = [client, "--socket", ready["socket_path"], '{"id":900,"command":"snapshot"}']
         cli = subprocess.run(cli_command, capture_output=True, text=True, timeout=10)
         assert cli.returncode == 0, cli.stderr
         cli_messages = [json.loads(line) for line in cli.stdout.splitlines()]
         assert any(message.get("id") == 900 and message.get("status") == "ok" for message in cli_messages)
         record("development-client-binary", argv=cli_command, stdout=cli.stdout)
 
-        # A large bounded page makes a genuinely unread TCP connection exhaust
-        # its send window quickly, without adding a fake slow-consumer hook.
+        # A large bounded page makes a genuinely unread Unix socket exhaust
+        # its send buffer quickly, without adding a fake slow-consumer hook.
         for _ in range(198):
             result = a.request("append", expected_revision=revision, path=str(source))
             revision = result["snapshot"]["queue_revision"]
@@ -349,7 +352,7 @@ def main():
         assert checkpoint["playing"] and checkpoint["current_id"] == two
         assert 0 <= observed - checkpoint["position_frames"] <= 72000
         ready = start()
-        assert ready["instance_id"] != first_instance and token_path.read_text().strip() == token
+        assert ready["instance_id"] != first_instance
         a = connect(ready)
         restored = a.snapshot
         assert restored["transport"] == "paused" and restored["current_id"] == two

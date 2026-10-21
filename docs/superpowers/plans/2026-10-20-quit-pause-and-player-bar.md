@@ -44,7 +44,7 @@
 
 1. **Quit while the server is buffering.** `transport == "buffering"` counts as playing: pause it, record the note, and resume on relaunch. The test is `noteTreatsBufferingAsPlaying`, in Task 2.
 2. **Quit while the server is hung.** The pause reply never arrives. Quit must still complete within about 1 s, and no note is written. The test is `deadlineReturnsNilWhenOperationOutlivesIt` in Task 2, which uses an operation that ignores cancellation.
-3. **Relaunch against a different server.** This covers another `--url`, or the managed endpoint after using `--url`. It must not resume. The test is `doesNotResumeOnAnotherEndpoint`, in Task 2.
+3. **Relaunch against a different server.** This covers another `--socket`, or the managed socket after using `--socket`. It must not resume. The test is `doesNotResumeOnAnotherSocket`, in Task 2.
 4. **Another client changes the track between quit and relaunch.** The relaunch must leave the new track alone. The tests are `doesNotResumeWhenTheCurrentEntryChanged` and `doesNotResumeWhenAlreadyPlaying`, in Task 2.
 5. **The window at its 940 pt minimum width.** The bar must not overlap or clip its controls. The left and right sections stay fixed and the scrubber shrinks. The check is render `17-player-bar-min-width`, in Task 4.
 
@@ -128,13 +128,13 @@
 - Produces:
   ```swift
   public struct QuitSuspension: Codable, Equatable, Sendable {
-      public let endpoint: String
+      public let socketPath: String
       public let entryID: UInt64
-      public init(endpoint: String, entryID: UInt64)
+      public init(socketPath: String, entryID: UInt64)
       /// Non-nil only when `transport` is "playing" or "buffering" and `currentID` is set.
-      public static func note(endpoint: String, transport: String?, currentID: UInt64?) -> QuitSuspension?
-      /// True only for the same endpoint, `transport == "paused"`, and `currentID == entryID`.
-      public func shouldResume(endpoint: String, transport: String?, currentID: UInt64?) -> Bool
+      public static func note(socketPath: String, transport: String?, currentID: UInt64?) -> QuitSuspension?
+      /// True only for the same socket path, `transport == "paused"`, and `currentID == entryID`.
+      public func shouldResume(socketPath: String, transport: String?, currentID: UInt64?) -> Bool
   }
   public struct QuitSuspensionStore: Sendable {
       public static let key = "quitSuspension"
@@ -152,12 +152,12 @@
   ```
 
 - [ ] **Step 1: Write the failing tests.** Use `UserDefaults(suiteName: "QuitSuspensionTests.\(UUID())")!` for store tests. The tests are:
-  - `noteWhenPlaying`: `note(endpoint: "ws://a", transport: "playing", currentID: 4) == QuitSuspension(endpoint: "ws://a", entryID: 4)`.
+  - `noteWhenPlaying`: `note(socketPath: "/private/tmp/a/control.sock", transport: "playing", currentID: 4) == QuitSuspension(socketPath: "/private/tmp/a/control.sock", entryID: 4)`.
   - `noteTreatsBufferingAsPlaying`: same, with `"buffering"`.
   - `noNoteWhenPausedStoppedOrUnknown`: nil for `"paused"`, `"stopped"`, `"ended"`, `"error"`, `nil`; and for `"playing"` with `currentID: nil`.
-  - `resumesWhenPausedOnTheSameEntry`: a note `("ws://a", 4)` and `shouldResume("ws://a", "paused", 4)` gives true.
-  - `doesNotResumeOnAnotherEndpoint`: `shouldResume("ws://b", "paused", 4)` gives false.
-  - `doesNotResumeWhenTheCurrentEntryChanged`: `shouldResume("ws://a", "paused", 5)` gives false.
+  - `resumesWhenPausedOnTheSameEntry`: a note `("/private/tmp/a/control.sock", 4)` and `shouldResume("/private/tmp/a/control.sock", "paused", 4)` gives true.
+  - `doesNotResumeOnAnotherSocket`: `shouldResume("/private/tmp/b/control.sock", "paused", 4)` gives false.
+  - `doesNotResumeWhenTheCurrentEntryChanged`: `shouldResume("/private/tmp/a/control.sock", "paused", 5)` gives false.
   - `doesNotResumeWhenAlreadyPlaying`: false for `"playing"`, `"stopped"`, and `nil` transport.
   - `storeTakeReturnsTheNoteOnce`: save, then `take()` gives the note, and a second `take()` gives nil.
   - `storeTakeDropsUndecodableData`: set the key to `Data("x".utf8)`; `take()` gives nil, and the key is gone.
@@ -186,14 +186,14 @@
   - `PlayerModel` resumes on the first snapshot of the app's first connection.
 
 - [ ] **Step 1: `PlayerModel.suspendForQuit()`.**
-  - Guard: `connected`, a snapshot, and a non-nil `QuitSuspension.note(endpoint:transport:currentID:)` from the snapshot.
+  - Guard: `connected`, a snapshot, and a non-nil `QuitSuspension.note(socketPath:transport:currentID:)` from the snapshot.
   - Call `Deadline.race(.seconds(1)) { try await self.send("pause") as Applied }`.
   - Save the note to `QuitSuspensionStore(defaults: .standard)` only when the result is non-nil.
   - Bypass `mutate`/`canMutate`, so that `busy` cannot block quitting.
 - [ ] **Step 2: Resume on launch.**
   - Add `@ObservationIgnored private var launchSuspensionChecked = false` to `PlayerModel`.
   - In `accept(_:newInstance:)`, on the first call with `newInstance == true` while `!launchSuspensionChecked`, set the flag first.
-  - Then, if `QuitSuspensionStore.take()` returns a note and `shouldResume(endpoint: endpoint, transport: state.transport, currentID: state.current_id)` is true, call `transport.play()`.
+  - Then, if `QuitSuspensionStore.take()` returns a note and `shouldResume(socketPath: socketPath, transport: state.transport, currentID: state.current_id)` is true, call `transport.play()`.
   - Later reconnects never check again.
 - [ ] **Step 3: The delegate.** `TyrannyAppDelegate.applicationShouldTerminate(_:) -> NSApplication.TerminateReply`:
   - If a suspension is already in flight, return `.terminateLater`. AppKit is already waiting for that reply, so a second ⌘Q adds nothing.

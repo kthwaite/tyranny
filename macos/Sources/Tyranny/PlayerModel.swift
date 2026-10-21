@@ -5,9 +5,8 @@ import TyrannyCore
 
 @MainActor @Observable
 final class PlayerModel {
-    var endpoint = "ws://127.0.0.1:9865/ws"
-    var tokenPath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/tyranny/token").path
+    var socketPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/tyranny/control.sock").path
     private(set) var connection = "disconnected" {
         didSet { updateMediaControls(); updateArtwork(); updateLyrics() }
     }
@@ -88,7 +87,7 @@ final class PlayerModel {
     @ObservationIgnored var activeDrag: TrackDrag?
     /// The launch prefetch, until the first `listTracks` takes it. It names the server it asked.
     @ObservationIgnored private var launchPrefetch: (slot: LaunchPrefetchSlot, deadline: ContinuousClock.Instant,
-                                                     endpoint: String, tokenPath: String)?
+                                                     socketPath: String)?
 
     /// The user's colours. Views read them from the environment.
     let theme: ColourTheme
@@ -98,15 +97,13 @@ final class PlayerModel {
         self.quitSuspensions = quitSuspensions
         self.importNotes = importNotes
         let arguments = CommandLine.arguments
-        for (index, argument) in arguments.enumerated() where index + 1 < arguments.count {
-            if argument == "--url" { endpoint = arguments[index + 1] }
-            if argument == "--token-file" { tokenPath = arguments[index + 1] }
-        }
         do {
             managedServer = try ManagedServer.make(arguments: arguments)
+            if let index = arguments.firstIndex(of: "--socket") {
+                socketPath = arguments[index + 1]
+            }
             if let managedServer {
-                endpoint = managedServer.endpoint
-                tokenPath = managedServer.tokenPath
+                socketPath = managedServer.socketPath
             }
         } catch {
             startupFailed = true
@@ -140,8 +137,8 @@ final class PlayerModel {
               let request = try? TrackListRequest.launchSongs(
                   defaultSort: Destination.songs.defaultSort,
                   group: NavigationModel.grouping(for: .songs, in: .standard)) else { return }
-        let started = LaunchPrefetch.start(endpoint: endpoint, tokenPath: tokenPath, request: request)
-        launchPrefetch = (started.slot, started.deadline, endpoint, tokenPath)
+        let started = LaunchPrefetch.start(socketPath: socketPath, request: request)
+        launchPrefetch = (started.slot, started.deadline, socketPath)
     }
 
     /// One `list_tracks` window. The first call may be answered by the launch prefetch instead: only
@@ -153,7 +150,7 @@ final class PlayerModel {
     func listTracks(_ fields: [String: JSONValue]) async throws -> ListTracksResponse {
         guard let launch = launchPrefetch else { return try await send("list_tracks", fields) }
         launchPrefetch = nil
-        guard launch.endpoint == endpoint, launch.tokenPath == tokenPath else {
+        guard launch.socketPath == socketPath else {
             return try await send("list_tracks", fields)
         }
         guard await launch.slot.isPending else {
@@ -194,7 +191,7 @@ final class PlayerModel {
     var canMutate: Bool { connected && !busy && !serverManagementBusy }
     var managesServer: Bool {
         guard let managedServer else { return false }
-        return endpoint == managedServer.endpoint && tokenPath == managedServer.tokenPath
+        return socketPath == managedServer.socketPath
     }
     var managedLabel: String? { managesServer ? managedServer?.label : nil }
     var managedLogPath: String? { managesServer ? managedServer?.logPath : nil }
@@ -220,7 +217,7 @@ final class PlayerModel {
 
     private func updateArtwork(invalidate: Bool = false) {
         artwork.synchronize(
-            endpoint: endpoint, tokenPath: tokenPath,
+            socketPath: socketPath,
             instance: connected ? wire.instanceID : nil,
             revision: connected ? snapshot?.library.revision : nil,
             entryID: connected ? snapshot?.now_playing?.entry_id : nil,
@@ -230,7 +227,7 @@ final class PlayerModel {
 
     private func updateLyrics(invalidate: Bool = false) {
         lyrics.synchronize(
-            endpoint: endpoint, tokenPath: tokenPath,
+            socketPath: socketPath,
             instance: connected ? wire.instanceID : nil,
             revision: connected ? snapshot?.library.revision : nil,
             entryID: connected ? snapshot?.now_playing?.entry_id : nil,
@@ -249,7 +246,7 @@ final class PlayerModel {
     /// It skips `mutate`, so a busy model cannot block quitting.
     func suspendForQuit() async {
         guard connected, let state = snapshot,
-              let note = QuitSuspension.note(endpoint: endpoint, transport: state.transport,
+              let note = QuitSuspension.note(socketPath: socketPath, transport: state.transport,
                                              currentID: state.current_id) else { return }
         let reply = await Deadline.race(.seconds(1)) { try await self.send("pause") as Applied }
         guard reply != nil else { return }
@@ -329,14 +326,14 @@ final class PlayerModel {
             var attemptedBootstrap = false
             while wantsConnection, generation == session, !Task.isCancelled {
                 connection = "connecting"
-                connectionDetail = "Connecting to \(endpoint)…"
+                connectionDetail = "Connecting to \(socketPath)…"
                 do {
-                    try await wire.connect(endpoint: endpoint, tokenPath: tokenPath)
+                    try await wire.connect(socketPath: socketPath)
                     let resume = launchResumePending
                     launchResumePending = false
                     guard generation == session, wantsConnection else { return }
                     connection = "connected"
-                    connectionDetail = endpoint
+                    connectionDetail = socketPath
                     connectionTask = nil
                     refresh()
                     if resume { transport.play() }
@@ -347,7 +344,7 @@ final class PlayerModel {
                     guard generation == session, wantsConnection, !Task.isCancelled else { return }
                     if !attemptedBootstrap, managedEnabled, managesServer,
                        let failure = error as? ServerFailure,
-                       ["token_read_failed", "connection_lost", "protocol_error"].contains(failure.code),
+                       ["socket_unavailable", "connection_lost", "protocol_error"].contains(failure.code),
                        let managedServer {
                         attemptedBootstrap = true
                         connectionDetail = "Starting the local background server…"
@@ -387,14 +384,14 @@ final class PlayerModel {
             launchImportChecked = true
             let note = importNotes.take()
             if importSession == nil {
-                setImportSession(ImportSession.atLaunch(library: state.library, note: note, endpoint: endpoint))
+                setImportSession(ImportSession.atLaunch(library: state.library, note: note, socketPath: socketPath))
             }
         }
         updateImportProgress()
         if newInstance, !launchSuspensionChecked {
             launchSuspensionChecked = true
             if let note = quitSuspensions.take(),
-               note.shouldResume(endpoint: endpoint, transport: state.transport, currentID: state.current_id) {
+               note.shouldResume(socketPath: socketPath, transport: state.transport, currentID: state.current_id) {
                 launchResumePending = true
             }
         }
@@ -510,7 +507,7 @@ final class PlayerModel {
         importSession = session
         importRootID = session?.rootID
         if let session {
-            importNotes.save(ImportNote(endpoint: endpoint, rootID: session.rootID))
+            importNotes.save(ImportNote(socketPath: socketPath, rootID: session.rootID))
         } else {
             importNotes.clear()
         }
@@ -809,15 +806,10 @@ extension PlayerModel {
         return dropSelection(selection, of: drag, on: destination)
     }
 
-    var hasLocalLibrary: Bool {
-        guard let url = URLComponents(string: endpoint) else { return false }
-        return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(url.host ?? "")
-    }
-
     /// Device drops copy files; they never reorder or remove the source selection.
     @discardableResult
     func dropTracksOnDevice(token: String, deviceID: String) -> Bool {
-        guard hasLocalLibrary, !devices.busy, devices.device(deviceID) != nil,
+        guard !devices.busy, devices.device(deviceID) != nil,
               validateTrackDrop(token: token, destination: nil), let drag = activeDrag,
               let selection = drag.selection else { return false }
         activeDrag = nil

@@ -217,7 +217,6 @@ def bundle(app, prefix, mtp_prefix=None):
     # Only previously validated native build outputs can be obsolete here.
     for path in existing_set - set(owners):
         path.unlink()
-
     # Validate before signing: install_name_tool invalidates existing signatures.
     for path in sorted(owners):
         if path.parent == frameworks:

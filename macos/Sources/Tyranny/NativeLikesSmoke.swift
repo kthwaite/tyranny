@@ -18,6 +18,7 @@ enum NativeLikesSmoke {
             var failure: String?
             do {
                 try FileManager.default.createDirectory(at: kit.output, withIntermediateDirectories: true)
+                try kit.requireIsolatedDaemon()
                 try await kit.wait("indexed fixture") {
                     model.connected && model.snapshot?.library.tracks == 3
                         && model.snapshot?.library.scan.phase == "complete"
@@ -52,7 +53,7 @@ enum NativeLikesSmoke {
         if ColumnPreferences.shared.isHidden("liked") { try await column(kit) }
         try await kit.drive("exists", heart)
         let selection = songs.selectedPositions
-        try await kit.drive("click-control", heart)
+        try await clickHeart(kit, identifier: heart, tableID: "track-table-songs")
         try await kit.wait("liked Alpha") { !model.busy && songs.cache.loadedRows().contains { $0.row.track.id == alpha.track.id && $0.row.track.liked } }
         try kit.check(songs.selectedPositions == selection && model.snapshot?.queue_length == 0,
                       "Heart click changed selection or playback")
@@ -67,8 +68,9 @@ enum NativeLikesSmoke {
             navigation.likedOnly && songs.cache.total == 1 && songs.cache.loadedRow(at: 0)?.track.id == alpha.track.id
         }
         try kit.check(navigation.filter == text, "Liked only overwrote typed text")
+        try await revealLikedColumn(kit, tableID: "track-table-songs")
         try kit.capture("liked-only")
-        try await kit.drive("click-control", heart)
+        try await clickHeart(kit, identifier: heart, tableID: "track-table-songs")
         try await kit.wait("unliked row disappears") { !model.busy && songs.cache.total == 0 }
         try kit.check(navigation.filter == text && model.snapshot?.queue_length == 0, "Unlike changed text or playback")
         kit.passed("liked-only-AND-composes-with-OR-and-unlike-removes-row")
@@ -88,7 +90,7 @@ enum NativeLikesSmoke {
         try await column(kit)
         try await kit.wait("hidden liked column") { ColumnPreferences.shared.isHidden("liked") }
         try kit.check(ColumnPreferences().isHidden("liked"), "Hidden column preference was not persisted")
-        try kit.check(songsTable()?.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("liked"))?.isHidden == true,
+        try kit.check(table("track-table-songs")?.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("liked"))?.isHidden == true,
                       "Native table still shows the hidden column")
         try await column(kit)
         try await kit.wait("shown liked column") { !ColumnPreferences.shared.isHidden("liked") }
@@ -101,7 +103,7 @@ enum NativeLikesSmoke {
         try await kit.wait("grouped songs") {
             songs.cache.total == 3 && songs.description.group == .artistAlbum && songs.layoutIsCurrent
         }
-        try await kit.drive("click-control", heart)
+        try await clickHeart(kit, identifier: heart, tableID: "track-table-songs")
         try await kit.wait("grouped heart refresh") { !model.busy && songs.cache.loadedRows().contains { $0.row.track.id == alpha.track.id && $0.row.track.liked } }
         try kit.capture("grouped-hearts")
         kit.passed("grouped-table-heart-refreshes-from-library-revision")
@@ -116,7 +118,7 @@ enum NativeLikesSmoke {
         }
         try kit.check(row.track.liked, "Album did not inherit liked state")
         let albumSelection = expansion.selectedRowIDs
-        try await kit.drive("click-control", "album-track-table-cell-\(row.row_id)-liked")
+        try await clickHeart(kit, identifier: "album-track-table-cell-\(row.row_id)-liked", tableID: "album-track-table")
         try await kit.wait("album heart refresh") { !model.busy && expansion.tracks.contains { $0.track.id == alpha.track.id && !$0.track.liked } }
         try kit.check(expansion.selectedRowIDs == albumSelection && model.snapshot?.queue_length == 0,
                       "Album heart changed selection or playback")
@@ -133,9 +135,32 @@ enum NativeLikesSmoke {
         try await kit.drive("choose", "columns-menu", "Liked")
     }
 
-    private static func songsTable() -> NSTableView? {
+    private static func clickHeart(_ kit: NativePlaylistKit, identifier: String, tableID: String) async throws {
+        try await revealLikedColumn(kit, tableID: tableID)
+        try await kit.drive("click-control", identifier)
+    }
+
+    private static func revealLikedColumn(_ kit: NativePlaylistKit, tableID: String) async throws {
+        guard let table = table(tableID) else { throw NativePlaylistKit.Failure(message: "Track table missing") }
+        let index = table.column(withIdentifier: NSUserInterfaceItemIdentifier("liked"))
+        try kit.check(index >= 0, "Liked column missing")
+        let column = table.rect(ofColumn: index)
+        let visible = table.visibleRect
+        guard column.minX < visible.minX || column.maxX > visible.maxX else { return }
+        // AppKit preserves user column order, including columns added by an upgrade.
+        // Scroll through the real native scroller before sending a pointer click.
+        let maximum = table.bounds.width - visible.width
+        try kit.check(maximum > 0, "Liked column cannot be scrolled into view")
+        let fraction = min(1, max(0, (column.midX - visible.width / 2) / maximum))
+        try await kit.drive("scroll-horizontal-fraction", tableID, String(Double(fraction)))
+        try await kit.wait("visible liked column") {
+            column.minX >= table.visibleRect.minX && column.maxX <= table.visibleRect.maxX
+        }
+    }
+
+    private static func table(_ identifier: String) -> NSTableView? {
         func find(_ view: NSView) -> NSTableView? {
-            if let table = view as? NSTableView, table.accessibilityIdentifier() == "track-table-songs" { return table }
+            if let table = view as? NSTableView, table.accessibilityIdentifier() == identifier { return table }
             for child in view.subviews { if let table = find(child) { return table } }
             return nil
         }

@@ -3,8 +3,8 @@ import AppKit
 import Foundation
 import TyrannyCore
 
-/// Reusable native acceptance driver. Requires an explicit non-default loopback daemon,
-/// token file and an empty fixture library/queue; never starts or edits the user's daemon.
+/// Reusable native acceptance driver. Requires an explicit private temporary Unix socket
+/// and an empty fixture library/queue; never starts or edits the user's daemon.
 @MainActor
 enum NativeEqualizerSmoke {
     private static var started = false
@@ -19,13 +19,7 @@ enum NativeEqualizerSmoke {
             var failure: String?
             do {
                 try FileManager.default.createDirectory(at: kit.output, withIntermediateDirectories: true)
-                let url = URLComponents(string: model.endpoint)
-                let userToken = FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent("Library/Application Support/tyranny/token").path
-                try kit.check(args.contains("--url") && args.contains("--token-file")
-                    && url?.host == "127.0.0.1" && url?.port != nil && url?.port != 9865
-                    && model.tokenPath != userToken && !model.managesServer,
-                    "Equalizer smoke requires an explicit isolated loopback daemon and token file")
+                try kit.requireIsolatedDaemon()
                 try await kit.wait("isolated server") { model.connected && model.snapshot != nil }
                 try kit.check(model.snapshot?.queue_length == 0 && model.snapshot?.library.tracks == 0,
                               "Equalizer smoke requires an empty isolated library and queue")

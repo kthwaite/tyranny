@@ -1,5 +1,9 @@
 # Faster Client Startup Implementation Plan
 
+Historical implementation plan: control transport subsequently moved to private,
+length-prefixed Unix-domain sockets. The WebSocket/token steps below record the
+original design, not current connection instructions; see [SPIKE.md](../../../SPIKE.md#small-initial-interface).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cut ~130 ms from client launch → rows on screen at 50k tracks with a launch prefetch of the first Songs window, cheaper track cells and no redundant first reload, and pin startup with scale_gate budgets.

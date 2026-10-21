@@ -110,7 +110,7 @@ do {
         }
     } else {
         guard arguments.count >= 4 else { throw DriverFailure(message: "Control identifier required") }
-        let control = try find(arguments[3], in: app, byTitle: action == "press-title")
+        let control = try find(arguments[3], in: app, byTitle: action == "press-title" || action == "click-title")
         switch action {
         case "press", "press-title":
             try check(AXUIElementPerformAction(control, kAXPressAction as CFString), "Press \(arguments[3])")
@@ -169,13 +169,14 @@ do {
             down.post(tap: .cghidEventTap)
             Thread.sleep(forTimeInterval: 0.05)
             up.post(tap: .cghidEventTap)
-        case "click-control", "click-row", "double-click-row":
+        case "click-control", "click-title", "click-row", "double-click-row":
             Thread.sleep(forTimeInterval: 0.1)
-            guard action == "click-control" || arguments.count >= 5,
-                  let rows = action == "click-control" ? [control] : attribute(control, kAXRowsAttribute) as? [AXUIElement] else {
+            let wholeControl = action == "click-control" || action == "click-title"
+            guard wholeControl || arguments.count >= 5,
+                  let rows = wholeControl ? [control] : attribute(control, kAXRowsAttribute) as? [AXUIElement] else {
                 throw DriverFailure(message: "Visible control or table rows required")
             }
-            let fields = (action == "click-control" ? "0,0.5" : arguments[4]).split(separator: ",")
+            let fields = (wholeControl ? "0,0.5" : arguments[4]).split(separator: ",")
             guard let first = fields.first, let index = Int(first), rows.indices.contains(index),
                   let position = attribute(rows[index], kAXPositionAttribute),
                   let size = attribute(rows[index], kAXSizeAttribute),

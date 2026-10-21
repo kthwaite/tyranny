@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real smart-rule, migration, snapshot and native workflows in isolated state."""
+"""Real smart-rule, persistence, snapshot and native workflows in isolated state."""
 import argparse
 import json
 import os
@@ -8,23 +8,21 @@ import selectors
 import shutil
 import subprocess
 import sys
-import tempfile
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket
+from server_gate import UnixSocket, run_directory
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', default='target/release/tyranny-server')
-    parser.add_argument('--legacy-server', help='Unmodified protocol6/schema3 executable')
     parser.add_argument('--app', help='Native debug app executable; requires AX and screen capture permissions')
     parser.add_argument('--ui-driver', default='target/native-ui-driver')
     parser.add_argument('--work-dir', default='target/smart-playlist-gate')
     args = parser.parse_args()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix='run-', dir=work))
+    run = run_directory(work)
     music = run / 'Music – 日本語'
     music.mkdir()
 
@@ -59,11 +57,11 @@ def main():
         report['cases'].append({'name': name, 'passed': True})
         print('Passed ' + name, flush=True)
 
-    def start(binary, version=22):
+    def start(binary):
         nonlocal process, client, ready
         index = len(report['launches'])
         command = [str(Path(binary).resolve()), '--state-dir', str(run / 'state'),
-                   '--bind', '127.0.0.1:0', '--capture', str(run / f'capture-{index}.f32')]
+                   '--capture', str(run / f'capture-{index}.f32')]
         log = (run / f'server-{index}.stderr').open('w')
         logs.append(log)
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True)
@@ -72,7 +70,7 @@ def main():
             assert selector.select(20), 'Daemon startup timed out'
         ready = json.loads(process.stdout.readline())
         report['launches'].append({'command': command, 'ready': ready})
-        client = WebSocket(ready['address'], Path(ready['token_path']).read_text().strip(), expected_version=version)
+        client = UnixSocket(ready['socket_path'])
 
     def stop():
         nonlocal client, process
@@ -125,8 +123,7 @@ def main():
 
     def native(mode):
         folder = run / ('native-' + mode)
-        command = [str(Path(args.app).resolve()), '--url', 'ws://' + ready['address'] + '/ws',
-                   '--token-file', ready['token_path'], '--smart-smoke-output', str(folder),
+        command = [str(Path(args.app).resolve()), '--socket', ready['socket_path'], '--smart-smoke-output', str(folder),
                    '--smart-smoke-mode', mode, '--smart-addition-source', str(addition),
                    '--smart-music-folder', str(music), '--ui-driver', str(Path(args.ui_driver).resolve())]
         with (run / f'native-{mode}.stdout').open('w') as stdout, (run / f'native-{mode}.stderr').open('w') as stderr:
@@ -137,7 +134,7 @@ def main():
         assert payload['passed'], payload.get('error')
 
     try:
-        start(args.legacy_server or args.server, 6 if args.legacy_server else 9)
+        start(args.server)
         root = client.request('add_root', path=str(music))['root']
         client.wait(lambda s: s['library']['scan']['phase'] == 'complete' and s['library']['tracks'] == 508, seconds=30)
         first = client.request('library_tracks', revision=None, offset=0, limit=500, query='', album_id=None)
@@ -155,16 +152,15 @@ def main():
         client.request('pause')
         before = client.state()
         kept_queue = queue()
-        if args.legacy_server:
-            stop()
-            start(args.server)
-            restored = client.state()
-            regular = catalog()['entries'][0]
-            assert regular['kind'] == 'regular' and regular['query'] is None and regular['entry_count'] == 3
-            assert all_entries(regular) == kept and queue() == kept_queue
-            assert (restored['current_id'], restored['position_frames'], restored['queue_revision']) == (before['current_id'], before['position_frames'], before['queue_revision'])
-            assert restored['transport'] == 'paused'
-            record('real-schema3-migration-preserves-ordinary-duplicates-queue-and-checkpoint')
+        stop()
+        start(args.server)
+        restored = client.state()
+        regular = catalog()['entries'][0]
+        assert regular['kind'] == 'regular' and regular['query'] is None and regular['entry_count'] == 3
+        assert all_entries(regular) == kept and queue() == kept_queue
+        assert (restored['current_id'], restored['position_frames'], restored['queue_revision']) == (before['current_id'], before['position_frames'], before['queue_revision'])
+        assert restored['transport'] == 'paused'
+        record('restart-preserves-ordinary-duplicates-queue-and-checkpoint')
         rule = 'artist:"Miles Davis" & !album:"Kind of Blue"'
         before = client.state()
         client.request('create_smart_playlist', expected_revision=before['playlists_revision'], name='Invalid', query='artist:[]', expect_error='invalid_filter')

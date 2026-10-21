@@ -10,10 +10,9 @@ from pathlib import Path
 import selectors
 import subprocess
 import sys
-import tempfile
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket
+from server_gate import UnixSocket, run_directory
 
 
 def main():
@@ -25,7 +24,7 @@ def main():
     args = parser.parse_args()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix='run-', dir=work))
+    run = run_directory(work)
     music = run / 'Music – 日本語'
     music.mkdir()
     specifications = {
@@ -67,14 +66,14 @@ def main():
 
     try:
         command = [str(Path(args.server).resolve()), '--state-dir', str(run / 'state'),
-                   '--bind', '127.0.0.1:0', '--capture', str(run / 'capture.f32')]
+                   '--capture', str(run / 'capture.f32')]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True)
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             assert selector.select(20), 'Server startup timed out'
         ready = json.loads(process.stdout.readline())
         report['launch'] = {'command': command, 'ready': ready}
-        client = WebSocket(ready['address'], Path(ready['token_path']).read_text().strip())
+        client = UnixSocket(ready['socket_path'])
         client.request('add_root', path=str(music))
         client.wait(lambda s: s['library']['scan']['phase'] == 'complete' and s['library']['tracks'] == 112, seconds=30)
 
@@ -163,8 +162,7 @@ def main():
 
         if args.app:
             folder = run / 'native'
-            command = [str(Path(args.app).resolve()), '--url', 'ws://' + ready['address'] + '/ws',
-                       '--token-file', ready['token_path'], '--filter-smoke-output', str(folder),
+            command = [str(Path(args.app).resolve()), '--socket', ready['socket_path'], '--filter-smoke-output', str(folder),
                        '--ui-driver', str(Path(args.ui_driver).resolve())]
             with (run / 'native.stdout').open('w') as stdout, (run / 'native.stderr').open('w') as stderr:
                 result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=180)

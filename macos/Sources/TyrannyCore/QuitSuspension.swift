@@ -2,23 +2,23 @@ import Foundation
 
 /// Recorded at quit when playback was running, so the next launch can resume it.
 public struct QuitSuspension: Codable, Equatable, Sendable {
-    public let endpoint: String
+    public let socketPath: String
     public let entryID: UInt64
 
-    public init(endpoint: String, entryID: UInt64) {
-        self.endpoint = endpoint
+    public init(socketPath: String, entryID: UInt64) {
+        self.socketPath = socketPath
         self.entryID = entryID
     }
 
     /// Non-nil only when `transport` is "playing" or "buffering" and `currentID` is set.
-    public static func note(endpoint: String, transport: String?, currentID: UInt64?) -> QuitSuspension? {
+    public static func note(socketPath: String, transport: String?, currentID: UInt64?) -> QuitSuspension? {
         guard transport == "playing" || transport == "buffering", let currentID else { return nil }
-        return QuitSuspension(endpoint: endpoint, entryID: currentID)
+        return QuitSuspension(socketPath: socketPath, entryID: currentID)
     }
 
-    /// True only for the same endpoint, `transport == "paused"`, and `currentID == entryID`.
-    public func shouldResume(endpoint: String, transport: String?, currentID: UInt64?) -> Bool {
-        self.endpoint == endpoint && transport == "paused" && currentID == entryID
+    /// True only for the same socket, `transport == "paused"`, and `currentID == entryID`.
+    public func shouldResume(socketPath: String, transport: String?, currentID: UInt64?) -> Bool {
+        self.socketPath == socketPath && transport == "paused" && currentID == entryID
     }
 }
 

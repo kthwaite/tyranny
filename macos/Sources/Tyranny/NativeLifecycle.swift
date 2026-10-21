@@ -29,6 +29,7 @@ enum NativeLifecycle {
                 }
                 if action != "observe" {
                     guard model.connected else { throw Failure(message: model.connectionDetail) }
+                    let previousInstance = model.serverInstance
                     guard ["restart", "uninstall"].contains(action) else {
                         throw Failure(message: "Unsupported lifecycle action")
                     }
@@ -37,10 +38,12 @@ enum NativeLifecycle {
                     try await Task.sleep(for: .milliseconds(300))
                     try await drive("press", action == "restart" ? "managed-restart" : "managed-stop", output: path)
                     try await Task.sleep(for: .milliseconds(300))
-                    try await drive("press-title", action == "restart" ? "Restart Server" : "Stop Server", output: path)
+                    // Click once: the confirmation disappears as its restart action runs.
+                    try await drive("click-title", action == "restart" ? "Restart Server" : "Stop Server", output: path)
                     if action == "restart" {
                         try await wait("managed restart") {
-                            !model.serverManagementBusy && ((model.connected && model.snapshot != nil) || model.message != nil)
+                            !model.serverManagementBusy && ((model.connected && model.snapshot != nil
+                                && model.serverInstance != previousInstance) || model.message != nil)
                         }
                     } else {
                         try await wait("managed stop") { !model.serverManagementBusy && !model.managedEnabled && !model.connected }
@@ -54,7 +57,7 @@ enum NativeLifecycle {
             let reportedError = failure ?? (model.startupFailed ? model.connectionDetail : model.message)
             var report: [String: Any] = [
                 "pid": getpid(), "connected": model.connected, "action": action,
-                "endpoint": model.endpoint, "tokenPath": model.tokenPath,
+                "socketPath": model.socketPath,
                 "managedLabel": model.managedLabel as Any? ?? NSNull(),
                 "error": reportedError as Any? ?? NSNull(),
                 "startup_error": model.startupFailed ? model.connectionDetail as Any : NSNull()

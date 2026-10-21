@@ -1,5 +1,9 @@
 # Faster Client Startup: Launch Prefetch, Cheaper Cells, Startup Budgets
 
+Historical transport note: launch prefetch now uses the same private Unix-socket
+validation and bounded JSON framing as the main client, not WebSockets or bearer
+tokens. The original measurements and design rationale below remain historical.
+
 Date: 2026-10-20. Scope: macOS client (`macos/`) and `scripts/scale_gate.py`. No server or
 protocol change. Task: TSK-quiet-jade-xd88r.
 

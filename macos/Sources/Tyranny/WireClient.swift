@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Network
 import TyrannyCore
 
 /// A connection owns its waiters. Losing it never authorizes replaying a command.
@@ -17,18 +18,17 @@ final class WireClient {
         let continuation: CheckedContinuation<Data, any Error>
         let expectedKind: String?
         let deadline: Task<Void, Never>
-        let sender: Task<Void, Never>
 
         func cancelTasks() {
             deadline.cancel()
-            sender.cancel()
         }
     }
 
     private var generation = UUID()
-    private var session: URLSession?
-    private var socket: URLSessionWebSocketTask?
-    private var receiver: Task<Void, Never>?
+    private var socket: NWConnection?
+    private var frameBuffer = Data()
+    private var frameLength = 4
+    private var readingHeader = true
     private var helloDeadline: Task<Void, Never>?
     private var helloWaiter: CheckedContinuation<Void, any Error>?
     private var pending: [UInt64: PendingRequest] = [:]
@@ -43,10 +43,8 @@ final class WireClient {
     }
 
     deinit {
-        receiver?.cancel()
+        socket?.cancel()
         helloDeadline?.cancel()
-        socket?.cancel(with: .goingAway, reason: nil)
-        session?.invalidateAndCancel()
         helloWaiter?.resume(throwing: CancellationError())
         for request in pending.values {
             request.cancelTasks()
@@ -57,33 +55,30 @@ final class WireClient {
         }
     }
 
-    func connect(endpoint: String, tokenPath: String) async throws {
+    func connect(socketPath: String) async throws {
         try Task.checkCancellation()
         endConnection(
             ServerFailure(code: "connection_replaced", message: "The connection was replaced."),
             notify: false
         )
 
-        // Do not even open the credential until the complete destination is validated.
-        let destination = try Self.validateEndpoint(endpoint)
-        let token = try Self.readToken(at: tokenPath)
+        let path = try Self.validateSocketPath(socketPath)
         let connectionID = generation
-        let configuration = Self.sessionConfiguration(timeout: TimeInterval(requestDeadlineSeconds))
-        let delegate = RedirectRejector { [weak self] in
+        let newSocket = NWConnection(to: .unix(path: path), using: .tcp)
+        socket = newSocket
+        newSocket.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
-                self?.endConnection(
-                    ServerFailure(code: "redirect_rejected", message: "The server attempted a redirect. Credentials were not forwarded."),
-                    generation: connectionID
-                )
+                guard let self, self.generation == connectionID else { return }
+                switch state {
+                case .ready:
+                    self.receiveFramePart(generation: connectionID)
+                case .failed:
+                    self.connectionFailed(generation: connectionID)
+                default:
+                    break
+                }
             }
         }
-        let newSession = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-        var upgrade = URLRequest(url: destination)
-        upgrade.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let newSocket = newSession.webSocketTask(with: upgrade)
-        newSocket.maximumMessageSize = Self.responseLimit
-        session = newSession
-        socket = newSocket
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -103,27 +98,7 @@ final class WireClient {
                         generation: connectionID
                     )
                 }
-                newSocket.resume()
-                receiver = Task { @MainActor [weak self] in
-                    while !Task.isCancelled {
-                        do {
-                            let message = try await newSocket.receive()
-                            guard self?.generation == connectionID else { return }
-                            try self?.receive(message, generation: connectionID)
-                        } catch {
-                            guard self?.generation == connectionID else { return }
-                            if let failure = error as? ServerFailure {
-                                self?.endConnection(failure, generation: connectionID)
-                            } else {
-                                self?.connectionFailed(
-                                    generation: connectionID,
-                                    status: (newSocket.response as? HTTPURLResponse)?.statusCode
-                                )
-                            }
-                            return
-                        }
-                    }
-                }
+                newSocket.start(queue: .main)
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -163,7 +138,7 @@ final class WireClient {
         guard bytes.count <= Self.requestLimit else {
             throw ServerFailure(code: "request_too_large", message: "The command exceeds the 16 KiB request limit and was not sent.")
         }
-        let text = String(decoding: bytes, as: UTF8.self)
+        let frame = try JSONFrame.encode(bytes, limit: Self.requestLimit)
         nextRequestID += 1
         let connectionID = generation
         let deadlineSeconds = requestDeadlineSeconds
@@ -181,31 +156,26 @@ final class WireClient {
                         generation: connectionID
                     )
                 }
-                let sender = Task { @MainActor [weak self] in
-                    guard !Task.isCancelled,
-                          self?.generation == connectionID,
-                          self?.pending[id] != nil else { return }
-                    do {
-                        try await socket.send(.string(text))
-                    } catch {
+                pending[id] = PendingRequest(
+                    continuation: continuation,
+                    expectedKind: Self.resultKind(for: command),
+                    deadline: deadline
+                )
+                socket.send(content: frame, completion: .contentProcessed { [weak self] error in
+                    guard error != nil else { return }
+                    Task { @MainActor [weak self] in
                         guard self?.generation == connectionID, self?.pending[id] != nil else { return }
                         self?.endConnection(
                             ServerFailure(code: "send_failed", message: "The connection failed while sending a request."),
                             generation: connectionID
                         )
                     }
-                }
-                pending[id] = PendingRequest(
-                    continuation: continuation,
-                    expectedKind: Self.resultKind(for: command),
-                    deadline: deadline,
-                    sender: sender
-                )
+                })
             }
         } onCancel: {
             Task { @MainActor [weak self] in
                 guard self?.generation == connectionID, self?.pending[id] != nil else { return }
-                // Cancellation cannot retract a command already handed to URLSession.
+                // Cancellation cannot retract a command already handed to Network.framework.
                 self?.endConnection(
                     ServerFailure(code: "request_cancelled", message: "A request was cancelled before its reply arrived."),
                     generation: connectionID
@@ -214,18 +184,69 @@ final class WireClient {
         }
     }
 
-    private func receive(_ message: URLSessionWebSocketTask.Message, generation connectionID: UUID) throws {
-        let data: Data
-        switch message {
-        case .string(let text):
-            guard text.utf8.count <= Self.responseLimit else {
-                throw protocolFailure("The server exceeded the 8 MiB message limit.")
+    /// Exactly one receive is outstanding. Request cancellation closes the entire connection;
+    /// it never cancels a partial frame and starts another read on the same byte stream.
+    private func receiveFramePart(generation connectionID: UUID) {
+        guard generation == connectionID, let socket else { return }
+        let remaining = frameLength - frameBuffer.count
+        socket.receive(minimumIncompleteLength: remaining, maximumLength: remaining) { [weak self] data, _, complete, error in
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == connectionID else { return }
+                if let data {
+                    if self.frameBuffer.isEmpty {
+                        self.frameBuffer = data
+                    } else {
+                        self.frameBuffer.append(data)
+                    }
+                }
+                do {
+                    if self.frameBuffer.count == self.frameLength {
+                        if self.readingHeader {
+                            // Validate the length before requesting or allocating its payload.
+                            self.frameLength = try JSONFrame.payloadLength(self.frameBuffer, limit: Self.responseLimit)
+                            self.frameBuffer = Data()
+                            self.readingHeader = false
+                            guard !complete, error == nil else {
+                                throw self.protocolFailure("The server closed in the middle of a frame.")
+                            }
+                            self.receiveFramePart(generation: connectionID)
+                        } else {
+                            try self.receive(self.frameBuffer, generation: connectionID)
+                            guard self.generation == connectionID else { return }
+                            self.frameBuffer = Data()
+                            self.frameLength = 4
+                            self.readingHeader = true
+                            if complete || error != nil {
+                                self.connectionFailed(generation: connectionID)
+                            } else {
+                                self.receiveFramePart(generation: connectionID)
+                            }
+                        }
+                    } else if complete || error != nil || data?.isEmpty != false {
+                        self.connectionFailed(generation: connectionID)
+                    } else {
+                        self.receiveFramePart(generation: connectionID)
+                    }
+                } catch {
+                    self.endConnection(
+                        (error as? ServerFailure) ?? self.protocolFailure("The server sent an invalid frame length."),
+                        generation: connectionID
+                    )
+                }
             }
-            data = Data(text.utf8)
-        case .data:
-            throw protocolFailure("The server sent a binary message; protocol v\(WireProtocol.version) requires JSON text.")
-        @unknown default:
-            throw protocolFailure("The server sent an unsupported WebSocket message.")
+        }
+    }
+
+    private func receive(_ data: Data, generation connectionID: UUID) throws {
+        var bytes = data.makeIterator()
+        var utf8 = Unicode.UTF8.ForwardParser()
+        validation: while true {
+            switch utf8.parseScalar(from: &bytes) {
+            case .valid: continue
+            case .emptyInput: break validation
+            case .error: throw protocolFailure("The server sent non-UTF-8 JSON.")
+            }
+
         }
         let incoming: IncomingMessage
         do {
@@ -296,34 +317,27 @@ final class WireClient {
         onSnapshot?(snapshot, nil)
     }
 
-    private func connectionFailed(generation connectionID: UUID, status: Int?) {
-        let failure: ServerFailure
-        switch status {
-        case 401, 403:
-            failure = ServerFailure(code: "authentication_failed", message: "The server rejected authentication. Check the selected token file and server.")
-        case .some(300..<400):
-            failure = ServerFailure(code: "redirect_rejected", message: "The server attempted a redirect. Credentials were not forwarded.")
-        default:
-            failure = ServerFailure(code: "connection_lost", message: "The server connection closed or could not be established. Check that the local server is running.")
-        }
-        endConnection(failure, generation: connectionID)
+    private func connectionFailed(generation connectionID: UUID) {
+        endConnection(
+            ServerFailure(code: "connection_lost", message: "The server connection closed or could not be established. Check that the local server is running."),
+            generation: connectionID
+        )
     }
 
     private func endConnection(_ failure: ServerFailure, generation expected: UUID? = nil, notify: Bool = true) {
         if let expected, expected != generation { return }
         instanceID = nil
-        let wasActive = session != nil || helloWaiter != nil
+        let wasActive = socket != nil || helloWaiter != nil
         generation = UUID()
         ready = false
         sequence = nil
-        receiver?.cancel()
-        receiver = nil
         helloDeadline?.cancel()
         helloDeadline = nil
-        socket?.cancel(with: .goingAway, reason: nil)
+        socket?.cancel()
         socket = nil
-        session?.invalidateAndCancel()
-        session = nil
+        frameBuffer = Data()
+        frameLength = 4
+        readingHeader = true
         let waiter = helloWaiter
         helloWaiter = nil
         let abandoned = pending
@@ -369,123 +383,65 @@ final class WireClient {
         }
     }
 
-    /// No caches, cookies, stored credentials or proxies. `timeout` bounds each request.
-    nonisolated static func sessionConfiguration(timeout: TimeInterval) -> URLSessionConfiguration {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.connectionProxyDictionary = [:]
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = timeout
-        return configuration
-    }
-
-    /// The `result` object of an ok reply frame, re-encoded on its own. It keeps the complete
-    /// result, including metadata fields this UI does not decode. Nil when there is none.
+    /// The result object of an ok reply, retaining metadata the UI does not decode.
     nonisolated static func result(ofReply data: Data) -> Data? {
         guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let object = envelope["result"] as? [String: Any] else { return nil }
         return try? JSONSerialization.data(withJSONObject: object)
     }
 
-    nonisolated static func validateEndpoint(_ endpoint: String) throws -> URL {
+    nonisolated static func validateSocketPath(_ value: String) throws -> String {
         let invalid = ServerFailure(
-            code: "invalid_endpoint",
-            message: "Use ws://127.x.x.x:port/ws or ws://[::1]:port/ws, without user information, a query, or a fragment."
+            code: "invalid_socket",
+            message: "Use an absolute Unix socket path in a private directory owned by the current user; the directory must be 0700 and the socket 0600, without symbolic links."
         )
-        guard endpoint.hasPrefix("ws://"), endpoint.hasSuffix("/ws") else { throw invalid }
-        let authority = endpoint.dropFirst(5).dropLast(3)
-        let host: String
-        let portText: Substring
-        if authority.hasPrefix("[::1]:") {
-            host = "[::1]"
-            portText = authority.dropFirst(6)
-        } else {
-            let parts = authority.split(separator: ":", omittingEmptySubsequences: false)
-            guard parts.count == 2 else { throw invalid }
-            let octets = parts[0].split(separator: ".", omittingEmptySubsequences: false)
-            guard octets.count == 4, octets[0] == "127",
-                  octets.allSatisfy({ octet in
-                      !octet.isEmpty && octet.utf8.count <= 3
-                          && octet.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 })
-                          && (octet.count == 1 || octet.first != "0")
-                          && UInt8(octet) != nil
-                  }) else { throw invalid }
-            host = String(parts[0])
-            portText = parts[1]
+        let path = value
+        guard path.hasPrefix("/"), !path.utf8.contains(0),
+              !path.split(separator: "/").contains("..") else { throw invalid }
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent()
+        var directory = stat()
+        var file = stat()
+        let unavailable = ServerFailure(code: "socket_unavailable", message: "The server socket does not exist.")
+        guard lstat(parent.path, &directory) == 0 else {
+            throw errno == ENOENT ? unavailable : invalid
         }
-        guard !portText.isEmpty, portText.utf8.count <= 5,
-              portText.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
-              let port = UInt16(portText), port > 0,
-              let url = URL(string: "ws://\(host):\(port)/ws") else { throw invalid }
-        return url
-    }
-
-    nonisolated static func readToken(at path: String) throws -> String {
-        let descriptor = open((path as NSString).expandingTildeInPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
-        guard descriptor >= 0 else {
-            throw ServerFailure(code: "token_read_failed", message: "The private authentication token file could not be opened.")
-        }
-        defer { close(descriptor) }
-        var metadata = stat()
-        guard fstat(descriptor, &metadata) == 0,
-              metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              metadata.st_nlink == 1, metadata.st_uid == geteuid(),
-              metadata.st_mode & 0o777 == 0o600 else {
-            throw ServerFailure(code: "token_permissions", message: "The token must be a regular, single-link file owned by the current user with permissions 0600; symbolic links are not accepted.")
-        }
-        guard metadata.st_size == 64 else {
-            throw ServerFailure(code: "token_format", message: "The authentication token must contain exactly 64 lowercase hexadecimal bytes.")
-        }
-        var bytes = [UInt8](repeating: 0, count: 64)
-        var offset = 0
-        while offset < bytes.count {
-            let count = bytes.withUnsafeMutableBytes { buffer in
-                Darwin.read(descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+        guard directory.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+              directory.st_uid == geteuid(), directory.st_mode & 0o7777 == 0o700 else { throw invalid }
+        // Foundation's resolvingSymlinksInPath rewrites /private/tmp back to the
+        // /tmp symlink on macOS, which is not a canonical path for lstat checks.
+        guard let resolved = realpath(parent.path, nil) else { throw invalid }
+        defer { free(resolved) }
+        let canonicalParent = URL(fileURLWithPath: String(cString: resolved))
+        var ancestor = canonicalParent.deletingLastPathComponent()
+        while true {
+            var info = stat()
+            guard lstat(ancestor.path, &info) == 0,
+                  info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  info.st_uid == 0 || info.st_uid == geteuid(),
+                  info.st_mode & 0o022 == 0 || (info.st_uid == 0 && info.st_mode & 0o1000 != 0) else {
+                throw invalid
             }
-            if count < 0, errno == EINTR { continue }
-            guard count > 0 else {
-                throw ServerFailure(code: "token_read_failed", message: "The private authentication token could not be read completely.")
-            }
-            offset += count
+            if ancestor.path == "/" { break }
+            ancestor.deleteLastPathComponent()
         }
-        guard bytes.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
-            throw ServerFailure(code: "token_format", message: "The authentication token must contain exactly 64 lowercase hexadecimal bytes.")
+        let canonical = canonicalParent.appendingPathComponent(url.lastPathComponent).path
+        let address = sockaddr_un()
+        guard canonical.utf8.count < MemoryLayout.size(ofValue: address.sun_path) else {
+            throw ServerFailure(code: "invalid_socket", message: "The Unix socket path is too long for this platform.")
         }
-        return String(decoding: bytes, as: UTF8.self)
+        guard lstat(path, &file) == 0 else {
+            throw errno == ENOENT ? unavailable : invalid
+        }
+        guard file.st_mode & mode_t(S_IFMT) == mode_t(S_IFSOCK),
+              file.st_uid == geteuid(), file.st_mode & 0o7777 == 0o600 else { throw invalid }
+        // Network.framework has no public peer-descriptor accessor. Unlike the Rust client,
+        // this client relies on the owned private directory and socket, not a peer-UID query.
+        return canonical
     }
 }
 
-/// No delegate method exposes a request, credential, or underlying error to UI/logs.
-final class RedirectRejector: NSObject, URLSessionTaskDelegate, Sendable {
-    private let rejected: @Sendable () -> Void
 
-    init(rejected: @escaping @Sendable () -> Void) {
-        self.rejected = rejected
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping @Sendable (URLRequest?) -> Void
-    ) {
-        completionHandler(nil)
-        rejected()
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        completionHandler(.cancelAuthenticationChallenge, nil)
-    }
-}
 
 struct ResultHeader: Decodable {
     let kind: String

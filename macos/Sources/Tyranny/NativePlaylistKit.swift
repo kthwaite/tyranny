@@ -83,6 +83,20 @@ final class NativePlaylistKit {
     func check(_ condition: Bool, _ message: String) throws {
         if !condition { throw Failure(message: message) }
     }
+
+    /// Mutating smoke drivers require an explicit private socket in temporary state,
+    /// never the managed user daemon or an alias pointing back to its directory.
+    func requireIsolatedDaemon() throws {
+        try check(CommandLine.arguments.contains("--socket") && !model.managesServer,
+                  "Smoke requires an explicit isolated --socket daemon")
+        let socket = URL(fileURLWithPath: try WireClient.validateSocketPath(model.socketPath)).resolvingSymlinksInPath()
+        let parent = socket.deletingLastPathComponent().path
+        let temporaryRoots = [FileManager.default.temporaryDirectory, URL(fileURLWithPath: "/private/tmp")]
+            .map { $0.resolvingSymlinksInPath().path }
+        try check(socket.lastPathComponent == "control.sock"
+            && temporaryRoots.contains(where: { parent.hasPrefix($0 + "/") }),
+            "Smoke requires a private temporary state directory, not the user's daemon")
+    }
     func capture(_ name: String) throws {
         guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) else {
             throw Failure(message: "Native window unavailable")

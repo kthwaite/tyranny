@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail, ensure};
-use futures_util::{SinkExt, StreamExt};
 use std::{
     env,
     io::{self, Write},
@@ -8,18 +7,13 @@ use std::{
     time::Duration,
 };
 use tokio::time::{Instant, timeout, timeout_at};
-use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{Message as Frame, protocol::WebSocketConfig},
-};
 use tyranny::{
     protocol::{Message, Reply, Request, Response, VERSION},
-    server::{
-        MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, client_request, default_state_dir, read_token,
-    },
+    server::default_state_dir,
+    transport::{FrameReader, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, connect, write_frame},
 };
 
-const USAGE: &str = "tyrannyctl [--url ws://127.0.0.1:9865/ws] [--token-file PATH] [--watch] JSON_REQUEST\n\
+const USAGE: &str = "tyrannyctl [--socket PATH] [--watch] JSON_REQUEST\n\
 Example: tyrannyctl '{\"id\":1,\"command\":\"snapshot\"}'\n\
 Transport: play, pause, toggle_play_pause, stop, next, previous.\n\
 Live stream (protocol 10): {\"id\":2,\"command\":\"append_stream\",\"expected_revision\":1,\"url\":\"https://radio.example/live.mp3\",\"title\":\"Radio\"}\n\
@@ -48,19 +42,18 @@ Add: {\"id\":8,\"command\":\"add_stations\",\"expected_revision\":0,\"stations\"
 Station directory (protocol 16): search_directory, count_directory_click.\n\
 Search: {\"id\":9,\"command\":\"search_directory\",\"query\":\"jazz\"} (query 1..100 bytes, no control characters)\n\
 Count: {\"id\":10,\"command\":\"count_directory_click\",\"station_uuid\":\"<uuid>\"} (replies at once; the click is best effort)\n\
-Listening stats (protocol 22): stats {period:{kind,anchor}}, wrapped {year}, stats_years.\n\
+Listening stats (protocol 23): stats {period:{kind,anchor}}, wrapped {year}, stats_years.\n\
 Parametric EQ: set_equalizer {equalizer:{enabled,preamp_db,bands}} replaces the complete curve (0..16 bands).\n\
 Each band requires enabled,kind,frequency_hz,gain_db,q,shelf_slope,slope_db; kinds: bell,low_shelf,high_shelf,high_pass,low_pass,notch.\n\
 Named EQ presets: save_equalizer_preset {name,equalizer}, rename_equalizer_preset {name,new_name}, remove_equalizer_preset {name}.\n\
 Preset edits persist without recalling; recall with set_equalizer while preserving your current enabled choice.\n\
-Control --url must use a literal loopback IP; stream URLs may use remote HTTP(S) hosts. --watch prints state events until interrupted.\n\
+The default endpoint is <state-dir>/control.sock; --socket requires an absolute path. Stream URLs may use remote HTTP(S) hosts. --watch prints state events until interrupted.\n\
 Commands are never automatically retried, including when a reply is lost.";
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Options {
-    url: String,
-    token_file: PathBuf,
+    socket_path: PathBuf,
     watch: bool,
     request_id: u64,
     json: String,
@@ -68,29 +61,24 @@ struct Options {
 
 fn options() -> Result<Option<Options>> {
     let mut args = env::args_os().skip(1);
-    let (mut url, mut token_file, mut json) = (None, None, None);
+    let (mut socket_path, mut json) = (None, None);
     let mut watch = false;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
             return Ok(None);
-        } else if arg == "--url" {
-            ensure!(url.is_none(), "--url specified twice");
-            url = Some(
-                args.next()
-                    .context("--url needs a value")?
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("URL must be UTF-8"))?,
-            );
-        } else if arg == "--token-file" {
-            ensure!(token_file.is_none(), "--token-file specified twice");
-            token_file = Some(PathBuf::from(
-                args.next().context("--token-file needs a path")?,
-            ));
+        } else if arg == "--socket" {
+            ensure!(socket_path.is_none(), "--socket specified twice");
+            socket_path = Some(PathBuf::from(args.next().context("--socket needs a path")?));
         } else if arg == "--watch" {
             ensure!(!watch, "--watch specified twice");
             watch = true;
         } else {
+            ensure!(
+                !arg.as_encoded_bytes().starts_with(b"-"),
+                "unknown argument {:?}; {USAGE}",
+                arg
+            );
             ensure!(json.is_none(), "supply exactly one JSON request; {USAGE}");
             json = Some(
                 arg.into_string()
@@ -102,10 +90,9 @@ fn options() -> Result<Option<Options>> {
     ensure!(json.len() <= MAX_REQUEST_BYTES, "request exceeds 16 KiB");
     let request: Request = serde_json::from_str(&json).context("invalid request JSON")?;
     Ok(Some(Options {
-        url: url.unwrap_or_else(|| "ws://127.0.0.1:9865/ws".to_owned()),
-        token_file: match token_file {
+        socket_path: match socket_path {
             Some(path) => path,
-            None => default_state_dir()?.join("token"),
+            None => default_state_dir()?.join("control.sock"),
         },
         watch,
         request_id: request.id,
@@ -124,30 +111,16 @@ async fn run() -> Result<()> {
     let Some(options) = options()? else {
         return Ok(());
     };
-    let token = read_token(&options.token_file)?;
-    let upgrade = client_request(&options.url, &token)?;
-    let configuration = WebSocketConfig::default()
-        .read_buffer_size(MAX_REQUEST_BYTES)
-        .write_buffer_size(0)
-        .max_write_buffer_size(MAX_REQUEST_BYTES + 1024)
-        .max_message_size(Some(MAX_RESPONSE_BYTES))
-        .max_frame_size(Some(MAX_RESPONSE_BYTES));
-    let (mut socket, _) = timeout(
-        IO_TIMEOUT,
-        connect_async_with_config(upgrade, Some(configuration), true),
-    )
-    .await
-    .context("WebSocket connection timed out")?
-    .map_err(|_| anyhow::anyhow!("WebSocket connection or authentication failed"))?;
-    let hello = timeout(IO_TIMEOUT, socket.next())
+    let mut socket = timeout(IO_TIMEOUT, connect(&options.socket_path))
         .await
-        .context("initial Hello timed out")?
-        .context("server disconnected before Hello")?
-        .map_err(|_| anyhow::anyhow!("invalid WebSocket handshake response"))?;
-    let Frame::Text(text) = hello else {
-        bail!("server did not send Hello first");
-    };
-    let message: Message = serde_json::from_str(&text).context("invalid Hello JSON")?;
+        .context("Unix socket connection timed out")??;
+    let mut reader = FrameReader::default();
+    let text = timeout(IO_TIMEOUT, reader.read(&mut socket, MAX_RESPONSE_BYTES))
+        .await
+        .context("initial Hello timed out")??
+        .context("server disconnected before Hello")?;
+    let text = std::str::from_utf8(text).context("invalid Hello UTF-8")?;
+    let message: Message = serde_json::from_str(text).context("invalid Hello JSON")?;
     let Message::Hello {
         protocol_version,
         instance_id,
@@ -165,13 +138,16 @@ async fn run() -> Result<()> {
         "invalid server instance ID"
     );
     let mut sequence = snapshot.sequence;
-    print_frame(&text)?;
-    timeout(IO_TIMEOUT, socket.send(Frame::Text(options.json.into())))
-        .await
-        .context("request send timed out; outcome uncertain, do not automatically retry")?
-        .map_err(|_| {
-            anyhow::anyhow!("request send failed; outcome uncertain, do not automatically retry")
-        })?;
+    print_frame(text)?;
+    timeout(
+        IO_TIMEOUT,
+        write_frame(&mut socket, options.json.as_bytes(), MAX_REQUEST_BYTES),
+    )
+    .await
+    .context("request send timed out; outcome uncertain, do not automatically retry")?
+    .map_err(|_| {
+        anyhow::anyhow!("request send failed; outcome uncertain, do not automatically retry")
+    })?;
     let deadline = Instant::now() + REPLY_TIMEOUT;
     let mut replied = false;
     let interrupted = tokio::signal::ctrl_c();
@@ -180,82 +156,62 @@ async fn run() -> Result<()> {
         let incoming = tokio::select! {
             signal = &mut interrupted => {
                 signal.context("receive interrupt")?;
-                let _ = timeout(IO_TIMEOUT, socket.close(None)).await;
                 ensure!(replied, "interrupted before reply; outcome uncertain, do not automatically retry");
                 return Ok(());
             }
             incoming = async {
                 if replied {
-                    Ok(socket.next().await)
+                    Ok(reader.read(&mut socket, MAX_RESPONSE_BYTES).await)
                 } else {
-                    timeout_at(deadline, socket.next()).await
+                    timeout_at(deadline, reader.read(&mut socket, MAX_RESPONSE_BYTES)).await
                 }
             } => incoming.context("reply timed out; outcome uncertain, do not automatically retry")?,
         };
-        let frame = incoming
-            .context("server disconnected; no automatic command retry")?
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "WebSocket protocol or connection failure; no automatic command retry"
-                )
-            })?;
-        match frame {
-            Frame::Text(text) => {
-                let message: Message =
-                    serde_json::from_str(&text).context("invalid server message JSON")?;
-                match message {
-                    Message::Hello { .. } => bail!("unexpected second Hello"),
-                    Message::State { snapshot } => {
-                        ensure!(
-                            snapshot.sequence > sequence,
-                            "server state sequence did not advance"
-                        );
-                        sequence = snapshot.sequence;
-                        if options.watch {
-                            print_frame(&text)?;
-                        }
-                    }
-                    Message::Reply { id, reply } => {
-                        ensure!(
-                            !replied && id == options.request_id,
-                            "unexpected reply ID or duplicate reply"
-                        );
-                        if let Reply::Ok {
-                            result:
-                                Response::Snapshot { snapshot }
-                                | Response::Applied { snapshot, .. }
-                                | Response::PlaylistApplied { snapshot, .. }
-                                | Response::StationsApplied { snapshot, .. },
-                        } = &reply
-                        {
-                            ensure!(
-                                snapshot.sequence >= sequence,
-                                "reply moved state sequence backwards"
-                            );
-                            sequence = snapshot.sequence;
-                        }
-                        print_frame(&text)?;
-                        replied = true;
-                        if matches!(reply, Reply::Error { .. }) {
-                            let _ = timeout(IO_TIMEOUT, socket.close(None)).await;
-                            bail!("server rejected the command (see reply)");
-                        }
-                        if !options.watch {
-                            let _ = timeout(IO_TIMEOUT, socket.close(None)).await;
-                            return Ok(());
-                        }
-                    }
+        let bytes = incoming
+            .context("framing or connection failure; no automatic command retry")?
+            .context("server disconnected; no automatic command retry")?;
+        let text = std::str::from_utf8(bytes).context("invalid server message UTF-8")?;
+        let message: Message = serde_json::from_str(text).context("invalid server message JSON")?;
+        match message {
+            Message::Hello { .. } => bail!("unexpected second Hello"),
+            Message::State { snapshot } => {
+                ensure!(
+                    snapshot.sequence > sequence,
+                    "server state sequence did not advance"
+                );
+                sequence = snapshot.sequence;
+                if options.watch {
+                    print_frame(text)?;
                 }
             }
-            Frame::Ping(_) => {
-                timeout(IO_TIMEOUT, socket.flush())
-                    .await
-                    .context("pong timed out")?
-                    .map_err(|_| anyhow::anyhow!("pong failed"))?;
+            Message::Reply { id, reply } => {
+                ensure!(
+                    !replied && id == options.request_id,
+                    "unexpected reply ID or duplicate reply"
+                );
+                if let Reply::Ok {
+                    result:
+                        Response::Snapshot { snapshot }
+                        | Response::Applied { snapshot, .. }
+                        | Response::PlaylistApplied { snapshot, .. }
+                        | Response::StationsApplied { snapshot, .. },
+                } = &reply
+                {
+                    ensure!(
+                        snapshot.sequence >= sequence,
+                        "reply moved state sequence backwards"
+                    );
+                    sequence = snapshot.sequence;
+                }
+                print_frame(text)?;
+                replied = true;
+                if matches!(reply, Reply::Error { .. }) {
+                    bail!("server rejected the command (see reply)");
+                }
+                if !options.watch {
+                    return Ok(());
+                }
             }
-            Frame::Pong(_) => {}
-            Frame::Close(_) => bail!("server closed the connection; no automatic command retry"),
-            _ => bail!("server sent a non-text protocol message"),
         }
     }
 }

@@ -58,11 +58,11 @@ the daemon still outlives the client, but the client pauses it on quit. Update t
 | ⌘Q while paused or stopped | Terminate. No note. Next launch does not auto-play. |
 | Close the window (app stays running) | No change: playback continues. |
 | Server unreachable or reply times out at quit | Terminate anyway. Record no note (we don't know the state). |
-| Connected to a server the app did not launch (`--url`) | Same as managed: pause on quit. *(Claude's call.)* |
+| Connected to a server the app did not launch (`--socket`) | Same as managed: pause on quit. *(Claude's call.)* |
 | Next launch, first authoritative snapshot after connecting | If a note exists **and** the server is `paused` **and** `current_id` equals the noted entry id: send `play` (resume, `entry_id: null`). Clear the note either way. |
 
 "Suspended" note: `UserDefaults` key, value = the `current_id` (queue entry id) at the moment of
-pause, plus the endpoint it applies to so a different `--url`/managed endpoint never resumes the
+pause, plus the socket path it applies to so a different `--socket`/managed endpoint never resumes the
 wrong server. Clearing it on first decision means a crash between launch and decision at worst
 skips one resume. Gate, smoke, render and isolated-management launches keep the note in the
 `dev.tyranny.controller.harness` defaults suite instead of the standard defaults
@@ -77,7 +77,7 @@ launches of one harness run share that suite.
   `NSApp.reply(toApplicationShouldTerminate: true)`. Otherwise returns `.terminateNow`.
   `applicationWillTerminate` keeps calling `model?.shutdown()`.
 - The resume decision lives in a small, unit-testable TyrannyCore type (e.g. `QuitSuspension`)
-  with pure functions: `noteForQuit(state) -> Note?` and `shouldResume(note, state, endpoint) ->
+  with pure functions: `noteForQuit(state) -> Note?` and `shouldResume(note, state, socketPath) ->
   Bool`. `PlayerModel` applies it on the first snapshot after a launch-time connect (not on later
   reconnects within the same run).
 - `SystemMediaControls` teardown order is unchanged.
@@ -167,7 +167,7 @@ summarised here).
 ## Verification
 
 - TyrannyCore unit tests for `QuitSuspension` (note on playing; none on paused/stopped/unknown;
-  resume only when paused on the same entry and endpoint; note cleared after decision).
+  resume only when paused on the same entry and socket path; note cleared after decision).
 - Rust test that `NowPlaying.album_artist_id`/`compilation` are filled for indexed entries and
   `None` otherwise.
 - Update `scripts/lifecycle_gate.py` (~lines 244–252) and the `NativeSmoke` relaunch case

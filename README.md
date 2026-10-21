@@ -16,13 +16,19 @@ peculiar desires.
   system playback controls.
 - **Playlists** — editable regular playlists and rule-based smart playlists, with
   Boolean filters, grouping, etc.
-- **Artwork** — embedded and album-folder images, with Cover Art Archive lookup
-  when a MusicBrainz release ID is available.
+- **Artwork** — embedded and album-folder images, with configurable Cover Art
+  Archive, Deezer, and Discogs lookup, retention, and attribution.
 - **Internet radio** — direct HTTP(S) MP3/Ogg streams, saved stations, ICY titles,
   station discovery through radio-browser.info.
-- **Equalizer** — ten bands, preamp, presets, and persistent server-owned settings.
+- **Parametric equalizer** — up to sixteen configurable bands, preamp, presets,
+  and persistent server-owned settings.
 - **Tracker music** — MOD, XM, IT, and S3M through libopenmpt, alongside the
   FFmpeg-backed audio decoder.
+- **Likes and listening history** — liked-only filtering, listening statistics,
+  and yearly Wrapped views.
+- **Sony Walkman sync** — browse the NW-A306 over USB, drag songs to copy without
+  duplicates, remove selected device copies, and see storage usage and synced
+  status in library columns.
 
 Closing the window leaves playback running. Explicitly quitting the app pauses
 playback; the next launch resumes it. The server owns playback and durable state,
@@ -32,15 +38,16 @@ so reconnecting the interface does not create a new player.
 
 ### Prerequisites
 
-- macOS 14 or later.
+- Apple Silicon Mac running macOS 14 or later.
 - Xcode command-line tools and a Swift 6.2 or newer toolchain.
 - A current Rust toolchain with Cargo and Rust 2024 edition support.
 - Python 3.9 or newer.
+- Go 1.23 or newer and `pkg-config` for the USB helper.
 - Optional: [`just`](https://github.com/casey/just) (`brew install just`).
 
-Run these commands from the repository root. The first server build downloads and
-compiles pinned FFmpeg and libopenmpt sources; later builds reuse the verified
-cache. Homebrew FFmpeg and pkg-config are not required.
+Run these commands from the repository root. The first build downloads and
+compiles pinned FFmpeg, libopenmpt, and libusb sources; later builds reuse the
+verified cache. Homebrew FFmpeg and libusb are not required.
 
 To assemble and launch the development app:
 
@@ -83,10 +90,13 @@ downloaded copies.
   playlists, settings, and SQLite persistence.
 - **SwiftUI client:** provides the native library browser, playback controls, and
   server connection management.
-- **Local protocol:** versioned JSON over authenticated loopback WebSockets.
-  Client and server builds must use matching protocol versions.
+- **Local protocol:** versioned, length-prefixed JSON over a private Unix-domain
+  socket. Client and server builds must use matching protocol versions; there is
+  no TCP listener or bearer token.
 - **Command-line tools:** `tyrannyctl` controls the server; `audio-probe` supports
   audio-engine diagnostics.
+- **USB helper:** a bundled native MTP process manages the Walkman independently
+  of the playback server.
 
 The current output backend and desktop client target macOS. Broader platform,
 format, and service support remains tracked in the requirements.
@@ -97,3 +107,4 @@ format, and service support remains tracked in the requirements.
 - [Verification results and known limitations](SPIKE_RESULTS.md)
 - [Product requirements](REQUIREMENTS.md)
 - [Lyrics provider integration notes](docs/lyrics-providers.md)
+- [Sony Walkman setup, sync guarantees, and verification](docs/device-sync.md)

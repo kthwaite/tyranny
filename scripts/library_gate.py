@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real audio import/rescan/restart gate over the actual server WebSocket.
+"""Real audio import/rescan/restart gate over the actual server Unix socket.
 
 No metadata-only substitute: FLAC files are encoded by FFmpeg, then read by the
 native indexer. Bulk entries are real filesystem hard links, with path identities.
@@ -13,12 +13,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 import wave
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket, fixture
+from server_gate import UnixSocket, fixture, run_directory
 
 
 FINISHED = {"complete", "failed", "interrupted"}
@@ -35,7 +34,7 @@ def main():
     server = str(Path(args.server).resolve())
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+    run = run_directory(work)
     root = run / "Musique – 日本語"
     root.mkdir()
     state_dir = run / "state"
@@ -121,7 +120,7 @@ def main():
     def start():
         nonlocal process, launches
         launches += 1
-        argv = [server, "--state-dir", str(state_dir), "--bind", "127.0.0.1:0"]
+        argv = [server, "--state-dir", str(state_dir)]
         if not args.coreaudio:
             argv += ["--capture", str(run / f"capture-{launches}.f32")]
         log = (run / f"server-{launches}.stderr").open("w")
@@ -134,8 +133,7 @@ def main():
         assert line, f"server failed; see {log.name}"
         ready = json.loads(line)
         report["launches"].append(dict(argv=argv, ready=ready))
-        token = Path(ready["token_path"]).read_text()
-        control = WebSocket(ready["address"], token)
+        control = UnixSocket(ready["socket_path"])
         connections.append(control)
         return control
 

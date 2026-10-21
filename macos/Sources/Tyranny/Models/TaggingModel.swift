@@ -204,7 +204,7 @@ final class TaggingModel {
     /// Connects on demand and refuses a server other than the one the window shows.
     private func open(_ wire: WireClient, _ player: PlayerModel) async throws -> String {
         guard let expected = player.serverInstance else { throw Self.unavailable }
-        try await wire.connect(endpoint: player.endpoint, tokenPath: player.tokenPath)
+        try await wire.connect(socketPath: player.socketPath)
         guard let instance = wire.instanceID, instance == expected else { throw Self.sessionChanged }
         return instance
     }

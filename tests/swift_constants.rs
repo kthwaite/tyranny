@@ -3,7 +3,7 @@
 use std::{fs, path::Path};
 use tyranny::{
     protocol::{MAX_STATION_BATCH, VERSION},
-    server::MAX_REQUEST_BYTES,
+    transport::MAX_REQUEST_BYTES,
 };
 
 /// The value of `static let <name>` in the Swift type declared by `owner` (e.g. `enum
@@ -76,6 +76,6 @@ fn swift_request_frame_limit_matches_server() {
     );
     assert_eq!(
         swift, MAX_REQUEST_BYTES as u64,
-        "Swift RequestFrame.limit is {swift}, but server::MAX_REQUEST_BYTES is {MAX_REQUEST_BYTES}"
+        "Swift RequestFrame.limit is {swift}, but transport::MAX_REQUEST_BYTES is {MAX_REQUEST_BYTES}"
     );
 }

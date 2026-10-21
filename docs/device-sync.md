@@ -34,8 +34,8 @@ content is not duplicated onto another storage.
 Connected devices also supply optional named columns in normal track tables.
 Columns distinguish **Checking…**, **Synced**, **Not synced**, and a failed check.
 Use the Columns menu to show or hide them. They disappear when the device is
-unplugged. Only local-server library paths can be copied; remote-server paths
-are not interpreted as files on this Mac. Device browsing and deletion continue
+unplugged. Library paths come from the local Unix-socket server; the helper
+validates each local source before copying. Device browsing and deletion continue
 to work without the playback server.
 
 Discovery runs every three seconds while USB is idle. Reading a large card is
@@ -43,6 +43,8 @@ asynchronous; playback and the app remain usable while the inventory is loaded.
 Reopening the device reuses its current inventory instead of rescanning the card.
 Do not disconnect during a copy. Refresh the device after making changes through
 another application.
+A discovery error clears when discovery succeeds again. Background discovery
+does not erase a failed copy or deletion that still needs attention.
 
 
 ## Actual guarantees
@@ -256,7 +258,7 @@ Interrupted-upload recovery is covered by deterministic transport failures, not
 by physically unplugging this user's player during a write. No existing user song
 was uploaded, overwritten, or deleted during the hardware smoke.
 
-## Dev integration
+## Initial dev integration (protocol 18)
 
 The merge into `dev` advances the shared protocol from 17 to 18 under the merge
 versioning policy. USB sync still adds no playback-server commands.
@@ -266,3 +268,9 @@ constant checks, 12 real-server gate scenarios, and 16 native client-model
 scenarios against the rebuilt server. The rebuilt app passed strict deep signature
 verification. Runtime reports are under `target/walkman-merge-server-gate/` and
 `target/walkman-merge-client-gate/`; the latter is model-only, not new visual proof.
+
+The subsequent protocol-23 worktree integration rechecked the actual native
+device sidebar, both storage views/capacity bars, and browsing without the server.
+The connected device still exposed 7,779 songs. This rerun was read-only; the
+upload/deduplication/deletion evidence above remains the earlier authorized run.
+See [worktree integration results](../SPIKE_RESULTS.md#worktree-integration-protocol-23).

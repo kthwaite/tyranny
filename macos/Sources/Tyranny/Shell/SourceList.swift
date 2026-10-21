@@ -173,7 +173,7 @@ struct SourceList: View {
             .lineLimit(1)
             .badge(model.devices.hasInventory(device.id) ? Text(DisplayFormat.count(device.songs.count)) : nil)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .trackDragHover(model: model, enabled: model.hasLocalLibrary && !model.devices.busy, destination: nil,
+            .trackDragHover(model: model, enabled: !model.devices.busy, destination: nil,
                             hover: {},
                             drop: { token in
                                 guard model.dropTracksOnDevice(token: token, deviceID: device.id) else { return false }

@@ -1,7 +1,7 @@
 use super::*;
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream as HttpSocket},
+    net::{SocketAddr, TcpListener, TcpStream as HttpSocket},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -171,9 +171,7 @@ async fn command(
     request.insert("id".into(), id.into());
     request.insert("command".into(), command.into());
     socket
-        .send(Frame::Text(
-            serde_json::Value::Object(request).to_string().into(),
-        ))
+        .send(serde_json::Value::Object(request).to_string())
         .await
         .unwrap();
     loop {
