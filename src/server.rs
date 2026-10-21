@@ -451,7 +451,7 @@ async fn serve_connection(
                             Ok(request) => request,
                             Err(_) => break (CloseCode::Invalid, "invalid request JSON"),
                         };
-                        // Artwork and lyrics have no mutations to replay. Observe
+                        // Artwork, lyrics, tag lookups and directory searches have no mutations to replay. Observe
                         // socket closure while waiting so abandoned discovery
                         // work is cancelled. At most one
                         // next frame is retained, preserving pipelined requests
@@ -462,6 +462,7 @@ async fn serve_connection(
                         // saw no state change in between.
                         let discovery = matches!(&request.command, Command::Artwork { .. }
                                 | Command::Lyrics { .. }
+                                | Command::MusicbrainzLookup { .. }
                                 | Command::SearchDirectory { .. }
                         );
                         let pending = controller.request(request);

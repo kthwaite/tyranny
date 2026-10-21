@@ -1,0 +1,144 @@
+{
+  "id": "22222222-2222-4222-8222-222222222222",
+  "title": "Fixture Album",
+  "status": "Official",
+  "date": "2003",
+  "country": "US",
+  "artist-credit": [
+    {
+      "name": "Fixture Artist",
+      "joinphrase": "",
+      "artist": {
+        "id": "c1000000-0000-4000-8000-000000000002"
+      }
+    }
+  ],
+  "release-group": {
+    "id": "99999999-9999-4999-8999-999999999998",
+    "first-release-date": ""
+  },
+  "media": [
+    {
+      "position": 1,
+      "track-count": 4,
+      "tracks": [
+        {
+          "id": "a1000000-0000-4000-8000-000000000011",
+          "position": 1,
+          "title": "First",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000011",
+            "title": "First",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1000000-0000-4000-8000-000000000012",
+          "position": 2,
+          "title": "Second",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000012",
+            "title": "Second",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1000000-0000-4000-8000-000000000013",
+          "position": 3,
+          "title": "Third",
+          "length": null,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000013",
+            "title": "Third",
+            "length": null,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1000000-0000-4000-8000-000000000014",
+          "position": 4,
+          "title": "Fourth",
+          "length": 250,
+          "artist-credit": [
+            {
+              "name": "Fixture Artist",
+              "joinphrase": "",
+              "artist": {
+                "id": "c1000000-0000-4000-8000-000000000002"
+              }
+            }
+          ],
+          "recording": {
+            "id": "b1000000-0000-4000-8000-000000000014",
+            "title": "Fourth",
+            "length": 250,
+            "artist-credit": [
+              {
+                "name": "Fixture Artist",
+                "joinphrase": "",
+                "artist": {
+                  "id": "c1000000-0000-4000-8000-000000000002"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

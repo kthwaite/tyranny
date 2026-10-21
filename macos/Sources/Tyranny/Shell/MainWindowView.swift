@@ -84,6 +84,9 @@ struct MainWindowView: View {
         .sheet(item: Binding(get: { model.activation.prompt }, set: { model.activation.prompt = $0 })) { _ in
             UpNextPrompt(activation: model.activation)
         }
+        .sheet(item: Binding(get: { model.tagging.target }, set: { model.tagging.target = $0 })) { _ in
+            TagLookupSheet(model: model.tagging)
+        }
         .onChange(of: navigation.destination) { _, _ in model.endImport() }
         .onChange(of: navigation.reveal) { _, target in reveal(target) }
         .onChange(of: navigation.revealPlayingRequest) { _, _ in revealPlaying() }

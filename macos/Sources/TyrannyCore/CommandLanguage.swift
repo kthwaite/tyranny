@@ -40,6 +40,7 @@ public enum CommandID: String, CaseIterable, Sendable {
     case coverSize = "cover-size"
     case albumExpand = "album-expand"
     case albumCollapse = "album-collapse"
+    case musicbrainz
     case browserGenre = "browser-genre"
     case browserArtist = "browser-artist"
     case browserAlbum = "browser-album"
@@ -163,6 +164,7 @@ public enum CommandLanguage {
         .init(.coverSize, "Set the album grid cover size.", [.init("96...200", .coverSize)]),
         .init(.albumExpand, "Expand the selected album."),
         .init(.albumCollapse, "Collapse the expanded album."),
+        .init(.musicbrainz, "Look up the selected album on MusicBrainz."),
         .init(.browserGenre, "Select a genre in the browser.", [.init("genre-id|all", .unsigned(or: "all"))]),
         .init(.browserArtist, "Select an artist in the browser.", [.init("artist-id|all", .unsigned(or: "all"))]),
         .init(.browserAlbum, "Select an album in the browser.", [.init("album-id|all", .unsigned(or: "all"))]),

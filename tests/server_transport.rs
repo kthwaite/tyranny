@@ -1066,6 +1066,80 @@ async fn artwork_keeps_pipelined_commands_ordered_and_queue_state_unchanged() {
     running.stop().await;
 }
 
+/// The next reply's JSON, skipping state messages.
+async fn raw_reply(socket: &mut Socket, id: u64) -> serde_json::Value {
+    timeout(DEADLINE, async {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Frame::Text(text) => {
+                    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if value["type"] == "state" {
+                        continue;
+                    }
+                    assert_eq!(value["type"], "reply", "{value}");
+                    assert_eq!(value["id"], id, "{value}");
+                    return value;
+                }
+                Frame::Ping(_) => socket.flush().await.unwrap(),
+                frame => panic!("unexpected WebSocket frame: {frame:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tag_commands_answer_without_network() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut socket = running.connect().await;
+    let snapshot = hello(&mut socket, &running.instance_id).await;
+    let revision = snapshot.library.revision;
+    let refused = |code: &str, message: &str| {
+        serde_json::json!({"type":"reply","id":0,"status":"error","code":code,
+            "message":message,"queue_revision":snapshot.queue_revision})
+    };
+    let cases = [
+        (
+            serde_json::json!({"command":"tag_edits"}),
+            serde_json::json!({"type":"reply","id":0,"status":"ok",
+                "result":{"kind":"tag_edits","edits":[]}}),
+        ),
+        (
+            serde_json::json!({"command":"musicbrainz_lookup","album_id":1,"library_revision":0}),
+            refused(
+                "stale_library_revision",
+                &format!("library revision is {revision}"),
+            ),
+        ),
+        (
+            serde_json::json!({"command":"musicbrainz_lookup","album_id":999,
+                "library_revision":revision}),
+            refused("invalid_command", "unknown album"),
+        ),
+        (
+            serde_json::json!({"command":"apply_tags","proposal_id":"x","track_ids":[1]}),
+            refused("invalid_command", "lookup expired, look the album up again"),
+        ),
+        (
+            serde_json::json!({"command":"revert_tag_edit","edit_id":99}),
+            refused("invalid_command", "unknown tag edit"),
+        ),
+    ];
+    for (id, (mut command, mut expected)) in (1..).zip(cases) {
+        command["id"] = id.into();
+        expected["id"] = id.into();
+        socket
+            .send(Frame::Text(command.to_string().into()))
+            .await
+            .unwrap();
+        assert_eq!(raw_reply(&mut socket, id).await, expected, "{command}");
+    }
+    socket.close(None).await.unwrap();
+    running.stop().await;
+}
+
 #[tokio::test]
 async fn search_directory_rejects_empty_query() {
     let scratch = Scratch::new();

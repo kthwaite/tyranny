@@ -22,6 +22,9 @@ use crate::{
         PlaylistEdit, PlaylistFailure, StaleStationsRevision, StationEdit, Store, UpcomingEdit,
         played_overflow,
     },
+    tagging::{
+        self, ApplyRequest, Handle as TaggingHandle, LookupRequest, TagRequest, TaggingWorkers,
+    },
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
@@ -52,6 +55,7 @@ pub struct Owner {
     controller: Controller,
     artwork: ArtworkWorkers,
     lyrics: LyricsWorkers,
+    tagging: TaggingWorkers,
     directory: DirectoryWorkers,
     thread: thread::JoinHandle<Result<()>>,
 }
@@ -61,6 +65,7 @@ pub struct Controller {
     library: LibraryHandle,
     artwork: ArtworkHandle,
     lyrics: LyricsHandle,
+    tagging: TaggingHandle,
     directory: DirectoryHandle,
     resolver: Arc<Resolver>,
 }
@@ -108,7 +113,8 @@ impl Owner {
             Ok((library, capture)) => {
                 let resolver = Arc::new(Resolver::new(database.clone(), capture));
                 let artwork = ArtworkWorkers::start(database.clone());
-                let lyrics = LyricsWorkers::start(database);
+                let lyrics = LyricsWorkers::start(database.clone());
+                let tagging = TaggingWorkers::start(database, library.clone());
                 let directory = DirectoryWorkers::start();
                 Ok(Self {
                     controller: Controller {
@@ -116,11 +122,13 @@ impl Owner {
                         library,
                         artwork: artwork.handle(),
                         lyrics: lyrics.handle(),
+                        tagging: tagging.handle(),
                         directory: directory.handle(),
                         resolver,
                     },
                     artwork,
                     lyrics,
+                    tagging,
                     directory,
                     thread,
                 })
@@ -144,6 +152,7 @@ impl Owner {
     pub async fn shutdown(self) -> Result<()> {
         self.artwork.stop();
         self.lyrics.stop();
+        self.tagging.stop();
         self.directory.stop();
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = self.controller.sender.send(Work::Shutdown(reply_tx)).await;
@@ -157,6 +166,7 @@ impl Owner {
         let joined = tokio::task::spawn_blocking(move || {
             self.artwork.shutdown();
             self.lyrics.shutdown();
+            self.tagging.shutdown();
             self.directory.shutdown();
             self.thread.join()
         })
@@ -190,6 +200,40 @@ impl Controller {
                     })
                     .await;
                 return Ok(Message::Reply { id, reply });
+            }
+            Command::MusicbrainzLookup {
+                album_id,
+                library_revision,
+                release_id,
+                fingerprint,
+                acoustid_key,
+            } => {
+                let request = TagRequest::Lookup(LookupRequest {
+                    album_id,
+                    library_revision,
+                    release_id,
+                    fingerprint,
+                    acoustid_key,
+                });
+                return self.tagging_request(id, request).await;
+            }
+            Command::ApplyTags {
+                proposal_id,
+                track_ids,
+                omit_fields,
+            } => {
+                let request = TagRequest::Apply(ApplyRequest {
+                    proposal_id,
+                    track_ids,
+                    omit_fields,
+                });
+                return self.tagging_request(id, request).await;
+            }
+            Command::TagEdits => return self.tagging_request(id, TagRequest::Edits).await,
+            Command::RevertTagEdit { edit_id } => {
+                return self
+                    .tagging_request(id, TagRequest::Revert { edit_id })
+                    .await;
             }
             command @ (Command::SearchDirectory { .. } | Command::CountDirectoryClick { .. }) => {
                 let mut reply = match command {
@@ -347,22 +391,6 @@ impl Controller {
                 result: reply.into(),
             },
             Err(error) => {
-                let snapshot = self
-                    .playback_request(Request {
-                        id,
-                        command: Command::Snapshot,
-                    })
-                    .await?;
-                let Message::Reply {
-                    reply:
-                        Reply::Ok {
-                            result: Response::Snapshot { snapshot },
-                        },
-                    ..
-                } = snapshot
-                else {
-                    return Err(anyhow!("owner did not return its control snapshot"));
-                };
                 let code = match error.kind {
                     LibraryErrorKind::Invalid | LibraryErrorKind::Busy => ErrorCode::InvalidCommand,
                     LibraryErrorKind::InvalidFilter => ErrorCode::InvalidFilter,
@@ -373,13 +401,26 @@ impl Controller {
                 Reply::Error {
                     code,
                     message: error.message,
-                    queue_revision: snapshot.queue_revision,
+                    queue_revision: self.queue_revision(id).await?,
                 }
             }
         };
         Ok(Message::Reply { id, reply })
     }
 
+    /// A failure the tagging workers refused before the engine ran carries
+    /// `queue_revision` 0; it then takes the owner's current revision.
+    async fn tagging_request(&self, id: u64, request: TagRequest) -> Result<Message> {
+        let mut reply = tagging::reply(self.tagging.request(request).await);
+        if let Reply::Error { queue_revision, .. } = &mut reply
+            && *queue_revision == 0
+        {
+            *queue_revision = self.queue_revision(id).await?;
+        }
+        Ok(Message::Reply { id, reply })
+    }
+
+    /// The owner's current queue revision, for error replies.
     async fn queue_revision(&self, id: u64) -> Result<u64> {
         match self
             .playback_request(Request {
@@ -1661,6 +1702,10 @@ impl Actor {
             }
             Command::Artwork { .. }
             | Command::Lyrics { .. }
+            | Command::MusicbrainzLookup { .. }
+            | Command::ApplyTags { .. }
+            | Command::TagEdits
+            | Command::RevertTagEdit { .. }
             | Command::SearchDirectory { .. }
             | Command::CountDirectoryClick { .. }
             | Command::AddRoot { .. }
@@ -1676,7 +1721,7 @@ impl Actor {
             | Command::AlbumSummaries { .. }
             | Command::ListGroups { .. } => {
                 unreachable!(
-                    "library, artwork, lyrics and directory commands are routed to their own workers"
+                    "library, artwork, lyrics, directory and tagging commands are routed to their own workers"
                 )
             }
             Command::Remove {

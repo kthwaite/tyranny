@@ -1,4 +1,4 @@
-//! Version 15 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 16 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -13,7 +13,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 15;
+pub const VERSION: u32 = 16;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -55,6 +55,27 @@ pub enum Command {
     Lyrics {
         entry_id: u64,
         library_revision: u64,
+    },
+    /// Looks an album up on MusicBrainz into a stored proposal. Nothing is written.
+    MusicbrainzLookup {
+        album_id: u64,
+        library_revision: u64,
+        release_id: Option<String>,
+        #[serde(default)]
+        fingerprint: bool,
+        acoustid_key: Option<String>,
+    },
+    /// Writes a stored proposal's values to the named tracks. The client sends
+    /// no tag values.
+    ApplyTags {
+        proposal_id: String,
+        track_ids: Vec<u64>,
+        #[serde(default)]
+        omit_fields: Vec<TagField>,
+    },
+    TagEdits,
+    RevertTagEdit {
+        edit_id: u64,
     },
     SearchDirectory {
         query: String,
@@ -441,6 +462,140 @@ pub struct Lyrics {
     pub message: Option<String>,
 }
 
+/// One journaled tag edit, as listed by `tag_edits`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagEditSummary {
+    pub edit_id: u64,
+    pub created_at: i64,
+    pub release_title: String,
+    pub file_count: u32,
+    pub reverted: bool,
+}
+
+/// A tag field that a MusicBrainz lookup can propose and Tyranny can write.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TagField {
+    Title,
+    Artist,
+    Album,
+    AlbumArtist,
+    TrackNumber,
+    TrackTotal,
+    DiscNumber,
+    DiscTotal,
+    Date,
+    OriginalDate,
+    MusicbrainzRecordingId,
+    MusicbrainzTrackId,
+    MusicbrainzReleaseId,
+    MusicbrainzReleaseGroupId,
+    MusicbrainzArtistId,
+    MusicbrainzAlbumArtistId,
+}
+
+impl TagField {
+    pub const ALL: [TagField; 16] = [
+        TagField::Title,
+        TagField::Artist,
+        TagField::Album,
+        TagField::AlbumArtist,
+        TagField::TrackNumber,
+        TagField::TrackTotal,
+        TagField::DiscNumber,
+        TagField::DiscTotal,
+        TagField::Date,
+        TagField::OriginalDate,
+        TagField::MusicbrainzRecordingId,
+        TagField::MusicbrainzTrackId,
+        TagField::MusicbrainzReleaseId,
+        TagField::MusicbrainzReleaseGroupId,
+        TagField::MusicbrainzArtistId,
+        TagField::MusicbrainzAlbumArtistId,
+    ];
+
+    /// Track and disc numbers and totals, which compare as numbers.
+    pub fn is_number(self) -> bool {
+        matches!(
+            self,
+            TagField::TrackNumber
+                | TagField::TrackTotal
+                | TagField::DiscNumber
+                | TagField::DiscTotal
+        )
+    }
+}
+
+/// One field of one file that a lookup proposes to change.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FieldChange {
+    pub field: TagField,
+    pub old: Option<String>,
+    pub new: String,
+}
+
+/// A release a lookup considered, with its score.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagCandidate {
+    pub release_id: String,
+    pub title: String,
+    pub artist: String,
+    pub date: Option<String>,
+    pub country: Option<String>,
+    pub track_count: u32,
+    pub score: u32,
+}
+
+/// What a lookup proposes for one file of the album.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TrackProposal {
+    pub track_id: u64,
+    pub file_name: String,
+    /// The matched release position, else the stored track number.
+    pub track_number: Option<u32>,
+    pub matched: bool,
+    pub writable: bool,
+    pub reason: Option<String>,
+    pub removes_other_copies: bool,
+    pub unwritable_fields: Vec<TagField>,
+    pub changes: Vec<FieldChange>,
+}
+
+/// The reply to `musicbrainz_lookup`. `candidates` is sorted by score, best first.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagProposal {
+    pub proposal_id: String,
+    pub release_id: String,
+    pub candidates: Vec<TagCandidate>,
+    pub tracks: Vec<TrackProposal>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TagFileOutcome {
+    Written,
+    Skipped,
+    Failed,
+}
+
+/// What `apply_tags` or `revert_tag_edit` did to one file. `message` says why
+/// a file was skipped or failed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagFileResult {
+    pub track_id: u64,
+    pub file_name: String,
+    pub outcome: TagFileOutcome,
+    pub message: Option<String>,
+}
+
+/// The reply to `apply_tags` and `revert_tag_edit`. `edit_id` is `None` when
+/// no file reached the journal.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagApplyResult {
+    pub edit_id: Option<u64>,
+    pub files: Vec<TagFileResult>,
+}
+
 /// A server-owned named parametric EQ configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -770,6 +925,16 @@ pub enum Response {
     Lyrics {
         lyrics: Lyrics,
     },
+    TagProposal {
+        proposal: TagProposal,
+    },
+    TagApply {
+        #[serde(flatten)]
+        result: TagApplyResult,
+    },
+    TagEdits {
+        edits: Vec<TagEditSummary>,
+    },
     DirectoryResults {
         stations: Vec<DirectoryStation>,
     },
@@ -891,6 +1056,9 @@ impl From<LibraryReply> for Response {
                 total,
                 groups,
             },
+            LibraryReply::ReindexQueued { .. } => {
+                unreachable!("Reindex is internal to tagging and never reaches the wire")
+            }
         }
     }
 }
@@ -906,6 +1074,7 @@ pub enum ErrorCode {
     InvalidFilter,
     Playback,
     Persistence,
+    Lookup,
     Unavailable,
 }
 
@@ -1131,6 +1300,128 @@ mod tests {
     }
 
     #[test]
+    fn tag_commands_use_snake_case_wire_names_and_refuse_client_values() {
+        let decode = |value: serde_json::Value| serde_json::from_value::<Request>(value);
+        let lookup = serde_json::json!({"id":1,"command":"musicbrainz_lookup",
+            "album_id":7,"library_revision":2});
+        assert!(matches!(
+            decode(lookup.clone()).unwrap().command,
+            Command::MusicbrainzLookup {
+                album_id: 7,
+                library_revision: 2,
+                release_id: None,
+                fingerprint: false,
+                acoustid_key: None
+            }
+        ));
+        let full = serde_json::json!({"id":1,"command":"musicbrainz_lookup","album_id":7,
+            "library_revision":2,"release_id":"r","fingerprint":true,"acoustid_key":"k"});
+        match decode(full).unwrap().command {
+            Command::MusicbrainzLookup {
+                release_id: Some(release_id),
+                fingerprint: true,
+                acoustid_key: Some(key),
+                ..
+            } => assert_eq!((release_id.as_str(), key.as_str()), ("r", "k")),
+            other => panic!("decoded as {other:?}"),
+        }
+        let apply = serde_json::json!({"id":1,"command":"apply_tags","proposal_id":"p",
+            "track_ids":[3,4]});
+        match decode(apply.clone()).unwrap().command {
+            Command::ApplyTags {
+                proposal_id,
+                track_ids,
+                omit_fields,
+            } => {
+                assert_eq!((proposal_id.as_str(), track_ids), ("p", vec![3, 4]));
+                assert!(omit_fields.is_empty());
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        let mut omitting = apply.clone();
+        omitting["omit_fields"] = serde_json::json!(["album_artist", "date"]);
+        assert!(matches!(
+            decode(omitting).unwrap().command,
+            Command::ApplyTags { omit_fields, .. }
+                if omit_fields == [TagField::AlbumArtist, TagField::Date]
+        ));
+        assert!(matches!(
+            decode(serde_json::json!({"id":1,"command":"tag_edits"}))
+                .unwrap()
+                .command,
+            Command::TagEdits
+        ));
+        let revert = serde_json::json!({"id":1,"command":"revert_tag_edit","edit_id":9});
+        assert!(matches!(
+            decode(revert.clone()).unwrap().command,
+            Command::RevertTagEdit { edit_id: 9 }
+        ));
+
+        let mut with_path = lookup.clone();
+        with_path["path"] = serde_json::json!("/private/source");
+        assert!(decode(with_path).is_err());
+        for field in ["values", "tags", "path"] {
+            let mut untrusted = apply.clone();
+            untrusted[field] = serde_json::json!({"title":"untrusted"});
+            assert!(decode(untrusted).is_err(), "{field} was accepted");
+        }
+        for (command, field) in [
+            (&lookup, "album_id"),
+            (&lookup, "library_revision"),
+            (&apply, "proposal_id"),
+            (&apply, "track_ids"),
+            (&revert, "edit_id"),
+        ] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(decode(missing).is_err(), "missing {field} was accepted");
+        }
+
+        let proposal = TagProposal {
+            proposal_id: "p".into(),
+            release_id: "r".into(),
+            candidates: Vec::new(),
+            tracks: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(Response::TagProposal { proposal }).unwrap(),
+            serde_json::json!({"kind":"tag_proposal","proposal":{"proposal_id":"p",
+                "release_id":"r","candidates":[],"tracks":[]}})
+        );
+        let result = TagApplyResult {
+            edit_id: Some(3),
+            files: vec![TagFileResult {
+                track_id: 4,
+                file_name: "01 a.flac".into(),
+                outcome: TagFileOutcome::Written,
+                message: None,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(Response::TagApply { result }).unwrap(),
+            serde_json::json!({"kind":"tag_apply","edit_id":3,"files":[{"track_id":4,
+                "file_name":"01 a.flac","outcome":"written","message":null}]})
+        );
+        let edits = vec![TagEditSummary {
+            edit_id: 3,
+            created_at: 1_792_575_000,
+            release_title: "Fixture Album".into(),
+            file_count: 1,
+            reverted: false,
+        }];
+        assert_eq!(
+            serde_json::to_value(Response::TagEdits { edits }).unwrap(),
+            serde_json::json!({"kind":"tag_edits","edits":[{"edit_id":3,
+                "created_at":1_792_575_000,"release_title":"Fixture Album","file_count":1,
+                "reverted":false}]})
+        );
+        assert_eq!(
+            serde_json::to_value(ErrorCode::Lookup).unwrap(),
+            serde_json::json!("lookup")
+        );
+    }
+
+    #[test]
     fn directory_commands_and_responses_round_trip() {
         let search = serde_json::json!({"id":1,"command":"search_directory","query":"jazz"});
         match serde_json::from_value::<Request>(search.clone())
@@ -1212,7 +1503,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 15);
+        assert_eq!(VERSION, 16);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

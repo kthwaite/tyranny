@@ -2,7 +2,7 @@
 //! assets; track IDs identify playable items; queue occurrences remain separate.
 use crate::listing::ListDescription;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct TrackMetadata {
@@ -305,6 +305,12 @@ pub enum LibraryCommand {
         list: ListDescription,
         revision: Option<u64>,
     },
+    /// Re-probe exactly these indexed files once no scan is running. Internal
+    /// to tagging; it never starts a root scan or changes scan status.
+    /// A file is re-probed only if its size or mtime changed, which every tag write does.
+    Reindex {
+        paths: Vec<PathBuf>,
+    },
 }
 #[derive(Debug)]
 pub enum LibraryReply {
@@ -334,6 +340,10 @@ pub enum LibraryReply {
         revision: u64,
         total: u64,
         groups: Vec<GroupSpan>,
+    },
+    /// The number of distinct paths in the command; all of them are now queued.
+    ReindexQueued {
+        paths: usize,
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

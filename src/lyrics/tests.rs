@@ -394,7 +394,9 @@ fn cancelled_work_skips_discovery_and_stopped_workers_reply_promptly() {
         .block_on(handle.request(request()));
     assert_eq!(lyrics(result).status, LyricsStatus::Unavailable);
     workers.shutdown();
-    let cancel = Cancellation::new();
-    cancel.abandoned.store(true, Ordering::Release);
+    let cancel = Cancellation::with_flags(
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(true)),
+    );
     assert!(discovery::probe(&fixture.song, &cancel, Instant::now() + DISCOVERY_TIMEOUT).is_err());
 }

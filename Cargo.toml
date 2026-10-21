@@ -22,6 +22,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 base64 = "0.22"
 sha2 = "0.10"
+lofty = "0.25.4"
+rusty-chromaprint = "0.3.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }

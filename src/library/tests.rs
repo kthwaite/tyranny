@@ -3022,3 +3022,251 @@ fn album_format_votes_by_codec_class_and_averages_lossy_bitrates() {
         ]
     );
 }
+
+async fn reindex(
+    library: &Library,
+    paths: Vec<PathBuf>,
+) -> std::result::Result<LibraryReply, LibraryError> {
+    library
+        .handle()
+        .request(LibraryCommand::Reindex { paths })
+        .await
+}
+/// A Reindex leaves the scan phase alone, so wait on the tracks it changes.
+async fn tracks_until(library: &Library, ready: impl Fn(&Page<Track>) -> bool) -> Page<Track> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let page = tracks(library).await;
+        if ready(&page) {
+            return page;
+        }
+        assert!(Instant::now() < deadline, "reindex did not land: {page:?}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+fn track_at<'a>(page: &'a Page<Track>, path: &Path) -> &'a Track {
+    page.entries
+        .iter()
+        .find(|track| Path::new(&track.path) == path)
+        .unwrap()
+}
+/// `library_state.scan`, the root's `last_scan` and its `completed_scan`.
+fn scan_rows(scratch: &Scratch) -> (String, Option<String>, u64) {
+    database(scratch)
+        .query_row(
+            "SELECT s.scan,r.last_scan,r.completed_scan FROM library_state s,library_roots r",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reindex_updates_only_named_files_and_keeps_track_ids() {
+    let scratch = Scratch::new();
+    let named = scratch.path("music/a.flac");
+    let other = scratch.path("music/b.flac");
+    flac(&named, &[("title", "Old"), ("album", "Record")]);
+    flac(&other, &[("title", "Other"), ("album", "Record")]);
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    let rows = scan_rows(&scratch);
+    flac(&named, &[("title", "New"), ("album", "Record")]);
+    // The other file changes on disk too, but is not named, so it keeps its row.
+    flac(&other, &[("title", "Changed"), ("album", "Record")]);
+    assert!(matches!(
+        reindex(&library, vec![named.clone()]).await.unwrap(),
+        LibraryReply::ReindexQueued { paths: 1 }
+    ));
+    let after = tracks_until(&library, |page| {
+        page.entries
+            .iter()
+            .any(|track| track.metadata.title == "New")
+    })
+    .await;
+    assert!(after.revision > before.revision);
+    assert_eq!(after.total, 2);
+    assert_eq!(track_at(&after, &named).id, track_at(&before, &named).id);
+    assert_eq!(track_at(&after, &other), track_at(&before, &other));
+    assert_eq!(scan_rows(&scratch), rows);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn reindex_queued_during_a_scan_runs_after_it() {
+    let scratch = Scratch::new();
+    let named = scratch.path("music/a.flac");
+    flac(&named, &[("title", "Old")]);
+    for index in 0..300 {
+        wav(&scratch.path(&format!("music/filler/{index}.wav")));
+    }
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    flac(&named, &[("title", "New")]);
+    assert!(matches!(
+        library
+            .handle()
+            .request(LibraryCommand::Rescan { root_id: root })
+            .await
+            .unwrap(),
+        LibraryReply::ScanAccepted { .. }
+    ));
+    assert!(matches!(
+        reindex(&library, vec![named.clone()]).await.unwrap(),
+        LibraryReply::ReindexQueued { paths: 1 }
+    ));
+    let scan = finished(&library).await;
+    assert_eq!((scan.phase, scan.discovered), (ScanPhase::Complete, 301));
+    // The Reindex runs after the Rescan, under a newer scan serial.
+    let connection = database(&scratch);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (seen, completed): (u64, u64) = connection
+            .query_row(
+                "SELECT a.last_seen_scan,r.completed_scan FROM library_assets a
+                JOIN library_roots r ON r.id=a.root_id WHERE a.path=?1",
+                [named.to_str().unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        if seen > completed {
+            break;
+        }
+        assert!(Instant::now() < deadline, "reindex did not run");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let page = tracks_until(&library, |page| {
+        track_at(page, &named).metadata.title == "New"
+    })
+    .await;
+    assert_eq!(page.total, 301);
+    let (state, last_scan, _) = scan_rows(&scratch);
+    assert_eq!(serde_json::from_str::<ScanStatus>(&state).unwrap(), scan);
+    assert_eq!(last_scan, Some(state));
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn reindex_moves_an_album_to_release_identity() {
+    let scratch = Scratch::new();
+    let named = scratch.path("music/a.flac");
+    let tags = [("title", "Song"), ("artist", "Band"), ("album", "Record")];
+    flac(&named, &tags);
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let before = tracks(&library).await.entries.remove(0);
+    let old_album = albums(&library).await.entries.remove(0);
+    assert_eq!(old_album.musicbrainz_release_id, None);
+    let mut tagged = tags.to_vec();
+    tagged.push(("MUSICBRAINZ_ALBUMID", "release-x"));
+    flac(&named, &tagged);
+    reindex(&library, vec![named.clone()]).await.unwrap();
+    let after = tracks_until(&library, |page| page.entries[0].album_id != before.album_id)
+        .await
+        .entries
+        .remove(0);
+    assert_eq!(after.id, before.id);
+    let page = albums(&library).await;
+    assert_eq!(page.total, 1);
+    assert_eq!(page.entries[0].id, after.album_id);
+    assert_ne!(page.entries[0].id, old_album.id);
+    assert_eq!(
+        page.entries[0].musicbrainz_release_id.as_deref(),
+        Some("release-x")
+    );
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn reindex_ignores_unknown_paths_and_rejects_relative_paths() {
+    let scratch = Scratch::new();
+    let named = scratch.path("music/a.flac");
+    flac(&named, &[("title", "Old")]);
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let rows = scan_rows(&scratch);
+    let invalid = |paths: Vec<PathBuf>| {
+        let library = &library;
+        async move {
+            let failure = reindex(library, paths).await.unwrap_err();
+            assert_eq!(
+                (failure.kind, failure.message.as_str()),
+                (
+                    LibraryErrorKind::Invalid,
+                    "reindex paths must be absolute UTF-8 paths"
+                )
+            );
+        }
+    };
+    invalid(vec![named.clone(), PathBuf::from("music/a.flac")]).await;
+    #[cfg(unix)]
+    {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        invalid(vec![PathBuf::from(OsString::from_vec(
+            b"/music/invalid-\xff.flac".to_vec(),
+        ))])
+        .await;
+    }
+    let too_many = (0..=MAX_PENDING_REINDEX)
+        .map(|index| scratch.path(&format!("elsewhere/{index}.flac")))
+        .collect();
+    let failure = reindex(&library, too_many).await.unwrap_err();
+    assert_eq!(
+        (failure.kind, failure.message.as_str()),
+        (
+            LibraryErrorKind::Busy,
+            "too many files are waiting to be re-indexed"
+        )
+    );
+    flac(&named, &[("title", "New")]);
+    let unknown = scratch.path("music/unknown.flac");
+    flac(&unknown, &[("title", "Unknown")]);
+    assert!(matches!(
+        reindex(
+            &library,
+            vec![unknown.clone(), named.clone(), named.clone()]
+        )
+        .await
+        .unwrap(),
+        LibraryReply::ReindexQueued { paths: 2 }
+    ));
+    let page = tracks_until(&library, |page| page.entries[0].metadata.title == "New").await;
+    assert_eq!(page.total, 1);
+    let assets: u64 = database(&scratch)
+        .query_row("SELECT COUNT(*) FROM library_assets", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(assets, 1);
+    assert_eq!(scan_rows(&scratch), rows);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn reindex_of_a_deleted_file_finishes_and_keeps_its_track() {
+    let scratch = Scratch::new();
+    let deleted = scratch.path("music/a.flac");
+    let kept = scratch.path("music/b.flac");
+    flac(&deleted, &[("title", "Deleted")]);
+    flac(&kept, &[("title", "Old")]);
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    let rows = scan_rows(&scratch);
+    fs::remove_file(&deleted).unwrap();
+    reindex(&library, vec![deleted.clone()]).await.unwrap();
+    // The empty Reindex must finish, or this second one never starts.
+    flac(&kept, &[("title", "New")]);
+    reindex(&library, vec![kept.clone()]).await.unwrap();
+    let after = tracks_until(&library, |page| {
+        track_at(page, &kept).metadata.title == "New"
+    })
+    .await;
+    assert_eq!(track_at(&after, &deleted), track_at(&before, &deleted));
+    assert_eq!(scan_rows(&scratch), rows);
+    library.shutdown().unwrap();
+}
