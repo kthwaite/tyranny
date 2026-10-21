@@ -198,6 +198,12 @@ public enum AcoustIDKey {
 }
 
 public enum TagRequests {
+    /// The lookup lane's request deadline. The server gives up on a lookup after 50 s.
+    public static let lookupDeadlineSeconds: UInt64 = 60
+    /// The edit lane's (apply, revert, tag_edits) request deadline. The server never cancels a
+    /// write, so a long apply must not time out in the client while files are still being written.
+    public static let editDeadlineSeconds: UInt64 = 30 * 60
+
     public static func lookup(albumID: UInt64, libraryRevision: UInt64, releaseID: String?, acoustIDKey: String?) -> CommandRequest {
         var fields: [String: JSONValue] = ["album_id": .uint(albumID), "library_revision": .uint(libraryRevision)]
         if let releaseID { fields["release_id"] = .string(releaseID) }
@@ -223,6 +229,17 @@ public enum TagLookupMessage {
         case "stale_library_revision": "The library changed. Look the album up again."
         case "request_timeout": "MusicBrainz took too long to answer."
         default: failure.message
+        }
+    }
+}
+
+/// Failures of an apply or a revert.
+public enum TagEditMessage {
+    public static func text(for failure: ServerFailure) -> String {
+        switch failure.code {
+        // The server keeps writing after the client stops waiting.
+        case "request_timeout": "Still writing tags. Check Recent Tag Edits in Settings."
+        default: TagLookupMessage.text(for: failure)
         }
     }
 }

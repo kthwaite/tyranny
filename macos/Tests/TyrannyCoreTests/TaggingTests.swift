@@ -138,6 +138,19 @@ import Testing
         #expect(text("other", "plain") == "plain")
     }
 
+    @Test func editFailureMessages() {
+        func text(_ code: String, _ message: String) -> String { TagEditMessage.text(for: ServerFailure(code: code, message: message)) }
+        #expect(text("request_timeout", "x") == "Still writing tags. Check Recent Tag Edits in Settings.")
+        #expect(text("invalid_command", "lookup expired, look the album up again") == "This lookup expired. Look the album up again.")
+        #expect(text("other", "plain") == "plain")
+    }
+
+    @Test func requestDeadlines() {
+        // Writes are never cancelled, so the edit lane waits far longer than a lookup.
+        #expect(TagRequests.lookupDeadlineSeconds == 60)
+        #expect(TagRequests.editDeadlineSeconds == 30 * 60)
+    }
+
     @Test func acoustIDKeyNormalization() {
         #expect(AcoustIDKey.normalized("  ab12CD  ") == "ab12CD")
         #expect(AcoustIDKey.normalized("") == nil)

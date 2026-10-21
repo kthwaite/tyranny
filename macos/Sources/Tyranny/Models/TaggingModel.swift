@@ -46,8 +46,8 @@ final class TaggingModel {
     }
 
     @ObservationIgnored private weak var player: PlayerModel?
-    @ObservationIgnored private let lookupWire = WireClient(requestDeadlineSeconds: 60)
-    @ObservationIgnored private let editWire = WireClient(requestDeadlineSeconds: 60)
+    @ObservationIgnored private let lookupWire = WireClient(requestDeadlineSeconds: TagRequests.lookupDeadlineSeconds)
+    @ObservationIgnored private let editWire = WireClient(requestDeadlineSeconds: TagRequests.editDeadlineSeconds)
     @ObservationIgnored private var lookupTask: Task<Void, Never>?
     @ObservationIgnored private var editTail: Task<Void, Never> = Task {}
     @ObservationIgnored private var ticket = UUID()
@@ -107,7 +107,7 @@ final class TaggingModel {
                 let result = try JSONDecoder().decode(TagApplyResult.self, from: data)
                 if self.ticket == ticket { phase = .applied(result) }
             } catch {
-                if self.ticket == ticket { phase = .failed(Self.message(for: error)) }
+                if self.ticket == ticket { phase = .failed(Self.editMessage(for: error)) }
             }
             await refreshEdits()
         }
@@ -129,7 +129,7 @@ final class TaggingModel {
                     phase = .applied(reverted)
                 }
             } catch {
-                if self.ticket == ticket { phase = .failed(Self.message(for: error)) }
+                if self.ticket == ticket { phase = .failed(Self.editMessage(for: error)) }
             }
             await refreshEdits()
         }
@@ -150,7 +150,7 @@ final class TaggingModel {
         do {
             _ = try await editRequest(request.name, request.fields)
         } catch {
-            editsError = Self.message(for: error)
+            editsError = Self.editMessage(for: error)
             return
         }
         await refreshEdits()
@@ -210,6 +210,12 @@ final class TaggingModel {
 
     private static func message(for error: Error) -> String {
         if let failure = error as? ServerFailure { return TagLookupMessage.text(for: failure) }
+        return error.localizedDescription
+    }
+
+    /// For an apply or a revert.
+    private static func editMessage(for error: Error) -> String {
+        if let failure = error as? ServerFailure { return TagEditMessage.text(for: failure) }
         return error.localizedDescription
     }
 
