@@ -970,6 +970,9 @@ impl From<LibraryReply> for Response {
                 total,
                 groups,
             },
+            LibraryReply::ReindexQueued { .. } => {
+                unreachable!("Reindex is internal to tagging and never reaches the wire")
+            }
         }
     }
 }

@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 pub(crate) use db::{migrate, migrate_v5, resolve_track};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock,
@@ -31,6 +31,8 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
+/// Bounds the in-memory Reindex queue; it is never persisted.
+pub(crate) const MAX_PENDING_REINDEX: usize = 4096;
 struct Work {
     command: LibraryCommand,
     reply: oneshot::Sender<std::result::Result<LibraryReply, LibraryError>>,
@@ -197,8 +199,17 @@ impl LibraryHandle {
     }
 }
 
+/// A `Root` scan enumerates a whole root and owns the scan status. A `Paths`
+/// scan (Reindex) probes only named files: its status lives only in
+/// `Active.status`, and it never moves `completed_scan`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanScope {
+    Root,
+    Paths,
+}
 struct Active {
     scanner: Option<Scanner>,
+    scope: ScanScope,
     serial: u64,
     status: ScanStatus,
     enumerated: bool,
@@ -217,6 +228,8 @@ struct Coordinator {
     /// in the database until this drains and no scan is active.
     pending_rescans: VecDeque<u64>,
     upgrading: bool,
+    /// Distinct paths waiting for a Reindex, held in memory only.
+    pending_reindex: Vec<PathBuf>,
 }
 impl Coordinator {
     fn open(path: PathBuf, shared: Arc<RwLock<LibraryState>>) -> Result<Self> {
@@ -254,6 +267,7 @@ impl Coordinator {
             cleanup_pending: true,
             pending_rescans,
             upgrading,
+            pending_reindex: Vec::new(),
         })
     }
     fn run(mut self, mut receiver: mpsc::Receiver<Work>, stop: Arc<AtomicBool>) -> Result<()> {
@@ -270,6 +284,10 @@ impl Coordinator {
             }
             if self.active.is_some() {
                 worked |= self.scan_tick()?;
+            }
+            if self.active.is_none() && !self.pending_reindex.is_empty() {
+                worked = true;
+                self.reindex_step();
             }
             if self.upgrading && self.active.is_none() {
                 self.upgrade_step()?;
@@ -288,9 +306,12 @@ impl Coordinator {
         }
         if let Some(mut active) = self.active.take() {
             let stopped = active.scanner.take().map(Scanner::shutdown).transpose();
-            active.status.phase = ScanPhase::Interrupted;
-            active.status.last_error = Some("scan interrupted by shutdown; rescan manually".into());
-            self.persist(&active.status)?;
+            if active.scope == ScanScope::Root {
+                active.status.phase = ScanPhase::Interrupted;
+                active.status.last_error =
+                    Some("scan interrupted by shutdown; rescan manually".into());
+                self.persist(&active.status)?;
+            }
             self.publish(true)?;
             stopped?;
         }
@@ -316,6 +337,55 @@ impl Coordinator {
             }
         }
         Ok(())
+    }
+    /// Runs while idle. Starts a path-scoped scan of the pending paths in one
+    /// root; paths in other roots wait for the next step. A failure drops the
+    /// paths it took.
+    fn reindex_step(&mut self) {
+        if let Err(error) = self.start_reindex() {
+            eprintln!("tyranny: re-index failed: {error:#}");
+        }
+    }
+    fn start_reindex(&mut self) -> Result<()> {
+        let mut known = Vec::with_capacity(self.pending_reindex.len());
+        {
+            let mut statement = self
+                .connection
+                .prepare("SELECT root_id FROM library_assets WHERE path=?1")?;
+            for path in std::mem::take(&mut self.pending_reindex) {
+                let root_id: Option<u64> = statement
+                    .query_row([path.to_str().context("invalid reindex path")?], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                if let Some(root_id) = root_id {
+                    known.push((path, root_id));
+                }
+            }
+        }
+        let Some(&(_, root_id)) = known.first() else {
+            return Ok(());
+        };
+        let (paths, later): (Vec<_>, Vec<_>) =
+            known.into_iter().partition(|(_, root)| *root == root_id);
+        self.pending_reindex = later.into_iter().map(|(path, _)| path).collect();
+        let paths = paths.into_iter().map(|(path, _)| path).collect();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let serial = db::begin_paths(&transaction)?;
+        transaction.commit()?;
+        let status = ScanStatus {
+            root_id: Some(root_id),
+            phase: ScanPhase::Discovering,
+            ..ScanStatus::default()
+        };
+        self.launch(
+            ScanScope::Paths,
+            || Scanner::start_paths(paths),
+            serial,
+            status,
+        )
     }
     fn publish(&mut self, force: bool) -> Result<()> {
         if self.dirty && (force || self.published.elapsed() >= PUBLISH_INTERVAL) {
@@ -343,6 +413,7 @@ impl Coordinator {
         match command {
             LibraryCommand::AddRoot { path } => self.add_root(path),
             LibraryCommand::Rescan { root_id } => self.rescan(root_id),
+            LibraryCommand::Reindex { paths } => self.queue_reindex(paths),
             command @ (LibraryCommand::ListTracks { .. }
             | LibraryCommand::ListAlbums { .. }
             | LibraryCommand::ListArtists { .. }
@@ -363,6 +434,33 @@ impl Coordinator {
             .into());
         }
         Ok(())
+    }
+    /// Queues distinct paths for `reindex_step`; it never starts a scan itself.
+    fn queue_reindex(&mut self, mut paths: Vec<PathBuf>) -> Result<LibraryReply> {
+        if !paths
+            .iter()
+            .all(|path| path.is_absolute() && path.to_str().is_some())
+        {
+            return Err(error(
+                LibraryErrorKind::Invalid,
+                "reindex paths must be absolute UTF-8 paths",
+            )
+            .into());
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        let requested = paths.len();
+        let pending: HashSet<&Path> = self.pending_reindex.iter().map(PathBuf::as_path).collect();
+        paths.retain(|path| !pending.contains(path.as_path()));
+        if pending.len() + paths.len() > MAX_PENDING_REINDEX {
+            return Err(error(
+                LibraryErrorKind::Busy,
+                "too many files are waiting to be re-indexed",
+            )
+            .into());
+        }
+        self.pending_reindex.extend(paths);
+        Ok(LibraryReply::ReindexQueued { paths: requested })
     }
     fn add_root(&mut self, path: String) -> Result<LibraryReply> {
         self.idle()?;
@@ -417,7 +515,12 @@ impl Coordinator {
         )?;
         let (serial, status) = db::begin_scan(&transaction, root_id)?;
         transaction.commit()?;
-        self.launch(canonical, serial, status.clone())?;
+        self.launch(
+            ScanScope::Root,
+            || Scanner::start(canonical),
+            serial,
+            status.clone(),
+        )?;
         Ok(LibraryReply::RootAdded(Root {
             id: root_id,
             path,
@@ -444,20 +547,32 @@ impl Coordinator {
         let (serial, status) = db::begin_scan(&transaction, root_id)?;
         transaction.commit()?;
         self.pending_rescans.retain(|queued| *queued != root_id);
-        self.launch(path.into(), serial, status)?;
+        self.launch(
+            ScanScope::Root,
+            || Scanner::start(path.into()),
+            serial,
+            status,
+        )?;
         Ok(LibraryReply::ScanAccepted { root_id })
     }
-    fn launch(&mut self, root: PathBuf, serial: u64, mut status: ScanStatus) -> Result<()> {
+    fn launch(
+        &mut self,
+        scope: ScanScope,
+        start: impl FnOnce() -> Result<Scanner>,
+        serial: u64,
+        mut status: ScanStatus,
+    ) -> Result<()> {
         self.dirty = true;
         self.cleanup_pending = true;
         grouping::begin(
             &self.connection,
             status.root_id.context("scan has no root")?,
         )?;
-        match Scanner::start(root) {
+        match start() {
             Ok(scanner) => {
                 self.active = Some(Active {
                     scanner: Some(scanner),
+                    scope,
                     serial,
                     status,
                     enumerated: false,
@@ -467,9 +582,11 @@ impl Coordinator {
                 })
             }
             Err(failure) => {
-                status.phase = ScanPhase::Failed;
-                status.last_error = Some(db::bounded_error(format!("{failure:#}")));
-                self.persist(&status)?;
+                if scope == ScanScope::Root {
+                    status.phase = ScanPhase::Failed;
+                    status.last_error = Some(db::bounded_error(format!("{failure:#}")));
+                    self.persist(&status)?;
+                }
                 self.publish(true)?;
                 return Err(failure);
             }
@@ -497,9 +614,14 @@ impl Coordinator {
                 if let Some(scanner) = active.scanner.take() {
                     let _ = scanner.shutdown();
                 }
-                active.status.phase = ScanPhase::Failed;
-                active.status.last_error = Some(db::bounded_error(format!("{failure:#}")));
-                self.persist(&active.status)?;
+                match active.scope {
+                    ScanScope::Root => {
+                        active.status.phase = ScanPhase::Failed;
+                        active.status.last_error = Some(db::bounded_error(format!("{failure:#}")));
+                        self.persist(&active.status)?;
+                    }
+                    ScanScope::Paths => eprintln!("tyranny: re-index failed: {failure:#}"),
+                }
                 self.cleanup_pending = true;
                 self.publish(true)?;
                 Ok(true)
@@ -520,6 +642,7 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep>
         return Ok(ScanStep::Progress);
     }
     let scanner = active.scanner.as_ref().context("scan worker missing")?;
+    let persist_status = active.scope == ScanScope::Root;
     let mut progressed = true;
     match scanner.try_recv() {
         Ok(ScanEvent::Candidates(candidates)) => {
@@ -527,7 +650,13 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep>
                 !active.enumerated,
                 "scanner returned candidates after enumeration"
             );
-            db::discover(connection, active.serial, &mut active.status, &candidates)?;
+            db::discover(
+                connection,
+                active.serial,
+                &mut active.status,
+                &candidates,
+                persist_status,
+            )?;
         }
         Ok(ScanEvent::Enumerated(enumeration)) => {
             ensure!(!active.enumerated, "scanner finished enumeration twice");
@@ -544,17 +673,25 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep>
             if let Some(failure) = enumeration.last_error {
                 active.status.last_error = Some(db::bounded_error(failure));
             }
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            db::save_status(&transaction, &active.status)?;
-            transaction.commit()?;
+            if persist_status {
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                db::save_status(&transaction, &active.status)?;
+                transaction.commit()?;
+            }
         }
         Ok(ScanEvent::Probed(results)) => {
             ensure!(
                 active.enumerated && active.in_flight > 0 && results.len() == active.in_flight,
                 "scanner returned an unexpected probe batch"
             );
-            db::probed(connection, active.serial, &mut active.status, results)?;
+            db::probed(
+                connection,
+                active.serial,
+                &mut active.status,
+                results,
+                persist_status,
+            )?;
             active.in_flight = 0;
         }
         Err(startup::TryRecvError::Empty) => progressed = false,
@@ -577,16 +714,24 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep>
                 .take()
                 .context("scan worker missing")?
                 .shutdown()?;
-            db::finish(
-                connection,
-                active.serial,
-                &mut active.status,
-                active.complete,
-            )?;
+            match active.scope {
+                ScanScope::Root => db::finish(
+                    connection,
+                    active.serial,
+                    &mut active.status,
+                    active.complete,
+                )?,
+                ScanScope::Paths => db::finish_paths(connection, active.serial, &active.status)?,
+            }
             return Ok(ScanStep::Complete);
         }
         let processed = active.status.processed;
-        let probes = db::next_batch(connection, active.serial, &mut active.status)?;
+        let probes = db::next_batch(
+            connection,
+            active.serial,
+            &mut active.status,
+            persist_status,
+        )?;
         progressed |= active.status.processed != processed;
         if !probes.is_empty() {
             let count = probes.len();
