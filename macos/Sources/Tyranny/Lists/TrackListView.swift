@@ -45,7 +45,7 @@ struct TrackListView: View {
                 Divider()
             }
             VirtualTrackTable(
-                list: list, player: player, generation: list.cache.generation, epoch: list.epoch,
+                list: list, player: player, colours: player.theme.tableColours, generation: list.cache.generation, epoch: list.epoch,
                 layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden, explicit: columns.explicit,
                 playingTrackID: player.snapshot?.now_playing?.track_id,
                 revealToken: list.revealRequest?.token, selectionToken: list.commandSelectionRevision)

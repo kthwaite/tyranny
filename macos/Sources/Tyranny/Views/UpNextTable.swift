@@ -11,6 +11,7 @@ import TyrannyCore
 struct UpNextTable: NSViewRepresentable {
     let model: UpNextModel
     let player: PlayerModel
+    let colours: TableColours
     /// Read in the parent's body so SwiftUI updates the table when they change.
     let generation: UInt64
     let epoch: UInt64
@@ -123,6 +124,7 @@ struct UpNextTable: NSViewRepresentable {
         private var dragItems = 0
         private var dragLifetime: Coordinator?
         private var shownReveal: UInt64?
+        private var shownColours: UInt64?
 
         init(_ parent: UpNextTable) { self.parent = parent }
 
@@ -164,6 +166,17 @@ struct UpNextTable: NSViewRepresentable {
                request.position < table.numberOfRows {
                 shownReveal = parent.revealToken
                 table.scrollRowToVisible(request.position)
+            }
+            if parent.colours.revision != shownColours {
+                shownColours = parent.colours.revision
+                table.enumerateAvailableRowViews { view, _ in
+                    (view as? TokenRowView)?.selection = parent.colours.selection
+                }
+                let rows = table.preparedRows
+                if let status = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == "status" }),
+                   !rows.isEmpty {
+                    table.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: status))
+                }
             }
             reportVisible()
         }
@@ -230,6 +243,7 @@ struct UpNextTable: NSViewRepresentable {
             let reuse = NSUserInterfaceItemIdentifier("up-next-row")
             let view = tableView.makeView(withIdentifier: reuse, owner: nil) as? QueueRowView ?? QueueRowView()
             view.identifier = reuse
+            view.selection = parent.colours.selection
             let item = cache.loadedRow(at: row)
             view.setAccessibilityIdentifier(item.map { "up-next-row-\($0.id)" } ?? "up-next-placeholder-\(row)")
             return view
@@ -254,7 +268,7 @@ struct UpNextTable: NSViewRepresentable {
             let section = UpNextSections.section(of: item, at: row, in: parent.context)
             let identifier = "\(UpNextTable.identifier)-cell-\(item.id)-\(id)"
             if id == "status" {
-                cell.showPlaying(section == .nowPlaying, identifier: identifier)
+                cell.showPlaying(section == .nowPlaying, colour: parent.colours.playing, identifier: identifier)
                 cell.toolTip = nil
                 return cell
             }
@@ -375,15 +389,18 @@ final class QueueNSTableView: NSTableView {
 }
 
 /// A queue row. Its section label lives in the # cell, which knows its live width.
-final class QueueRowView: NSTableRowView {}
+final class QueueRowView: TokenRowView {}
 
 /// A queue table cell: one text field, or the playing indicator. The # column's cells
 /// (`sectioned`) also carry the section label, at the leading edge, left of the number.
-final class QueueCellView: NSTableCellView {
+final class QueueCellView: NSTableCellView, PlayingIndicatorCell {
     static let reuse = NSUserInterfaceItemIdentifier("up-next-cell")
     static let numberReuse = NSUserInterfaceItemIdentifier("up-next-number-cell")
     private let field = NSTextField(labelWithString: "")
     private let icon = NSImageView()
+    private var playingColour: NSColor?
+    private var rowSelected = false
+    private var rowStyle = NSView.BackgroundStyle.normal
     /// Only in the # column: the section name, truncated so it stays clear of the number.
     private let sectionLabel: NSTextField?
 
@@ -397,7 +414,6 @@ final class QueueCellView: NSTableCellView {
         addSubview(field)
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Playing")
-        icon.contentTintColor = .controlAccentColor
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
         addSubview(icon)
         textField = field
@@ -456,7 +472,15 @@ final class QueueCellView: NSTableCellView {
         sectionLabel.setAccessibilityIdentifier(section.map { "up-next-section-\($0.key)" })
     }
 
-    func showPlaying(_ playing: Bool, identifier: String) {
+    func rowChanged(selected: Bool, style: NSView.BackgroundStyle) {
+        rowSelected = selected
+        rowStyle = style
+        icon.tintPlayingIcon(playingColour, selected: selected, style: style)
+    }
+
+    func showPlaying(_ playing: Bool, colour: NSColor, identifier: String) {
+        playingColour = colour
+        icon.tintPlayingIcon(colour, selected: rowSelected, style: rowStyle)
         field.isHidden = true
         sectionLabel?.isHidden = true
         field.stringValue = ""

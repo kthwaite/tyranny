@@ -16,7 +16,7 @@ struct UpNextView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            UpNextTable(model: model, player: player, generation: model.cache.generation, epoch: model.epoch,
+            UpNextTable(model: model, player: player, colours: player.theme.tableColours, generation: model.cache.generation, epoch: model.epoch,
                         context: model.context, selected: model.selection, revealToken: model.revealRequest?.token)
                 .overlay {
                     if model.cache.revision != nil, model.cache.total == 0 {

@@ -31,6 +31,14 @@ extension View {
     }
 }
 
+/// What AppKit views draw with. Equal when `revision` is equal.
+struct TableColours: Equatable {
+    let accent: NSColor
+    let playing: NSColor
+    let selection: RGB?                // nil: "System", the default row selection
+    let revision: UInt64
+}
+
 /// The user's colour settings, resolved to the colours the app draws with.
 @MainActor @Observable
 final class ColourTheme {
@@ -70,6 +78,13 @@ final class ColourTheme {
             colours = Self.colours(for: resolved)
             revision &+= 1
         }
+    }
+
+    var tableColours: TableColours {
+        let selection: RGB?
+        if case .custom(let rgb) = tokens[.selection] { selection = rgb } else { selection = nil }
+        return TableColours(accent: nsColour(.accent), playing: nsColour(.playing), selection: selection,
+                            revision: revision)
     }
 
     func nsColour(_ token: ColourToken) -> NSColor {

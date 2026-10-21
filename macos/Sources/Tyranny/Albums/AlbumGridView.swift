@@ -15,7 +15,7 @@ struct AlbumGridView: View {
             header
             Divider()
             AlbumCollection(
-                grid: grid, player: player, generation: grid.cache.generation, epoch: grid.epoch,
+                grid: grid, player: player, colours: player.theme.tableColours, generation: grid.cache.generation, epoch: grid.epoch,
                 coverSize: CGFloat(coverSize), expandedID: grid.expansion?.albumID,
                 artworkGeneration: player.artwork.generation)
                 .overlay { emptyState }
@@ -105,6 +105,7 @@ struct AlbumGridView: View {
 struct AlbumCollection: NSViewRepresentable {
     let grid: AlbumGridModel
     let player: PlayerModel
+    let colours: TableColours
     /// Read in the parent's body so SwiftUI updates the grid when they change.
     let generation: UInt64
     let epoch: UInt64
@@ -171,6 +172,7 @@ struct AlbumCollection: NSViewRepresentable {
         private var shownEpoch: UInt64?
         private var shownGeneration: UInt64?
         private var shownArtwork: UInt64?
+        private var shownColours: UInt64?
         private var reported: Range<Int>?
         /// The first album in view and its offset from the top of the view, restored after a
         /// refresh pass moves it.
@@ -200,6 +202,8 @@ struct AlbumCollection: NSViewRepresentable {
             let epochChanged = parent.epoch != shownEpoch
             let generationChanged = parent.generation != shownGeneration
             let artworkChanged = parent.artworkGeneration != shownArtwork
+            let coloursChanged = parent.colours.revision != shownColours
+            shownColours = parent.colours.revision
             shownEpoch = parent.epoch
             shownGeneration = parent.generation
             shownArtwork = parent.artworkGeneration
@@ -212,7 +216,7 @@ struct AlbumCollection: NSViewRepresentable {
                 scroll?.contentView.scroll(to: .zero)
                 scroll.map { $0.reflectScrolledClipView($0.contentView) }
             }
-            if !relayout, generationChanged || artworkChanged { reconfigureVisible() }
+            if !relayout, generationChanged || artworkChanged || coloursChanged { reconfigureVisible() }
             if generationChanged { restoreAnchor() }
             syncSelection()
             reportVisible()
@@ -393,7 +397,7 @@ struct AlbumCollection: NSViewRepresentable {
                 guard let cell = item as? AlbumGridItem else { return }
                 let album = cache.row(at: position)
                 cell.show(album, position: position, coverSize: CGFloat(geometry.coverSize), store: store,
-                          retainArtwork: !dismantled)
+                          retainArtwork: !dismantled, selectionColour: parent.colours.accent)
                 cell.onPress = { [weak self] in self?.clicked(position: position) }
             case .expansion?:
                 guard let panel = item as? AlbumExpansionItem, let expansion = parent.grid.expansion else { return }
