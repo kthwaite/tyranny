@@ -678,6 +678,13 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep>
                     connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 db::save_status(&transaction, &active.status)?;
                 transaction.commit()?;
+            } else if enumeration.failures > 0 {
+                // For example a file deleted between the tag write and the Reindex.
+                eprintln!(
+                    "tyranny: re-index skipped {} file(s); last failure: {}",
+                    enumeration.failures,
+                    active.status.last_error.as_deref().unwrap_or("unknown")
+                );
             }
         }
         Ok(ScanEvent::Probed(results)) => {
@@ -701,12 +708,17 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep>
     }
     if active.enumerated && active.in_flight == 0 {
         if active.status.total == Some(active.status.processed) {
-            if !active.grouping.step(
-                connection,
-                active.status.root_id.context("scan has no root")?,
-                active.serial,
-                active.complete,
-            )? {
+            // A Reindex that found no files changed no rows, so it has nothing to group.
+            let nothing_to_group =
+                active.scope == ScanScope::Paths && active.status.discovered == 0;
+            if !nothing_to_group
+                && !active.grouping.step(
+                    connection,
+                    active.status.root_id.context("scan has no root")?,
+                    active.serial,
+                    active.complete,
+                )?
+            {
                 return Ok(ScanStep::Progress);
             }
             active

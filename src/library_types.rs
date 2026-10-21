@@ -306,6 +306,7 @@ pub enum LibraryCommand {
     },
     /// Re-probe exactly these indexed files once no scan is running. Internal
     /// to tagging; it never starts a root scan or changes scan status.
+    /// A file is re-probed only if its size or mtime changed, which every tag write does.
     Reindex {
         paths: Vec<PathBuf>,
     },

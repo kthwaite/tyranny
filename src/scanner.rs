@@ -314,23 +314,8 @@ fn enumerate(
         } else if !kind.is_file() || !is_candidate(&path) {
             result.skipped += 1;
         } else {
-            match fingerprint(&path) {
-                Ok((size, modified_ns, created_ns)) => {
-                    batch.push(Candidate {
-                        path,
-                        size,
-                        modified_ns,
-                        created_ns: Some(created_ns),
-                    });
-                    result.total += 1;
-                    if batch.len() == ENUMERATION_BATCH {
-                        if !send_event(events, ScanEvent::Candidates(batch), cancelled) {
-                            return None;
-                        }
-                        batch = Vec::with_capacity(ENUMERATION_BATCH);
-                    }
-                }
-                Err(error) => result.failure(format!("{error:#}")),
+            if !offer(path, &mut batch, &mut result, events, cancelled) {
+                return None;
             }
         }
     }
@@ -341,10 +326,7 @@ fn enumerate(
         Ok(_) => result.failure(format!("root is no longer a directory: {}", root.display())),
         Err(error) => result.failure(format!("checking scan root {}: {error}", root.display())),
     }
-    if !batch.is_empty() && !send_event(events, ScanEvent::Candidates(batch), cancelled) {
-        return None;
-    }
-    Some(result)
+    flush(batch, events, cancelled).then_some(result)
 }
 
 /// Each path that is a regular file with a candidate extension becomes a
@@ -370,29 +352,44 @@ fn enumerate_paths(
             result.failure(format!("not an audio file: {}", path.display()));
             continue;
         }
-        match fingerprint(&path) {
-            Ok((size, modified_ns, created_ns)) => {
-                batch.push(Candidate {
-                    path,
-                    size,
-                    modified_ns,
-                    created_ns: Some(created_ns),
-                });
-                result.total += 1;
-                if batch.len() == ENUMERATION_BATCH {
-                    if !send_event(events, ScanEvent::Candidates(batch), cancelled) {
-                        return None;
-                    }
-                    batch = Vec::with_capacity(ENUMERATION_BATCH);
-                }
-            }
-            Err(error) => result.failure(format!("{error:#}")),
+        if !offer(path, &mut batch, &mut result, events, cancelled) {
+            return None;
         }
     }
-    if !batch.is_empty() && !send_event(events, ScanEvent::Candidates(batch), cancelled) {
-        return None;
+    flush(batch, events, cancelled).then_some(result)
+}
+
+/// Fingerprints one candidate into `batch` and sends each full batch. A
+/// fingerprint error is an enumeration failure. False when cancelled.
+fn offer(
+    path: PathBuf,
+    batch: &mut Vec<Candidate>,
+    result: &mut Enumeration,
+    events: &SyncSender<ScanEvent>,
+    cancelled: &AtomicBool,
+) -> bool {
+    match fingerprint(&path) {
+        Ok((size, modified_ns, created_ns)) => {
+            batch.push(Candidate {
+                path,
+                size,
+                modified_ns,
+                created_ns: Some(created_ns),
+            });
+            result.total += 1;
+            if batch.len() == ENUMERATION_BATCH {
+                let full = std::mem::replace(batch, Vec::with_capacity(ENUMERATION_BATCH));
+                return send_event(events, ScanEvent::Candidates(full), cancelled);
+            }
+        }
+        Err(error) => result.failure(format!("{error:#}")),
     }
-    Some(result)
+    true
+}
+
+/// Sends the last, partial batch. False when cancelled.
+fn flush(batch: Vec<Candidate>, events: &SyncSender<ScanEvent>, cancelled: &AtomicBool) -> bool {
+    batch.is_empty() || send_event(events, ScanEvent::Candidates(batch), cancelled)
 }
 
 impl Enumeration {

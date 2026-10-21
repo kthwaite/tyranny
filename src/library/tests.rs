@@ -3095,7 +3095,7 @@ async fn reindex_updates_only_named_files_and_keeps_track_ids() {
 }
 
 #[tokio::test]
-async fn reindex_during_a_scan_waits_for_the_scan() {
+async fn reindex_queued_during_a_scan_runs_after_it() {
     let scratch = Scratch::new();
     let named = scratch.path("music/a.flac");
     flac(&named, &[("title", "Old")]);
@@ -3241,6 +3241,32 @@ async fn reindex_ignores_unknown_paths_and_rejects_relative_paths() {
         .query_row("SELECT COUNT(*) FROM library_assets", [], |row| row.get(0))
         .unwrap();
     assert_eq!(assets, 1);
+    assert_eq!(scan_rows(&scratch), rows);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn reindex_of_a_deleted_file_finishes_and_keeps_its_track() {
+    let scratch = Scratch::new();
+    let deleted = scratch.path("music/a.flac");
+    let kept = scratch.path("music/b.flac");
+    flac(&deleted, &[("title", "Deleted")]);
+    flac(&kept, &[("title", "Old")]);
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    let rows = scan_rows(&scratch);
+    fs::remove_file(&deleted).unwrap();
+    reindex(&library, vec![deleted.clone()]).await.unwrap();
+    // The empty Reindex must finish, or this second one never starts.
+    flac(&kept, &[("title", "New")]);
+    reindex(&library, vec![kept.clone()]).await.unwrap();
+    let after = tracks_until(&library, |page| {
+        track_at(page, &kept).metadata.title == "New"
+    })
+    .await;
+    assert_eq!(track_at(&after, &deleted), track_at(&before, &deleted));
     assert_eq!(scan_rows(&scratch), rows);
     library.shutdown().unwrap();
 }
