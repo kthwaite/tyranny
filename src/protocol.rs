@@ -488,6 +488,14 @@ impl TagField {
     }
 }
 
+/// One field of one file that a lookup proposes to change.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FieldChange {
+    pub field: TagField,
+    pub old: Option<String>,
+    pub new: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Settings {
     pub gain_mode: GainMode,

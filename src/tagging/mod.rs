@@ -5,6 +5,7 @@ mod acoustid;
 mod fingerprint;
 mod http;
 mod journal;
+mod matching;
 mod musicbrainz;
 mod safe_write;
 pub mod tags;

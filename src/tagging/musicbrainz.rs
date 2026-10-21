@@ -203,13 +203,15 @@ impl Release {
         self.media.iter().map(|m| m.track_count).sum()
     }
     /// Sum of track lengths (recording length when the track has none).
-    /// `None` if any track has neither.
+    /// `None` if any track has neither, or if the release has no tracks.
     pub fn duration_ms(&self) -> Option<u64> {
         let mut total = 0;
+        let mut any = false;
         for track in self.media.iter().flat_map(|m| &m.tracks) {
             total += track.length.or(track.recording.length)?;
+            any = true;
         }
-        Some(total)
+        any.then_some(total)
     }
 }
 
@@ -479,5 +481,8 @@ mod tests {
         assert_eq!(release(C).duration_ms(), None);
         assert_eq!(release(C).track_count(), 4);
         assert_eq!(release(B).duration_ms(), None);
+        let mut empty = release(A);
+        empty.media.clear();
+        assert_eq!(empty.duration_ms(), None);
     }
 }
