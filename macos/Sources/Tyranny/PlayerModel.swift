@@ -108,6 +108,11 @@ final class PlayerModel {
             message = error.localizedDescription
             configurationError = error.localizedDescription
         }
+        artwork.onNowPlayingChange = { [weak self] in
+            guard let self else { return }
+            theme.artworkChanged(hasContext: artwork.hasContext, playing: artwork.nowPlayingRequest != nil,
+                                 image: artwork.nowPlaying)
+        }
         startLaunchPrefetch()
         wire.onSnapshot = { [weak self] state, instance in self?.accept(state, newInstance: instance != nil) }
         wire.onDisconnect = { [weak self] reason in self?.lostConnection(reason) }

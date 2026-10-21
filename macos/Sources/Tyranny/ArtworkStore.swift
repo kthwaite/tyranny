@@ -65,6 +65,8 @@ final class ArtworkStore {
 
     private(set) var generation: UInt64 = 0
     private(set) var nowPlayingRequest: ArtworkRequest?
+    /// Called after the now-playing request or its image may have changed.
+    @ObservationIgnored var onNowPlayingChange: (@MainActor () -> Void)?
     private var cache: [ArtworkRequest: Cached] = [:]
     @ObservationIgnored private var context: Context?
     @ObservationIgnored private var demand: [ArtworkRequest: Int] = [:]
@@ -104,6 +106,13 @@ final class ArtworkStore {
             nowPlayingRequest = request
             if let request { retain(request) }
         }
+        onNowPlayingChange?()
+    }
+
+    /// Whether a server session exists. Reading `generation` makes context changes observable.
+    var hasContext: Bool {
+        _ = generation
+        return context != nil
     }
 
     func albumRequest(_ albumID: UInt64) -> ArtworkRequest? {
@@ -203,6 +212,7 @@ final class ArtworkStore {
         cache[request] = Cached(value: value, expires: Date().addingTimeInterval(lifetime))
         cacheBytes += value.byteCost
         touch(request)
+        onNowPlayingChange?()
     }
 
     private func removeCached(_ request: ArtworkRequest) {

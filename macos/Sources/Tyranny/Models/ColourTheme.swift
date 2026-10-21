@@ -48,6 +48,9 @@ final class ColourTheme {
     private(set) var colours: ThemeColours
     /// Incremented whenever `tokens` changes. AppKit views compare it to know when to redraw.
     private(set) var revision: UInt64 = 0
+    /// The dominant colour of the playing cover, or nil when there is none to show.
+    private(set) var artColour: RGB?
+    @ObservationIgnored private var tint = ArtTint()
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
@@ -69,10 +72,47 @@ final class ColourTheme {
     func update(_ settings: ColourSettings) {
         settings.save(to: defaults)
         self.settings = settings
-        let resolved = ThemeResolver.resolve(settings: settings, artColour: nil)
+        publish(animated: false)
+    }
+
+    /// Called when the playing track, its context or its cover changes.
+    func artworkChanged(hasContext: Bool, playing: Bool, image: ArtworkImage) {
+        let artwork = ArtTint.artwork(hasContext: hasContext, playing: playing,
+                                      state: image.state, cacheKey: image.cacheKey)
+        let key = tint.observe(artwork)
+        if let key {
+            if let cover = image.image {
+                Task { [weak self] in
+                    let colour = await Task.detached(priority: .utility) {
+                        ArtworkPalette.dominant(image: cover)
+                    }.value
+                    self?.finishExtraction(colour, for: key)
+                }
+            } else {
+                tint.extracted(nil, for: key)
+            }
+        }
+        applyTint()
+    }
+
+    private func finishExtraction(_ colour: RGB?, for key: String) {
+        tint.extracted(colour, for: key)
+        applyTint()
+    }
+
+    private func applyTint() {
+        guard tint.colour != artColour else { return }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            artColour = tint.colour
+            publish(animated: true)
+        }
+    }
+
+    private func publish(animated: Bool) {
+        let resolved = ThemeResolver.resolve(settings: settings, artColour: artColour)
         guard resolved != tokens else { return }
         var transaction = Transaction()
-        transaction.disablesAnimations = true
+        transaction.disablesAnimations = !animated
         withTransaction(transaction) {
             tokens = resolved
             colours = Self.colours(for: resolved)
