@@ -701,7 +701,7 @@ fn shuffle_strategy() -> Box<dyn ShuffleStrategy> {
 /// rows it left open close on the next start.
 fn restore_plays(store: &mut Store, player: &mut Player, selected: Option<u64>) -> PendingHistory {
     let rows = store.open_play_rows().unwrap_or_else(|error| {
-        eprintln!("tyranny: reading open plays failed; they close on the next start: {error:#}");
+        eprintln!("tyranny: reading open plays failed; none is continued: {error:#}");
         Vec::new()
     });
     let kept = selected.and_then(|id| rows.into_iter().rev().find(|row| row.entry_id == id));
