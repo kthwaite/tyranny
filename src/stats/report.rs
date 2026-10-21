@@ -882,6 +882,36 @@ mod tests {
     }
 
     #[test]
+    fn thresholds_reach_full_scale_at_five_years_of_history() {
+        let thresholds = Thresholds::default();
+        let five_years = thresholds.scale_span_days;
+        assert_eq!(five_years, 1_826);
+        assert_eq!(scaled_plays(30, &thresholds), 2);
+        assert_eq!(scaled_plays(365, &thresholds), 29);
+        assert_eq!(scaled_plays(five_years, &thresholds), 150);
+        // Longer history asks for no more.
+        assert_eq!(scaled_plays(3 * five_years, &thresholds), 150);
+        assert_eq!(lapsed_gap_days(five_years, &thresholds), 456);
+        assert_eq!(lapsed_gap_days(5 * five_years, &thresholds), 1_095);
+
+        // At S = 5 years, lapsed loves and shallow dives both need 150 plays.
+        let now = T0 + five_years as i64 * DAY;
+        let bounds = Bounds {
+            start: T0,
+            end: now + 1,
+        };
+        let history = |plays: i64| -> Vec<PlayRow> {
+            (0..plays).map(|i| play(T0 + i, "Fan", "only")).collect()
+        };
+        let report = |rows: &[PlayRow]| run(rows, &index(), PeriodKind::All, bounds, now);
+        let full = report(&history(150));
+        assert_eq!(full.history_span_days, 1_826);
+        assert_eq!((full.lapsed_loves.len(), full.shallow_dives.len()), (1, 1));
+        let short = report(&history(149));
+        assert!(short.lapsed_loves.is_empty() && short.shallow_dives.is_empty());
+    }
+
+    #[test]
     fn shallow_dives_need_sixty_percent_in_top_three() {
         let now = T0 + 100 * DAY;
         let mut library = index();
