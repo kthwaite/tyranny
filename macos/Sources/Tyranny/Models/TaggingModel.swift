@@ -16,7 +16,7 @@ final class TaggingModel {
     }
 
     enum Phase: Equatable {
-        case lookingUp, reviewing, applying, applied(TagApplyResult), failed(String)
+        case lookingUp, reviewing, applying, reverting, applied(TagApplyResult), failed(String)
     }
 
     /// The sheet's item. Setting nil closes the sheet and cuts off any lookup.
@@ -36,6 +36,9 @@ final class TaggingModel {
     /// True once the applied edit was reverted.
     private(set) var isUndone = false
 
+    /// A write or revert is in flight. It is never cancelled: a half-finished write would leave files mixed.
+    var isEditing: Bool { phase == .applying || phase == .reverting }
+
     var hasAcoustIDKey: Bool { acoustIDKey != nil }
 
     private var acoustIDKey: String? {
@@ -49,6 +52,7 @@ final class TaggingModel {
     @ObservationIgnored private let editWire = WireClient(requestDeadlineSeconds: 60)
     @ObservationIgnored private var lookupTask: Task<Void, Never>?
     @ObservationIgnored private var editTask: Task<Void, Never>?
+    @ObservationIgnored private var editTail: Task<Void, Never> = Task {}
     @ObservationIgnored private var ticket = UUID()
     @ObservationIgnored private var lastReleaseID: String?
     @ObservationIgnored private var lastFingerprint = false
@@ -103,11 +107,9 @@ final class TaggingModel {
             do {
                 let data = try await editRequest(request.name, request.fields)
                 let result = try JSONDecoder().decode(TagApplyResult.self, from: data)
-                guard self.ticket == ticket else { return }
-                phase = .applied(result)
+                if self.ticket == ticket { phase = .applied(result) }
             } catch {
-                guard self.ticket == ticket else { return }
-                phase = .failed(Self.message(for: error))
+                if self.ticket == ticket { phase = .failed(Self.message(for: error)) }
             }
             editTask = nil
             await refreshEdits()
@@ -117,18 +119,19 @@ final class TaggingModel {
     func undo() {
         guard case .applied(let result) = phase, let editID = result.edit_id, !isUndone, editTask == nil else { return }
         let ticket = ticket
+        phase = .reverting
         let request = TagRequests.revert(editID: editID)
         editTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let data = try await editRequest(request.name, request.fields)
                 let reverted = try JSONDecoder().decode(TagApplyResult.self, from: data)
-                guard self.ticket == ticket else { return }
-                isUndone = true
-                phase = .applied(reverted)
+                if self.ticket == ticket {
+                    isUndone = true
+                    phase = .applied(reverted)
+                }
             } catch {
-                guard self.ticket == ticket else { return }
-                phase = .failed(Self.message(for: error))
+                if self.ticket == ticket { phase = .failed(Self.message(for: error)) }
             }
             editTask = nil
             await refreshEdits()
@@ -163,6 +166,7 @@ final class TaggingModel {
         let session = try await open(lookupWire, player)
         let revision = player.snapshot?.library.revision ?? 0
         let request = TagRequests.lookup(albumID: albumID, libraryRevision: revision, releaseID: releaseID, acoustIDKey: key)
+        try Task.checkCancellation()
         do {
             let data = try await lookupWire.request(request.name, fields: request.fields)
             try Task.checkCancellation()
@@ -176,10 +180,24 @@ final class TaggingModel {
 
     private func editRequest(_ name: String, _ fields: [String: JSONValue]) async throws -> Data {
         guard let player else { throw Self.unavailable }
-        let session = try await open(editWire, player)
-        let data = try await editWire.request(name, fields: fields)
-        guard editWire.instanceID == session else { throw Self.sessionChanged }
-        return data
+        // One request at a time: each connect replaces the connection, which would kill a write in flight.
+        return try await exclusive { [self] in
+            let session = try await open(editWire, player)
+            let data = try await editWire.request(name, fields: fields)
+            guard editWire.instanceID == session else { throw Self.sessionChanged }
+            return data
+        }
+    }
+
+    /// Runs edit-lane operations in order. The operation itself is not cancelled with its caller.
+    private func exclusive<T: Sendable>(_ operation: @escaping @MainActor () async throws -> T) async throws -> T {
+        let previous = editTail
+        let work = Task { @MainActor in
+            await previous.value
+            return try await operation()
+        }
+        editTail = Task { _ = try? await work.value }
+        return try await work.value
     }
 
     /// Connects on demand and refuses a server other than the one the window shows.
@@ -207,9 +225,8 @@ final class TaggingModel {
 
     private func reset() {
         cancelLookup()
-        editTask?.cancel()
-        editTask = nil
-        editWire.disconnect()
+        // A write or revert in flight (or a Settings edit request) finishes on its own.
+        if editTask == nil { editWire.disconnect() }
         phase = .lookingUp
         proposal = nil
         candidates = []

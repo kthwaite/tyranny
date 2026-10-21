@@ -16,20 +16,23 @@ struct TagLookupSheet: View {
         }
         .padding(20)
         .frame(width: 640)
+        .interactiveDismissDisabled(model.isEditing)
         .accessibilityIdentifier("tag-lookup-sheet")
     }
 
     @ViewBuilder private var content: some View {
         switch model.phase {
-        case .lookingUp, .applying:
+        case .lookingUp, .applying, .reverting:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small).accessibilityIdentifier("tag-lookup-progress")
-                Text(model.phase == .applying ? "Writing tags…" : "Asking MusicBrainz…")
+                Text(progressText)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            HStack {
-                Spacer()
-                cancelButton
+            if !model.isEditing {
+                HStack {
+                    Spacer()
+                    cancelButton
+                }
             }
         case .reviewing:
             reviewing
@@ -44,6 +47,14 @@ struct TagLookupSheet: View {
                 cancelButton
                 Button("Try Again") { model.retry() }.keyboardShortcut(.defaultAction)
             }
+        }
+    }
+
+    private var progressText: String {
+        switch model.phase {
+        case .applying: "Writing tags…"
+        case .reverting: "Undoing…"
+        default: "Asking MusicBrainz…"
         }
     }
 
@@ -96,7 +107,7 @@ struct TagLookupSheet: View {
 
     private func row(_ track: TrackProposal) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Toggle("", isOn: Binding(
+            Toggle(track.file_name, isOn: Binding(
                 get: { model.selection?.selected.contains(track.track_id) ?? false },
                 set: { _ in model.selection?.toggle(track.track_id) }
             ))
@@ -106,8 +117,8 @@ struct TagLookupSheet: View {
                 .monospacedDigit().foregroundStyle(.secondary).frame(width: 28, alignment: .trailing)
             VStack(alignment: .leading, spacing: 2) {
                 Text(track.file_name).lineLimit(1).truncationMode(.middle)
-                ForEach(track.changes.map(\.line), id: \.self) { Text($0).font(.callout) }
-                ForEach(track.notes, id: \.self) { Text($0).font(.callout).foregroundStyle(.secondary) }
+                ForEach(Array(track.changes.map(\.line).enumerated()), id: \.offset) { Text($0.element).font(.callout) }
+                ForEach(Array(track.notes.enumerated()), id: \.offset) { Text($0.element).font(.callout).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)
         }
