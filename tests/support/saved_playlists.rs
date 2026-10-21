@@ -1,4 +1,4 @@
-//! Saved playlists through real authenticated clients, native indexing and the
+//! Saved playlists through real private Unix clients, native indexing and the
 //! clocked capture owner. No direct command dispatch or private engine wiring.
 use super::*;
 use serde_json::{Value, json};

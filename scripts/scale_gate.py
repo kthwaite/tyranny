@@ -18,12 +18,11 @@ import selectors
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 import wave
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket, fixture
+from server_gate import UnixSocket, fixture, run_directory
 
 TRACKS = 50_000
 QUEUE = 10_000
@@ -31,7 +30,7 @@ PAGE = 100  # the legacy library_* page cases below
 WINDOW = 200  # the client's list and Up Next window size
 
 
-class MeasuredWebSocket(WebSocket):
+class MeasuredUnixSocket(UnixSocket):
     frame_bytes = 0
 
     def take(self, count):
@@ -176,7 +175,7 @@ def main():
     driver = Path(args.ui_driver).resolve()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+    run = run_directory(work)
     state_dir = run / "state"
     state_dir.mkdir(mode=0o700)
     root, scan_root = run / "METADATA-ONLY-NOT-IMPORTED", run / "Real scan WAVs"
@@ -192,7 +191,7 @@ def main():
                   targets=dict(query_p95_ms=dict(operator="<", value=100), warm_native_first_usable_ms=dict(operator="<=", value=1000)),
                   launches=[], query_samples=[], query_distributions={}, native_runs=[],
                   limitations=["Process-cold means newly started daemon and client before library query warmup; OS/filesystem caches remain uncontrolled, with no purge",
-                               "Query latency is end-to-end authenticated WebSocket round trip, including JSON decoding, not SQLite-only time",
+                               "Query latency is end-to-end peer-verified Unix socket round trip, including JSON decoding, not SQLite-only time",
                                "Native filter timing includes external Accessibility process overhead, debounce, queries and observed UI completion",
                                "Bounded native/model and reply pages checked; not a heap profiler or proof of server-internal constant memory",
                                "Server currently loads its persistent queue on startup; no full-library or full-queue hydration is requested by this client",
@@ -205,7 +204,7 @@ def main():
     def start():
         nonlocal process, control
         number = len(report["launches"]) + 1
-        argv = [str(server), "--state-dir", str(state_dir), "--bind", "127.0.0.1:0"]
+        argv = [str(server), "--state-dir", str(state_dir)]
         if not args.coreaudio:
             argv += ["--capture", str(run / f"capture-{number}.f32")]
         log = (run / f"server-{number}.stderr").open("w")
@@ -218,10 +217,9 @@ def main():
         line = process.stdout.readline()
         assert line, f"server failed; inspect {log.name}"
         ready = json.loads(line)
-        control = MeasuredWebSocket(ready["address"], Path(ready["token_path"]).read_text())
-        assert control.status == 101
+        control = MeasuredUnixSocket(ready["socket_path"])
         report["launches"].append(dict(argv=argv, ready=ready, process_launch_uptime=started,
-                                       authenticated_ready_ms=(time.monotonic()-started)*1000))
+                                       peer_verified_ready_ms=(time.monotonic()-started)*1000))
         return ready
 
     def stop():
@@ -245,13 +243,13 @@ def main():
     def native_run(index, ready, server_launch_uptime=None, scan=False):
         nonlocal control, native
         # Avoid accumulating unread events while the real native client owns
-        # this stage. The next query stage gets a fresh authenticated snapshot.
+        # this stage. The next query stage gets a fresh peer-verified snapshot.
         control.close()
         control = None
         output = run / f"native-{index}"
         output.mkdir()
         label = "process-cold-cache-uncontrolled" if server_launch_uptime is not None else f"warm-{index}"
-        argv = [str(executable), "--url", f"ws://{ready['address']}/ws", "--token-file", ready["token_path"],
+        argv = [str(executable), "--socket", ready["socket_path"],
                 "--scale-output", str(output), "--ui-driver", str(driver), "--scale-run-label", label]
         if server_launch_uptime is not None:
             argv += ["--scale-server-launch-uptime", str(server_launch_uptime)]
@@ -277,8 +275,7 @@ def main():
         result["report_path"] = str(result_path)
         report["native_runs"].append(result)
         assert code == 0 and result["passed"], f"native correctness failure: {result_path}"
-        control = MeasuredWebSocket(ready["address"], Path(ready["token_path"]).read_text())
-        assert control.status == 101
+        control = MeasuredUnixSocket(ready["socket_path"])
         # The client's quit paused playback. Resume it, so later stages still measure under playback.
         quit_state = control.state()
         result["quit_transport"] = quit_state["transport"]
@@ -629,7 +626,7 @@ def main():
                 enqueue_run_50k=report["v9_enqueue_run_50k"], underrun_counters=report["v9_underrun_counters"],
                 playback_observation={k: v for k, v in report.get("playback_observation", {}).items() if k not in ("before", "after")},
                 queue_edit_families_50k=report.get("v9_queue_families_50k"),
-                note="Latency is end-to-end authenticated WebSocket round trip on this machine; seeding time (hard links and SQL) is reported in fixture.persisted_counts and excluded from enqueue timing")
+                note="Latency is end-to-end peer-verified Unix socket round trip on this machine; seeding time (hard links and SQL) is reported in fixture.persisted_counts and excluded from enqueue timing")
             record.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
         print(json.dumps(dict(report=str(run / "report.json"), passed=report["passed"], targets_met=report["targets_met"])))
     return 0 if report["passed"] else 1

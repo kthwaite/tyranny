@@ -77,7 +77,7 @@ struct StatusBar: View {
 
     private var connectionLabel: String {
         switch model.connection {
-        case "connected": return "Server · local · protocol v9"  // endpoints are loopback-only
+        case "connected": return "Server · local · protocol v9"
         case "connecting": return "Connecting…"
         default: return model.startupFailed ? "Server unavailable" : "Disconnected"
         }

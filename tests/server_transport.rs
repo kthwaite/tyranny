@@ -1,24 +1,18 @@
-use futures_util::{SinkExt, StreamExt};
 use std::{
     fs,
-    net::SocketAddr,
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::{net::TcpStream, sync::oneshot, task::JoinHandle, time::timeout};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{
-        Error, Message as Frame,
-        client::IntoClientRequest,
-        http::{HeaderValue, StatusCode},
-    },
-};
+use tokio::{io::AsyncWriteExt, net::UnixStream, sync::oneshot, task::JoinHandle, time::timeout};
 use tyranny::{
     output::OutputConfig,
     protocol::{ControlState, ErrorCode, Message, Reply, Response, Transport},
-    server::{MAX_REQUEST_BYTES, Server, ServerConfig, client_request, read_token},
+    server::{Server, ServerConfig},
+    transport::{
+        FrameReader, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, connect, validate_socket_path,
+        write_frame,
+    },
 };
 use uuid::Uuid;
 
@@ -28,12 +22,33 @@ const DEADLINE: Duration = Duration::from_secs(5);
 mod library_lists;
 #[path = "support/saved_playlists.rs"]
 mod saved_playlists;
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+struct Socket {
+    stream: UnixStream,
+    reader: FrameReader,
+}
+
+impl Socket {
+    async fn send(&mut self, json: String) -> std::io::Result<()> {
+        write_frame(&mut self.stream, json.as_bytes(), MAX_REQUEST_BYTES).await
+    }
+
+    async fn next(&mut self) -> std::io::Result<Option<Message>> {
+        self.reader
+            .read(&mut self.stream, MAX_RESPONSE_BYTES)
+            .await?
+            .map(|bytes| serde_json::from_slice(bytes).map_err(std::io::Error::other))
+            .transpose()
+    }
+
+    async fn close(&mut self) -> std::io::Result<()> {
+        self.stream.shutdown().await
+    }
+}
 
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("tyranny-server-{}", Uuid::new_v4()));
+        let path = PathBuf::from("/tmp").join(format!("tyr-{}", Uuid::new_v4().simple()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -50,7 +65,6 @@ impl Drop for Scratch {
 fn config(state_dir: PathBuf, capture: PathBuf) -> ServerConfig {
     ServerConfig {
         state_dir,
-        bind: SocketAddr::from(([127, 0, 0, 1], 0)),
         output: OutputConfig::Capture {
             path: capture,
             clocked: true,
@@ -59,8 +73,7 @@ fn config(state_dir: PathBuf, capture: PathBuf) -> ServerConfig {
 }
 
 struct Running {
-    url: String,
-    token: String,
+    socket_path: PathBuf,
     instance_id: String,
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<anyhow::Result<()>>,
@@ -70,30 +83,28 @@ impl Running {
         let server = Server::start(config(scratch.path("state"), scratch.path("capture.f32")))
             .await
             .unwrap();
-        let url = format!("ws://{}/ws", server.address());
-        let token = read_token(server.token_path()).unwrap();
+        let socket_path = server.socket_path().to_owned();
         let instance_id = server.instance_id().to_owned();
         let (shutdown, stopped) = oneshot::channel();
         let task = tokio::spawn(server.run(async {
             let _ = stopped.await;
         }));
         Self {
-            url,
-            token,
+            socket_path,
             instance_id,
             shutdown,
             task,
         }
     }
     async fn connect(&self) -> Socket {
-        timeout(
-            DEADLINE,
-            connect_async(client_request(&self.url, &self.token).unwrap()),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .0
+        let stream = timeout(DEADLINE, connect(&self.socket_path))
+            .await
+            .unwrap()
+            .unwrap();
+        Socket {
+            stream,
+            reader: FrameReader::default(),
+        }
     }
     async fn stop(self) {
         self.shutdown.send(()).unwrap();
@@ -106,17 +117,11 @@ impl Running {
 }
 
 async fn receive(socket: &mut Socket) -> Message {
-    timeout(DEADLINE, async {
-        loop {
-            match socket.next().await.unwrap().unwrap() {
-                Frame::Text(text) => return serde_json::from_str(&text).unwrap(),
-                Frame::Ping(_) => socket.flush().await.unwrap(),
-                frame => panic!("unexpected WebSocket frame: {frame:?}"),
-            }
-        }
-    })
-    .await
-    .unwrap()
+    timeout(DEADLINE, socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
 }
 
 async fn hello(socket: &mut Socket, instance: &str) -> ControlState {
@@ -164,36 +169,81 @@ async fn reply(socket: &mut Socket, id: u64, sequence: &mut u64) -> ControlState
     }
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn hello_reaches_a_client_with_receive_credit_below_default_send_low_water() {
+    use std::os::fd::AsRawFd;
+    let scratch = Scratch::new();
+    let server = Server::start(config(scratch.path("state"), scratch.path("capture.f32")))
+        .await
+        .unwrap();
+    // Configure before the accept loop begins, so the regression is deterministic.
+    let socket = std::os::unix::net::UnixStream::connect(server.socket_path()).unwrap();
+    let size: libc::c_int = 1024;
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    socket.set_nonblocking(true).unwrap();
+    let mut socket = UnixStream::from_std(socket).unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let task = tokio::spawn(server.run(async {
+        let _ = stopped.await;
+    }));
+    let mut reader = FrameReader::default();
+    let hello = timeout(
+        Duration::from_secs(2),
+        reader.read(&mut socket, MAX_RESPONSE_BYTES),
+    )
+    .await;
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    let message: Message = serde_json::from_slice(
+        hello
+            .expect("Hello stalled below send low-water")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(message, Message::Hello { .. }));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn handshake_requires_bearer_and_rejects_every_browser_origin() {
+async fn fragmented_and_coalesced_requests_preserve_order_across_state_events() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
-    let missing = running.url.as_str().into_client_request().unwrap();
-    let wrong = client_request(&running.url, &"0".repeat(64)).unwrap();
-    let mut origin = client_request(&running.url, &running.token).unwrap();
-    origin
-        .headers_mut()
-        .insert("origin", HeaderValue::from_static("null"));
-    let mut duplicate = client_request(&running.url, &running.token).unwrap();
-    duplicate
-        .headers_mut()
-        .append("authorization", HeaderValue::from_static("Bearer wrong"));
-    let mut wrong_path = client_request(&running.url, &running.token).unwrap();
-    *wrong_path.uri_mut() = running.url.replace("/ws", "/elsewhere").parse().unwrap();
-    for (request, status) in [
-        (missing, StatusCode::UNAUTHORIZED),
-        (wrong, StatusCode::UNAUTHORIZED),
-        (origin, StatusCode::FORBIDDEN),
-        (duplicate, StatusCode::UNAUTHORIZED),
-        (wrong_path, StatusCode::NOT_FOUND),
-    ] {
-        match timeout(DEADLINE, connect_async(request)).await.unwrap() {
-            Err(Error::Http(response)) => assert_eq!(response.status(), status),
-            result => panic!("unsafe handshake was not rejected: {result:?}"),
-        }
-    }
-    let mut allowed = running.connect().await;
-    hello(&mut allowed, &running.instance_id).await;
+    let mut socket = running.connect().await;
+    let mut sequence = hello(&mut socket, &running.instance_id).await.sequence;
+    let mut other = PlaybackClient::connect(&running).await;
+    let payload = br#"{"id":1,"command":"snapshot"}"#;
+    let header = (payload.len() as u32).to_be_bytes();
+    socket.stream.write_all(&header[..2]).await.unwrap();
+    other
+        .apply(serde_json::json!({"command":"set_resume","enabled":true}))
+        .await;
+    // Receiving the event forces the server's select to cancel its partial read.
+    assert!(matches!(receive(&mut socket).await, Message::State { .. }));
+    socket.stream.write_all(&header[2..]).await.unwrap();
+    socket.stream.write_all(&payload[..7]).await.unwrap();
+    other
+        .apply(serde_json::json!({"command":"set_resume","enabled":false}))
+        .await;
+    assert!(matches!(receive(&mut socket).await, Message::State { .. }));
+    let second = br#"{"id":2,"command":"snapshot"}"#;
+    let mut rest = payload[7..].to_vec();
+    rest.extend_from_slice(&(second.len() as u32).to_be_bytes());
+    rest.extend_from_slice(second);
+    socket.stream.write_all(&rest).await.unwrap();
+    reply(&mut socket, 1, &mut sequence).await;
+    reply(&mut socket, 2, &mut sequence).await;
     running.stop().await;
 }
 
@@ -208,13 +258,12 @@ async fn two_controllers_receive_ordered_state_and_reconnect_to_current_authorit
     for id in 1..=40_u64 {
         let enabled = id % 2 != 0;
         first
-            .send(Frame::Text(
+            .send(
                 serde_json::json!({
                     "id": id, "command": "set_resume", "enabled": enabled,
                 })
-                .to_string()
-                .into(),
-            ))
+                .to_string(),
+            )
             .await
             .unwrap();
         let applied = reply(&mut first, id, &mut first_sequence).await;
@@ -233,11 +282,9 @@ async fn two_controllers_receive_ordered_state_and_reconnect_to_current_authorit
             }
         }
     }
-    first.close(None).await.unwrap();
+    first.close().await.unwrap();
     second
-        .send(Frame::Text(
-            r#"{"id":41,"command":"set_resume","enabled":true}"#.into(),
-        ))
+        .send(r#"{"id":41,"command":"set_resume","enabled":true}"#.into())
         .await
         .unwrap();
     reply(&mut second, 41, &mut second_sequence).await;
@@ -248,11 +295,9 @@ async fn two_controllers_receive_ordered_state_and_reconnect_to_current_authorit
             .settings
             .resume_on_start
     );
-    let token = running.token.clone();
     let old_instance = running.instance_id.clone();
     running.stop().await;
     let restarted = Running::start(&scratch).await;
-    assert_eq!(restarted.token, token);
     assert_ne!(restarted.instance_id, old_instance);
     let mut reconnected = restarted.connect().await;
     assert!(
@@ -265,37 +310,45 @@ async fn two_controllers_receive_ordered_state_and_reconnect_to_current_authorit
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malformed_binary_and_oversized_requests_disconnect_only_the_offending_controller() {
+async fn malformed_lengths_json_and_premature_eof_disconnect_only_offender() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
     let mut healthy = running.connect().await;
     let mut sequence = hello(&mut healthy, &running.instance_id).await.sequence;
-    for frame in [
-        Frame::Text("{".into()),
-        Frame::Text(r#"{"id":1,"command":"seek","position_frames":0}"#.into()),
-        Frame::Binary(vec![1, 2, 3].into()),
-        Frame::Text("x".repeat(MAX_REQUEST_BYTES + 1).into()),
+    let mut malformed = Vec::new();
+    for payload in [
+        b"{".as_slice(),
+        br#"{"id":1,"command":"seek","position_frames":0}"#,
+        &[0xff],
     ] {
+        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(payload);
+        malformed.push(frame);
+    }
+    malformed.extend([
+        0_u32.to_be_bytes().to_vec(),
+        (MAX_REQUEST_BYTES as u32 + 1).to_be_bytes().to_vec(),
+        u32::MAX.to_be_bytes().to_vec(),
+        vec![0, 0],
+        vec![0, 0, 0, 8, b'{'],
+    ]);
+    for (index, bytes) in malformed.into_iter().enumerate() {
         let mut offending = running.connect().await;
         hello(&mut offending, &running.instance_id).await;
-        offending.send(frame).await.unwrap();
+        offending.stream.write_all(&bytes).await.unwrap();
+        if index >= 6 {
+            offending.stream.shutdown().await.unwrap();
+        }
         timeout(DEADLINE, async {
-            loop {
-                match offending.next().await {
-                    Some(Ok(Frame::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(Frame::Text(text))) => assert!(matches!(
-                        serde_json::from_str::<Message>(&text).unwrap(),
-                        Message::State { .. }
-                    )),
-                    Some(Ok(_)) => {}
-                }
+            while let Ok(Some(message)) = offending.next().await {
+                assert!(matches!(message, Message::State { .. }));
             }
         })
         .await
         .unwrap();
     }
     healthy
-        .send(Frame::Text(r#"{"id":1,"command":"snapshot"}"#.into()))
+        .send(r#"{"id":1,"command":"snapshot"}"#.into())
         .await
         .unwrap();
     reply(&mut healthy, 1, &mut sequence).await;
@@ -310,7 +363,8 @@ async fn state_is_private_and_exclusively_locked_until_owner_shutdown() {
         fs::metadata(scratch.path("state")).unwrap().mode() & 0o777,
         0o700
     );
-    for file in ["token", "server.lock", "state.sqlite3"] {
+    assert!(!scratch.path("state/token").exists());
+    for file in ["control.sock", "server.lock", "state.sqlite3"] {
         assert_eq!(
             fs::metadata(scratch.path("state").join(file))
                 .unwrap()
@@ -330,6 +384,7 @@ async fn state_is_private_and_exclusively_locked_until_owner_shutdown() {
         "second instance reached the audio owner before taking the lock"
     );
     running.stop().await;
+    assert!(!scratch.path("state/control.sock").exists());
     let restarted = Running::start(&scratch).await;
     restarted.stop().await;
 }
@@ -340,7 +395,7 @@ fn private_directory(path: &Path) {
 }
 
 #[tokio::test]
-async fn insecure_state_paths_and_nonloopback_binds_fail_before_starting_audio() {
+async fn insecure_state_and_socket_paths_fail_before_starting_audio() {
     let scratch = Scratch::new();
     let capture = scratch.path("capture.f32");
     let insecure = scratch.path("insecure");
@@ -360,49 +415,209 @@ async fn insecure_state_paths_and_nonloopback_binds_fail_before_starting_audio()
             .await
             .is_err()
     );
-    symlink(scratch.path("missing-token"), target.join("token")).unwrap();
+    symlink(scratch.path("missing-socket"), target.join("control.sock")).unwrap();
     assert!(
         Server::start(config(target.clone(), capture.clone()))
             .await
             .is_err()
     );
     assert!(
-        fs::symlink_metadata(target.join("token"))
+        fs::symlink_metadata(target.join("control.sock"))
             .unwrap()
             .file_type()
             .is_symlink()
     );
-    let mut public = config(scratch.path("public"), capture.clone());
-    public.bind = SocketAddr::from(([0, 0, 0, 0], 0));
-    assert!(Server::start(public).await.is_err());
     assert!(!capture.exists());
 }
 
-#[test]
-fn controller_never_attaches_credentials_to_nonloopback_or_query_urls() {
-    for url in [
-        "ws://192.0.2.1:9865/ws",
-        "ws://example.com/ws",
-        "ws://localhost:9865/ws",
-        "ws://127.0.0.1:9865/ws?token=secret",
-        "ws://user@127.0.0.1:9865/ws",
-        "wss://127.0.0.1:9865/ws",
-        "ws://[::]:9865/ws",
-    ] {
-        assert!(
-            client_request(url, "secret").is_err(),
-            "unsafe URL accepted: {url}"
-        );
+#[tokio::test]
+async fn writable_ancestors_are_rejected_by_server_and_client() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let original = fs::metadata(&scratch.0).unwrap().permissions();
+    for mode in [0o777, 0o770] {
+        fs::set_permissions(&scratch.0, fs::Permissions::from_mode(mode)).unwrap();
+        let connection = connect(&running.socket_path).await;
+        let startup = Server::start(config(
+            scratch.path("other-state"),
+            scratch.path("other.f32"),
+        ))
+        .await;
+        let startup_rejected = startup.is_err();
+        if let Ok(server) = startup {
+            server.run(async {}).await.unwrap();
+        }
+        fs::set_permissions(&scratch.0, original.clone()).unwrap();
+        assert!(connection.is_err(), "client trusted a writable ancestor");
+        assert!(startup_rejected, "server trusted a writable ancestor");
+        assert!(!scratch.path("other.f32").exists());
     }
-    for url in ["ws://127.0.0.1:9865/ws", "ws://[::1]:9865/ws"] {
-        let request = client_request(url, "secret").unwrap();
-        assert_eq!(request.headers()["authorization"], "Bearer secret");
-        assert!(request.headers()["authorization"].is_sensitive());
+    // /tmp's canonical root-owned sticky ancestor remains supported.
+    let mut connection = running.connect().await;
+    hello(&mut connection, &running.instance_id).await;
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn client_resolves_ancestor_aliases_before_applying_the_socket_byte_limit() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let alias = scratch.path(&"a".repeat(100));
+    symlink(&scratch.0, &alias).unwrap();
+    let path = alias.join("state/control.sock");
+    assert!(validate_socket_path(&path).is_err());
+    let stream = connect(&path).await.unwrap();
+    let mut socket = Socket {
+        stream,
+        reader: FrameReader::default(),
+    };
+    hello(&mut socket, &running.instance_id).await;
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn client_rejects_unsafe_socket_paths_and_permissions() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let linked = scratch.path("state/alias.sock");
+    symlink(&running.socket_path, &linked).unwrap();
+    assert!(connect(&linked).await.is_err());
+    let regular = scratch.path("state/not-socket");
+    fs::write(&regular, b"").unwrap();
+    fs::set_permissions(&regular, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(connect(&regular).await.is_err());
+    fs::set_permissions(&running.socket_path, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(connect(&running.socket_path).await.is_err());
+    fs::set_permissions(&running.socket_path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(scratch.path("state"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(connect(&running.socket_path).await.is_err());
+    fs::set_permissions(scratch.path("state"), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(validate_socket_path(Path::new(&"x".repeat(200))).is_err());
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn stale_socket_is_replaced_but_live_listener_is_not_unlinked() {
+    let scratch = Scratch::new();
+    let state = scratch.path("state");
+    private_directory(&state);
+    let path = state.join("control.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    assert!(
+        Server::start(config(state.clone(), scratch.path("capture.f32")))
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    assert!(!scratch.path("capture.f32").exists());
+    drop(listener);
+    let running = Running::start(&scratch).await;
+    let mut socket = running.connect().await;
+    hello(&mut socket, &running.instance_id).await;
+    running.stop().await;
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn cleanup_never_unlinks_a_replacement_socket() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let path = running.socket_path.clone();
+    fs::remove_file(&path).unwrap();
+    let replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    running.stop().await;
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    drop(replacement);
+}
+
+#[tokio::test]
+async fn insecure_existing_socket_and_regular_file_are_never_removed() {
+    let scratch = Scratch::new();
+    let state = scratch.path("state");
+    private_directory(&state);
+    let path = state.join("control.sock");
+    fs::write(&path, b"not a socket").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        Server::start(config(state.clone(), scratch.path("capture.f32")))
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"not a socket");
+    fs::remove_file(&path).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    drop(listener);
+    let inode = fs::metadata(&path).unwrap().ino();
+    assert!(
+        Server::start(config(state, scratch.path("capture.f32")))
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    assert!(!scratch.path("capture.f32").exists());
+}
+
+#[tokio::test]
+async fn obsolete_token_is_inert_and_failed_owner_start_cleans_socket() {
+    let scratch = Scratch::new();
+    let state = scratch.path("state");
+    private_directory(&state);
+    symlink(scratch.path("missing"), state.join("token")).unwrap();
+    let running = Running::start(&scratch).await;
+    let mut socket = running.connect().await;
+    hello(&mut socket, &running.instance_id).await;
+    running.stop().await;
+    assert!(
+        fs::symlink_metadata(state.join("token"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        Server::start(config(state.clone(), state.join("state.sqlite3")))
+            .await
+            .is_err()
+    );
+    assert!(!state.join("control.sock").exists());
+    let restarted = Running::start(&scratch).await;
+    restarted.stop().await;
+}
+
+#[tokio::test]
+async fn response_reader_rejects_invalid_lengths_and_partial_eof() {
+    for header in [0_u32, MAX_RESPONSE_BYTES as u32 + 1, u32::MAX] {
+        let (mut writer, mut reader_socket) = UnixStream::pair().unwrap();
+        writer.write_all(&header.to_be_bytes()).await.unwrap();
+        let mut reader = FrameReader::default();
+        let error = timeout(
+            DEADLINE,
+            reader.read(&mut reader_socket, MAX_RESPONSE_BYTES),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+    for bytes in [vec![0, 0], vec![0, 0, 0, 5, b'{']] {
+        let (mut writer, mut reader_socket) = UnixStream::pair().unwrap();
+        writer.write_all(&bytes).await.unwrap();
+        writer.shutdown().await.unwrap();
+        let mut reader = FrameReader::default();
+        let error = reader
+            .read(&mut reader_socket, MAX_RESPONSE_BYTES)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capture_cannot_overwrite_credentials_database_or_queued_media() {
+async fn capture_cannot_overwrite_database_or_queued_media() {
     let scratch = Scratch::new();
     let source = scratch.path("queued.wav");
     fs::write(&source, b"queued source must survive capture startup").unwrap();
@@ -410,15 +625,14 @@ async fn capture_cannot_overwrite_credentials_database_or_queued_media() {
     let mut socket = running.connect().await;
     let initial = hello(&mut socket, &running.instance_id).await;
     socket
-        .send(Frame::Text(
+        .send(
             serde_json::json!({
                 "id": 1, "command": "append",
                 "expected_revision": initial.queue_revision,
                 "path": source,
             })
-            .to_string()
-            .into(),
-        ))
+            .to_string(),
+        )
         .await
         .unwrap();
     let mut sequence = initial.sequence;
@@ -426,12 +640,7 @@ async fn capture_cannot_overwrite_credentials_database_or_queued_media() {
     running.stop().await;
     let alias = scratch.path("source-alias.wav");
     fs::hard_link(&source, &alias).unwrap();
-    for target in [
-        scratch.path("state/token"),
-        scratch.path("state/state.sqlite3"),
-        source,
-        alias,
-    ] {
+    for target in [scratch.path("state/state.sqlite3"), source, alias] {
         let before = fs::read(&target).unwrap();
         let result = Server::start(config(scratch.path("state"), target.clone())).await;
         let rejected = result.is_err();
@@ -447,7 +656,7 @@ async fn capture_cannot_overwrite_credentials_database_or_queued_media() {
     }
 }
 
-// Exercise transport through the same authenticated socket used by controllers;
+// Exercise transport through the same private socket used by controllers;
 // all expected positions below are server-timeline frames, not decoder state.
 struct PlaybackClient {
     socket: Socket,
@@ -469,10 +678,7 @@ impl PlaybackClient {
     async fn request(&mut self, mut command: serde_json::Value) -> Reply {
         self.id += 1;
         command["id"] = self.id.into();
-        self.socket
-            .send(Frame::Text(command.to_string().into()))
-            .await
-            .unwrap();
+        self.socket.send(command.to_string()).await.unwrap();
         loop {
             match receive(&mut self.socket).await {
                 Message::State { snapshot } => {
@@ -772,7 +978,7 @@ async fn cached_metadata_tracks_consumed_occurrence_through_prefetch_end_and_rec
     assert_eq!(client.state.transport, Transport::Paused);
     client.apply(serde_json::json!({"command": "stop"})).await;
     assert!(client.state.now_playing.is_none());
-    paused_reconnect.socket.close(None).await.unwrap();
+    paused_reconnect.socket.close().await.unwrap();
     running.stop().await;
 }
 
@@ -868,10 +1074,7 @@ async fn artwork_keeps_pipelined_commands_ordered_and_queue_state_unchanged() {
             "library_revision":before.library.revision,"size":"display"}),
         serde_json::json!({"id":2,"command":"snapshot"}),
     ] {
-        socket
-            .send(Frame::Text(command.to_string().into()))
-            .await
-            .unwrap();
+        socket.send(command.to_string()).await.unwrap();
     }
     let mut expected = 1;
     while expected <= 2 {
@@ -906,7 +1109,7 @@ async fn artwork_keeps_pipelined_commands_ordered_and_queue_state_unchanged() {
             other => panic!("unexpected message: {other:?}"),
         }
     }
-    socket.close(None).await.unwrap();
-    control.socket.close(None).await.unwrap();
+    socket.close().await.unwrap();
+    control.socket.close().await.unwrap();
     running.stop().await;
 }

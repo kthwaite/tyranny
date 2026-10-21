@@ -1,4 +1,4 @@
-//! v9 list queries through a real authenticated client and native indexing.
+//! v9 list queries through a real private Unix client and native indexing.
 use super::{
     saved_playlists::{add, create, index, ok, queue, rescan},
     *,

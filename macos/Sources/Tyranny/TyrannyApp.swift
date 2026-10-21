@@ -120,7 +120,8 @@ final class TyrannyAppDelegate: NSObject, NSApplicationDelegate {
 struct TyrannyApp: App {
     @NSApplicationDelegateAdaptor(TyrannyAppDelegate.self) private var appDelegate
     @State private var model = PlayerModel(
-        quitSuspensions: .forLaunch(arguments: CommandLine.arguments))
+        quitSuspensions: .forLaunch(arguments: CommandLine.arguments),
+        importNotes: .forLaunch(arguments: CommandLine.arguments))
     @State private var navigation = NavigationModel()
     @State private var started = false
 
@@ -169,7 +170,10 @@ struct TyrannyApp: App {
             }
             CommandMenu("Go") {
                 ForEach(Array((Destination.library + Destination.playing).enumerated()), id: \.offset) { index, destination in
-                    Button(destination.title) { navigation.destination = destination }
+                    Button(destination.title) {
+                        model.endImport()
+                        navigation.destination = destination
+                    }
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }
             }

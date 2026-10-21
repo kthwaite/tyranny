@@ -3,7 +3,7 @@ import Testing
 @testable import TyrannyCore
 
 @Suite struct QuitSuspensionTests {
-    private let note = QuitSuspension(endpoint: "ws://a", entryID: 4)
+    private let note = QuitSuspension(socketPath: "/private/tmp/a/control.sock", entryID: 4)
 
     /// A per-test preference domain; `body` runs with it, then the domain is removed.
     private func withFreshDefaults(_ body: (UserDefaults) -> Void) {
@@ -14,35 +14,35 @@ import Testing
     }
 
     @Test func noteWhenPlaying() {
-        #expect(QuitSuspension.note(endpoint: "ws://a", transport: "playing", currentID: 4) == note)
+        #expect(QuitSuspension.note(socketPath: "/private/tmp/a/control.sock", transport: "playing", currentID: 4) == note)
     }
 
     @Test func noteTreatsBufferingAsPlaying() {
-        #expect(QuitSuspension.note(endpoint: "ws://a", transport: "buffering", currentID: 4) == note)
+        #expect(QuitSuspension.note(socketPath: "/private/tmp/a/control.sock", transport: "buffering", currentID: 4) == note)
     }
 
     @Test func noNoteWhenPausedStoppedOrUnknown() {
         for transport in ["paused", "stopped", "ended", "error", nil] as [String?] {
-            #expect(QuitSuspension.note(endpoint: "ws://a", transport: transport, currentID: 4) == nil)
+            #expect(QuitSuspension.note(socketPath: "/private/tmp/a/control.sock", transport: transport, currentID: 4) == nil)
         }
-        #expect(QuitSuspension.note(endpoint: "ws://a", transport: "playing", currentID: nil) == nil)
+        #expect(QuitSuspension.note(socketPath: "/private/tmp/a/control.sock", transport: "playing", currentID: nil) == nil)
     }
 
     @Test func resumesWhenPausedOnTheSameEntry() {
-        #expect(note.shouldResume(endpoint: "ws://a", transport: "paused", currentID: 4))
+        #expect(note.shouldResume(socketPath: "/private/tmp/a/control.sock", transport: "paused", currentID: 4))
     }
 
-    @Test func doesNotResumeOnAnotherEndpoint() {
-        #expect(!note.shouldResume(endpoint: "ws://b", transport: "paused", currentID: 4))
+    @Test func doesNotResumeOnAnotherSocket() {
+        #expect(!note.shouldResume(socketPath: "/private/tmp/b/control.sock", transport: "paused", currentID: 4))
     }
 
     @Test func doesNotResumeWhenTheCurrentEntryChanged() {
-        #expect(!note.shouldResume(endpoint: "ws://a", transport: "paused", currentID: 5))
+        #expect(!note.shouldResume(socketPath: "/private/tmp/a/control.sock", transport: "paused", currentID: 5))
     }
 
     @Test func doesNotResumeWhenAlreadyPlaying() {
         for transport in ["playing", "stopped", nil] as [String?] {
-            #expect(!note.shouldResume(endpoint: "ws://a", transport: transport, currentID: 4))
+            #expect(!note.shouldResume(socketPath: "/private/tmp/a/control.sock", transport: transport, currentID: 4))
         }
     }
 
@@ -66,7 +66,7 @@ import Testing
 
     @Test func normalLaunchUsesStandardDefaults() {
         #expect(QuitSuspensionStore.suiteName(forArguments: ["/Applications/Tyranny.app/Contents/MacOS/Tyranny"]) == nil)
-        #expect(QuitSuspensionStore.suiteName(forArguments: ["Tyranny", "--url", "ws://x", "--token-file", "/t"]) == nil)
+        #expect(QuitSuspensionStore.suiteName(forArguments: ["Tyranny", "--socket", "/private/tmp/s/control.sock"]) == nil)
     }
 
     @Test func harnessLaunchesUseTheHarnessSuite() {
@@ -76,7 +76,7 @@ import Testing
             ["--ui-smoke-relaunch"],
             ["--shell-smoke-output", "/r.json"],
             ["--lifecycle-output", "/r.json", "--lifecycle-action", "observe"],
-            ["--managed-state-dir", "/s", "--managed-bind", "127.0.0.1:0"],
+            ["--managed-state-dir", "/s", "--managed-label", "dev.tyranny.spike.test", "--managed-agent-dir", "/a"],
             ["--model-gate-output", "/r.json"],
             ["--scale-output", "/r.json"],
         ]

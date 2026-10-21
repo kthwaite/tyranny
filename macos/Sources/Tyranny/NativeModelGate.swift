@@ -62,25 +62,63 @@ enum NativeModelGate {
     private static func exercise(_ model: PlayerModel, folder: String, serverPID: Int32?) async throws {
         let transport = model.transport
         let probe = WireClient()
-        for endpoint in ["ws://localhost:9865/ws", "ws://10.0.0.1:9865/ws", "ws://user@127.0.0.1:9865/ws",
-                         "ws://127.0.0.1:9865/ws?secret=x", "wss://127.0.0.1:9865/ws"] {
+        for socketPath in ["relative/control.sock", "/private/tmp/../control.sock"] {
             do {
-                try await probe.connect(endpoint: endpoint, tokenPath: "/nonexistent-token-must-not-be-opened")
-                throw Failure(message: "Unsafe endpoint was accepted")
+                try await probe.connect(socketPath: socketPath)
+                throw Failure(message: "Unsafe socket path was accepted")
             } catch let error as ServerFailure {
-                try check(error.code == "invalid_endpoint", "Endpoint validation happened after credential access")
+                try check(error.code == "invalid_socket", "Socket validation did not reject an unsafe path")
             }
         }
-        cases.append("unsafe-destinations-rejected-before-credential-access")
-        let badToken = FileManager.default.temporaryDirectory.appendingPathComponent("tyranny-model-gate-wrong-token")
-        FileManager.default.createFile(atPath: badToken.path, contents: Data(String(repeating: "0", count: 64).utf8),
-                                       attributes: [.posixPermissions: 0o600])
-        defer { try? FileManager.default.removeItem(at: badToken) }
+        cases.append("unsafe-socket-paths-rejected-before-connect")
+        let fixture = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("tyranny-wire-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        for path in [fixture.appendingPathComponent("missing/control.sock").path,
+                     fixture.appendingPathComponent("control.sock").path] {
+            do {
+                try await probe.connect(socketPath: path)
+                throw Failure(message: "A missing socket was accepted")
+            } catch let error as ServerFailure {
+                try check(error.code == "socket_unavailable", "Missing socket was not classified as unavailable")
+            }
+        }
+        cases.append("missing-parent-and-socket-classified-as-unavailable")
+        let unsafeDirectory = fixture.appendingPathComponent("unsafe")
+        try FileManager.default.createDirectory(at: unsafeDirectory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: unsafeDirectory.path)
         do {
-            try await probe.connect(endpoint: model.endpoint, tokenPath: badToken.path)
-            throw Failure(message: "Wrong bearer token was accepted")
-        } catch is ServerFailure { }
-        cases.append("real-server-rejects-wrong-native-bearer-token")
+            try await probe.connect(socketPath: unsafeDirectory.appendingPathComponent("control.sock").path)
+            throw Failure(message: "An unsafe state directory was accepted")
+        } catch let error as ServerFailure {
+            try check(error.code == "invalid_socket", "Unsafe directory was classified as bootstrap-eligible")
+        }
+        cases.append("unsafe-directory-never-classified-as-unavailable")
+        let regular = fixture.appendingPathComponent("regular")
+        try Data().write(to: regular)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: regular.path)
+        let link = fixture.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: model.socketPath)
+        for path in [regular.path, link.path] {
+            do {
+                try await probe.connect(socketPath: path)
+                throw Failure(message: "A non-socket or symbolic link was accepted")
+            } catch let error as ServerFailure {
+                try check(error.code == "invalid_socket", "Unsafe socket type was not rejected")
+            }
+        }
+        cases.append("native-socket-validation-rejects-files-and-symlinks")
+        let managedState = fixture.appendingPathComponent("state")
+        let managed = try ManagedServer.make(arguments: [
+            "Tyranny", "--managed-state-dir", managedState.path,
+            "--managed-label", "dev.tyranny.spike.model-gate",
+            "--managed-agent-dir", fixture.appendingPathComponent("agents").path
+        ])
+        try check(managed?.socketPath == managedState.appendingPathComponent("control.sock").path,
+                  "Managed socket path lost its canonical /private prefix")
+        cases.append("managed-socket-path-preserves-canonical-private-prefix")
 
         try await wait("connected empty library") { model.connected && model.snapshot != nil }
         await model.addRoot(folder)
@@ -183,7 +221,7 @@ enum NativeModelGate {
         cases.append("reconnect-clears-cache-without-replaying-queue-mutations")
 
         model.disconnect()
-        try await probe.connect(endpoint: model.endpoint, tokenPath: model.tokenPath)
+        try await probe.connect(socketPath: model.socketPath)
         let state2 = try JSONDecoder().decode(SnapshotReply.self, from: await probe.request("snapshot")).snapshot
         try check(state2.transport == "playing" && state2.queue_length == 1 && state2.underruns == 0, "Controller disconnect changed server playback")
         cases.append("controller-disconnect-preserves-server-playback")
@@ -233,7 +271,7 @@ enum NativeModelGate {
                 try check(error.code == "uncertain_outcome", "Timeout did not report uncertain outcome")
             }
             kill(pid, SIGCONT)
-            try await probe.connect(endpoint: model.endpoint, tokenPath: model.tokenPath)
+            try await probe.connect(socketPath: model.socketPath)
             let recovered = try JSONDecoder().decode(SnapshotReply.self, from: await probe.request("snapshot")).snapshot
             try check(recovered.queue_revision <= after.queue_revision + 1, "Unanswered clear was replayed")
             cases.append("real-request-timeout-closes-connection-and-never-replays")

@@ -54,7 +54,7 @@ enum NativeLifecycle {
             let reportedError = failure ?? (model.startupFailed ? model.connectionDetail : model.message)
             var report: [String: Any] = [
                 "pid": getpid(), "connected": model.connected, "action": action,
-                "endpoint": model.endpoint, "tokenPath": model.tokenPath,
+                "socketPath": model.socketPath,
                 "managedLabel": model.managedLabel as Any? ?? NSNull(),
                 "error": reportedError as Any? ?? NSNull(),
                 "startup_error": model.startupFailed ? model.connectionDetail as Any : NSNull()

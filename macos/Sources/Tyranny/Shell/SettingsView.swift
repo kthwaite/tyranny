@@ -33,15 +33,13 @@ struct ConnectionSettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Server Connection").font(.title2)
-            Text("Connect to a local Tyranny server. The token file is read when connecting; its contents are never displayed.")
+            Text("Connect to the local server through its private Unix socket.")
                 .foregroundStyle(.secondary)
             Form {
-                TextField("WebSocket URL", text: $model.endpoint)
-                    .accessibilityIdentifier("connection-url")
-                TextField("Token file", text: $model.tokenPath)
-                    .accessibilityIdentifier("connection-token-path")
+                TextField("Unix socket", text: $model.socketPath)
+                    .accessibilityIdentifier("connection-socket-path")
             }.disabled(model.serverManagementBusy)
-            Text("Use a literal loopback address, for example ws://127.0.0.1:9865/ws.")
+            Text("Use an absolute socket path in a private server state directory, ending in control.sock.")
                 .font(.caption).foregroundStyle(.secondary)
             Text(model.connectionDetail).textSelection(.enabled)
                 .accessibilityIdentifier("connection-detail")

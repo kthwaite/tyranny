@@ -2,7 +2,6 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     env,
     io::{self, Write},
-    net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -12,22 +11,21 @@ use tyranny::{
     server::{Server, ServerConfig, default_state_dir},
 };
 
-const USAGE: &str = "tyranny-server [--state-dir PATH] [--bind 127.0.0.1:9865] [--capture PATH]\n\
+const USAGE: &str = "tyranny-server [--state-dir PATH] [--capture PATH]\n\
 Default output is the real CoreAudio device; --capture writes clocked stereo f32 PCM.\n\
-Only literal loopback bind addresses are accepted. The ready JSON never contains the token.";
+Control uses the private Unix socket <state-dir>/control.sock.";
 
 #[derive(serde::Serialize)]
 struct Ready<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
-    address: SocketAddr,
+    socket_path: &'a Path,
     instance_id: &'a str,
-    token_path: &'a Path,
 }
 
 fn options() -> Result<Option<ServerConfig>> {
     let mut args = env::args_os().skip(1);
-    let (mut state_dir, mut bind, mut capture) = (None, None, None);
+    let (mut state_dir, mut capture) = (None, None);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
@@ -37,16 +35,6 @@ fn options() -> Result<Option<ServerConfig>> {
             state_dir = Some(PathBuf::from(
                 args.next().context("--state-dir needs a path")?,
             ));
-        } else if arg == "--bind" {
-            ensure!(bind.is_none(), "--bind specified twice");
-            let value = args.next().context("--bind needs a socket address")?;
-            bind = Some(
-                value
-                    .to_str()
-                    .context("--bind must be UTF-8")?
-                    .parse::<SocketAddr>()
-                    .context("invalid bind socket address")?,
-            );
         } else if arg == "--capture" {
             ensure!(capture.is_none(), "--capture specified twice");
             capture = Some(PathBuf::from(
@@ -61,7 +49,6 @@ fn options() -> Result<Option<ServerConfig>> {
             Some(path) => path,
             None => default_state_dir()?,
         },
-        bind: bind.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 9865))),
         output: match capture {
             Some(path) => OutputConfig::Capture {
                 path,
@@ -83,9 +70,8 @@ async fn run() -> Result<()> {
     let server = Server::start(config).await?;
     let ready = Ready {
         kind: "ready",
-        address: server.address(),
+        socket_path: server.socket_path(),
         instance_id: server.instance_id(),
-        token_path: server.token_path(),
     };
     let ready_result = (|| -> Result<()> {
         let mut stdout = io::stdout().lock();

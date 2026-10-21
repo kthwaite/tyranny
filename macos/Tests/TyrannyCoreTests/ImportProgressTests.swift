@@ -185,11 +185,44 @@ import Testing
         #expect(ImportSession.afterAddRoot(rootID: 8, rootsBefore: 1, current: nil, baseline: nil) == nil)
     }
 
+    private func sessionAt(_ stage: ImportProgress.Stage) -> ImportSession {
+        var s = session()
+        let library: LibraryState
+        switch stage {
+        case .empty: library = self.library(scan("complete"))
+        case .done: library = self.library(scan("complete"), tracks: 5)
+        case .stopped: library = self.library(scan("failed"))
+        default: library = self.library(scan("indexing", processed: 1, total: 10))
+        }
+        _ = s.progress(library: library)
+        return s
+    }
+
     @Test func addAfterEmptyRestartsSession() {
-        let s = ImportSession.afterAddRoot(rootID: 8, rootsBefore: 1,
-                                           current: ImportSession(rootID: 7, baseline: nil),
-                                           baseline: nil)
+        let s = ImportSession.afterAddRoot(rootID: 8, rootsBefore: 1, current: sessionAt(.empty), baseline: nil)
         #expect(s?.rootID == 8)
+    }
+
+    @Test func addWhileDoneStartsNoSession() {
+        #expect(ImportSession.afterAddRoot(rootID: 8, rootsBefore: 1, current: sessionAt(.done), baseline: nil) == nil)
+    }
+
+    @Test func addWhileStoppedStartsNoSession() {
+        #expect(ImportSession.afterAddRoot(rootID: 8, rootsBefore: 1, current: sessionAt(.stopped), baseline: nil) == nil)
+    }
+
+    @Test func addWhileImportingStartsNoSession() {
+        #expect(ImportSession.afterAddRoot(rootID: 8, rootsBefore: 1, current: sessionAt(.indexing), baseline: nil) == nil)
+    }
+
+    @Test func cancelRetryBringsBackTheStoppedScreen() {
+        var s = session()
+        let failed = library(scan("failed", error: "gone"))
+        let before = s.progress(library: failed)
+        s.retry(baseline: failed.scan)
+        #expect(s.progress(library: failed).stage == .preparing)
+        s.cancelRetry()
+        #expect(s.progress(library: failed) == before)
     }
 
     @Test func launchDuringFirstImportStartsSession() {
@@ -202,5 +235,36 @@ import Testing
         #expect(ImportSession.atLaunch(library: library(scan("idle"))) == nil)
         #expect(ImportSession.atLaunch(library: library(scan("indexing"), roots: 0)) == nil)
         #expect(ImportSession.atLaunch(library: library(scan("indexing", root: nil))) == nil)
+    }
+
+    private let note = ImportNote(socketPath: "/private/tmp/a/control.sock", rootID: 7)
+
+    @Test func noteRestoresWhileTheRootIsScanning() {
+        let lib = library(scan("indexing", processed: 3, total: 10), tracks: 40)
+        #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/a/control.sock")?.rootID == 7)
+        #expect(ImportSession.atLaunch(library: library(scan("discovering"), tracks: 2), note: note,
+                                       socketPath: "/private/tmp/a/control.sock")?.rootID == 7)
+    }
+
+    @Test func noteForAnotherSocketIsIgnored() {
+        let lib = library(scan("indexing"), tracks: 40)
+        #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/b/control.sock") == nil)
+    }
+
+    @Test func noteForAnotherRootIsIgnored() {
+        let lib = library(scan("indexing", root: 9), tracks: 40)
+        #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/a/control.sock") == nil)
+    }
+
+    @Test func noteIsIgnoredWhenTheScanIsNotActive() {
+        for phase in ["complete", "idle", "failed", "interrupted"] {
+            let lib = library(scan(phase), tracks: 40)
+            #expect(ImportSession.atLaunch(library: lib, note: note, socketPath: "/private/tmp/a/control.sock") == nil)
+        }
+    }
+
+    @Test func withoutANoteTheNoTracksRuleApplies() {
+        #expect(ImportSession.atLaunch(library: library(scan("indexing")), note: nil, socketPath: "/private/tmp/a/control.sock")?.rootID == 7)
+        #expect(ImportSession.atLaunch(library: library(scan("indexing"), tracks: 5), note: nil, socketPath: "/private/tmp/a/control.sock") == nil)
     }
 }

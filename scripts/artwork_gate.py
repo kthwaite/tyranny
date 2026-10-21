@@ -10,12 +10,11 @@ import selectors
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 import zlib
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket
+from server_gate import UnixSocket, run_directory
 
 
 def png(path, colour):
@@ -45,7 +44,7 @@ def main():
     args = parser.parse_args()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix='run-', dir=work))
+    run = run_directory(work)
     music = run / 'Music'
     music.mkdir()
     colours = {}
@@ -76,7 +75,7 @@ def main():
     def start(offline=False):
         nonlocal process, client, ready
         index = len(report['launches'])
-        command = [str(Path(args.server).resolve()), '--state-dir', str(run / 'state'), '--bind', '127.0.0.1:0', '--capture', str(run / f'capture-{index}.f32')]
+        command = [str(Path(args.server).resolve()), '--state-dir', str(run / 'state'), '--capture', str(run / f'capture-{index}.f32')]
         environment = os.environ.copy()
         if offline:
             for key in ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']:
@@ -90,7 +89,7 @@ def main():
             assert selector.select(20), 'Daemon startup timed out'
         ready = json.loads(process.stdout.readline())
         report['launches'].append({'command': command, 'ready': ready, 'offline_proxy': offline})
-        client = WebSocket(ready['address'], Path(ready['token_path']).read_text().strip())
+        client = UnixSocket(ready['socket_path'])
 
     def stop():
         nonlocal client, process
@@ -140,7 +139,7 @@ def main():
 
     def native(mode):
         folder = run / ('native-' + mode)
-        command = [str(Path(args.app).resolve()), '--url', 'ws://' + ready['address'] + '/ws', '--token-file', ready['token_path'], '--artwork-smoke-output', str(folder), '--artwork-smoke-mode', mode, '--artwork-music-folder', str(music), '--artwork-green-source', str(colours['green']), '--ui-driver', str(Path(args.ui_driver).resolve())]
+        command = [str(Path(args.app).resolve()), '--socket', ready['socket_path'], '--artwork-smoke-output', str(folder), '--artwork-smoke-mode', mode, '--artwork-music-folder', str(music), '--artwork-green-source', str(colours['green']), '--ui-driver', str(Path(args.ui_driver).resolve())]
         with (run / f'native-{mode}.stdout').open('w') as stdout, (run / f'native-{mode}.stderr').open('w') as stderr:
             result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=180)
         assert result.returncode == 0, result.returncode

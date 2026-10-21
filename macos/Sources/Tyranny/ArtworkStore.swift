@@ -46,8 +46,7 @@ struct ArtworkImage: @unchecked Sendable {
 @MainActor @Observable
 final class ArtworkStore {
     private struct Context: Equatable {
-        let endpoint: String
-        let tokenPath: String
+        let socketPath: String
         let instance: String
         let revision: UInt64
     }
@@ -77,10 +76,10 @@ final class ArtworkStore {
     private static let maximumEntries = 256
     private static let maximumBytes = 24 * 1024 * 1024
 
-    func synchronize(endpoint: String, tokenPath: String, instance: String?, revision: UInt64?, entryID: UInt64?, invalidate: Bool = false) {
+    func synchronize(socketPath: String, instance: String?, revision: UInt64?, entryID: UInt64?, invalidate: Bool = false) {
         let next: Context?
         if let instance, let revision {
-            next = Context(endpoint: endpoint, tokenPath: tokenPath, instance: instance, revision: revision)
+            next = Context(socketPath: socketPath, instance: instance, revision: revision)
         } else {
             next = nil
         }
@@ -168,7 +167,7 @@ final class ArtworkStore {
             let value: ArtworkImage
             do {
                 if lane.wire.instanceID == nil {
-                    try await lane.wire.connect(endpoint: context.endpoint, tokenPath: context.tokenPath)
+                    try await lane.wire.connect(socketPath: context.socketPath)
                 }
                 guard lane.wire.instanceID == context.instance else {
                     throw ServerFailure(code: "artwork_session_changed", message: "Artwork belongs to a different server session.")

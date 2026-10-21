@@ -4,14 +4,12 @@ import Foundation
 /// Development-only, per-login launchd ownership. The daemon owns playback; the app only pauses it on quit.
 @MainActor
 final class ManagedServer {
-    let endpoint: String
-    let tokenPath: String
+    let socketPath: String
     let label: String
     let logPath: String
     private let state: URL
     private let agentDirectory: URL
     private let helper: URL
-    private let bind: String
     private let capture: String?
     private let home: String
     private var operation = false
@@ -24,7 +22,11 @@ final class ManagedServer {
     }
 
     static func make(arguments: [String] = CommandLine.arguments) throws -> ManagedServer? {
-        let names = ["--managed-state-dir", "--managed-bind", "--managed-label", "--managed-agent-dir", "--managed-capture"]
+        let obsolete = ["--url", "--token-file", "--managed-bind"]
+        if let option = arguments.first(where: { argument in obsolete.contains(where: { argument == $0 || argument.hasPrefix($0 + "=") }) }) {
+            throw Failure(message: "\(option) is no longer supported. Use --socket PATH, or managed state-directory options.")
+        }
+        let names = ["--managed-state-dir", "--managed-label", "--managed-agent-dir", "--managed-capture"]
         var values: [String: String] = [:]
         for (index, argument) in arguments.enumerated() where names.contains(argument) {
             guard values[argument] == nil, index + 1 < arguments.count,
@@ -33,36 +35,47 @@ final class ManagedServer {
             }
             values[argument] = arguments[index + 1]
         }
-        let unmanaged = arguments.contains("--url") || arguments.contains("--token-file")
+        let sockets = arguments.indices.filter { arguments[$0] == "--socket" }
+        guard sockets.count <= 1,
+              sockets.allSatisfy({ $0 + 1 < arguments.count && !arguments[$0 + 1].hasPrefix("--") }) else {
+            throw Failure(message: "--socket requires exactly one path.")
+        }
+        if arguments.contains(where: { $0.hasPrefix("--socket=") }) {
+            throw Failure(message: "Use --socket PATH, with a separate path argument.")
+        }
+        let unmanaged = !sockets.isEmpty
         if values.isEmpty && unmanaged { return nil }
-        guard !unmanaged else { throw Failure(message: "Do not combine --url/--token-file with managed server options.") }
+        guard !unmanaged else { throw Failure(message: "Do not combine --socket with managed server options.") }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let custom = !values.isEmpty
         if custom {
-            guard names.prefix(4).allSatisfy({ values[$0] != nil }) else {
-                throw Failure(message: "Isolated management requires --managed-state-dir, --managed-bind, --managed-label and --managed-agent-dir together.")
+            guard names.prefix(3).allSatisfy({ values[$0] != nil }) else {
+                throw Failure(message: "Isolated management requires --managed-state-dir, --managed-label and --managed-agent-dir together.")
             }
         }
         let label = values["--managed-label"] ?? "dev.tyranny.server"
         guard !custom || (label.hasPrefix("dev.tyranny.spike.") && label.count > 18 && label.count < 128 && label.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") })) else {
             throw Failure(message: "An isolated label must be dev.tyranny.spike.UNIQUE (ASCII letters, digits, dots or hyphens).")
         }
-        let bind = values["--managed-bind"] ?? "127.0.0.1:9865"
-        guard bind.hasPrefix("127.0.0.1:"), let port = UInt16(bind.dropFirst(10)), port > 0,
-              bind == "127.0.0.1:\(port)" else {
-            throw Failure(message: "Managed server bind must be literal 127.0.0.1:PORT, with PORT from 1 through 65535.")
-        }
         func path(_ value: String) throws -> URL {
             guard value.hasPrefix("/"), !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
                   !value.split(separator: "/").contains("..") else {
                 throw Failure(message: "Managed paths must be absolute, without parent traversal or control characters.")
             }
-            let url = URL(fileURLWithPath: value).standardizedFileURL
+            // Normalize lexically: Foundation standardization rewrites /private/tmp
+            // to its /tmp symlink, which our filesystem ownership checks reject.
+            let components = value.split(separator: "/").filter { $0 != "." }
+            let url = URL(fileURLWithPath: "/" + components.joined(separator: "/"))
             guard url.path != "/" else { throw Failure(message: "The filesystem root cannot be a managed directory.") }
             return url
         }
         let state = try path(values["--managed-state-dir"] ?? "\(home)/Library/Application Support/tyranny")
         let agents = try path(values["--managed-agent-dir"] ?? "\(home)/Library/LaunchAgents")
+        let socketPath = state.appendingPathComponent("control.sock").path
+        let address = sockaddr_un()
+        guard socketPath.utf8.count < MemoryLayout.size(ofValue: address.sun_path) else {
+            throw Failure(message: "The managed state directory produces a Unix socket path that is too long for this platform.")
+        }
         if custom {
             let defaultState = "\(home)/Library/Application Support/tyranny"
             let defaultAgents = "\(home)/Library/LaunchAgents"
@@ -78,26 +91,24 @@ final class ManagedServer {
                 throw Failure(message: "Managed capture must be a .f32 file directly inside the isolated state directory.")
             }
         }
-        return ManagedServer(state: state, agents: agents, bind: bind, label: label, capture: capture, home: home)
+        return ManagedServer(state: state, agents: agents, label: label, capture: capture, home: home)
     }
 
-    private init(state: URL, agents: URL, bind: String, label: String, capture: String?, home: String) {
+    private init(state: URL, agents: URL, label: String, capture: String?, home: String) {
         self.state = state
         agentDirectory = agents
-        self.bind = bind
         self.label = label
         self.capture = capture
         self.home = home
         helper = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/tyranny-server")
-        endpoint = "ws://\(bind)/ws"
-        tokenPath = state.appendingPathComponent("token").path
+        socketPath = state.appendingPathComponent("control.sock").path
         logPath = state.appendingPathComponent("server.log").path
     }
 
     func ensureRunning() async throws {
         try begin()
         defer { operation = false }
-        // A manually started, authenticated daemon is always preferable to a new job.
+        // A manually started daemon on this private socket is preferable to a new job.
         if await ready() { return }
         try Task.checkCancellation()
         try prepare()
@@ -118,7 +129,7 @@ final class ManagedServer {
             // bootout gives the Rust owner SIGTERM and its checkpoint window; -k is a kill.
             try await stopOwnedJob()
         } else if await ready() {
-            throw failure("A manual server is using this endpoint; it will not be replaced.")
+            throw failure("A manual server is using this socket; it will not be replaced.")
         }
         try await installAndStart()
         try await waitUntilReady()
@@ -149,7 +160,7 @@ final class ManagedServer {
     }
 
     private var helperArguments: [String] {
-        var result = [helper.path, "--state-dir", state.path, "--bind", bind]
+        var result = [helper.path, "--state-dir", state.path]
         if let capture { result += ["--capture", capture] }
         return result
     }
@@ -232,14 +243,14 @@ final class ManagedServer {
     private func preflight() async throws {
         let result = try await command(helper.path, ["--help"], log: state.appendingPathComponent("helper-check.log"))
         guard result.status == 0, result.text.contains("tyranny-server") else {
-            throw failure("The bundled server cannot start (exit \(result.status)). Install the development decoder dependencies (brew install ffmpeg), then rebuild the app with scripts/build_macos.sh. Details: \(state.appendingPathComponent("helper-check.log").path). \(result.text.prefix(3000))")
+            throw failure("The bundled server cannot start (exit \(result.status)). Reinstall the app or rebuild it with scripts/build_macos.sh release. Release apps include their decoder libraries. Details: \(state.appendingPathComponent("helper-check.log").path). \(result.text.prefix(3000))")
         }
     }
 
     private func ready() async -> Bool {
         let client = WireClient()
         defer { client.disconnect() }
-        do { try await client.connect(endpoint: endpoint, tokenPath: tokenPath); return true }
+        do { try await client.connect(socketPath: socketPath); return true }
         catch { return false }
     }
 
@@ -250,7 +261,7 @@ final class ManagedServer {
             if await ready() { return }
             try await Task.sleep(for: .milliseconds(200))
         } while ContinuousClock.now < deadline
-        throw failure("Background server did not complete an authenticated protocol-v4 handshake within 30 seconds. Check decoder dependencies, port conflicts, and folder permissions; then Retry.")
+        throw failure("Background server did not complete a protocol-v9 handshake within 30 seconds. Check decoder dependencies, socket conflicts, and folder permissions; then Retry.")
     }
 
     private func stopOwnedJob() async throws {

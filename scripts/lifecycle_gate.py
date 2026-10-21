@@ -12,15 +12,13 @@ import plistlib
 import selectors
 import shutil
 import signal
-import socket
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket, fixture
+from server_gate import UnixSocket, fixture, private_socket, run_directory
 
 
 def main():
@@ -32,7 +30,7 @@ def main():
     args = parser.parse_args()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix="run-", dir=work))
+    run = run_directory(work)
     os.chmod(run, 0o700)
     app = run / "Tyranny.app"
     source_app = Path(args.app).resolve()
@@ -44,13 +42,10 @@ def main():
     label = "dev.tyranny.spike." + uuid.uuid4().hex
     agents = run / "agents"
     state = run / "state"
-    with socket.socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        port = reservation.getsockname()[1]
-    address = f"127.0.0.1:{port}"
+    socket_path = str(state / "control.sock")
     target = f"{domain}/{label}"
     plist = agents / f"{label}.plist"
-    report = {"run_directory": str(run), "label": label, "address": address,
+    report = {"run_directory": str(run), "label": label, "socket_path": socket_path,
               "launch_method": "/usr/bin/open -n -W (LaunchServices)",
               "environment": environment, "output": "coreaudio" if args.coreaudio else "clocked_pcm",
               "cases": [], "commands": [], "native": [],
@@ -92,7 +87,7 @@ def main():
         argv = ["/usr/bin/open", "-n", "-W",
                 "--stdout", str(run / f"native-{name}.stdout"), "--stderr", str(run / f"native-{name}.stderr"),
                 str(bundle), "--args",
-                "--managed-state-dir", str(managed_state), "--managed-bind", address,
+                "--managed-state-dir", str(managed_state),
                 "--managed-label", managed_label, "--managed-agent-dir", str(agents),
                 "--lifecycle-output", str(output), "--lifecycle-action", action, "--ui-driver", str(driver)]
         if not args.coreaudio:
@@ -158,8 +153,7 @@ def main():
         native = json.loads(output.read_text())
         report["native"].append({"name": name, "path": str(output), "report": native})
         assert native["action"] == action and native["managedLabel"] == managed_label, native
-        assert native["endpoint"] == f"ws://{address}/ws", native
-        assert native["tokenPath"] == str(managed_state / "token"), native
+        assert native["socketPath"] == str(managed_state / "control.sock"), native
         assert native["connected"] == expect_connected, native
         screenshot = output.with_suffix(".png")
         assert screenshot.is_file() and screenshot.stat().st_size > 0, f"Actual native window capture missing: {screenshot}"
@@ -179,9 +173,7 @@ def main():
         error = None
         while time.monotonic() < deadline:
             try:
-                token = (state / "token").read_text().strip()
-                client = WebSocket(address, token)
-                assert client.status == 101, "Real daemon did not authenticate"
+                client = UnixSocket(socket_path)
                 if previous is not None and client.hello["instance_id"] == previous:
                     client.close()
                     time.sleep(0.1)
@@ -191,7 +183,7 @@ def main():
             except (OSError, AssertionError, ConnectionError) as caught:
                 error = str(caught)
                 time.sleep(0.15)
-        raise AssertionError(f"Authenticated daemon readiness timed out: {error}")
+        raise AssertionError(f"Peer-verified daemon readiness timed out: {error}")
 
     def scan(client, root_id=None):
         if root_id is not None:
@@ -218,14 +210,10 @@ def main():
         assert configured["Label"] == label and str(helper) in configured["ProgramArguments"]
         assert configured["KeepAlive"] is True and configured["Umask"] == 63
         assert state.stat().st_mode & 0o777 == 0o700
-        assert (state / "token").stat().st_mode & 0o777 == 0o600
+        private_socket(socket_path)
         assert (state / "server.log").stat().st_mode & 0o777 == 0o600
-        unauthorized = WebSocket(address)
-        assert unauthorized.status == 401
-        wrong = WebSocket(address, "not-the-token")
-        assert wrong.status == 401
-        record("absent-daemon-installed-by-launchservices-app-and-authenticated-v4", hello=control.hello,
-               launchd=ctl("print", target).stdout, unauthorized_status=401)
+        record("absent-daemon-installed-by-launchservices-app-and-peer-verified-v9", hello=control.hello,
+               launchd=ctl("print", target).stdout, socket_path=socket_path)
 
         root = run / "Music – 日本語"
         root.mkdir()
@@ -333,11 +321,11 @@ def main():
 
         launch("uninstall", action="uninstall", expect_connected=False)
         assert not plist.exists() and ctl("print", target, check=False).returncode != 0
-        assert (state / "state.sqlite3").is_file() and (state / "token").is_file() and song.is_file()
+        assert (state / "state.sqlite3").is_file() and song.is_file()
         record("native-explicit-uninstall-removes-only-job-and-preserves-data")
 
         # Start a real manually-owned process; the copied app must reuse, never kill it.
-        manual_argv = [str(helper), "--state-dir", str(state), "--bind", address]
+        manual_argv = [str(helper), "--state-dir", str(state)]
         if not args.coreaudio:
             manual_argv += ["--capture", str(state / "manual-output.f32")]
         with (run / "manual.stderr").open("w") as stderr:

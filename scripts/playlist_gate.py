@@ -2,8 +2,8 @@
 """Exercise saved playlists against real daemons and optional displayed SwiftUI.
 
 Uses isolated state and clock-paced PCM capture, never the user's audio device.
-An optional prior protocol-v3 executable creates a genuine schema-2 migration
-fixture. No mutation retry or mocked persistence/playback path.
+Exercises current-runtime API and durable restart behavior.
+No mutation retry or mocked persistence/playback path.
 """
 import argparse
 import json
@@ -13,24 +13,22 @@ import selectors
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import wave
 
 sys.dont_write_bytecode = True
-from server_gate import WebSocket
+from server_gate import UnixSocket, run_directory
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', default='target/release/tyranny-server')
-    parser.add_argument('--legacy-server', help='Prior protocol-v3/schema-2 executable for real migration coverage')
     parser.add_argument('--app', help='Opt-in native app executable; requires an unlocked desktop and AX permission')
     parser.add_argument('--ui-driver', default='target/native-ui-driver')
     parser.add_argument('--work-dir', default='target/playlist-gate')
     args = parser.parse_args()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix='run-', dir=work))
+    run = run_directory(work)
     state = run / 'state'
     music = run / 'Music – 日本語'
     music.mkdir()
@@ -56,15 +54,15 @@ def main():
         report['cases'].append({'name': name, 'passed': True, **details})
         print('Passed ' + name, flush=True)
 
-    def connect(version=9):
-        client = WebSocket(ready['address'], Path(ready['token_path']).read_text().strip(), expected_version=version)
+    def connect():
+        client = UnixSocket(ready['socket_path'])
         connections.append(client)
         return client
 
-    def start(binary, version=9):
+    def start(binary):
         nonlocal process, ready
         index = len(report['launches'])
-        command = [str(Path(binary).resolve()), '--state-dir', str(state), '--bind', '127.0.0.1:0',
+        command = [str(Path(binary).resolve()), '--state-dir', str(state),
                    '--capture', str(run / f'capture-{index}.f32')]
         log = (run / f'server-{index}.stderr').open('w')
         logs.append(log)
@@ -76,7 +74,7 @@ def main():
         assert line, f'Daemon startup failed; see {log.name}'
         ready = json.loads(line)
         report['launches'].append({'command': command, 'ready': ready})
-        return connect(version)
+        return connect()
 
     def stop(crash=False):
         nonlocal process
@@ -121,8 +119,7 @@ def main():
 
     def native(client, relaunch=False, drag=False):
         folder = run / ('native-drag' if drag else 'native-relaunch' if relaunch else 'native-initial')
-        command = [str(Path(args.app).resolve()), '--url', 'ws://' + ready['address'] + '/ws',
-                   '--token-file', ready['token_path'], '--drag-smoke-output' if drag else '--playlist-smoke-output', str(folder),
+        command = [str(Path(args.app).resolve()), '--socket', ready['socket_path'], '--drag-smoke-output' if drag else '--playlist-smoke-output', str(folder),
                    '--ui-driver', str(Path(args.ui_driver).resolve())]
         if relaunch:
             command.append('--playlist-smoke-relaunch')
@@ -134,34 +131,27 @@ def main():
         return payload
 
     try:
-        old = None
-        if args.legacy_server:
-            a = start(args.legacy_server, version=3)
-        else:
-            a = start(args.server)
+        a = start(args.server)
         root_id = a.request('add_root', path=str(music))['root']['id']
         a.wait(lambda s: s['library']['scan']['phase'] == 'complete' and s['library']['tracks'] == 105, seconds=30)
         tracks = library(a)
         track_ids = [entry['id'] for entry in tracks['entries']]
         assert len(track_ids) == 105
-        if args.legacy_server:
-            added = a.request('append_track', expected_revision=a.state()['queue_revision'],
-                              library_revision=tracks['revision'], track_id=track_ids[0])
-            a.request('play', entry_id=added['entry_id'])
-            a.request('pause')
-            a.request('seek', entry_id=added['entry_id'], position_frames=24000)
-            a.request('set_gain', mode='album')
-            old = {'queue': queue(a), 'snapshot': a.state()}
-            stop()
-            a = start(args.server)
-            migrated = a.state()
-            assert queue(a) == old['queue']
-            for field in ['queue_revision', 'current_id', 'position_frames', 'settings']:
-                assert migrated[field] == old['snapshot'][field], field
-            assert migrated['transport'] == 'paused' and migrated['library']['tracks'] == 105
-            with sqlite3.connect(state / 'state.sqlite3') as database:
-                assert database.execute('PRAGMA user_version').fetchone()[0] == 4
-            record('real-schema2-migration-preserves-library-queue-selection-settings', snapshot=migrated)
+        added = a.request('append_track', expected_revision=a.state()['queue_revision'],
+                          library_revision=tracks['revision'], track_id=track_ids[0])
+        a.request('play', entry_id=added['entry_id'])
+        a.request('pause')
+        a.request('seek', entry_id=added['entry_id'], position_frames=24000)
+        a.request('set_gain', mode='album')
+        old = {'queue': queue(a), 'snapshot': a.state()}
+        stop()
+        a = start(args.server)
+        restored = a.state()
+        assert queue(a) == old['queue']
+        for field in ['queue_revision', 'current_id', 'position_frames', 'settings']:
+            assert restored[field] == old['snapshot'][field], field
+        assert restored['transport'] == 'paused' and restored['library']['tracks'] == 105
+        record('restart-preserves-library-queue-selection-settings', snapshot=restored)
         a.request('clear', expected_revision=a.state()['queue_revision'])
         b = connect()
         initial_catalog_revision = a.state()['playlists_revision']

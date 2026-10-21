@@ -5,9 +5,8 @@ import TyrannyCore
 
 @MainActor @Observable
 final class PlayerModel {
-    var endpoint = "ws://127.0.0.1:9865/ws"
-    var tokenPath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/tyranny/token").path
+    var socketPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/tyranny/control.sock").path
     private(set) var connection = "disconnected" {
         didSet { updateMediaControls(); updateArtwork() }
     }
@@ -62,28 +61,31 @@ final class PlayerModel {
     #if DEBUG
     /// Shown by the import screen instead of `importProgress`.
     var importOverride: ImportProgress?
+    /// Shown as the folder line while `importOverride` is set.
+    var importFolderOverride: String?
     #endif
     /// The hello arrives before `connected` is true, and `play` needs `connected`.
     /// So the decision waits here until the connection loop marks the connection connected.
     @ObservationIgnored private var launchResumePending = false
     /// Where quit notes live. The app picks it from the launch arguments.
     @ObservationIgnored private let quitSuspensions: QuitSuspensionStore
+    /// Where the live import's note lives. It shares the quit note's defaults suite.
+    @ObservationIgnored private let importNotes: ImportNoteStore
     /// The server's page limit.
     private static let catalogLimit = 500
     @ObservationIgnored var activeDrag: TrackDrag?
 
-    init(quitSuspensions: QuitSuspensionStore) {
+    init(quitSuspensions: QuitSuspensionStore, importNotes: ImportNoteStore) {
         self.quitSuspensions = quitSuspensions
+        self.importNotes = importNotes
         let arguments = CommandLine.arguments
-        for (index, argument) in arguments.enumerated() where index + 1 < arguments.count {
-            if argument == "--url" { endpoint = arguments[index + 1] }
-            if argument == "--token-file" { tokenPath = arguments[index + 1] }
-        }
         do {
             managedServer = try ManagedServer.make(arguments: arguments)
+            if let index = arguments.firstIndex(of: "--socket") {
+                socketPath = arguments[index + 1]
+            }
             if let managedServer {
-                endpoint = managedServer.endpoint
-                tokenPath = managedServer.tokenPath
+                socketPath = managedServer.socketPath
             }
         } catch {
             startupFailed = true
@@ -104,7 +106,7 @@ final class PlayerModel {
     var canMutate: Bool { connected && !busy && !serverManagementBusy }
     var managesServer: Bool {
         guard let managedServer else { return false }
-        return endpoint == managedServer.endpoint && tokenPath == managedServer.tokenPath
+        return socketPath == managedServer.socketPath
     }
     var managedLabel: String? { managesServer ? managedServer?.label : nil }
     var managedLogPath: String? { managesServer ? managedServer?.logPath : nil }
@@ -127,7 +129,7 @@ final class PlayerModel {
 
     private func updateArtwork(invalidate: Bool = false) {
         artwork.synchronize(
-            endpoint: endpoint, tokenPath: tokenPath,
+            socketPath: socketPath,
             instance: connected ? wire.instanceID : nil,
             revision: connected ? snapshot?.library.revision : nil,
             entryID: connected ? snapshot?.now_playing?.entry_id : nil,
@@ -145,7 +147,7 @@ final class PlayerModel {
     /// It skips `mutate`, so a busy model cannot block quitting.
     func suspendForQuit() async {
         guard connected, let state = snapshot,
-              let note = QuitSuspension.note(endpoint: endpoint, transport: state.transport,
+              let note = QuitSuspension.note(socketPath: socketPath, transport: state.transport,
                                              currentID: state.current_id) else { return }
         let reply = await Deadline.race(.seconds(1)) { try await self.send("pause") as Applied }
         guard reply != nil else { return }
@@ -237,14 +239,14 @@ final class PlayerModel {
             var attemptedBootstrap = false
             while wantsConnection, generation == session, !Task.isCancelled {
                 connection = "connecting"
-                connectionDetail = "Connecting to \(endpoint)…"
+                connectionDetail = "Connecting to \(socketPath)…"
                 do {
-                    try await wire.connect(endpoint: endpoint, tokenPath: tokenPath)
+                    try await wire.connect(socketPath: socketPath)
                     let resume = launchResumePending
                     launchResumePending = false
                     guard generation == session, wantsConnection else { return }
                     connection = "connected"
-                    connectionDetail = endpoint
+                    connectionDetail = socketPath
                     connectionTask = nil
                     refresh()
                     if resume { transport.play() }
@@ -254,7 +256,7 @@ final class PlayerModel {
                     guard generation == session, wantsConnection, !Task.isCancelled else { return }
                     if !attemptedBootstrap, managedEnabled, managesServer,
                        let failure = error as? ServerFailure,
-                       ["token_read_failed", "connection_lost"].contains(failure.code),
+                       ["socket_unavailable", "connection_lost"].contains(failure.code),
                        let managedServer {
                         attemptedBootstrap = true
                         connectionDetail = "Starting the local background server…"
@@ -288,13 +290,16 @@ final class PlayerModel {
         if newInstance || previous?.current_id != state.current_id { playbackSession &+= 1 }
         if newInstance, !launchImportChecked {
             launchImportChecked = true
-            if importSession == nil { setImportSession(ImportSession.atLaunch(library: state.library)) }
+            let note = importNotes.take()
+            if importSession == nil {
+                setImportSession(ImportSession.atLaunch(library: state.library, note: note, socketPath: socketPath))
+            }
         }
         updateImportProgress()
         if newInstance, !launchSuspensionChecked {
             launchSuspensionChecked = true
             if let note = quitSuspensions.take(),
-               note.shouldResume(endpoint: endpoint, transport: state.transport, currentID: state.current_id) {
+               note.shouldResume(socketPath: socketPath, transport: state.transport, currentID: state.current_id) {
                 launchResumePending = true
             }
         }
@@ -394,6 +399,9 @@ final class PlayerModel {
     }
     /// The path of the root being imported, abbreviated, once the root list has it.
     var importRootPath: String? {
+        #if DEBUG
+        if importOverride != nil, let importFolderOverride { return importFolderOverride }
+        #endif
         guard let importRootID, let root = roots?.entries.first(where: { $0.id == importRootID }) else { return nil }
         return DisplayFormat.abbreviatedPath(root.path, home: NSHomeDirectory())
     }
@@ -404,15 +412,36 @@ final class PlayerModel {
     }
     /// Try Again: a fresh baseline, then a rescan of the same root.
     func retryImport() {
-        guard let scan = snapshot?.library.scan, var session = importSession else { return }
+        guard canMutate, let scan = snapshot?.library.scan, var session = importSession else { return }
         session.retry(baseline: scan)
         importSession = session
         updateImportProgress()
-        rescan(session.rootID)
+        busy = true; message = nil
+        let rootID = session.rootID
+        Task {
+            defer { busy = false }
+            do {
+                let _: ScanAccepted = try await request("rescan", ["root_id": .uint(rootID)])
+                refresh()
+            } catch {
+                // The rescan never started, so the old Stopped screen comes back.
+                if var current = importSession, current.rootID == rootID {
+                    current.cancelRetry()
+                    importSession = current
+                    updateImportProgress()
+                }
+                message = error.localizedDescription
+            }
+        }
     }
     private func setImportSession(_ session: ImportSession?) {
         importSession = session
         importRootID = session?.rootID
+        if let session {
+            importNotes.save(ImportNote(socketPath: socketPath, rootID: session.rootID))
+        } else {
+            importNotes.clear()
+        }
         importProgress = nil
         updateImportProgress()
     }
