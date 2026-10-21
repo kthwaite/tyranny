@@ -11,15 +11,24 @@ import TyrannyCore
 final class StationsModel {
     @ObservationIgnored private weak var player: PlayerModel?
     @ObservationIgnored private var session: UInt64?
-    @ObservationIgnored private lazy var catalog = StationCatalog(
-        send: { [weak self] request in
+    @ObservationIgnored private lazy var catalog = StationCatalog(send: sendRequest, addStream: addStream)
+    /// The directory search behind Find Stations…. It saves through `catalog` and resets with it.
+    @ObservationIgnored private(set) lazy var directory = StationDirectory(
+        send: sendRequest, catalog: catalog, addStream: addStream)
+
+    private var sendRequest: StationCatalog.Send {
+        { [weak self] request in
             guard let player = self?.player else { throw CancellationError() }
             return try await player.sendRaw(request)
-        },
-        addStream: { [weak self] url, title, play in
+        }
+    }
+
+    private var addStream: StationCatalog.AddStream {
+        { [weak self] url, title, play in
             guard let player = self?.player else { return "Radio closed." }
             return await player.upNext.addStream(url: url, title: title, play: play)
-        })
+        }
+    }
 
     func attach(_ player: PlayerModel) { self.player = player }
 
@@ -42,6 +51,7 @@ final class StationsModel {
         if session != generation {
             session = generation
             catalog.reset()
+            directory.reset()
         }
         guard player.connected, let snapshot = player.snapshot else { return }
         sync(snapshot)
@@ -59,6 +69,14 @@ final class StationsModel {
 
     func add(name: String, url: String) async -> Bool {
         await run { await self.catalog.add(name: name, url: url) }
+    }
+
+    /// Saves a directory station as a user mutation. Its failure is in `directory.error`.
+    func save(_ station: DirectoryStation) async -> Bool {
+        let saved = await run(busy: { self.directory.error = $0 }) { await self.directory.save(station) }
+        // The sheet shows the failure; the view behind it need not.
+        if !saved { catalog.error = nil }
+        return saved
     }
 
     func update(_ id: UInt64, name: String, url: String) async -> Bool {
@@ -100,9 +118,11 @@ final class StationsModel {
     // MARK: Running
 
     /// Runs one catalog edit as a user mutation. Its failure is in `error`.
-    private func run(_ operation: @escaping @MainActor () async -> Bool) async -> Bool {
+    private func run(busy: ((String) -> Void)? = nil,
+                     _ operation: @escaping @MainActor () async -> Bool) async -> Bool {
         guard let player, player.canMutate else {
-            catalog.error = "Wait for the current command to finish."
+            let message = "Wait for the current command to finish."
+            if let busy { busy(message) } else { catalog.error = message }
             return false
         }
         return await withCheckedContinuation { continuation in
