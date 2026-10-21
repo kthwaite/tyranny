@@ -49,7 +49,7 @@ struct TrackListView: View {
                 layoutToken: list.layoutToken, factsGeneration: list.facts.generation, hidden: columns.hidden, explicit: columns.explicit,
                 playingTrackID: player.snapshot?.now_playing?.track_id,
                 revealToken: list.revealRequest?.token, selectionToken: list.commandSelectionRevision,
-                deviceGeneration: player.devices.generation)
+                deviceGeneration: player.devices.generation, canMutate: player.canMutate)
                 .overlay { emptyState }
                 .overlay(alignment: .bottom) { reorderHint }
         }
@@ -92,7 +92,7 @@ struct TrackListView: View {
     private var syncKey: SyncKey {
         SyncKey(connected: player.connected, session: player.playlistConnectionGeneration,
                 library: player.snapshot?.library.revision, history: player.snapshot?.history_revision,
-                filter: navigation.filter, browser: list.usesBrowser && navigation.columnBrowserVisible,
+                filter: navigation.effectiveFilter, browser: list.usesBrowser && navigation.columnBrowserVisible,
                 grouping: navigation.grouping(for: list.destination), source: list.liveSource)
     }
 
@@ -169,6 +169,7 @@ struct TrackListView: View {
                     Toggle(column.title, isOn: Binding(
                         get: { columns.isShown(column.id, sortFields: list.sortKeys.map(\.field)) },
                         set: { columns.setHidden(column.id, !$0) }))
+                        .accessibilityIdentifier("column-\(column.id)")
                 }
             } label: {
                 Label("Columns", systemImage: "tablecells")

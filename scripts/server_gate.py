@@ -23,7 +23,7 @@ import wave
 
 
 class WebSocket:
-    def __init__(self, address, token=None, origin=None, receive_buffer=None, expected_version=18):
+    def __init__(self, address, token=None, origin=None, receive_buffer=None, expected_version=19):
         host, port = address.rsplit(":", 1)
         self.socket = socket.create_connection((host, int(port)), timeout=8)
         if receive_buffer:

@@ -224,7 +224,7 @@ pub(super) fn execute(
                 JOIN library_roots r ON r.id=a.root_id WHERE {condition}
                 ORDER BY t.disc_number,t.track_number,t.title_sort,a.path,t.id
                 LIMIT ?{limit_parameter} OFFSET ?{offset_parameter})
-                SELECT t.id,t.asset_id,t.album_id,p.path,t.metadata,a.error
+                SELECT t.id,t.asset_id,t.album_id,p.path,t.metadata,a.error,t.liked
                 FROM track_page p JOIN library_tracks t ON t.id=p.id
                 JOIN library_assets a ON a.id=t.asset_id
                 ORDER BY p.disc_number,p.track_number,p.title_sort,p.path,p.id"
@@ -238,6 +238,7 @@ pub(super) fn execute(
                         path: row.get(3)?,
                         metadata: json(row, 4)?,
                         error: row.get(5)?,
+                        liked: row.get(6)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

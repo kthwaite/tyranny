@@ -59,7 +59,7 @@ final class AlbumGridModel {
             cache.discard(session: session)
         }
         self.session = session
-        let filter = navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filter = navigation.effectiveFilter
         var queryChanged = false
         if filter != query {
             if filter.isEmpty || needsReset {

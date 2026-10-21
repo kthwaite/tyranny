@@ -221,6 +221,7 @@ private struct MainWindow: View {
                 NativeLifecycle.startIfRequested(model)
                 NativeScale.startIfRequested(model, navigation: navigation)
                 NativeFilterSmoke.startIfRequested(model, navigation: navigation)
+                NativeLikesSmoke.startIfRequested(model, navigation: navigation)
                 NativeArtworkSmoke.startIfRequested(model, navigation: navigation)
                 NativeLyricsSmoke.startIfRequested(model)
                 NativeShellSmoke.startIfRequested(model, navigation: navigation)

@@ -96,6 +96,8 @@ final class ListModel {
     @ObservationIgnored private(set) var anchorOffset = 0
     /// The display rows in view, from the table.
     @ObservationIgnored private var visibleDisplay: Range<Int>?
+    /// Session-local viewport; survives native table recreation, not a new list description.
+    @ObservationIgnored var scrollOrigin: CGPoint?
     /// What `groupedLayout` was built for.
     @ObservationIgnored private var layoutBasis: LayoutBasis?
     @ObservationIgnored private var groupsRequest: LayoutBasis?
@@ -148,7 +150,7 @@ final class ListModel {
             discardGroups()
         }
         self.session = session
-        let filter = navigation.filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filter = navigation.effectiveFilter
         if filter != query {
             if filter.isEmpty || needsReset {
                 cancelFilter()
@@ -217,6 +219,7 @@ final class ListModel {
         anchorRowID = nil
         anchorOffset = 0
         visibleDisplay = nil
+        scrollOrigin = nil
         cache.reset(fetch: makeFetch())
         syncLayout()
     }

@@ -25,6 +25,7 @@ impl Scratch {
             let transaction = connection.transaction().unwrap();
             migrate(&transaction).unwrap();
             migrate_v5(&transaction).unwrap();
+            migrate_v9(&transaction).unwrap();
             transaction.commit().unwrap();
         }
         Library::start(database).unwrap()
@@ -139,6 +140,115 @@ async fn tracks(library: &Library) -> Page<Track> {
         LibraryReply::Tracks(page) => page,
         other => panic!("unexpected tracks reply: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn likes_publish_revision_and_validate_stale_unknown_and_noop_writes() {
+    let scratch = Scratch::new();
+    wav(&scratch.path("music/song.wav"));
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    let track_id = before.entries[0].id;
+    assert!(!before.entries[0].liked);
+    let handle = library.handle();
+    let revision = before.revision + 1;
+    for expected in [before.revision, revision] {
+        assert!(matches!(
+            handle.request(LibraryCommand::SetTrackLiked {
+                track_id, liked: true, library_revision: expected,
+            }).await.unwrap(),
+            LibraryReply::TrackLiked { track_id: id, liked: true, library_revision }
+                if id == track_id && library_revision == revision
+        ));
+        assert_eq!(library.state().revision, revision);
+        assert!(tracks(&library).await.entries[0].liked);
+    }
+    for liked in [false, true] {
+        let failure = handle
+            .request(LibraryCommand::SetTrackLiked {
+                track_id,
+                liked,
+                library_revision: before.revision,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, LibraryErrorKind::StaleRevision);
+    }
+    for id in [0, track_id + 1, u64::MAX] {
+        let failure = handle
+            .request(LibraryCommand::SetTrackLiked {
+                track_id: id,
+                liked: true,
+                library_revision: revision,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, LibraryErrorKind::Invalid);
+        assert_eq!(library.state().revision, revision);
+    }
+    assert!(matches!(
+        handle.request(LibraryCommand::SetTrackLiked {
+            track_id, liked: false, library_revision: revision,
+        }).await.unwrap(),
+        LibraryReply::TrackLiked { liked: false, library_revision, .. }
+            if library_revision == revision + 1
+    ));
+    assert!(!tracks(&library).await.entries[0].liked);
+    fs::remove_file(scratch.path("music/song.wav")).unwrap();
+    rescan(&library, root).await;
+    let unavailable_revision = library.state().revision;
+    let failure = handle
+        .request(LibraryCommand::SetTrackLiked {
+            track_id,
+            liked: true,
+            library_revision: unavailable_revision,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failure.kind, LibraryErrorKind::Invalid);
+    assert_eq!(library.state().revision, unavailable_revision);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn likes_survive_reindex_rescan_and_restart() {
+    let scratch = Scratch::new();
+    let source = scratch.path("music/song.flac");
+    flac(&source, &[("title", "Before")]);
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    let id = before.entries[0].id;
+    library
+        .handle()
+        .request(LibraryCommand::SetTrackLiked {
+            track_id: id,
+            liked: true,
+            library_revision: before.revision,
+        })
+        .await
+        .unwrap();
+    flac(&source, &[("title", "After reindex")]);
+    reindex(&library, vec![source.clone()]).await.unwrap();
+    let indexed = tracks_until(&library, |page| {
+        page.entries[0].metadata.title == "After reindex"
+    })
+    .await;
+    assert_eq!(indexed.entries[0].id, id);
+    assert!(indexed.entries[0].liked);
+    library.shutdown().unwrap();
+    let library = scratch.library();
+    assert!(tracks(&library).await.entries[0].liked);
+    flac(&source, &[("title", "After rescan")]);
+    rescan(&library, root).await;
+    let scanned = tracks(&library).await;
+    assert_eq!(scanned.entries[0].id, id);
+    assert_eq!(scanned.entries[0].metadata.title, "After rescan");
+    assert!(scanned.entries[0].liked);
+    library.shutdown().unwrap();
 }
 async fn albums(library: &Library) -> Page<Album> {
     match library
@@ -1036,6 +1146,7 @@ fn ordered_track_pages_keep_path_ties_filters_and_availability() {
     let mut connection = Connection::open_in_memory().unwrap();
     let transaction = connection.transaction().unwrap();
     migrate(&transaction).unwrap();
+    migrate_v9(&transaction).unwrap();
     transaction
         .execute_batch(
             "INSERT INTO library_roots(id,path,search,completed_scan)
@@ -1327,6 +1438,7 @@ fn structured_filter_fixture() -> Connection {
     let transaction = connection.transaction().unwrap();
     migrate(&transaction).unwrap();
     migrate_v5(&transaction).unwrap();
+    migrate_v9(&transaction).unwrap();
     transaction.execute_batch(
         "INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/music','/music',1);
          INSERT INTO library_genres(id,name,search) VALUES(1,'Jazz','jazz'),(2,'Free Jazz','free jazz'),
@@ -1433,6 +1545,72 @@ fn structured_filters_support_genre_year_and_album_artist() {
             expected,
             "{filter}"
         );
+    }
+}
+
+#[test]
+fn liked_filters_compose_and_hydrate_legacy_and_list_tracks() {
+    use lists_fixture::{ListSource, list};
+    let mut connection = structured_filter_fixture();
+    connection
+        .execute("UPDATE library_tracks SET liked=1 WHERE id IN (1,3,5)", [])
+        .unwrap();
+    for (filter, expected) in [
+        ("liked:true", vec![1, 3]),
+        ("liked:false", vec![2, 4, 6]),
+        ("NOT liked:true", vec![2, 4, 6]),
+        ("liked:true AND genre:jazz", vec![1]),
+        ("liked:true OR year:1975", vec![1, 3, 4]),
+        ("(artist:miles OR genre:folk) AND liked:true", vec![1, 3]),
+        ("liked:[true,false]", vec![1, 2, 3, 4, 6]),
+        ("liked:TRUE", vec![1, 3]),
+    ] {
+        let LibraryReply::Tracks(page) = query::execute(
+            &mut connection,
+            LibraryCommand::Tracks {
+                album_id: None,
+                page: page_request(Some(7), 0, 500, filter),
+            },
+        )
+        .unwrap() else {
+            panic!("expected tracks");
+        };
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            expected,
+            "{filter}"
+        );
+        for track in page.entries {
+            assert_eq!(track.liked, matches!(track.id, 1 | 3));
+        }
+        let mut description = list(ListSource::Library);
+        description.query = filter.into();
+        let LibraryReply::ListTracks { page, .. } = lists::execute(
+            &mut connection,
+            LibraryCommand::ListTracks {
+                list: description,
+                revision: Some(7),
+                offset: 0,
+                limit: 500,
+            },
+            lists_fixture::NOW,
+        )
+        .unwrap() else {
+            panic!("expected list tracks");
+        };
+        let mut ids = page
+            .entries
+            .iter()
+            .map(|row| row.track.id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, expected, "{filter}");
+        for row in page.entries {
+            assert_eq!(row.track.liked, matches!(row.track.id, 1 | 3));
+        }
     }
 }
 
@@ -1609,6 +1787,13 @@ fn malformed_filters_are_typed_located_and_bounded_for_all_projections() {
     let mut connection = structured_filter_fixture();
     for filter in [
         "artist:",
+        "liked:",
+        "liked:yes",
+        "liked:1",
+        "liked:0",
+        "liked:null",
+        "liked:[true,no]",
+        "liked:\"\"",
         "mood:jazz",
         "artist:[]",
         "artist:[Miles,]",
@@ -2061,7 +2246,7 @@ mod lists_fixture {
     /// Genres: Orphan (4) has no tracks; Hidden (5) only the unavailable track.
     pub(super) fn connection(tracks: &[Fixture]) -> Connection {
         let mut connection = Connection::open_in_memory().unwrap();
-        crate::store::migrate(&mut connection, 5).unwrap();
+        crate::store::migrate(&mut connection, 9).unwrap();
         connection
             .execute_batch(
                 "INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/m','/m',2);
@@ -2390,6 +2575,7 @@ fn list_rows_summarize_tracks_and_library_state_totals_visible_tracks() {
                 last_played: Some(1234),
                 date_added: 300,
                 path: "/m/0002.flac".into(),
+                liked: false,
             },
         }]
     );

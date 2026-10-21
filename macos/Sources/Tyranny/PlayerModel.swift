@@ -347,12 +347,12 @@ final class PlayerModel {
                     guard generation == session, wantsConnection, !Task.isCancelled else { return }
                     if !attemptedBootstrap, managedEnabled, managesServer,
                        let failure = error as? ServerFailure,
-                       ["token_read_failed", "connection_lost"].contains(failure.code),
+                       ["token_read_failed", "connection_lost", "protocol_error"].contains(failure.code),
                        let managedServer {
                         attemptedBootstrap = true
                         connectionDetail = "Starting the local background server…"
                         do {
-                            try await managedServer.ensureRunning()
+                            try await managedServer.ensureRunning(replacingIncompatibleServer: failure.code == "protocol_error")
                             guard generation == session, wantsConnection, !Task.isCancelled else { return }
                             continue
                         } catch {
@@ -536,6 +536,16 @@ final class PlayerModel {
             setImportSession(ImportSession.afterAddRoot(
                 rootID: added.root.id, rootsBefore: rootsBefore, current: importSession, baseline: baseline))
             refresh()
+        }
+    }
+
+    /// Hearts reflect authoritative list rows, never an optimistic local toggle.
+    func setTrackLiked(_ trackID: UInt64, liked: Bool, libraryRevision: UInt64) {
+        mutate { [self] in
+            let _: TrackLiked = try await send("set_track_liked", [
+                "track_id": .uint(trackID), "liked": .bool(liked),
+                "library_revision": .uint(libraryRevision),
+            ])
         }
     }
     /// Runs one user mutation: marks the model busy, reports failure in `message`,

@@ -8,6 +8,52 @@ see [SPIKE_RESULTS.md](SPIKE_RESULTS.md) for commands, evidence, and limitations
 Development LaunchAgent/bootstrap and the 50,000-track/10,000-entry scale experiments are also exercised; results distinguish build profiles, process-cold startup, warm startup, and actual native filtering.
 Playback controls include server-owned Next/Previous and toggle, occurrence-bound native seeking, page-independent Now Playing metadata, and macOS system controls. Regular playlists have durable identities/order, bounded native browsing/editing, and atomic enqueue/play. Native multi-row dragging supports insertion points and spring-loaded navigation. Structured live library/playlist filters support title/artist/album predicates, symbolic Boolean operators, grouping and value lists. Smart playlists persist these rules, refresh live membership, and atomically capture full results into the queue or a new regular playlist; dynamic queue autofill remains separate. Server-owned artwork discovery/caching and native album/Now Playing images are implemented and exercised through rescan, browser navigation and offline relaunch. The client remains running after closing its window; explicit Quit pauses daemon audio (resumed on the next launch) and removes its system controls; see `docs/superpowers/specs/2026-10-20-quit-pause-and-player-bar-design.md`. Direct HTTP(S) MP3/Ogg streams support persistent queue occurrences, ICY titles and bounded reconnects. Saved radio stations arrived in protocol v12 and the radio-browser.info station directory in v13. Protocol v13 requires matching client/server processes; the main database is schema 7.
 
+## Song likes
+
+Click the heart beside a song to like or unlike it. Filled hearts are liked;
+outlines are unliked. The **Liked** column is visible by default and can be
+hidden or restored through **Columns → Liked** (or the table-header menu).
+The preference is shared with album-expansion track lists and persists.
+Heart clicks do not select rows or start playback.
+
+The toolbar's heart toggle enables **Liked only**, AND-combined with the
+current filter without replacing its text. Queries also accept `liked:true`
+and `liked:false`, including in saved smart-playlist rules. For example:
+
+```text
+(artist:"Miles Davis" OR artist:"John Coltrane") AND liked:true
+```
+
+Likes belong to library tracks, not playlist occurrences or audio-file tags.
+All occurrences share the same value; rescanning, metadata reindexing and
+server restarts preserve it. New and migrated tracks start unliked.
+Unliking a track removes it from a liked-only result after the server commits.
+Mutation failures leave the displayed state authoritative and report an error.
+
+SQLite schema 9 adds the persisted boolean. The command
+`set_track_liked {track_id, liked, library_revision}` returns
+`track_liked {track_id, liked, library_revision}`; changes advance the library
+revision, while no-ops do not. Stale revisions are rejected, including for
+no-ops. Song likes integrate at protocol **19**; upgrade client and server
+together.
+
+## Songs scroll memory
+
+Songs remembers its viewport when navigating to another destination and back,
+including grouped rows and partial-row offsets. The viewport belongs to the retained
+list model, not the disposable native table. Restoration waits for a current layout
+and an attached, sized viewport; revision-refresh anchoring takes precedence.
+
+This is session-local, not saved across app relaunches. Changing the list description
+(sort, filter, browser selection or grouping) clears the saved viewport and starts
+at the top. Other retained track lists use the same table behavior.
+
+Native acceptance: `python3 scripts/client_gate.py --scenario scroll-memory --app
+target/swift-client/debug/Tyranny`. On an isolated 1,129-track library it navigates
+Songs → Albums → Songs twice in both None and Artist › Album grouping, checks the
+first visible track and exact viewport offset, captures the restored views, and
+checks that changing grouping resets to the top.
+
 ## Development commands
 
 Install Rust, Xcode command-line tools, Python 3.9+, Go 1.23+, `pkg-config`, and
@@ -61,7 +107,7 @@ The scanner accepts `.mod`, `.xm`, `.it`, and `.s3m`, case-insensitively. Rescan
 existing music roots to discover these files. Native libopenmpt decoding through
 FFmpeg preserves embedded module titles and shows the format as `Tracker`.
 No BASS runtime or decoder subprocess is used.
-Tracker support integrated at protocol **14**; the current version is **18**.
+Tracker support integrated at protocol **14**; the current version is **19**.
 The version bump follows the merge policy; the wire shape and database schema
 are unchanged by tracker support.
 
@@ -164,7 +210,7 @@ Settings are persisted before applying/publishing; invalid input or a failed
 write does not change audio/settings. Reconnection fetches authoritative server
 state rather than replaying abandoned client edits.
 
-Parametric EQ integrated at protocol **v15**; the current version is **v18**; upgrade client and server together.
+Parametric EQ integrated at protocol **v15**; the current version is **v19**; upgrade client and server together.
 The merge bumps the version from 14 because the EQ wire shape changed.
 `set_equalizer` takes a complete object, also returned in
 `snapshot.settings.equalizer`:
@@ -334,6 +380,22 @@ FFmpeg libraries, icon, and source/license artifacts) and an Applications
 shortcut. Drag the app to Applications before launching it; do not run the
 managed server from the mounted image.
 
+App upgrades do not require the previous app to remove its LaunchAgent. When
+startup needs a server, Tyranny recognizes its saved job even if the app moved
+or the old bundle was deleted, gracefully unloads an owned loaded job, and
+rewrites the helper path for the current bundle. Library, queue, settings, and
+authentication token stay in the existing state directory. An incompatible
+protocol triggers replacement only for a verified managed job; compatible
+authenticated servers are reused. Manual servers and foreign or modified
+LaunchAgents are not stopped or overwritten. Ownership checks still require
+the saved environment, state paths, endpoint, logs, and launchd policy to match,
+and loaded arguments must match the saved plist.
+
+`scripts/lifecycle_gate.py --app <debug-app-path> --upgrade-only` exercises
+automatic migration with loaded/unloaded jobs and missing old bundles, checks
+queue/library/token preservation, and verifies foreign-job protection through
+the native app. It uses isolated labels and state, never the normal login job.
+
 The source builder currently supports native **arm64 macOS**, with a deployment
 target of macOS 14. It downloads [FFmpeg 9.0.2](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz)
 and verifies the pinned SHA256 before extraction. The FFmpeg pin was established
@@ -341,6 +403,11 @@ by verifying its upstream detached signature against the published signing
 fingerprint. It also verifies pinned official release archives for
 [libopenmpt 0.8.9](https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.8.9+release.autotools.tar.gz)
 and build-only [pkgconf 3.0.10](https://distfiles.ariadne.space/pkgconf/pkgconf-3.0.10.tar.gz).
+If the libopenmpt upstream download fails, the builder tries the
+[MacPorts distfile mirror](https://distfiles.macports.org/libopenmpt/).
+Both sources must match the same pinned SHA256; a checksum mismatch stops the
+build rather than falling back. Failed transfers are removed before another
+source is tried, and only verified archives enter the download cache.
 The first build needs network access; subsequent builds reuse a checksum-verified
 cache under `target/native`, keyed by dependency sources/options, architecture,
 builder, compiler, and SDK. Interrupted installs are not reused.

@@ -150,6 +150,49 @@ pub(crate) fn migrate_v5(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// User-owned state is separate from metadata and omitted from scanner upserts.
+pub(crate) fn migrate_v9(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE library_tracks ADD COLUMN liked INTEGER NOT NULL DEFAULT 0 CHECK(liked IN (0,1));",
+    )?;
+    Ok(())
+}
+
+pub(super) fn set_track_liked(
+    connection: &mut Connection,
+    track_id: u64,
+    liked: bool,
+    expected_revision: u64,
+) -> Result<(u64, bool)> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (revision, current): (u64, Option<bool>) = transaction.query_row(
+        "SELECT s.revision,(SELECT t.liked FROM library_tracks t
+         JOIN library_assets a ON a.id=t.asset_id
+         JOIN library_roots r ON r.id=a.root_id
+         WHERE t.id=?1 AND a.indexed=1 AND a.last_seen_scan>=r.completed_scan)
+         FROM library_state s WHERE s.singleton=1",
+        [i64::try_from(track_id).ok()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if revision != expected_revision {
+        return Err(StaleLibraryRevision { current: revision }.into());
+    }
+    let current = current.ok_or_else(|| LibraryError {
+        kind: LibraryErrorKind::Invalid,
+        message: "library track is unknown or unavailable".into(),
+    })?;
+    let changed = current != liked;
+    if changed {
+        transaction.execute(
+            "UPDATE library_tracks SET liked=?1 WHERE id=?2",
+            params![liked, track_id],
+        )?;
+        bump_revision(&transaction)?;
+    }
+    transaction.commit()?;
+    Ok((revision + u64::from(changed), changed))
+}
+
 /// One statement also works inside the caller's queue transaction; the revision
 /// and optional path necessarily belong to the same SQLite read snapshot.
 pub(crate) fn resolve_track(

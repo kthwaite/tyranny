@@ -45,6 +45,9 @@ DEPENDENCIES = {
         "archive": "libopenmpt-0.8.9+release.autotools.tar.gz",
         "source_directory": "libopenmpt-0.8.9+release.autotools",
         "source_url": "https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.8.9+release.autotools.tar.gz",
+        "source_mirrors": [
+            "https://distfiles.macports.org/libopenmpt/libopenmpt-0.8.9+release.autotools.tar.gz",
+        ],
         "source_sha256": "d7ce84fd05d686c4bcf66af40eae857afa371442db60eeda3f874bd6cf6fc318",
         "license": "BSD-3-Clause AND BSL-1.0",
         "license_files": ["LICENSE", "src/mpt/LICENSE.BSD-3-Clause.txt",
@@ -245,18 +248,26 @@ def reusable(prefix, identity):
         return False
 
 
-def download(archive, env, source_url=SOURCE_URL, source_sha256=SOURCE_SHA256):
+def download(archive, env, source_url=SOURCE_URL, source_sha256=SOURCE_SHA256,
+             source_mirrors=()):
     if not archive.exists():
         temporary = archive.with_suffix(archive.suffix + ".partial")
-        try:
-            run(["/usr/bin/curl", "--disable", "--fail", "--location", "--proto", "=https",
-                 "--proto-redir", "=https", "--tlsv1.2", "--connect-timeout", "30",
-                 "--max-time", "600", "--output", temporary, source_url], env)
-            if digest(temporary) != source_sha256:
-                raise RuntimeError(f"Downloaded source does not match the pinned SHA256: {source_url}; refusing to extract it.")
-            temporary.replace(archive)
-        finally:
-            temporary.unlink(missing_ok=True)
+        sources = (source_url, *source_mirrors)
+        for index, url in enumerate(sources):
+            try:
+                run(["/usr/bin/curl", "--disable", "--fail", "--location", "--proto", "=https",
+                     "--proto-redir", "=https", "--tlsv1.2", "--connect-timeout", "30",
+                     "--max-time", "600", "--output", temporary, url], env)
+                if digest(temporary) != source_sha256:
+                    raise RuntimeError(f"Downloaded source does not match the pinned SHA256: {url}; refusing to extract it.")
+                temporary.replace(archive)
+                break
+            except subprocess.CalledProcessError:
+                if index + 1 == len(sources):
+                    raise
+                print(f"Source download failed: {url}; trying {sources[index + 1]}", file=sys.stderr)
+            finally:
+                temporary.unlink(missing_ok=True)
     if digest(archive) != source_sha256:
         raise RuntimeError(f"Cached source checksum mismatch: {archive}. Remove this archive and run again.")
 
@@ -420,7 +431,8 @@ def main():
             download(archive, env)
             for specification in DEPENDENCIES.values():
                 download(downloads / specification["archive"], env,
-                         specification["source_url"], specification["source_sha256"])
+                         specification["source_url"], specification["source_sha256"],
+                         specification.get("source_mirrors", ()))
             print(f"Building pinned FFmpeg {VERSION}: {prefix}", file=sys.stderr)
             build(prefix, archive, identity, options, env, root)
     print(prefix)

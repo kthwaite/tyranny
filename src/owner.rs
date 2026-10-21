@@ -317,6 +317,15 @@ impl Controller {
             }
             Command::AddRoot { path } => LibraryCommand::AddRoot { path },
             Command::Rescan { root_id } => LibraryCommand::Rescan { root_id },
+            Command::SetTrackLiked {
+                track_id,
+                liked,
+                library_revision,
+            } => LibraryCommand::SetTrackLiked {
+                track_id,
+                liked,
+                library_revision,
+            },
             Command::LibraryRoots {
                 revision,
                 offset,
@@ -1889,6 +1898,7 @@ impl Actor {
             | Command::CountDirectoryClick { .. }
             | Command::AddRoot { .. }
             | Command::Rescan { .. }
+            | Command::SetTrackLiked { .. }
             | Command::LibraryRoots { .. }
             | Command::LibraryArtists { .. }
             | Command::LibraryAlbums { .. }

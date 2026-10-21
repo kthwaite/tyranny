@@ -12,6 +12,13 @@ enum SettingsTab: String, Hashable {
 final class NavigationModel {
     var destination: Destination = .songs
     var filter = ""
+    var likedOnly = false
+    /// Keep the user's text intact, including malformed input for the server's error display.
+    var effectiveFilter: String {
+        let text = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard likedOnly else { return text }
+        return text.isEmpty ? "liked:true" : "(\(text)) AND liked:true"
+    }
     /// Set by the current view's list when the server rejects `filter`.
     var filterError: String?
     var settingsTab: SettingsTab = .connection

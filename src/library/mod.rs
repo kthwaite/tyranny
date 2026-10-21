@@ -15,7 +15,7 @@ use crate::{
     store::PlaylistFailure,
 };
 use anyhow::{Context, Result, anyhow, ensure};
-pub(crate) use db::{migrate, migrate_v5, resolve_track};
+pub(crate) use db::{migrate, migrate_v5, migrate_v9, resolve_track};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{
     collections::{HashSet, VecDeque},
@@ -468,6 +468,21 @@ impl Coordinator {
             LibraryCommand::AddRoot { path } => self.add_root(path),
             LibraryCommand::Rescan { root_id } => self.rescan(root_id),
             LibraryCommand::Reindex { paths } => self.queue_reindex(paths),
+            LibraryCommand::SetTrackLiked {
+                track_id,
+                liked,
+                library_revision,
+            } => {
+                let (library_revision, changed) =
+                    db::set_track_liked(&mut self.connection, track_id, liked, library_revision)?;
+                self.dirty |= changed;
+                self.publish(true)?;
+                Ok(LibraryReply::TrackLiked {
+                    track_id,
+                    liked,
+                    library_revision,
+                })
+            }
             command @ (LibraryCommand::ListTracks { .. }
             | LibraryCommand::ListAlbums { .. }
             | LibraryCommand::ListArtists { .. }

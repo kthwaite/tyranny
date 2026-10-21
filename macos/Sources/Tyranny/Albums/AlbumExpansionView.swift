@@ -208,7 +208,8 @@ struct AlbumExpansionContent: View {
                     .accessibilityIdentifier(AlbumTrackTable.tracksIdentifier)
             } else {
                 AlbumTrackTable(expansion: expansion, grid: grid, player: player, colours: player.theme.tableColours,
-                                tracks: expansion.tracks, selected: expansion.selectedRowIDs, total: expansion.total)
+                                tracks: expansion.tracks, selected: expansion.selectedRowIDs, total: expansion.total,
+                                likedHidden: ColumnPreferences.shared.isHidden("liked"), canMutate: player.canMutate)
             }
         }
         .frame(height: AlbumExpansionMetrics.tableHeight(trackCount: album.track_count))

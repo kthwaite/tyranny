@@ -34,9 +34,10 @@ def main():
                         help="Run the app's headless model gate (NativeModelGate, no Accessibility driver) without claiming visual verification")
     parser.add_argument("--commands-only", action="store_true",
                         help="Exercise the command-language dispatcher against a real server (no UI input or visual verification)")
-    parser.add_argument("--scenario", choices=["core", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs", "stats"], default="core",
+    parser.add_argument("--scenario", choices=["core", "shell", "songs", "scroll-memory", "grouping", "albums", "artists", "history", "upnext", "runs", "stats"], default="core",
                         help="core: folder import, a double-click run, the seek slider, filter, rescan, disconnect and a relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
+                             "scroll-memory: Songs viewport restoration across navigation, ungrouped and grouped; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
                              "albums: the album grid, its inline panel, a double-click run and Add to Up Next on two selected tracks; "
                              "artists: Artists with Compilations and Appears On, and Genres; "
@@ -105,8 +106,8 @@ def main():
                 shell(report, run, app, port, ready, root, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
-            if args.scenario == "songs":
-                songs(report, run, app, port, ready, source, controller, Path(args.screenshots))
+            if args.scenario in ("songs", "scroll-memory"):
+                songs(report, run, app, port, ready, source, controller, Path(args.screenshots), args.scenario)
                 report["passed"] = True
                 return
             if args.scenario == "grouping":
@@ -233,9 +234,9 @@ def songs_fixture(music, source):
         os.link(source, untagged / f"Untagged {index:04}.wav")
 
 
-def songs(report, run, app, port, ready, source, controller, screenshots):
-    """Drive the Songs table: scroll to the end, sort, narrow by genre, drag to Up Next."""
-    report["scenario"] = "songs"
+def songs(report, run, app, port, ready, source, controller, screenshots, scenario):
+    """Drive the complete Songs workflow or its focused scroll-memory scenario."""
+    report["scenario"] = scenario
     music = run / "Songs fixture"
     songs_fixture(music, source)
     controller.request("add_root", path=str(music))
@@ -243,7 +244,7 @@ def songs(report, run, app, port, ready, source, controller, screenshots):
                     and state["library"]["tracks"] == 1129, seconds=180)
     output = run / "songs"
     command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
-               "--songs-smoke-output", str(output),
+               "--songs-smoke-output", str(output), "--songs-smoke-scenario", scenario,
                "--ui-driver", str(Path("target/native-ui-driver").resolve())]
     report["app_command"] = command
     with (run / "songs.stdout").open("w") as stdout, (run / "songs.stderr").open("w") as stderr:
@@ -252,12 +253,13 @@ def songs(report, run, app, port, ready, source, controller, screenshots):
     native = json.loads((output / "report.json").read_text())
     report["songs"] = native
     assert native["passed"], native.get("error")
-    # The server, not the app, holds the dragged entries.
-    page = controller.request("queue_page", revision=None, offset=0, limit=500)
-    sources = [entry["source"] for entry in page["entries"]]
-    assert page["total"] == 5 and all(source == {"kind": "drag", "name": "Songs"} for source in sources), page
-    assert [entry["track_id"] for entry in page["entries"]] == native["observations"]["dragged_track_ids"], page
-    report["cases"].append({"name": "songs-server-holds-dragged-entries", "total": page["total"]})
+    if scenario == "songs":
+        # The server, not the app, holds the dragged entries.
+        page = controller.request("queue_page", revision=None, offset=0, limit=500)
+        sources = [entry["source"] for entry in page["entries"]]
+        assert page["total"] == 5 and all(source == {"kind": "drag", "name": "Songs"} for source in sources), page
+        assert [entry["track_id"] for entry in page["entries"]] == native["observations"]["dragged_track_ids"], page
+        report["cases"].append({"name": "songs-server-holds-dragged-entries", "total": page["total"]})
     screenshots.mkdir(parents=True, exist_ok=True)
     for image in sorted(output.glob("songs*.png")):
         shutil.copy2(image, screenshots / image.name)
