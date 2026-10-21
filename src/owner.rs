@@ -1335,6 +1335,10 @@ impl Actor {
                 }),
             )
             .map_err(Failure::playlist)?;
+        if play {
+            // The new entry replaces the current pass and ends its play.
+            self.player.end_play(EndReason::Skipped);
+        }
         self.player.commit_append(prepared);
         if play {
             self.fault = None;
@@ -1431,6 +1435,10 @@ impl Actor {
                     .map(|((id, path), track_id)| (id, track_id, path)),
             )
             .map_err(Failure::playlist)?;
+        if play {
+            // The new entry replaces the current pass and ends its play.
+            self.player.end_play(EndReason::Skipped);
+        }
         self.player.commit_replace_upcoming(prepared);
         if play {
             self.fault = None;

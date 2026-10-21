@@ -865,6 +865,115 @@ async fn clearing_the_queue_closes_its_play_as_stopped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_closes_the_play_as_stopped() {
+    let fixture = Fixture::new();
+    fixture.index_frames(&["a", "b"], TEN_SECONDS).await;
+    let first = fixture.queue_library().await;
+    fixture.play_to(first, 48_000).await;
+    ok(&fixture.control(), Command::Stop).await;
+    let plays = fixture
+        .until_plays(|plays| closed(plays, first).is_some())
+        .await;
+    assert_eq!(plays.len(), 1, "{plays:?}");
+    assert_eq!(
+        (plays[0].counted, plays[0].end_reason.as_deref()),
+        (false, Some("stopped")),
+        "{plays:?}"
+    );
+    assert!(plays[0].listened_ms.unwrap() >= 1_000, "{plays:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn playing_an_enqueued_selection_mid_track_closes_the_play_as_skipped() {
+    let fixture = Fixture::new();
+    fixture.index_frames(&["a", "b"], TEN_SECONDS).await;
+    let first = fixture.queue_library().await;
+    fixture.play_to(first, 48_000).await;
+    let state = snapshot(&fixture.control()).await;
+    let Command::EnqueueTracks {
+        selection,
+        expected_revision,
+        source,
+        ..
+    } = enqueue(&state)
+    else {
+        unreachable!()
+    };
+    ok(
+        &fixture.control(),
+        Command::EnqueueTracks {
+            selection,
+            expected_revision,
+            placement: Placement::ReplaceUpcoming,
+            play: true,
+            source,
+        },
+    )
+    .await;
+    let plays = fixture
+        .until_plays(|plays| closed(plays, first).is_some())
+        .await;
+    let replaced = closed(&plays, first).unwrap();
+    assert_eq!(
+        (replaced.counted, replaced.end_reason.as_deref()),
+        (false, Some("skipped")),
+        "{plays:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn playing_a_playlist_mid_track_closes_the_play_as_skipped() {
+    let fixture = Fixture::new();
+    fixture.index_frames(&["a", "b"], TEN_SECONDS).await;
+    let control = fixture.control();
+    let state = snapshot(&control).await;
+    let Response::PlaylistApplied {
+        playlist: Some(playlist),
+        ..
+    } = ok(
+        &control,
+        Command::CreatePlaylist {
+            expected_revision: state.playlists_revision,
+            name: "Mix".into(),
+        },
+    )
+    .await
+    else {
+        panic!("expected a new playlist");
+    };
+    let Response::PlaylistApplied {
+        playlist: Some(playlist),
+        ..
+    } = ok(&control, add_selection(&state, &playlist)).await
+    else {
+        panic!("expected the filled playlist");
+    };
+    let first = fixture.queue_library().await;
+    fixture.play_to(first, 48_000).await;
+    let state = snapshot(&control).await;
+    ok(
+        &control,
+        Command::EnqueuePlaylist {
+            playlist_id: playlist.id,
+            playlist_revision: playlist.revision,
+            library_revision: state.library.revision,
+            expected_revision: state.queue_revision,
+            play: true,
+        },
+    )
+    .await;
+    let plays = fixture
+        .until_plays(|plays| closed(plays, first).is_some())
+        .await;
+    let replaced = closed(&plays, first).unwrap();
+    assert_eq!(
+        (replaced.counted, replaced.end_reason.as_deref()),
+        (false, Some("skipped")),
+        "{plays:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_continues_the_restored_play() {
     let mut fixture = Fixture::new();
     // Four seconds: the play counts at two.
