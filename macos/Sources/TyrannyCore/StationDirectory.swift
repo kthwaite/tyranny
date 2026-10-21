@@ -18,6 +18,11 @@ public final class StationDirectory {
     public private(set) var results: [DirectoryStation] = []
     /// True while the latest search waits for its reply.
     public private(set) var searching = false
+    /// True after a search finished with an answer for the current query. A failed, cancelled or
+    /// stale search leaves it as it was. `reset` and an empty query clear it.
+    public private(set) var searched = false
+    /// The uuids of the stations whose save is in flight.
+    public private(set) var saving: Set<String> = []
     /// The last failure, for the view to show.
     public var error: String?
 
@@ -40,7 +45,9 @@ public final class StationDirectory {
         token &+= 1
         query = ""
         results = []
+        searched = false
         searching = false
+        saving = []
         error = nil
     }
 
@@ -53,6 +60,7 @@ public final class StationDirectory {
         error = nil
         guard !text.isEmpty else {
             results = []
+            searched = false
             searching = false
             return
         }
@@ -62,6 +70,7 @@ public final class StationDirectory {
             let found = try decoder.decode(DirectoryResults.self, from: data)
             guard token == mine else { return }
             results = found.stations
+            searched = true
         } catch is CancellationError {
             if token == mine { searching = false }
             return
@@ -73,8 +82,11 @@ public final class StationDirectory {
     }
 
     /// Saves the station to the catalog. Returns false on failure; `error` then says why.
+    /// A station whose save is already in flight is not saved twice: this returns false with no error.
     public func save(_ station: DirectoryStation) async -> Bool {
+        guard saving.insert(station.uuid).inserted else { return false }
         let started = token
+        defer { if token == started { saving.remove(station.uuid) } }
         error = nil
         guard await catalog.add(name: station.name, url: station.url) else {
             if token == started { error = catalog.error ?? "The station could not be saved." }

@@ -13,12 +13,14 @@ private final class FakeDirectoryServer {
     /// Parked `search_directory` requests, in arrival order.
     var parked: [CheckedContinuation<Void, Never>] = []
     var parkSearches = false
+    /// With this set, each `add_stations` request also parks in `parked`.
+    var parkAdds = false
     var failure: (any Error)?
 
     func send(_ request: CommandRequest) async throws -> Data {
         requests.append(request)
         if let failure { throw failure }
-        if parkSearches, request.name == "search_directory" {
+        if (parkSearches && request.name == "search_directory") || (parkAdds && request.name == "add_stations") {
             await withCheckedContinuation { parked.append($0) }
         }
         let reply = replies.isEmpty ? respond!(request) : replies.removeFirst()
@@ -106,6 +108,50 @@ private func syncedCatalog(_ server: FakeDirectoryServer) async throws -> Statio
         #expect(directory.error == nil)
     }
 
+    @Test func searchedMarksACompletedSearchEvenWithNoStations() async {
+        let server = FakeDirectoryServer()
+        let directory = server.directory(server.catalog())
+        #expect(directory.searched == false)
+        server.replies = [results([])]
+        directory.query = "zzzz"
+        await directory.search()
+        #expect(directory.searched)
+        #expect(directory.results.isEmpty)
+    }
+
+    @Test func searchedClearsOnEmptyQueryAndReset() async {
+        let server = FakeDirectoryServer()
+        let directory = server.directory(server.catalog())
+        server.replies = [results([groove]), results([groove])]
+        directory.query = "groove"
+        await directory.search()
+        directory.query = " "
+        await directory.search()
+        #expect(directory.searched == false)
+        directory.query = "groove"
+        await directory.search()
+        #expect(directory.searched)
+        directory.reset()
+        #expect(directory.searched == false)
+    }
+
+    @Test func failedOrStaleSearchDoesNotMarkSearched() async {
+        let server = FakeDirectoryServer()
+        let directory = server.directory(server.catalog())
+        server.replies = [.failure(ServerFailure(code: "unavailable", message: "Directory unreachable."))]
+        directory.query = "groove"
+        await directory.search()
+        #expect(directory.searched == false)
+        server.parkSearches = true
+        server.replies = [results([groove])]
+        let search = Task { await directory.search() }
+        while server.parked.isEmpty { await Task.yield() }
+        directory.reset()
+        server.parked[0].resume()
+        await search.value
+        #expect(directory.searched == false)
+    }
+
     @Test func emptyQuerySendsNothing() async {
         let server = FakeDirectoryServer()
         let directory = server.directory(server.catalog())
@@ -179,6 +225,48 @@ private func syncedCatalog(_ server: FakeDirectoryServer) async throws -> Statio
         #expect(server.requests.map(\.name) == ["add_stations", "count_directory_click"])
         #expect(server.requests.last?.fields["station_uuid"] == .string("u-groove"))
         #expect(directory.error == nil)
+    }
+
+    @Test func saveIsInFlightUntilItReplies() async throws {
+        let server = FakeDirectoryServer()
+        let catalog = try await syncedCatalog(server)
+        let directory = server.directory(catalog)
+        server.parkAdds = true
+        server.replies = [applied(1, [Station(id: 1, name: groove.name, url: groove.url)]), clicked]
+        let first = Task { await directory.save(groove) }
+        while server.parked.isEmpty { await Task.yield() }
+        #expect(directory.saving == ["u-groove"])
+        // A second save of the same station is refused and sends nothing.
+        #expect(await directory.save(groove) == false)
+        #expect(directory.error == nil)
+        #expect(server.requests.map(\.name) == ["add_stations"])
+        server.parked[0].resume()
+        #expect(await first.value)
+        #expect(directory.saving.isEmpty)
+    }
+
+    @Test func failedSaveLeavesNothingInFlight() async throws {
+        let server = FakeDirectoryServer()
+        let catalog = try await syncedCatalog(server)
+        let directory = server.directory(catalog)
+        server.replies = [.failure(ServerFailure(code: "invalid_command", message: "No."))]
+        #expect(await directory.save(groove) == false)
+        #expect(directory.saving.isEmpty)
+    }
+
+    @Test func resetForgetsSavesInFlight() async throws {
+        let server = FakeDirectoryServer()
+        let catalog = try await syncedCatalog(server)
+        let directory = server.directory(catalog)
+        server.parkAdds = true
+        server.replies = [.failure(ServerFailure(code: "internal", message: "Dropped."))]
+        let save = Task { await directory.save(groove) }
+        while server.parked.isEmpty { await Task.yield() }
+        directory.reset()
+        #expect(directory.saving.isEmpty)
+        server.parked[0].resume()
+        _ = await save.value
+        #expect(directory.saving.isEmpty)
     }
 
     @Test func failedSaveSendsNoClick() async throws {

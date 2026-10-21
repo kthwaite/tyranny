@@ -32,6 +32,12 @@ struct DirectorySheet: View {
                 row(station)
             }
             .frame(minHeight: 260)
+            .overlay {
+                if directory.searched, directory.results.isEmpty, !directory.searching {
+                    Text("No stations found.").foregroundStyle(.secondary)
+                        .accessibilityIdentifier("radio-directory-empty")
+                }
+            }
             .accessibilityIdentifier("radio-directory-results")
             HStack {
                 Text("Station data from radio-browser.info")
@@ -46,6 +52,8 @@ struct DirectorySheet: View {
         .padding(20)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("radio-directory-sheet")
+        // A failure from an earlier visit is not news.
+        .onAppear { directory.error = nil }
     }
 
     private func row(_ station: DirectoryStation) -> some View {
@@ -61,7 +69,7 @@ struct DirectorySheet: View {
             Spacer(minLength: 8)
             Button("Play") { Task { await directory.play(station) } }
             Button(saved ? "Saved" : "Add") { Task { _ = await model.save(station) } }
-                .disabled(saved)
+                .disabled(saved || directory.saving.contains(station.uuid))
         }
     }
 

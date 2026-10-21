@@ -12,9 +12,22 @@ final class StationsModel {
     @ObservationIgnored private weak var player: PlayerModel?
     @ObservationIgnored private var session: UInt64?
     @ObservationIgnored private lazy var catalog = StationCatalog(send: sendRequest, addStream: addStream)
+    /// A search can take seconds, so it gets its own connection. The shared one carries the
+    /// transport and state events, and a long request on it would stall them.
+    @ObservationIgnored private let lane = DirectoryLane()
     /// The directory search behind Find Stations…. It saves through `catalog` and resets with it.
     @ObservationIgnored private(set) lazy var directory = StationDirectory(
-        send: sendRequest, catalog: catalog, addStream: addStream)
+        send: sendDirectoryRequest, catalog: catalog, addStream: addStream)
+
+    /// `search_directory` goes to the lane. `count_directory_click` is answered at once, so it stays
+    /// on the shared connection with the other commands.
+    private var sendDirectoryRequest: StationCatalog.Send {
+        { [weak self] request in
+            guard let self else { throw CancellationError() }
+            if request.name == "search_directory" { return try await lane.request(request) }
+            return try await sendRequest(request)
+        }
+    }
 
     private var sendRequest: StationCatalog.Send {
         { [weak self] request in
@@ -47,6 +60,7 @@ final class StationsModel {
     /// Follows the connection and `stations_revision`. A new connection forgets the catalog.
     func sync() {
         guard let player else { return }
+        lane.synchronize(endpoint: player.endpoint, tokenPath: player.tokenPath, instance: player.serverInstance)
         let generation = player.playlistConnectionGeneration
         if session != generation {
             session = generation
@@ -73,9 +87,11 @@ final class StationsModel {
 
     /// Saves a directory station as a user mutation. Its failure is in `directory.error`.
     func save(_ station: DirectoryStation) async -> Bool {
+        let before = catalog.error
         let saved = await run(busy: { self.directory.error = $0 }) { await self.directory.save(station) }
-        // The sheet shows the failure; the view behind it need not.
-        if !saved { catalog.error = nil }
+        // The sheet shows the failure; the view behind it need not. Only take back what this
+        // save set, not an earlier Radio error.
+        if !saved { catalog.error = before }
         return saved
     }
 
