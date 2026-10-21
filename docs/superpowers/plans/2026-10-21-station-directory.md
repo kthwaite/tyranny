@@ -113,8 +113,8 @@
 
 **Interfaces:**
 - Wire forms:
-  - `{"command":"search_directory","query":"jazz"}` replies `{"type":"directory_results","stations":[{uuid,name,url,codec,bitrate,country_code,tags}]}`.
-  - `{"command":"count_directory_click","station_uuid":"<uuid>"}` replies `{"type":"directory_click_counted"}`.
+  - `{"command":"search_directory","query":"jazz"}` replies `{"kind":"directory_results","stations":[{uuid,name,url,codec,bitrate,country_code,tags}]}`.
+  - `{"command":"count_directory_click","station_uuid":"<uuid>"}` replies `{"kind":"directory_click_counted"}`.
 - `count_directory_click`:
   - It replies as soon as the click is queued. It does not wait for the HTTP request. A full queue drops the click and still replies `directory_click_counted`.
   - `station_uuid` must parse as a UUID. Otherwise reply `invalid_command`.
