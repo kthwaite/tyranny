@@ -63,7 +63,7 @@ impl PlayRecord {
 
 /// Why a play ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EndReason {
+pub enum EndReason {
     /// The track played to its end.
     Finished,
     /// The listener moved on, or the entry was removed.

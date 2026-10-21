@@ -430,9 +430,7 @@ fn a_play_counted_just_before_its_entry_is_deleted_is_recorded() {
             },
         );
         actor.player.pump().unwrap();
-        for play in actor.player.take_counted_plays() {
-            actor.count_play(play);
-        }
+        actor.take_plays();
         assert!(actor.write_plays(), "clear {clear}: the play was dropped");
         let page = actor.store.history_page(0, 10).unwrap();
         assert_eq!(page.total, 1, "clear {clear}");

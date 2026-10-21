@@ -1,14 +1,21 @@
 //! The player's side of its `PlayOrder`: passes over queue entries, what
 //! follows each pass, and which played entries Repeat All keeps.
 
-use super::Player;
+use super::{
+    Player,
+    radio::{self, RadioText},
+};
 use crate::{
+    SAMPLE_RATE,
     listing::unix_now,
     output::{OutputSnapshot, TrackToken},
     play_order::{self, RepeatMode, ShuffleStrategy, Slot},
-    store::{count_threshold_frames, played_overflow},
+    store::{EndReason, count_threshold_frames, played_overflow},
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 /// One decode of a queue entry. Each pass has its own token, so a replay
 /// (Repeat One, a Repeat All wrap, a shuffle revisit) is heard from its start
@@ -32,14 +39,85 @@ pub(super) struct Pass {
     pub counted: bool,
     /// When output started this pass, or the pass it continues: UTC seconds.
     pub started_at: Option<i64>,
+    /// The open play this pass, or the pass it continues, is heard as.
+    pub play: Option<Play>,
 }
 
-/// A pass that counted as a play.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CountedPlay {
-    pub entry_id: u64,
-    /// When output started the pass: UTC seconds.
-    pub started_at: i64,
+/// Listened time at which a radio play counts.
+const RADIO_COUNT_FRAMES: u64 = 60 * SAMPLE_RATE as u64;
+
+/// A change in the life of a play: one pass over a queue entry, or one
+/// announced song on a radio stream. `play` is a key unique to this player.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlayEvent {
+    /// Output started the play. `started_at` is in UTC seconds. A radio play
+    /// carries the station's now-playing text.
+    Opened {
+        play: u64,
+        entry_id: u64,
+        started_at: i64,
+        radio: Option<RadioText>,
+    },
+    /// The play reached its count threshold.
+    Counted { play: u64 },
+    /// The play ended. `ended_at` is in UTC seconds.
+    Closed {
+        play: u64,
+        listened_ms: u64,
+        reason: EndReason,
+        ended_at: i64,
+    },
+}
+
+/// An open play.
+pub(super) struct Play {
+    key: u64,
+    /// Frames output rendered for the play.
+    listened: u64,
+    counted: bool,
+    /// Output has rendered the play since it opened or was restored.
+    heard: bool,
+    /// The play opened on a pass that had already counted, so it never
+    /// counts and closes as stopped.
+    forced: bool,
+    radio: Option<Radio>,
+}
+
+/// The now-playing text a radio play opened with.
+struct Radio {
+    raw: String,
+    junk: bool,
+}
+
+impl Play {
+    fn new(key: u64, radio: Option<&RadioText>) -> Self {
+        Self {
+            key,
+            listened: 0,
+            counted: false,
+            heard: true,
+            forced: false,
+            radio: radio.map(|text| Radio {
+                raw: text.raw.clone(),
+                junk: text.junk,
+            }),
+        }
+    }
+
+    /// Adds listened frames. Returns whether a radio play just reached its
+    /// count threshold; junk radio text never counts.
+    fn listen(&mut self, frames: u64) -> bool {
+        self.listened += frames;
+        let counts = !self.counted
+            && self.listened >= RADIO_COUNT_FRAMES
+            && self.radio.as_ref().is_some_and(|radio| !radio.junk);
+        self.counted |= counts;
+        counts
+    }
+
+    fn listened_ms(&self) -> u64 {
+        self.listened * 1_000 / u64::from(SAMPLE_RATE)
+    }
 }
 
 /// What the player decodes after a pass.
@@ -92,13 +170,64 @@ impl Player {
         std::mem::take(&mut self.advances)
     }
 
-    /// The entry of each pass that counted as a play since the last call,
-    /// oldest first. A pass counts once: when output reaches its threshold
-    /// position, or when it ends naturally. Re-selecting the current entry (a
-    /// seek or gain change) continues its pass; any other selection, and each
-    /// replay (Repeat One, a Repeat All wrap), is a new pass.
-    pub fn take_counted_plays(&mut self) -> Vec<CountedPlay> {
-        std::mem::take(&mut self.counted_plays)
+    /// What happened to plays since the last call, oldest first. A play
+    /// opens when output starts a pass. A file play counts once: when output
+    /// reaches its threshold position, or when it ends naturally. A radio play
+    /// counts after a minute listened. Re-selecting the current entry (a seek
+    /// or gain change) continues its pass and play; any other selection, and
+    /// each replay (Repeat One, a Repeat All wrap), is a new pass and play. A
+    /// change of a station's now-playing text starts a new radio play.
+    pub fn take_play_events(&mut self) -> Vec<PlayEvent> {
+        std::mem::take(&mut self.play_events)
+    }
+
+    /// The open play's key and listened milliseconds, as of the last pump.
+    pub fn open_play(&self) -> Option<(u64, u64)> {
+        self.passes
+            .iter()
+            .rev()
+            .find_map(|pass| pass.play.as_ref())
+            .map(|play| (play.key, play.listened_ms()))
+    }
+
+    /// Closes the open play with `reason`. A skip closes a radio play, a
+    /// restored play not heard since, or a play opened already counted as
+    /// stopped. What output played since the last pump counts first.
+    pub fn end_play(&mut self, reason: EndReason) {
+        self.count_heard();
+        if let Some(play) = self
+            .passes
+            .iter_mut()
+            .rev()
+            .find_map(|pass| pass.play.take())
+        {
+            self.close(play, reason);
+        }
+    }
+
+    /// Continues the open play of entry `entry_id`, the restored selection,
+    /// from before the restart: `counted` and `listened_ms` come from its
+    /// row. Returns the play's key. Without the selection's pass the play
+    /// closes at once as stopped.
+    pub fn restore_play(&mut self, entry_id: u64, counted: bool, listened_ms: u64) -> u64 {
+        let key = self.next_play_key();
+        // The text of a restored radio play is unknown. It never counts again,
+        // and the station's first announced text starts a new radio play.
+        let station = self
+            .stream_title(entry_id)
+            .map(|station| radio::parse(station, station));
+        let mut play = Play::new(key, station.as_ref());
+        play.listened = listened_ms * u64::from(SAMPLE_RATE) / 1_000;
+        play.counted = counted;
+        play.heard = false;
+        match self.passes.back_mut().filter(|pass| pass.id == entry_id) {
+            Some(pass) => {
+                pass.counted = counted;
+                pass.play = Some(play);
+            }
+            None => self.close(play, EndReason::Stopped),
+        }
+        key
     }
 
     /// The selection was restored from a checkpoint. At or past its
@@ -114,18 +243,21 @@ impl Player {
         }
     }
 
-    /// Whether `id`'s current pass has counted, and when it started, for a
-    /// selection that re-selects it and so continues it. Completed playback
-    /// has no current pass to continue.
-    pub(super) fn continued_pass(&self, id: u64) -> (bool, Option<i64>) {
+    /// Whether `id`'s current pass has counted, when it started, and its
+    /// play, taken for a selection that re-selects it and so continues it.
+    /// Completed playback has no current pass to continue.
+    pub(super) fn continued_pass(&mut self, id: u64) -> (bool, Option<i64>, Option<Play>) {
         if self.completed() {
-            return (false, None);
+            return (false, None, None);
         }
-        self.current_pass(&self.output.snapshot())
+        let current = self
+            .current_pass(&self.output.snapshot())
             .and_then(|(_, pass, _)| pass)
-            .map(|pass| &self.passes[pass])
-            .filter(|pass| pass.id == id)
-            .map_or((false, None), |pass| (pass.counted, pass.started_at))
+            .filter(|pass| self.passes[*pass].id == id);
+        current.map_or((false, None, None), |pass| {
+            let pass = &mut self.passes[pass];
+            (pass.counted, pass.started_at, pass.play.take())
+        })
     }
 
     /// Clears the played state of `ids`, as the store does for a fresh pass.
@@ -229,6 +361,7 @@ impl Player {
             threshold: count_threshold_frames(duration),
             counted: false,
             started_at: None,
+            play: None,
         });
         self.plan = self.decide(self.cursor);
     }
@@ -255,8 +388,9 @@ impl Player {
             .unwrap_or(self.queue.len());
     }
 
-    /// Notes the passes output has started, oldest first. Passes before the
-    /// latest one ended naturally, and are dropped. Counts plays.
+    /// Notes the passes output has started, oldest first, and opens their
+    /// plays. Passes before the latest one ended naturally, and are dropped.
+    /// Counts plays.
     pub(super) fn hear(&mut self) {
         let output = self.output.snapshot();
         let rendered = output.rendered_frames;
@@ -265,6 +399,7 @@ impl Player {
             .iter()
             .rposition(|pass| pass.token.consumed_by(rendered))
         else {
+            self.listen(rendered);
             return;
         };
         for index in 0..=latest {
@@ -273,8 +408,16 @@ impl Player {
                 continue;
             }
             pass.heard = true;
-            pass.started_at.get_or_insert_with(unix_now);
             let (id, fresh) = (pass.id, pass.fresh.take());
+            // A restored play is heard again.
+            let restored = pass.play.as_ref().is_some_and(|play| !play.heard);
+            if let Some(play) = pass.play.as_mut() {
+                play.heard = true;
+            }
+            self.start_play(index);
+            if restored {
+                self.retitle(index);
+            }
             self.heard(id, fresh);
         }
         self.count(&output, latest);
@@ -286,34 +429,153 @@ impl Player {
     /// meantime must not be lost.
     pub(crate) fn count_heard(&mut self) {
         let output = self.output.snapshot();
-        if let Some(latest) = self
+        match self
             .passes
             .iter()
             .rposition(|pass| pass.token.consumed_by(output.rendered_frames))
         {
-            self.count(&output, latest);
+            Some(latest) => self.count(&output, latest),
+            None => self.listen(output.rendered_frames),
         }
     }
 
     /// Passes before `latest`, the latest pass output started, ended
-    /// naturally: each counts. The latest counts at its threshold, or once
-    /// output drains after it with no failure: the queue ended there.
+    /// naturally: each counts, and its play finishes. The latest counts at its
+    /// threshold, or once output drains after it with no failure: the queue
+    /// ended there, and its play finishes. Radio plays count by listened time
+    /// instead.
     fn count(&mut self, output: &OutputSnapshot, latest: usize) {
         let ended = self.finished && output.drained && self.failure.is_none();
-        for (index, pass) in self.passes.range_mut(..=latest).enumerate() {
+        for index in 0..=latest {
+            let pass = &self.passes[index];
             let reached = output.entry_id == pass.id
                 && pass
                     .threshold
                     .is_some_and(|threshold| output.position_frames >= threshold);
             let counts = index < latest || reached || ended;
-            if !pass.counted && pass.token.is_valid() && counts {
-                pass.counted = true;
-                self.counted_plays.push(CountedPlay {
-                    entry_id: pass.id,
-                    started_at: *pass.started_at.get_or_insert_with(unix_now),
-                });
+            if pass.counted || !pass.token.is_valid() || !counts {
+                continue;
+            }
+            self.start_play(index);
+            let pass = &mut self.passes[index];
+            pass.counted = true;
+            if let Some(play) = pass.play.as_mut().filter(|play| play.radio.is_none()) {
+                play.counted = true;
+                self.play_events.push(PlayEvent::Counted { play: play.key });
             }
         }
+        self.listen(output.rendered_frames);
+        for index in 0..latest {
+            if let Some(play) = self.passes[index].play.take() {
+                self.close(play, EndReason::Finished);
+            }
+        }
+        if ended && let Some(play) = self.passes[latest].play.take() {
+            self.close(play, EndReason::Finished);
+        }
+    }
+
+    /// Gives what output rendered since the last call to the play of the
+    /// latest heard valid pass.
+    fn listen(&mut self, rendered: u64) {
+        let frames = rendered.saturating_sub(self.rendered_frames);
+        self.rendered_frames = rendered;
+        if let Some(play) = self
+            .passes
+            .iter_mut()
+            .rev()
+            .find(|pass| pass.heard && pass.token.is_valid())
+            .and_then(|pass| pass.play.as_mut())
+            && play.listen(frames)
+        {
+            self.play_events.push(PlayEvent::Counted { play: play.key });
+        }
+    }
+
+    /// Pass `index` started, or counts before `hear` noted it: it gets its
+    /// start time and, unless it continues a play, a new play. A pass that
+    /// counted before its play opened (a restored selection with no restored
+    /// play) leaves its play uncounted.
+    fn start_play(&mut self, index: usize) {
+        let pass = &mut self.passes[index];
+        if pass.started_at.is_some() {
+            return;
+        }
+        let started_at = unix_now();
+        pass.started_at = Some(started_at);
+        if pass.play.is_none() {
+            self.open_play_at(index, started_at);
+        }
+    }
+
+    /// Opens a play for pass `index`.
+    fn open_play_at(&mut self, index: usize, started_at: i64) {
+        let key = self.next_play_key();
+        let entry_id = self.passes[index].id;
+        let radio = self.radio_text(entry_id);
+        let mut play = Play::new(key, radio.as_ref());
+        play.forced = self.passes[index].counted;
+        self.passes[index].play = Some(play);
+        self.play_events.push(PlayEvent::Opened {
+            play: key,
+            entry_id,
+            started_at,
+            radio,
+        });
+    }
+
+    /// Follows a change of the now-playing text of pass `index`. When the
+    /// pass is heard and its radio play opened with other text, that play
+    /// finishes and the next one opens.
+    pub(super) fn retitle(&mut self, index: usize) {
+        let pass = &self.passes[index];
+        let Some(text) = self.radio_text(pass.id) else {
+            return;
+        };
+        let changed = pass.heard
+            && pass
+                .play
+                .as_ref()
+                .and_then(|play| play.radio.as_ref())
+                .is_some_and(|radio| radio.raw != text.raw);
+        if !changed {
+            return;
+        }
+        // What output played so far belongs to the earlier play.
+        self.count_heard();
+        if let Some(play) = self.passes[index].play.take() {
+            self.close(play, EndReason::Finished);
+            self.open_play_at(index, unix_now());
+        }
+    }
+
+    /// The now-playing text of stream entry `entry_id`: its latest title, or
+    /// the station name before any.
+    fn radio_text(&self, entry_id: u64) -> Option<RadioText> {
+        let entry = self.queue.iter().find(|entry| entry.id == entry_id)?;
+        let station = &entry.stream.as_ref()?.title;
+        let title = entry.metadata.as_ref().map_or(station, |now| &now.title);
+        Some(radio::parse(title, station))
+    }
+
+    fn close(&mut self, play: Play, reason: EndReason) {
+        let skip_stops = reason == EndReason::Skipped && (play.radio.is_some() || !play.heard);
+        let reason = if play.forced || skip_stops {
+            EndReason::Stopped
+        } else {
+            reason
+        };
+        self.play_events.push(PlayEvent::Closed {
+            play: play.key,
+            listened_ms: play.listened_ms(),
+            reason,
+            ended_at: unix_now(),
+        });
+    }
+
+    fn next_play_key(&mut self) -> u64 {
+        self.next_play += 1;
+        self.next_play
     }
 
     fn heard(&mut self, id: u64, fresh: Option<Vec<u64>>) {
@@ -505,9 +767,9 @@ impl Player {
         if from < self.passes.len() {
             self.decoder = None;
             self.equalizer.reset();
-            for pass in self.passes.drain(from..) {
-                pass.token.invalidate();
-                self.prefilled_frames -= pass.prefilled;
+            let dropped: Vec<Pass> = self.passes.drain(from..).collect();
+            for pass in dropped {
+                self.discard(pass);
             }
         }
         // The kept pass may be older than the entry's latest token.
@@ -531,27 +793,33 @@ impl Player {
             self.decoded_position = 0;
             self.equalizer.reset();
         }
-        let prefilled = &mut self.prefilled_frames;
-        self.passes.retain(|pass| {
-            let gone = removed.contains(&pass.id);
-            if gone {
-                pass.token.invalidate();
-                *prefilled -= pass.prefilled;
-            }
-            !gone
-        });
+        let (gone, kept): (VecDeque<Pass>, _) = std::mem::take(&mut self.passes)
+            .into_iter()
+            .partition(|pass| removed.contains(&pass.id));
+        self.passes = kept;
+        for pass in gone {
+            self.discard(pass);
+        }
     }
 
     /// Drops every pass and what was planned after them.
     pub(super) fn drop_passes(&mut self) {
         self.count_heard();
-        for pass in self.passes.drain(..) {
-            pass.token.invalidate();
-            self.prefilled_frames -= pass.prefilled;
+        for pass in std::mem::take(&mut self.passes) {
+            self.discard(pass);
         }
         self.plan = Plan::default();
         self.opening = None;
         self.silent = 0;
+    }
+
+    /// A dropped pass no longer plays. Its open play closes as stopped.
+    fn discard(&mut self, pass: Pass) {
+        pass.token.invalidate();
+        self.prefilled_frames -= pass.prefilled;
+        if let Some(play) = pass.play {
+            self.close(play, EndReason::Stopped);
+        }
     }
 }
 
@@ -562,10 +830,19 @@ mod tests {
         decoder::GainMode,
         output::OutputConfig,
         play_order::{RepeatScope, RunInfo},
-        playback::Start,
-        store::LoadedEntry,
+        playback::{RadioText, Start, radio},
+        protocol::StreamSpec,
+        store::{EndReason, LoadedEntry},
     };
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        path::PathBuf,
+        sync::atomic::{AtomicBool, Ordering},
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn repeat_all_trim_keeps_the_current_context() -> anyhow::Result<()> {
@@ -657,18 +934,18 @@ mod tests {
         Ok(())
     }
 
-    /// 100 frames of stereo 16-bit silence.
-    fn silence(directory: &std::path::Path) -> anyhow::Result<PathBuf> {
+    /// `frames` frames of stereo 16-bit silence.
+    fn silence(directory: &std::path::Path, frames: u32) -> anyhow::Result<PathBuf> {
         let source = directory.join("source.wav");
         let mut bytes = b"RIFF".to_vec();
-        bytes.extend_from_slice(&(36 + 400_u32).to_le_bytes());
+        bytes.extend_from_slice(&(36 + frames * 4).to_le_bytes());
         bytes.extend_from_slice(b"WAVEfmt ");
         for field in [16_u32, 0x0002_0001, 48_000, 192_000, 0x0010_0004] {
             bytes.extend_from_slice(&field.to_le_bytes());
         }
         bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&400_u32.to_le_bytes());
-        bytes.resize(bytes.len() + 400, 0);
+        bytes.extend_from_slice(&(frames * 4).to_le_bytes());
+        bytes.resize(bytes.len() + frames as usize * 4, 0);
         fs::write(&source, bytes)?;
         Ok(source)
     }
@@ -686,7 +963,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("tyranny-start-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory)?;
-        let source = silence(&directory)?;
+        let source = silence(&directory, 100)?;
         let mut player = Player::new(
             vec![source.clone()],
             OutputConfig::Capture {
@@ -722,7 +999,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("tyranny-fresh-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory)?;
-        let source = silence(&directory)?;
+        let source = silence(&directory, 100)?;
         let mut player = Player::new(
             vec![source.clone(), source],
             OutputConfig::Capture {
@@ -739,6 +1016,533 @@ mod tests {
         assert!(player.passes.iter().all(|pass| pass.fresh.is_none()));
         drop(player);
         fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    /// A clocked capture player over `sources`.
+    fn clocked(directory: &std::path::Path, sources: Vec<PathBuf>) -> anyhow::Result<Player> {
+        Player::new(
+            sources,
+            OutputConfig::Capture {
+                path: directory.join("capture.f32"),
+                clocked: true,
+            },
+            GainMode::Off,
+        )
+    }
+
+    /// Pumps until `done`, gathering the play events.
+    fn pump_until(
+        player: &mut Player,
+        events: &mut Vec<PlayEvent>,
+        mut done: impl FnMut(&Player, &[PlayEvent]) -> bool,
+    ) -> anyhow::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(player, events) {
+            anyhow::ensure!(Instant::now() < deadline, "timed out: {events:?}");
+            player.pump()?;
+            events.extend(player.take_play_events());
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
+    fn position(player: &Player) -> u64 {
+        player.snapshot().position_frames
+    }
+
+    fn listened(player: &Player) -> u64 {
+        player.open_play().map_or(0, |(_, listened)| listened)
+    }
+
+    fn near(actual: u64, expected: u64, tolerance: u64) -> bool {
+        actual.abs_diff(expected) <= tolerance
+    }
+
+    fn opened(events: &[PlayEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PlayEvent::Opened { play, .. } => Some(*play),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn counted(events: &[PlayEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PlayEvent::Counted { play } => Some(*play),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn scratch(name: &str) -> anyhow::Result<PathBuf> {
+        let directory =
+            std::env::temp_dir().join(format!("tyranny-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        Ok(directory)
+    }
+
+    #[test]
+    fn a_track_heard_to_its_end_opens_counts_and_finishes() -> anyhow::Result<()> {
+        let directory = scratch("finish")?;
+        let mut player = clocked(&directory, vec![silence(&directory, 24_000)?])?;
+        let before = unix_now();
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |player, _| player.completed())?;
+        player.pump()?;
+        events.extend(player.take_play_events());
+        let [
+            PlayEvent::Opened {
+                play,
+                entry_id: 1,
+                started_at,
+                radio: None,
+            },
+            PlayEvent::Counted { play: counted },
+            PlayEvent::Closed {
+                play: closed,
+                listened_ms,
+                reason: EndReason::Finished,
+                ended_at,
+            },
+        ] = events[..]
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!((counted, closed), (play, play));
+        assert!(near(listened_ms, 500, 50), "{listened_ms}");
+        assert!(before <= started_at && started_at <= ended_at);
+        assert_eq!(player.open_play(), None);
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn end_play_skipped_before_the_threshold_closes_uncounted() -> anyhow::Result<()> {
+        let directory = scratch("skip")?;
+        let mut player = clocked(&directory, vec![silence(&directory, 480_000)?])?;
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 48_000
+        })?;
+        player.end_play(EndReason::Skipped);
+        events.extend(player.take_play_events());
+        let [
+            PlayEvent::Opened { play, .. },
+            PlayEvent::Closed {
+                play: closed,
+                listened_ms,
+                reason: EndReason::Skipped,
+                ..
+            },
+        ] = events[..]
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(closed, play);
+        assert!(near(listened_ms, 1_000, 50), "{listened_ms}");
+        assert_eq!(player.open_play(), None);
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn pause_is_not_listened_time() -> anyhow::Result<()> {
+        let directory = scratch("pause")?;
+        let mut player = clocked(&directory, vec![silence(&directory, 480_000)?])?;
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 48_000
+        })?;
+        player.pause();
+        let paused = Instant::now();
+        pump_until(&mut player, &mut events, |_, _| {
+            paused.elapsed() >= Duration::from_secs(2)
+        })?;
+        player.play();
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 96_000
+        })?;
+        assert!(near(listened(&player), 2_000, 100), "{}", listened(&player));
+        assert_eq!(opened(&events).len(), 1, "{events:?}");
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn seeking_continues_the_same_play_without_double_counting() -> anyhow::Result<()> {
+        let directory = scratch("seek")?;
+        let mut player = clocked(&directory, vec![silence(&directory, 480_000)?])?;
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 24_000
+        })?;
+        // Forward 5 s, past the 5 s threshold: the play counts.
+        player.seek(264_000)?;
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 288_000
+        })?;
+        // Back 3 s, then across the threshold again.
+        player.seek(144_000)?;
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 264_000
+        })?;
+        let opened = opened(&events);
+        assert_eq!(opened.len(), 1, "{events:?}");
+        assert_eq!(counted(&events), opened, "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, PlayEvent::Closed { .. })),
+            "{events:?}"
+        );
+        let (play, listened) = player.open_play().expect("an open play");
+        assert_eq!(play, opened[0]);
+        // About 3.5 s rendered, though the position is 5.5 s.
+        let rendered = player.snapshot().output.rendered_frames * 1_000 / 48_000;
+        assert!(near(listened, rendered, 50), "{listened} {rendered}");
+        assert!(near(listened, 3_500, 300), "{listened}");
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restored_play_keeps_its_key_and_counted_state() -> anyhow::Result<()> {
+        let directory = scratch("restore")?;
+        let mut player = clocked(&directory, vec![silence(&directory, 480_000)?])?;
+        // Restored past the 5 s threshold.
+        let prepared = player.prepare_selection(1, 288_000, GainMode::Off)?;
+        player.commit_selection(prepared);
+        player.restored_selection();
+        let play = player.restore_play(1, true, 90_000);
+        assert_eq!(player.open_play(), Some((play, 90_000)));
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 336_000
+        })?;
+        assert!(events.is_empty(), "{events:?}");
+        let (open, listened) = player.open_play().expect("an open play");
+        assert_eq!(open, play);
+        assert!(near(listened, 91_000, 50), "{listened}");
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restored_play_never_heard_closes_as_stopped() -> anyhow::Result<()> {
+        let directory = scratch("unheard")?;
+        let mut player = clocked(&directory, vec![silence(&directory, 480_000)?])?;
+        let prepared = player.prepare_selection(1, 0, GainMode::Off)?;
+        player.commit_selection(prepared);
+        player.restored_selection();
+        let play = player.restore_play(1, false, 4_000);
+        player.end_play(EndReason::Skipped);
+        let events = player.take_play_events();
+        let [
+            PlayEvent::Closed {
+                play: closed,
+                listened_ms: 4_000,
+                reason: EndReason::Stopped,
+                ..
+            },
+        ] = events[..]
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(closed, play);
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_restored_counted_pass_without_a_row_opens_uncounted_and_stops() -> anyhow::Result<()> {
+        let directory = scratch("rowless")?;
+        let mut player = clocked(&directory, vec![silence(&directory, 480_000)?])?;
+        let prepared = player.prepare_selection(1, 288_000, GainMode::Off)?;
+        player.commit_selection(prepared);
+        player.restored_selection();
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |player, _| {
+            position(player) >= 312_000
+        })?;
+        player.end_play(EndReason::Skipped);
+        events.extend(player.take_play_events());
+        let [
+            PlayEvent::Opened { play, .. },
+            PlayEvent::Closed {
+                play: closed,
+                reason: EndReason::Stopped,
+                ..
+            },
+        ] = events[..]
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(closed, play);
+        drop(player);
+        fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn radio_play_counts_after_sixty_seconds() {
+        let frames = |ms: u64| ms * 48;
+        let song = radio::parse("Burial - Archangel", "NTS");
+        let mut play = Play::new(1, Some(&song));
+        assert!(!play.listen(frames(59_900)));
+        assert!(play.listen(frames(100)));
+        assert!(!play.listen(frames(60_000)), "a radio play counts once");
+        let mut junk = Play::new(2, Some(&radio::parse("NTS", "NTS")));
+        assert!(!junk.listen(frames(120_000)));
+        let mut file = Play::new(3, None);
+        assert!(
+            !file.listen(frames(120_000)),
+            "file plays count by position"
+        );
+    }
+
+    /// A local ICY station. It sends `live.mp3` as fast as it is read, with
+    /// the current title in every metadata block.
+    struct Station {
+        address: std::net::SocketAddr,
+        title: Arc<std::sync::Mutex<String>>,
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Station {
+        fn start(title: &str) -> anyhow::Result<Self> {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let address = listener.local_addr()?;
+            listener.set_nonblocking(true)?;
+            let title = Arc::new(std::sync::Mutex::new(title.to_owned()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (current, halt) = (Arc::clone(&title), Arc::clone(&stop));
+            let thread = thread::spawn(move || {
+                let mut clients = Vec::new();
+                while !halt.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((socket, _)) => {
+                            let (current, halt) = (Arc::clone(&current), Arc::clone(&halt));
+                            clients.push(thread::spawn(move || {
+                                let _ = Self::serve(socket, &current, &halt);
+                            }));
+                        }
+                        Err(_) => thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+                for client in clients {
+                    let _ = client.join();
+                }
+            });
+            Ok(Self {
+                address,
+                title,
+                stop,
+                thread: Some(thread),
+            })
+        }
+
+        fn serve(
+            mut socket: TcpStream,
+            title: &std::sync::Mutex<String>,
+            stop: &AtomicBool,
+        ) -> std::io::Result<()> {
+            socket.set_nonblocking(false)?;
+            socket.set_write_timeout(Some(Duration::from_millis(500)))?;
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte)?;
+                request.push(byte[0]);
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nicy-metaint: 1024\r\nConnection: close\r\n\r\n")?;
+            let audio = include_bytes!("../../tests/fixtures/streams/live.mp3");
+            let mut position = 0;
+            while !stop.load(Ordering::Acquire) {
+                let mut remaining = 1024;
+                while remaining > 0 {
+                    let count = remaining.min(audio.len() - position);
+                    socket.write_all(&audio[position..position + count])?;
+                    position = (position + count) % audio.len();
+                    remaining -= count;
+                }
+                let text = format!("StreamTitle='{}';", title.lock().unwrap());
+                let blocks = text.len().div_ceil(16);
+                let mut metadata = vec![0; blocks * 16 + 1];
+                metadata[0] = blocks as u8;
+                metadata[1..=text.len()].copy_from_slice(text.as_bytes());
+                socket.write_all(&metadata)?;
+            }
+            Ok(())
+        }
+
+        fn set_title(&self, title: &str) {
+            title.clone_into(&mut self.title.lock().unwrap());
+        }
+
+        /// A player whose only entry is this station, named "Fixture Radio".
+        /// Output is unclocked, so a minute of radio plays in seconds.
+        fn player(&self) -> anyhow::Result<Player> {
+            let spec = StreamSpec::new(
+                format!("http://{}/live", self.address),
+                "Fixture Radio".into(),
+            )?;
+            Player::from_loaded(
+                vec![LoadedEntry {
+                    id: 1,
+                    path: PathBuf::from(&spec.url),
+                    stream: Some(spec),
+                    run: None,
+                    played_seq: None,
+                }],
+                1,
+                2,
+                OutputConfig::Capture {
+                    path: PathBuf::from("/dev/null"),
+                    clocked: false,
+                },
+                GainMode::Off,
+            )
+        }
+    }
+
+    impl Drop for Station {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            let _ = self.thread.take().map(thread::JoinHandle::join);
+        }
+    }
+
+    /// The radio play opened with now-playing text `raw`, if any.
+    fn radio_play<'a>(events: &'a [PlayEvent], raw: &str) -> Option<(u64, &'a RadioText)> {
+        events.iter().find_map(|event| match event {
+            PlayEvent::Opened {
+                play,
+                radio: Some(text),
+                ..
+            } if text.raw == raw => Some((*play, text)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn radio_text_change_finishes_one_radio_play_and_opens_the_next() -> anyhow::Result<()> {
+        let station = Station::start("Artist One - First Song")?;
+        let mut player = station.player()?;
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |_, events| {
+            radio_play(events, "Artist One - First Song").is_some()
+        })?;
+        station.set_title("Artist Two - Second Song");
+        pump_until(&mut player, &mut events, |_, events| {
+            radio_play(events, "Artist Two - Second Song").is_some()
+        })?;
+        let (first, _) = radio_play(&events, "Artist One - First Song").unwrap();
+        let (second, text) = radio_play(&events, "Artist Two - Second Song").unwrap();
+        assert_eq!(
+            (text.artist.as_str(), text.title.as_str()),
+            ("Artist Two", "Second Song")
+        );
+        assert!(!text.junk);
+        let closed = events.iter().position(|event| {
+            matches!(event, PlayEvent::Closed { play, reason: EndReason::Finished, .. } if *play == first)
+        });
+        let next = events
+            .iter()
+            .position(|event| matches!(event, PlayEvent::Opened { play, .. } if *play == second));
+        assert!(closed.is_some() && closed < next, "{events:?}");
+        assert_eq!(player.open_play().map(|(play, _)| play), Some(second));
+        drop(player);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_radio_text_does_not_split_the_play() -> anyhow::Result<()> {
+        let station = Station::start("Artist One - First Song")?;
+        let mut player = station.player()?;
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |_, events| {
+            radio_play(events, "Artist One - First Song").is_some()
+        })?;
+        let (play, _) = radio_play(&events, "Artist One - First Song").unwrap();
+        let start = listened(&player);
+        let seen = events.len();
+        // Ten seconds of radio repeat the same text in dozens of metadata blocks.
+        pump_until(&mut player, &mut events, |player, _| {
+            listened(player) >= start + 10_000
+        })?;
+        // The stream reports a metadata update; the text is the same.
+        player.retitle(player.passes.len() - 1);
+        events.extend(player.take_play_events());
+        assert!(events[seen..].is_empty(), "{events:?}");
+        assert_eq!(player.open_play().map(|(open, _)| open), Some(play));
+        drop(player);
+        Ok(())
+    }
+
+    #[test]
+    fn junk_radio_play_never_counts() -> anyhow::Result<()> {
+        // Blank text stands for the station name.
+        let station = Station::start("")?;
+        let mut player = station.player()?;
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |player, _| {
+            listened(player) >= 61_000
+        })?;
+        let [
+            PlayEvent::Opened {
+                play,
+                radio: Some(ref text),
+                ..
+            },
+        ] = events[..]
+        else {
+            panic!("{events:?}");
+        };
+        assert!(text.junk, "{text:?}");
+        assert_eq!(player.open_play().map(|(open, _)| open), Some(play));
+        drop(player);
+        Ok(())
+    }
+
+    #[test]
+    fn leaving_a_station_closes_as_stopped() -> anyhow::Result<()> {
+        let station = Station::start("Artist One - First Song")?;
+        let mut player = station.player()?;
+        player.play();
+        let mut events = Vec::new();
+        pump_until(&mut player, &mut events, |_, events| {
+            radio_play(events, "Artist One - First Song").is_some()
+        })?;
+        let (play, _) = radio_play(&events, "Artist One - First Song").unwrap();
+        player.end_play(EndReason::Skipped);
+        let events = player.take_play_events();
+        assert!(
+            matches!(events[..], [PlayEvent::Closed { play: closed, reason: EndReason::Stopped, .. }] if closed == play),
+            "{events:?}"
+        );
+        assert_eq!(player.open_play(), None);
+        drop(player);
         Ok(())
     }
 }

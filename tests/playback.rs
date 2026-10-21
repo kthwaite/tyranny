@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -10,7 +11,7 @@ use tyranny::{
     decoder::{Decoder, GainMode},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, UniformShuffle},
-    playback::Player,
+    playback::{PlayEvent, Player},
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -72,6 +73,21 @@ fn pcm(path: &Path) -> Vec<[f32; 2]> {
                 f32::from_le_bytes(bytes[..4].try_into().unwrap()),
                 f32::from_le_bytes(bytes[4..].try_into().unwrap()),
             ]
+        })
+        .collect()
+}
+/// The entry of each counted play in `events`, oldest first.
+fn counted_entries(events: &[PlayEvent]) -> Vec<u64> {
+    let mut entries = HashMap::new();
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PlayEvent::Opened { play, entry_id, .. } => {
+                entries.insert(*play, *entry_id);
+                None
+            }
+            PlayEvent::Counted { play } => Some(entries[play]),
+            PlayEvent::Closed { .. } => None,
         })
         .collect()
 }
@@ -704,12 +720,12 @@ fn repeat_one_counts_each_pass() {
     .unwrap();
     player.set_repeat(RepeatMode::One);
     player.play();
-    let mut counted = Vec::new();
+    let mut events = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while counted.len() < 3 {
-        assert!(Instant::now() < deadline, "{counted:?}");
+    while counted_entries(&events).len() < 3 {
+        assert!(Instant::now() < deadline, "{events:?}");
         player.pump().unwrap();
-        counted.extend(player.take_counted_plays());
+        events.extend(player.take_play_events());
         thread::sleep(Duration::from_millis(1));
     }
     // Repeat Off ends the queue after the pass being heard.
@@ -717,17 +733,16 @@ fn repeat_one_counts_each_pass() {
     while !player.completed() {
         assert!(Instant::now() < deadline, "{:?}", player.snapshot());
         player.pump().unwrap();
-        counted.extend(player.take_counted_plays());
+        events.extend(player.take_play_events());
         thread::sleep(Duration::from_millis(1));
     }
     player.pump().unwrap();
-    counted.extend(player.take_counted_plays());
+    events.extend(player.take_play_events());
     drop(player);
     let heard = pcm(&capture);
     assert_eq!(heard.len() % 4_800, 0);
     // Every pass counts, each once.
-    let entries: Vec<u64> = counted.iter().map(|play| play.entry_id).collect();
-    assert_eq!(entries, vec![1; heard.len() / 4_800]);
+    assert_eq!(counted_entries(&events), vec![1; heard.len() / 4_800]);
 }
 
 #[test]
@@ -754,7 +769,8 @@ fn a_selection_counts_a_pass_that_crossed_its_threshold_since_the_last_pump() {
         thread::sleep(Duration::from_millis(1));
     }
     assert!(player.snapshot().position_frames < 4_800);
-    assert!(player.take_counted_plays().is_empty());
+    let mut events = player.take_play_events();
+    assert!(counted_entries(&events).is_empty());
     // No pump while output passes the threshold at 4_800 frames.
     while player.snapshot().position_frames < 4_800 {
         assert!(Instant::now() < deadline, "{:?}", player.snapshot());
@@ -763,11 +779,8 @@ fn a_selection_counts_a_pass_that_crossed_its_threshold_since_the_last_pump() {
     assert_eq!(player.snapshot().current_id, Some(1));
     let prepared = player.prepare_selection(2, 0, GainMode::Off).unwrap();
     player.commit_selection(prepared);
-    let counted = player.take_counted_plays();
-    assert_eq!(
-        counted.iter().map(|play| play.entry_id).collect::<Vec<_>>(),
-        [1]
-    );
+    events.extend(player.take_play_events());
+    assert_eq!(counted_entries(&events), [1]);
 }
 
 #[cfg(target_os = "macos")]

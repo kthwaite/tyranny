@@ -1,8 +1,8 @@
 //! Splits a radio station's now-playing text into artist and title.
 
 /// Now-playing text from a radio station, split into its parts.
-#[allow(dead_code)] // Task 3 uses this
-pub(crate) struct RadioText {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RadioText {
     pub artist: String,
     pub title: String,
     pub raw: String,
@@ -11,7 +11,6 @@ pub(crate) struct RadioText {
 }
 
 /// Parses `raw` for a station named `station`.
-#[allow(dead_code)] // Task 3 uses this
 pub(crate) fn parse(raw: &str, station: &str) -> RadioText {
     let text = raw.trim();
     let junk = text.is_empty()

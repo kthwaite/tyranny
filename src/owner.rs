@@ -11,7 +11,7 @@ use crate::{
     lyrics::{Handle as LyricsHandle, LyricsWorkers, Request as LyricsRequest},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, ShuffleStrategy, UniformShuffle},
-    playback::{CountedPlay, Player, PreparedRemove, Start},
+    playback::{PlayEvent, Player, PreparedRemove, Start},
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
         NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
@@ -26,7 +26,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
     cell::RefCell,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -637,6 +637,8 @@ struct Actor {
     pending_plays: PendingHistory,
     /// The last history write failed: pending plays wait for the retry.
     retrying_plays: bool,
+    /// The entry and start of each open play. Task 4 replaces this.
+    open_plays: HashMap<u64, (u64, i64)>,
 }
 impl Actor {
     fn open(config: OwnerConfig) -> Result<Self> {
@@ -720,6 +722,7 @@ impl Actor {
             history_revision,
             pending_plays: PendingHistory::default(),
             retrying_plays: false,
+            open_plays: HashMap::new(),
         };
         actor.publish();
         Ok(actor)
@@ -989,16 +992,38 @@ impl Actor {
         Ok(())
     }
 
-    /// A pass counted as a play. It waits in `pending_plays` with what queue
-    /// pages show for its entry. An entry already gone from the queue has
-    /// nothing to describe it, and is not recorded.
-    fn count_play(&mut self, play: CountedPlay) {
-        let started_at = play.started_at;
-        match self.store.queue_entry(play.entry_id) {
+    /// Feeds the player's play events to `count_play`. Task 4 replaces this.
+    fn take_plays(&mut self) {
+        for event in self.player.take_play_events() {
+            match event {
+                PlayEvent::Opened {
+                    play,
+                    entry_id,
+                    started_at,
+                    ..
+                } => {
+                    self.open_plays.insert(play, (entry_id, started_at));
+                }
+                PlayEvent::Counted { play } => {
+                    if let Some(&(entry_id, started_at)) = self.open_plays.get(&play) {
+                        self.count_play(play, entry_id, started_at);
+                    }
+                }
+                PlayEvent::Closed { play, .. } => {
+                    self.open_plays.remove(&play);
+                }
+            }
+        }
+    }
+
+    /// A play of entry `entry_id` counted. It waits in `pending_plays` with
+    /// what queue pages show for its entry. An entry already gone from the
+    /// queue has nothing to describe it, and is not recorded.
+    fn count_play(&mut self, play: u64, entry_id: u64, started_at: i64) {
+        match self.store.queue_entry(entry_id) {
             Ok(Some(item)) => {
-                // Task 4 replaces this: a counted pass becomes a play that
-                // opens, counts and closes at once.
-                let play = play.entry_id;
+                // Task 4 replaces this: a counted play opens, counts and
+                // closes at once.
                 let events = [
                     HistoryEvent::Open {
                         play,
@@ -1015,15 +1040,14 @@ impl Actor {
                 for event in events {
                     if self.pending_plays.push(event).is_some() {
                         eprintln!(
-                            "tyranny: play history writes keep failing; dropped an event of the play of entry {play}"
+                            "tyranny: play history writes keep failing; dropped an event of the play of entry {entry_id}"
                         );
                     }
                 }
             }
             Ok(None) => {}
             Err(error) => eprintln!(
-                "tyranny: describing the play of entry {} failed; not recorded: {error:#}",
-                play.entry_id
+                "tyranny: describing the play of entry {entry_id} failed; not recorded: {error:#}"
             ),
         }
     }
@@ -1034,9 +1058,7 @@ impl Actor {
     /// the pump, and a deleted entry has nothing to describe its play.
     fn collect_plays(&mut self) {
         self.player.count_heard();
-        for play in self.player.take_counted_plays() {
-            self.count_play(play);
-        }
+        self.take_plays();
     }
 
     /// Writes the pending plays oldest first, one small commit each. The first
@@ -2074,9 +2096,7 @@ impl Actor {
                 }
                 // Before the advances, whose trims may remove a counted entry.
                 // While earlier writes fail, new plays wait for the retry.
-                for play in self.player.take_counted_plays() {
-                    self.count_play(play);
-                }
+                self.take_plays();
                 let recorded =
                     !self.retrying_plays && !self.pending_plays.is_empty() && self.write_plays();
                 // Natural advance: each pass output starts marks its entry played.
