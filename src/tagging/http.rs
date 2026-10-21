@@ -96,6 +96,31 @@ pub(super) fn get_json(
     cancel: &Cancellation,
     deadline: Instant,
 ) -> Result<Vec<u8>, LookupError> {
+    fetch(client, gate, url, service, cancel, deadline, false).map(|(_, body)| body)
+}
+
+/// As `get_json`, but a 4xx reply whose content type is JSON returns `Ok((status, body))` instead of `Failed`.
+/// Busy statuses, redirects, size and transport errors map exactly as in `get_json`.
+pub(super) fn get_json_or_error(
+    client: &Client,
+    gate: &StartGate,
+    url: Url,
+    service: &'static str,
+    cancel: &Cancellation,
+    deadline: Instant,
+) -> Result<(u16, Vec<u8>), LookupError> {
+    fetch(client, gate, url, service, cancel, deadline, true)
+}
+
+fn fetch(
+    client: &Client,
+    gate: &StartGate,
+    url: Url,
+    service: &'static str,
+    cancel: &Cancellation,
+    deadline: Instant,
+    accept_error_json: bool,
+) -> Result<(u16, Vec<u8>), LookupError> {
     let failed = |message: String| LookupError::Failed(message);
     let unreachable = || failed(format!("{service} could not be reached"));
     gate.wait(cancel, deadline)?;
@@ -117,26 +142,29 @@ pub(super) fn get_json(
     {
         return Err(LookupError::Busy(service));
     }
-    if status == StatusCode::NOT_FOUND {
-        return Err(failed(format!("{service} has no such record")));
-    }
-    if status.is_redirection() {
-        return Err(failed(format!("{service} redirect rejected")));
-    }
-    if status != StatusCode::OK {
-        return Err(failed(format!(
-            "{service} returned an unsuccessful response (HTTP {})",
-            status.as_u16()
-        )));
-    }
     let json = response
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.split(';').next())
         .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"));
-    if !json {
-        return Err(failed(format!("{service} returned non-JSON content")));
+    let error_body = accept_error_json && status.is_client_error() && json;
+    if !error_body {
+        if status == StatusCode::NOT_FOUND {
+            return Err(failed(format!("{service} has no such record")));
+        }
+        if status.is_redirection() {
+            return Err(failed(format!("{service} redirect rejected")));
+        }
+        if status != StatusCode::OK {
+            return Err(failed(format!(
+                "{service} returned an unsuccessful response (HTTP {})",
+                status.as_u16()
+            )));
+        }
+        if !json {
+            return Err(failed(format!("{service} returned non-JSON content")));
+        }
     }
     let too_big = || failed(format!("{service} response exceeds 2 MiB"));
     if response
@@ -151,7 +179,7 @@ pub(super) fn get_json(
         cancel.check_lookup(deadline)?;
         let count = response.read(&mut chunk).map_err(|_| unreachable())?;
         if count == 0 {
-            return Ok(bytes);
+            return Ok((status.as_u16(), bytes));
         }
         if count > MAX_RESPONSE_BYTES - bytes.len() {
             return Err(too_big());

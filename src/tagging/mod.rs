@@ -1,6 +1,8 @@
 // Task 10 routes this module and removes the attribute.
 #![allow(dead_code)]
 
+mod acoustid;
+mod fingerprint;
 mod http;
 mod journal;
 mod musicbrainz;

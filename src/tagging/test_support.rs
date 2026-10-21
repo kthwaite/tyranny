@@ -135,3 +135,34 @@ fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
     stream.write_all(head.as_bytes())?;
     stream.write_all(&reply.body)
 }
+
+/// Writes `seconds` of a 48 kHz s16 stereo logarithmic chirp, 200 Hz to 2000 Hz, as a WAV file.
+pub(super) fn write_tone_wav(path: &std::path::Path, seconds: u32) {
+    const RATE: u32 = 48_000;
+    let frames = u64::from(RATE) * u64::from(seconds);
+    let (f0, f1) = (200.0_f64, 2000.0_f64);
+    let total = f64::from(seconds);
+    let k = (f1 / f0).ln();
+    let data_len = (frames * 4) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&RATE.to_le_bytes());
+    out.extend_from_slice(&(RATE * 4).to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for n in 0..frames {
+        let t = n as f64 / f64::from(RATE);
+        let phase = std::f64::consts::TAU * f0 * total / k * ((k * t / total).exp() - 1.0);
+        let sample = ((phase.sin() * 0.5) * 32767.0) as i16;
+        out.extend_from_slice(&sample.to_le_bytes());
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(path, out).unwrap();
+}
