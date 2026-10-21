@@ -29,6 +29,9 @@ enum NativeArtworkSmoke {
                 defer { UserDefaults.standard.removeObject(forKey: "upNextOnPlay") }
                 // `now-playing-art` is the player bar's thumbnail, which shows only while the art is
                 // collapsed. This is the user's real preference; restore it when done.
+                let savedColours = model.theme.settings
+                model.theme.update(ColourSettings())
+                defer { model.theme.update(savedColours) }
                 let savedArtExpanded = navigation.nowPlayingArtExpanded
                 navigation.nowPlayingArtExpanded = false
                 defer { navigation.nowPlayingArtExpanded = savedArtExpanded }
@@ -69,6 +72,7 @@ enum NativeArtworkSmoke {
         cases.append("native-visible-album-thumbnails-decode-embedded-folder-online-and-neutral-missing")
         try await play("Embedded Track", source: "embedded", model, navigation)
         try colour(model.artwork.nowPlaying.image, 0)
+        try await wait("red accent tint", model) { tintedAccent(model) { $0.red > 0.8 && $0.green < 0.2 && $0.blue < 0.2 } }
         let current = model.snapshot?.current_id
         let position = model.snapshot?.position_frames ?? 0
         try await NativeSmoke.drive("value", "library-filter", "album:\"Online Album\"")
@@ -79,6 +83,19 @@ enum NativeArtworkSmoke {
         cases.append("native-now-playing-image-follows-occurrence-not-browser-filter-and-audio-advances")
         try await play("Folder Track", source: "folder", model, navigation)
         try colour(model.artwork.nowPlaying.image, 2)
+        try await wait("blue accent tint", model) { tintedAccent(model) { $0.blue > 0.8 && $0.red < 0.2 && $0.green < 0.2 } }
+        let blueAccent = model.theme.tokens.accent
+        try await NativeSmoke.drive("press", "transport-play-pause")
+        try await wait("paused", model) { model.snapshot?.transport == "paused" }
+        try check(model.theme.tokens.accent == blueAccent, "Pausing changed the tinted accent")
+        try await NativeSmoke.drive("press", "transport-play-pause")
+        try await wait("playing again", model) { model.snapshot?.transport == "playing" }
+        let commands = CommandDispatcher(player: model, navigation: navigation, lists: TrackLists())
+        try await commands.execute("tint off")
+        try check(model.theme.tokens.accent == .system, "tint off did not revert the accent")
+        try await commands.execute("tint on")
+        try await wait("blue accent tint restored", model) { tintedAccent(model) { $0.blue > 0.8 && $0.red < 0.2 && $0.green < 0.2 } }
+        cases.append("native-accent-follows-playing-cover-holds-on-pause-and-reverts-with-tint-off")
         let previousKey = model.artwork.nowPlaying.cacheKey
         let folderCurrent = model.snapshot?.current_id
         guard let folder = argument("--artwork-music-folder"), let green = argument("--artwork-green-source"), let root = model.roots?.entries.first else { throw Failure(message: "Rescan fixture missing") }
@@ -127,6 +144,11 @@ enum NativeArtworkSmoke {
         try await NativeSmoke.drive("double-click-row", "track-table-songs", "0,0.5")
         try await wait("play \(title)", model) { model.snapshot?.transport == "playing" && model.snapshot?.now_playing?.title == title && model.artwork.nowPlaying.state == source }
         try await NativeSmoke.drive("expect-text", "now-playing-art", source)
+    }
+
+    private static func tintedAccent(_ model: PlayerModel, matches: (RGB) -> Bool) -> Bool {
+        if case .tinted(let rgb) = model.theme.tokens.accent { return matches(rgb) }
+        return false
     }
 
     private static func colour(_ image: CGImage?, _ channel: Int) throws {

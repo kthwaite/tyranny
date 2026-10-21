@@ -137,6 +137,18 @@ enum NativeCommandSmoke {
         try check(player.snapshot?.settings.volume == before, "Invalid command changed server state")
         try await commands.execute("playlist-delete \"Night Mix\"")
         try await commands.execute("queue-clear")
+        let savedColours = player.theme.settings
+        defer { player.theme.update(savedColours) }
+        try await commands.execute("colour accent #3366ff")
+        try check(player.theme.settings[.accent] == RGB(hex: "#3366FF"), "colour did not set the accent")
+        try await commands.execute("tint off")
+        try check(!player.theme.settings.tintFromArtwork, "tint off did not turn the tint off")
+        try await commands.execute("colours reset")
+        try check(player.theme.settings == ColourSettings(), "colours reset did not restore defaults")
+        try await commands.execute("settings appearance")
+        try check(navigation.settingsTab == .appearance, "settings appearance did not open the tab")
+        player.theme.update(savedColours)
+        cases.append("colour-tint-reset-and-appearance-commands-apply-locally")
         try await commands.execute("disconnect")
         do {
             try await commands.execute("play")

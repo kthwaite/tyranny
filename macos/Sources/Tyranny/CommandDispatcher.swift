@@ -164,6 +164,10 @@ struct CommandDispatcher {
                     try await player.activation.answerForCommand(arguments[0] == "keep" ? .keep : .clear)
                 }
             }
+        case .colour, .colours, .tint:
+            var settings = player.theme.settings
+            try settings.apply(command)
+            player.theme.update(settings)
         case .help:
             let definitions = CommandLanguage.registry.filter { arguments.isEmpty || $0.id.rawValue == arguments[0] }
             player.message = definitions.map { "\($0.usage) — \($0.summary)" }.joined(separator: "\n")

@@ -13,6 +13,7 @@ import Testing
             ("focus-filter", .focusFilter, []), ("reveal-playing", .revealPlaying, []),
             ("browser off", .browser, ["off"]), ("drawer on", .drawer, ["on"]),
             ("artwork toggle", .artwork, ["toggle"]), ("settings playback", .settings, ["playback"]),
+            ("colour accent #3366ff", .colour, ["accent", "#3366ff"]), ("colours reset", .colours, ["reset"]), ("tint off", .tint, ["off"]),
             ("connect", .connect, []), ("disconnect", .disconnect, []),
             ("server restart", .server, ["restart"]), ("choose-folder", .chooseFolder, []),
             ("rescan 18446744073709551615", .rescan, ["18446744073709551615"]),
@@ -88,6 +89,9 @@ import Testing
         "seek nan", "seek inf", "seek -inf", "seek 1e3", "seek 1ms", "seek 1.2.3", "seek +",
         "seek .", "seek 1_000", "seek ' 1'", "seek 1S", "seek １", "volume 1s", "volume --1",
         "volume +nan", "volume infinity", "volume %", "help nonexistent",
+        "colour accent", "colour accent red", "colour accent #12345", "colour accent #1234567",
+        "colour accent #GGGGGG", "colour background #000000", "colour Accent system", "colours",
+        "colours clear", "tint toggle", "tint yes", "settings appearances",
     ])
     func rejectsInvalidInput(text: String) {
         #expect(throws: CommandLanguageError.self) { try CommandLanguage.parse(text) }
@@ -98,6 +102,17 @@ import Testing
         #expect(throws: CommandLanguageError.self) { try CommandLanguage.parse("seek " + String(repeating: "9", count: 400)) }
         #expect(throws: CommandLanguageError.self) { try CommandLanguage.parse("seek 0." + String(repeating: "0", count: 400) + "1") }
         #expect(throws: CommandLanguageError.self) { try CommandLanguage.parse("volume 0." + String(repeating: "1", count: 39)) }
+    }
+
+    @Test func settingsAppearanceParses() throws {
+        #expect(try CommandLanguage.parse("settings appearance") == ParsedCommand(id: .settings, arguments: ["appearance"]))
+    }
+
+    @Test func colourCompletions() {
+        #expect(CommandLanguage.completions("colour ac") == ["colour accent"])
+        #expect(CommandLanguage.completions("colour accent ") == ["colour accent system"])
+        #expect(CommandLanguage.completions("tint ") == ["tint off", "tint on"])
+        #expect(CommandLanguage.completions("colours ") == ["colours reset"])
     }
 
     @Test func completionsAreContextualAndPreserveColon() throws {

@@ -92,4 +92,20 @@ public struct ColourSettings: Equatable, Sendable {
         }
         defaults.set(tintFromArtwork, forKey: ColourSettings.tintKey)
     }
+
+    /// Applies a parsed `colour`, `colours` or `tint` command.
+    public mutating func apply(_ command: ParsedCommand) throws {
+        let arguments = command.arguments
+        switch command.id {
+        case .colour:
+            guard let token = ColourToken(rawValue: arguments[0]) else { throw CommandLanguageError("Unknown colour token.") }
+            self[token] = arguments[1] == "system" ? nil : RGB(hex: arguments[1])
+        case .colours:
+            self = ColourSettings()
+        case .tint:
+            tintFromArtwork = arguments[0] == "on"
+        default:
+            throw CommandLanguageError("Not a colour command.")
+        }
+    }
 }

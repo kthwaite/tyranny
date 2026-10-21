@@ -70,4 +70,32 @@ import Testing
             #expect(ColourSettings(defaults: defaults) == ColourSettings())
         }
     }
+
+    @Test func applySetsAndClearsAToken() throws {
+        var settings = ColourSettings()
+        try settings.apply(CommandLanguage.parse("colour error #AA0000"))
+        #expect(settings[.error] == RGB(hex: "#AA0000"))
+        try settings.apply(CommandLanguage.parse("colour error system"))
+        #expect(settings[.error] == nil)
+    }
+
+    @Test func coloursResetRestoresDefaults() throws {
+        var settings = ColourSettings(custom: [.accent: RGB(hex: "#3366FF")!], tintFromArtwork: false)
+        try settings.apply(CommandLanguage.parse("colours reset"))
+        #expect(settings == ColourSettings())
+    }
+
+    @Test func tintCommandSetsTheToggle() throws {
+        var settings = ColourSettings()
+        try settings.apply(CommandLanguage.parse("tint off"))
+        #expect(!settings.tintFromArtwork)
+        try settings.apply(CommandLanguage.parse("tint on"))
+        #expect(settings.tintFromArtwork)
+    }
+
+    @Test func applyRejectsOtherCommands() throws {
+        var settings = ColourSettings()
+        let play = try CommandLanguage.parse("play")
+        #expect(throws: CommandLanguageError.self) { try settings.apply(play) }
+    }
 }
