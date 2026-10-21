@@ -173,16 +173,20 @@ impl Handle {
     }
     /// Replies once the click is queued or dropped; never waits for the HTTP request.
     pub(crate) fn count_click(&self, station_uuid: &str) -> Reply {
-        if Uuid::parse_str(station_uuid).is_err() {
+        let Some(uuid) = normalize_uuid(station_uuid) else {
             return error(ErrorCode::InvalidCommand, "invalid station uuid".into());
-        }
-        let _ = self.sender.try_send(Work::Click {
-            uuid: station_uuid.to_owned(),
-        });
+        };
+        let _ = self.sender.try_send(Work::Click { uuid });
         Reply::Ok {
             result: Response::DirectoryClickCounted,
         }
     }
+}
+/// The hyphenated form is the only one the provider will request.
+fn normalize_uuid(uuid: &str) -> Option<String> {
+    Uuid::parse_str(uuid)
+        .ok()
+        .map(|uuid| uuid.hyphenated().to_string())
 }
 fn validate_query(query: &str) -> std::result::Result<&str, String> {
     let query = query.trim();

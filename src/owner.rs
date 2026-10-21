@@ -200,7 +200,7 @@ impl Controller {
                     _ => unreachable!("matched directory commands above"),
                 };
                 if let Reply::Error { queue_revision, .. } = &mut reply {
-                    *queue_revision = self.queue_revision(id).await?;
+                    *queue_revision = self.queue_revision(id).await.unwrap_or(0);
                 }
                 return Ok(Message::Reply { id, reply });
             }

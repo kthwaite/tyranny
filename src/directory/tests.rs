@@ -1,5 +1,6 @@
 use super::{
-    Cancellation, DirectoryWorkers, Provider, mirrors, provider::USER_AGENT, validate_query,
+    Cancellation, DirectoryWorkers, Handle, Provider, Work, mirrors, normalize_uuid,
+    provider::USER_AGENT, validate_query,
 };
 use crate::protocol::{DirectoryStation, ErrorCode, Reply, Response};
 use reqwest::Url;
@@ -312,4 +313,40 @@ fn count_click_rejects_non_uuid_and_replies_without_waiting() {
             result: Response::DirectoryClickCounted
         }
     ));
+}
+
+#[test]
+fn click_uuid_is_queued_in_hyphenated_form() {
+    let plain = "9617a958-0601-11e8-ae97-52543be04c81";
+    for form in [
+        "{9617a958-0601-11e8-ae97-52543be04c81}",
+        "urn:uuid:9617a958-0601-11e8-ae97-52543be04c81",
+        "9617A958060111E8AE9752543BE04C81",
+    ] {
+        assert_eq!(normalize_uuid(form).as_deref(), Some(plain), "{form}");
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+    let handle = Handle {
+        sender,
+        stop: Default::default(),
+    };
+    handle.count_click("{9617a958-0601-11e8-ae97-52543be04c81}");
+    assert!(matches!(receiver.try_recv(), Ok(Work::Click { uuid }) if uuid == plain));
+}
+#[tokio::test]
+async fn dropped_search_marks_its_work_abandoned() {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+    let handle = Handle {
+        sender,
+        stop: Default::default(),
+    };
+    let mut search = Box::pin(handle.search("jazz"));
+    assert!(futures_util::poll!(search.as_mut()).is_pending());
+    let Ok(Work::Search { cancel, reply, .. }) = receiver.try_recv() else {
+        panic!("search was not queued");
+    };
+    assert!(!cancel.cancelled());
+    drop(search);
+    assert!(cancel.cancelled());
+    assert!(reply.is_closed());
 }
