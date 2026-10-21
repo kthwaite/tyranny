@@ -424,6 +424,16 @@ pub struct Lyrics {
     pub message: Option<String>,
 }
 
+/// One journaled tag edit, as listed by `tag_edits`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TagEditSummary {
+    pub edit_id: u64,
+    pub created_at: i64,
+    pub release_title: String,
+    pub file_count: u32,
+    pub reverted: bool,
+}
+
 /// A tag field that a MusicBrainz lookup can propose and Tyranny can write.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
