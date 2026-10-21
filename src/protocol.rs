@@ -1,4 +1,4 @@
-//! Version 21 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 22 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -14,7 +14,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 21;
+pub const VERSION: u32 = 22;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -52,6 +52,9 @@ pub enum Command {
         entry_id: Option<u64>,
         library_revision: u64,
         size: ArtworkSize,
+        providers: Vec<ArtworkProvider>,
+        #[serde(deserialize_with = "required")]
+        discogs_token: Option<DiscogsToken>,
     },
     Lyrics {
         entry_id: u64,
@@ -435,12 +438,56 @@ pub enum ArtworkSource {
     Embedded,
     Folder,
     CoverArtArchive,
+    Deezer,
+    Discogs,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtworkProvider {
+    CoverArtArchive,
+    Deezer,
+    Discogs,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtworkCachePolicy {
+    Persistent,
+    DisplayOnly,
+}
+
+/// Never include credentials in diagnostic output.
+#[derive(Clone, Serialize)]
+#[serde(transparent)]
+pub struct DiscogsToken(String);
+impl std::fmt::Debug for DiscogsToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+impl<'de> Deserialize<'de> for DiscogsToken {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+            return Err(serde::de::Error::custom("invalid Discogs token"));
+        }
+        Ok(Self(value))
+    }
+}
+impl DiscogsToken {
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Artwork {
     pub status: ArtworkStatus,
     pub source: Option<ArtworkSource>,
+    pub source_url: Option<String>,
+    pub expires_at: Option<u64>,
+    pub cache_policy: ArtworkCachePolicy,
     pub cache_key: Option<String>,
     pub width: u32,
     pub height: u32,
@@ -1329,7 +1376,8 @@ mod tests {
     fn artwork_wire_requires_revision_and_size_and_rejects_client_paths() {
         let command = serde_json::json!({
             "id": 1, "command": "artwork", "album_id": 7, "entry_id": null,
-            "library_revision": 2, "size": "thumbnail"
+            "library_revision": 2, "size": "thumbnail",
+            "providers": ["cover_art_archive"], "discogs_token": null
         });
         assert!(matches!(
             serde_json::from_value::<Request>(command.clone())
@@ -1339,10 +1387,11 @@ mod tests {
                 album_id: Some(7),
                 entry_id: None,
                 library_revision: 2,
-                size: ArtworkSize::Thumbnail
+                size: ArtworkSize::Thumbnail,
+                ..
             }
         ));
-        for field in ["library_revision", "size"] {
+        for field in ["library_revision", "size", "providers", "discogs_token"] {
             let mut missing = command.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<Request>(missing).is_err());
@@ -1587,7 +1636,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 21);
+        assert_eq!(VERSION, 22);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",
@@ -1948,5 +1997,41 @@ mod source_tests {
             serde_json::to_string(&SourceKind::Compilations).unwrap(),
             "\"compilations\""
         );
+    }
+
+    #[test]
+    fn artwork_requires_provider_policy_and_redacts_credentials() {
+        let command = serde_json::json!({
+            "id": 1, "command": "artwork", "album_id": 7, "entry_id": null,
+            "library_revision": 2, "size": "thumbnail",
+            "providers": ["discogs", "deezer", "cover_art_archive"],
+            "discogs_token": "secret-do-not-log"
+        });
+        let request = serde_json::from_value::<Request>(command.clone()).unwrap();
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret-do-not-log"));
+        assert!(debug.contains("[redacted]"));
+        for token in [
+            serde_json::json!(""),
+            serde_json::json!("a".repeat(513)),
+            serde_json::json!("secret\r\nAuthorization: other"),
+            serde_json::json!("secret\u{7f}"),
+        ] {
+            let mut invalid = command.clone();
+            invalid["discogs_token"] = token;
+            let error = serde_json::from_value::<Request>(invalid)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("secret"));
+        }
+        for providers in [
+            serde_json::json!(["last_fm"]),
+            serde_json::json!(["unknown"]),
+            serde_json::json!(null),
+        ] {
+            let mut invalid = command.clone();
+            invalid["providers"] = providers;
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
     }
 }

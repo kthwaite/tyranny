@@ -303,6 +303,8 @@ impl Controller {
                 entry_id,
                 library_revision,
                 size,
+                providers,
+                discogs_token,
             } => {
                 let reply = self
                     .artwork
@@ -311,6 +313,8 @@ impl Controller {
                         entry_id,
                         library_revision,
                         size,
+                        providers,
+                        discogs_token,
                     })
                     .await;
                 return Ok(Message::Reply { id, reply });

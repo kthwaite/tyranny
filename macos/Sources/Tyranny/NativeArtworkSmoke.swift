@@ -21,8 +21,10 @@ enum NativeArtworkSmoke {
         Task {
             do {
                 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-                try await wait("indexed library", model) {
-                    model.connected && model.snapshot?.library.scan.phase == "complete" && (model.snapshot?.library.tracks ?? 0) >= 6
+                let settingsOnly = argument("--artwork-smoke-mode") == "settings"
+                let providersOnly = argument("--artwork-smoke-mode") == "providers"
+                try await wait(settingsOnly ? "connected server" : "indexed library", model) {
+                    model.connected && (settingsOnly || (model.snapshot?.library.scan.phase == "complete" && (model.snapshot?.library.tracks ?? 0) >= (providersOnly ? 1 : 6)))
                 }
                 try await NativeSmoke.drive("activate")
                 UserDefaults.standard.set(UpNextPolicy.replace.rawValue, forKey: "upNextOnPlay")
@@ -35,7 +37,9 @@ enum NativeArtworkSmoke {
                 let savedArtExpanded = navigation.nowPlayingArtExpanded
                 navigation.nowPlayingArtExpanded = false
                 defer { navigation.nowPlayingArtExpanded = savedArtExpanded }
-                if argument("--artwork-smoke-mode") == "restore" { try await restore(model, navigation) }
+                if settingsOnly { try await settings(model) }
+                else if providersOnly { try await providers(model, navigation) }
+                else if argument("--artwork-smoke-mode") == "restore" { try await restore(model, navigation) }
                 else { try await exercise(model, navigation) }
                 try finish(model, error: nil)
             } catch {
@@ -134,6 +138,115 @@ enum NativeArtworkSmoke {
         cases.append("native-restart-restores-online-image-offline-and-transport-remains-usable")
     }
 
+    /// Run with an empty library and isolated preferences/Keychain domain; never use real credentials.
+    private static func settings(_ model: PlayerModel) async throws {
+        let settings = model.artwork.settings
+        try check(settings.preferences == ArtworkPreferences() && !settings.hasToken,
+                  "Artwork settings smoke requires a fresh isolated preferences/Keychain domain")
+        try check(model.snapshot?.library.tracks == 0, "Settings credential smoke requires an empty isolated library")
+        let saved = UserDefaults.standard.object(forKey: ArtworkSettings.preferencesKey)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: ArtworkSettings.preferencesKey) }
+            else { UserDefaults.standard.removeObject(forKey: ArtworkSettings.preferencesKey) }
+        }
+        try await NativeSmoke.drive("press", "status-connection")
+        try await NativeSmoke.drive("press-title", "Artwork")
+        try await NativeSmoke.drive("exists", "artwork-discogs-token")
+        let generation = model.artwork.generation
+        try await NativeSmoke.drive("press", "artwork-enabled-deezer")
+        try await wait("Deezer opt-in", model) { settings.preferences.enabled.contains(.deezer) && model.artwork.generation > generation }
+        try await NativeSmoke.drive("press", "artwork-up-deezer")
+        try await wait("provider reorder", model) { settings.preferences.order.first == .deezer }
+        try await NativeSmoke.drive("press", "artwork-up-discogs")
+        try await wait("disabled provider reorder", model) { settings.preferences.order == [.deezer, .discogs, .coverArtArchive] }
+        let reloaded = ArtworkSettings()
+        try check(reloaded.preferences == settings.preferences, "Provider choices did not persist")
+        try check(reloaded.preferences.providers == [.deezer, .coverArtArchive], "Disabled Discogs leaked into provider requests")
+        try await NativeSmoke.drive("press", "artwork-enabled-discogs")
+        try await NativeSmoke.drive("exists", "artwork-settings-error")
+        try check(!settings.preferences.enabled.contains(.discogs), "Discogs enabled without a Keychain token")
+        try await NativeSmoke.drive("press", "artwork-discogs-save")
+        try check(!settings.hasToken && settings.error != nil, "An empty token was accepted")
+        try await NativeSmoke.drive("press", "artwork-enabled-deezer")
+        try await wait("Deezer disabled", model) { !settings.preferences.enabled.contains(.deezer) }
+        try await NativeSmoke.drive("press", "artwork-enabled-cover_art_archive")
+        try await wait("local-only preference", model) { settings.preferences.providers.isEmpty }
+        try check(ArtworkSettings().preferences.providers.isEmpty, "Local-only preference did not persist")
+        // Exercise the actual Keychain path only after every remote provider is disabled.
+        // This deliberately synthetic value must never be sent to a provider or copied to reports.
+        defer { if settings.hasToken { settings.removeToken() } }
+        try await NativeSmoke.drive("value", "artwork-discogs-token",
+                                    "tyranny-native-smoke-not-a-real-discogs-token", sensitive: true)
+        try await NativeSmoke.drive("press", "artwork-discogs-save")
+        try check(settings.hasToken && settings.error == nil,
+                  "Keychain save failed: \(settings.error ?? "token presence was not confirmed")")
+        try check(settings.preferences.providers.isEmpty, "Credential smoke unexpectedly enabled a remote provider")
+        let savedCredential = ArtworkSettings()
+        try check(savedCredential.hasToken && savedCredential.error == nil,
+                  "Keychain reload failed: \(savedCredential.error ?? "saved token was not found")")
+        try await NativeSmoke.drive("press", "artwork-discogs-remove")
+        try check(!settings.hasToken && settings.error == nil,
+                  "Keychain removal failed: \(settings.error ?? "token remains present")")
+        let removedCredential = ArtworkSettings()
+        try check(!removedCredential.hasToken && removedCredential.error == nil,
+                  "Keychain removal did not persist: \(removedCredential.error ?? "token remains present")")
+        try capture("artwork-settings", window: NSApp.keyWindow)
+        cases.append("native-keychain-save-reload-delete-with-disabled-providers-and-synthetic-token")
+        cases.append("native-artwork-settings-opt-in-order-persistence-local-only-and-missing-token-validation")
+    }
+
+    /// A real remote lookup, with no local cover/MBID: Daft Punk / Discovery / One More Time.
+    private static func providers(_ model: PlayerModel, _ navigation: NavigationModel) async throws {
+        let settings = model.artwork.settings
+        try check(settings.preferences == ArtworkPreferences() && !settings.hasToken,
+                  "Provider smoke requires a fresh isolated preferences/Keychain domain")
+        let saved = UserDefaults.standard.object(forKey: ArtworkSettings.preferencesKey)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: ArtworkSettings.preferencesKey) }
+            else { UserDefaults.standard.removeObject(forKey: ArtworkSettings.preferencesKey) }
+        }
+        try await NativeSmoke.drive("press", "status-connection")
+        try await NativeSmoke.drive("press-title", "Artwork")
+        try await NativeSmoke.drive("press", "artwork-enabled-deezer")
+        try await wait("Deezer enabled", model) { settings.preferences.enabled.contains(.deezer) }
+        NSApp.windows.first(where: { $0.title == "Tyranny" })?.makeKeyAndOrderFront(nil)
+        try await openAlbums(model, navigation, expecting: ["Discovery"])
+        guard let album = album("Discovery") else { throw Failure(message: "Discovery fixture missing") }
+        try await wait("real Deezer cover", model) {
+            let value = model.artwork.value(for: model.artwork.albumRequest(album.id))
+            return value.state == "deezer" && value.image != nil
+        }
+        let displayed = model.artwork.value(for: model.artwork.albumRequest(album.id))
+        try check(displayed.sourceURL?.host == "www.deezer.com" && displayed.cachePolicy == .displayOnly,
+                  "Deezer provenance or display-only policy missing")
+        try check(ArtworkBrand.deezerLogo != nil, "Official Deezer branding resource missing")
+        try await NativeSmoke.drive("exists", "artwork-deezer-attribution")
+        try capture("deezer-visible-attributed-cover")
+        try await NativeSmoke.drive("click-control", "album-cell-\(album.id)")
+        try await wait("attributed expansion", model) {
+            let artwork = model.artwork.value(for: model.artwork.albumRequest(album.id))
+            return NativeAlbumsSmoke.grid?.expansion?.albumID == album.id
+                && NativeAlbumsSmoke.grid?.expansion?.isLoaded == true
+                && artwork.state == "deezer" && artwork.image != nil
+        }
+        let expandedArtwork = model.artwork.value(for: model.artwork.albumRequest(album.id))
+        try await NativeSmoke.drive("expect-text", "album-expansion-cover", "deezer")
+        try capture("deezer-attributed-expansion")
+        try await NativeSmoke.drive("press", "status-connection")
+        try await NativeSmoke.drive("press-title", "Artwork")
+        try await NativeSmoke.drive("press", "artwork-enabled-deezer")
+        try await wait("Deezer pixels revoked", model) {
+            !settings.preferences.enabled.contains(.deezer) && displayed.image == nil && expandedArtwork.image == nil
+        }
+        NSApp.windows.first(where: { $0.title == "Tyranny" })?.makeKeyAndOrderFront(nil)
+        try await wait("disabled source cannot redisplay", model) {
+            let value = model.artwork.value(for: model.artwork.albumRequest(album.id))
+            return value.state == "missing" && value.image == nil
+        }
+        try capture("deezer-disabled-neutral-cover")
+        cases.append("native-real-deezer-art-with-official-linked-branding-and-disable-revokes-pixels-without-redisplay")
+    }
+
     /// Filters Songs to one track and double-clicks it: the run of one plays.
     private static func play(_ title: String, source: String, _ model: PlayerModel, _ navigation: NavigationModel) async throws {
         try await NativeSmoke.drive("click-control", Destination.songs.identifier)
@@ -176,8 +289,8 @@ enum NativeArtworkSmoke {
         try await Task.sleep(for: .milliseconds(150))
     }
     private static func check(_ condition: Bool, _ message: String) throws { if !condition { throw Failure(message: message) } }
-    private static func capture(_ name: String) throws {
-        guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }) else { throw Failure(message: "Native window missing") }
+    private static func capture(_ name: String, window: NSWindow? = nil) throws {
+        guard let window = window ?? NSApp.windows.first(where: { $0.title == "Tyranny" }) else { throw Failure(message: "Native window missing") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         process.arguments = ["-x", "-o", "-l", String(window.windowNumber), output.appendingPathComponent(name + ".png").path]

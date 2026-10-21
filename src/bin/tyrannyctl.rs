@@ -25,7 +25,7 @@ Transport: play, pause, toggle_play_pause, stop, next, previous.\n\
 Live stream (protocol 10): {\"id\":2,\"command\":\"append_stream\",\"expected_revision\":1,\"url\":\"https://radio.example/live.mp3\",\"title\":\"Radio\"}\n\
 Append does not play; play the returned entry_id separately. Streams cannot seek; blank titles default to the host.\n\
 Seek requires the current occurrence: {\"id\":2,\"command\":\"seek\",\"entry_id\":1,\"position_frames\":48000}\n\
-Artwork (protocol 8, read-only): {\"id\":3,\"command\":\"artwork\",\"album_id\":1,\"entry_id\":null,\"library_revision\":2,\"size\":\"thumbnail\"}\n\
+Artwork (read-only): {\"id\":3,\"command\":\"artwork\",\"album_id\":1,\"entry_id\":null,\"library_revision\":2,\"size\":\"thumbnail\",\"providers\":[\"cover_art_archive\"],\"discogs_token\":null}\n\
 Use exactly one album_id or durable queue entry_id; size is thumbnail (128px) or display (512px). Ready data is base64 JPEG.\n\
 Saved playlists: saved_playlists, playlist_entries, create_playlist, rename_playlist, delete_playlist,\n\
 playlist_add, playlist_remove, playlist_move, enqueue_playlist. Names are unique ignoring Unicode case.\n\
@@ -48,7 +48,7 @@ Add: {\"id\":8,\"command\":\"add_stations\",\"expected_revision\":0,\"stations\"
 Station directory (protocol 16): search_directory, count_directory_click.\n\
 Search: {\"id\":9,\"command\":\"search_directory\",\"query\":\"jazz\"} (query 1..100 bytes, no control characters)\n\
 Count: {\"id\":10,\"command\":\"count_directory_click\",\"station_uuid\":\"<uuid>\"} (replies at once; the click is best effort)\n\
-Listening stats (protocol 21): stats {period:{kind,anchor}}, wrapped {year}, stats_years.\n\
+Listening stats (protocol 22): stats {period:{kind,anchor}}, wrapped {year}, stats_years.\n\
 Parametric EQ: set_equalizer {equalizer:{enabled,preamp_db,bands}} replaces the complete curve (0..16 bands).\n\
 Each band requires enabled,kind,frequency_hz,gain_db,q,shelf_slope,slope_db; kinds: bell,low_shelf,high_shelf,high_pass,low_pass,notch.\n\
 Named EQ presets: save_equalizer_preset {name,equalizer}, rename_equalizer_preset {name,new_name}, remove_equalizer_preset {name}.\n\

@@ -69,6 +69,7 @@ final class AlbumGridItem: NSCollectionViewItem {
         showing &+= 1
         if let retained { store?.release(retained) }
         retained = nil
+        cell.showArtwork(.missing)
     }
 
     override func prepareForReuse() {
@@ -84,7 +85,8 @@ final class AlbumGridCellView: NSView {
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
     private var coverSize: CGFloat = 140
-    private var image: CGImage?
+    private var artwork: ArtworkImage = .missing
+    private let attribution = ArtworkAttributionButton()
     private var hasAlbum = false
     var onLookUp: (() -> Void)?
     /// The selected cover's border. Set by `show`.
@@ -103,6 +105,7 @@ final class AlbumGridCellView: NSView {
             addSubview(field)
         }
         setAccessibilityElement(true)
+        addSubview(attribution)
         setAccessibilityRole(.button)
     }
 
@@ -143,7 +146,9 @@ final class AlbumGridCellView: NSView {
     @objc private func lookUp() { onLookUp?() }
 
     func showArtwork(_ artwork: ArtworkImage) {
-        image = artwork.image
+        self.artwork = artwork
+        attribution.show(artwork)
+        needsLayout = true
         needsDisplay = true
     }
 
@@ -152,10 +157,12 @@ final class AlbumGridCellView: NSView {
         let top = coverSize + Self.gap
         title.frame = NSRect(x: 0, y: top, width: bounds.width, height: 16)
         subtitle.frame = NSRect(x: 0, y: top + 17, width: bounds.width, height: 15)
+        attribution.frame = NSRect(x: 0, y: coverSize - 28, width: bounds.width, height: 28)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let rect = NSRect(x: 0, y: 0, width: coverSize, height: coverSize)
+        let imageSize = artwork.requiresAttribution ? coverSize - 28 : coverSize
+        let rect = NSRect(x: (coverSize - imageSize) / 2, y: 0, width: imageSize, height: imageSize)
         guard hasAlbum else {
             NSColor.quaternaryLabelColor.withAlphaComponent(0.08).setFill()
             NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
@@ -163,7 +170,7 @@ final class AlbumGridCellView: NSView {
         }
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).addClip()
-        if let image {
+        if let image = artwork.image {
             NSImage(cgImage: image, size: rect.size)
                 .draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         } else {

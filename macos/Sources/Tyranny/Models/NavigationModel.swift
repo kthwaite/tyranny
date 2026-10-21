@@ -3,7 +3,7 @@ import Observation
 import TyrannyCore
 
 enum SettingsTab: String, Hashable {
-    case connection, library, playback, appearance
+    case connection, library, playback, appearance, artwork
 }
 
 /// Window navigation state: the source-list destination, the filter text,

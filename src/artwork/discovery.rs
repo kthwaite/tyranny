@@ -88,6 +88,9 @@ fn encode(image: image::DynamicImage, source: ArtworkSource) -> Result<Artwork> 
     Ok(Artwork {
         status: ArtworkStatus::Ready,
         source: Some(source),
+        source_url: None,
+        expires_at: None,
+        cache_policy: crate::protocol::ArtworkCachePolicy::Persistent,
         cache_key: Some(format!("{:x}", Sha256::digest(&bytes))),
         width,
         height,

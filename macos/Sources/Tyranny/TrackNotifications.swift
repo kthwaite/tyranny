@@ -105,7 +105,9 @@ final class TrackNotifications: NSObject, UNUserNotificationCenterDelegate {
             content.title = track.title
             content.subtitle = track.artist
             content.body = track.album
-            if artwork.nowPlayingRequest?.target == .entry(track.entry_id), let image = artwork.nowPlaying.image {
+            if artwork.nowPlayingRequest?.target == .entry(track.entry_id),
+               ArtworkRetention.permitsAttachment(source: artwork.nowPlaying.state),
+               let image = artwork.nowPlaying.image {
                 do { content.attachments = [try attachment(image)] }
                 catch { self.error = "Notification artwork: \(error.localizedDescription)" }
             }

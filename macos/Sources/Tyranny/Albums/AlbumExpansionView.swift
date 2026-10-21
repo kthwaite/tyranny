@@ -158,21 +158,30 @@ struct AlbumExpansionContent: View {
 
     private var cover: some View {
         let artwork = player.artwork.value(for: player.artwork.albumRequest(expansion.albumID))
-        return ZStack {
-            RoundedRectangle(cornerRadius: 6).fill(.quaternary)
-            if let image = artwork.image {
-                Image(decorative: image, scale: 1).resizable().interpolation(.high)
-            } else {
-                Image(systemName: "music.note")
-                    .font(.system(size: 40)).foregroundStyle(.secondary)
+        let dimension = AlbumExpansionMetrics.cover - (artwork.requiresAttribution ? 28 : 0)
+        return VStack(spacing: 4) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6).fill(.quaternary)
+                if let image = artwork.image {
+                    Image(decorative: image, scale: 1).resizable().interpolation(.high).scaledToFit()
+                } else {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 40)).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: dimension, height: dimension)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(nsColor: .separatorColor)))
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isImage)
+            .accessibilityLabel("Album artwork")
+            .accessibilityValue(artwork.state)
+            .accessibilityIdentifier("album-expansion-cover")
+            if artwork.requiresAttribution {
+                ArtworkAttributionView(artwork: artwork).frame(height: 24)
             }
         }
-        .frame(width: AlbumExpansionMetrics.cover, height: AlbumExpansionMetrics.cover)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(nsColor: .separatorColor)))
-        .accessibilityLabel("Album artwork")
-        .accessibilityValue(artwork.state)
-        .accessibilityIdentifier("album-expansion-cover")
+        .frame(width: AlbumExpansionMetrics.cover)
     }
 
     // MARK: Tracks

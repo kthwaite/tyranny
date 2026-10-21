@@ -316,7 +316,7 @@ enum NativeRenderViews {
             lines.append(write(host, name, into: output))
         }
         for (tab, name) in [(SettingsTab.connection, "12-settings-connection"), (.library, "13-settings-library"),
-                            (.playback, "14-settings-playback")] {
+                            (.playback, "14-settings-playback"), (.artwork, "14-settings-artwork")] {
             renderTab(tab, name)
         }
         let light = NSAppearance(named: .aqua)

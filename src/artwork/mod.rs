@@ -6,7 +6,10 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
-use crate::protocol::{Artwork, ArtworkSize, ArtworkStatus, ErrorCode, Reply, Response};
+use crate::protocol::{
+    Artwork, ArtworkCachePolicy, ArtworkProvider, ArtworkSize, ArtworkSource, ArtworkStatus,
+    DiscogsToken, ErrorCode, Reply, Response,
+};
 use anyhow::{Result, ensure};
 use provider::{FetchOutcome, Provider};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -31,12 +34,14 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const NEGATIVE_TTL: u64 = 24 * 60 * 60;
 const FAILURE_TTL: u64 = 60;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Request {
     pub album_id: Option<u64>,
     pub entry_id: Option<u64>,
     pub library_revision: u64,
     pub size: ArtworkSize,
+    pub providers: Vec<ArtworkProvider>,
+    pub discogs_token: Option<DiscogsToken>,
 }
 struct Work {
     request: Request,
@@ -168,6 +173,9 @@ impl Artwork {
         Self {
             status,
             source: None,
+            source_url: None,
+            expires_at: None,
+            cache_policy: ArtworkCachePolicy::Persistent,
             cache_key: None,
             width: 0,
             height: 0,
@@ -206,17 +214,16 @@ impl Images {
 struct Local {
     images: Option<Images>,
     release_id: Option<String>,
+    album: String,
+    artist: String,
     failure: Option<String>,
 }
-#[derive(Serialize, Deserialize)]
-enum Online {
-    Found(Images),
-    Missing,
-    Unavailable(String),
-}
+type Online = std::result::Result<Option<Images>, String>;
 struct Target {
     paths: Vec<PathBuf>,
     release_id: Option<String>,
+    album: String,
+    artist: String,
     key: String,
     direct: bool,
 }
@@ -278,11 +285,11 @@ impl Engine {
         if self.cache.is_none() {
             self.cache = cache::Cache::open(&self.cache_path).ok();
         }
-        let result = self.resolve(request).and_then(|target| {
-            let artwork = self.load(target, request.size);
+        let result = self.resolve(&request).and_then(|target| {
+            let artwork = self.load(target, &request);
             // Re-resolve after slow IO: stale revision/removed occurrence cannot be
             // mistaken for the current target, even if a client missed an event.
-            self.revalidate(request)?;
+            self.revalidate(&request)?;
             Ok(artwork)
         });
         match result {
@@ -308,7 +315,7 @@ impl Engine {
             }
         }
     }
-    fn revalidate(&self, request: Request) -> Result<()> {
+    fn revalidate(&self, request: &Request) -> Result<()> {
         let (revision, exists): (u64, bool) = self.database.query_row(
             "SELECT revision,CASE WHEN ?1 IS NOT NULL THEN EXISTS(SELECT 1 FROM queue WHERE id=?1)
              ELSE EXISTS(SELECT 1 FROM library_albums WHERE id=?2) END FROM library_state WHERE singleton=1",
@@ -324,7 +331,26 @@ impl Engine {
         ensure!(exists, invalid("artwork target was removed"));
         Ok(())
     }
-    fn resolve(&mut self, request: Request) -> Result<Target> {
+    fn resolve(&mut self, request: &Request) -> Result<Target> {
+        ensure!(
+            request.providers.len() <= 3
+                && request
+                    .providers
+                    .iter()
+                    .enumerate()
+                    .all(|(index, provider)| !request.providers[..index].contains(provider)),
+            invalid("artwork providers must be unique and contain at most three entries")
+        );
+        ensure!(
+            !request.providers.contains(&ArtworkProvider::Discogs)
+                || request.discogs_token.is_some(),
+            invalid("Discogs requires a saved token")
+        );
+        ensure!(
+            request.providers.contains(&ArtworkProvider::Discogs)
+                || request.discogs_token.is_none(),
+            invalid("Discogs token must be null when Discogs is disabled")
+        );
         let transaction = self.database.transaction()?;
         let revision: u64 = transaction.query_row(
             "SELECT revision FROM library_state WHERE singleton=1",
@@ -362,6 +388,8 @@ impl Engine {
                     return Ok(Target {
                         paths: Vec::new(),
                         release_id: None,
+                        album: String::new(),
+                        artist: String::new(),
                         key: String::new(),
                         direct: false,
                     });
@@ -371,21 +399,28 @@ impl Engine {
             _ => return Err(invalid("artwork requires exactly one album_id or entry_id")),
         };
         let mut hash = Sha256::new();
-        hash.update(b"local-artwork-v1\0");
+        hash.update(b"local-artwork-v2\0");
         let mut paths = Vec::new();
         let mut release_id = None;
+        let mut album_title = String::new();
+        let mut artist = String::new();
         if let Some(album) = album {
-            let identity: Option<(String, Option<String>)> = transaction
+            let identity: Option<(String, Option<String>, String, String)> = transaction
                 .query_row(
-                    "SELECT identity,musicbrainz_release_id FROM library_albums WHERE id=?1",
+                    "SELECT identity,musicbrainz_release_id,title,album_artist FROM library_albums WHERE id=?1",
                     [album],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()?;
-            let (identity, release) =
+            let (identity, release, title, album_artist) =
                 identity.ok_or_else(|| invalid("album is unknown or unavailable"))?;
             hash.update(identity.as_bytes());
+            hash.update(title.as_bytes());
+            hash.update([0]);
+            hash.update(album_artist.as_bytes());
             release_id = release;
+            album_title = title;
+            artist = album_artist;
             let mut statement = transaction.prepare(
                 "SELECT a.path,a.size,a.modified_ns,r.completed_scan FROM library_tracks t
                  JOIN library_assets a ON a.id=t.asset_id JOIN library_roots r ON r.id=a.root_id
@@ -444,11 +479,15 @@ impl Engine {
         Ok(Target {
             paths,
             release_id,
+            album: album_title,
+            artist,
             key: format!("local:{:x}", hash.finalize()),
             direct: album.is_none(),
         })
     }
-    fn load(&mut self, target: Target, size: ArtworkSize) -> Artwork {
+    fn load(&mut self, target: Target, request: &Request) -> Artwork {
+        let size = request.size;
+        let deadline = Instant::now() + Duration::from_secs(26);
         if target.paths.is_empty() {
             return Artwork::missing();
         }
@@ -464,9 +503,10 @@ impl Engine {
                 // Incomplete discovery cannot authorize any lower-priority source.
                 Err(error) => return Artwork::unavailable(format!("{error:#}")),
             };
-            let release_id = if target.release_id.is_some() || !target.direct || images.is_some() {
-                target.release_id
-            } else {
+            let mut release_id = target.release_id;
+            let mut album = target.album;
+            let mut artist = target.artist;
+            if target.direct && images.is_none() {
                 let probed = crate::metadata::probe_before(&target.paths[0], &self.stop, deadline);
                 if self.stop.load(Ordering::Acquire) || Instant::now() >= deadline {
                     return Artwork::unavailable(
@@ -474,16 +514,21 @@ impl Engine {
                     );
                 }
                 match probed {
-                    Ok(metadata) => metadata.musicbrainz_release_id,
+                    Ok(metadata) => {
+                        release_id = metadata.musicbrainz_release_id;
+                        album = metadata.album;
+                        artist = metadata.album_artist;
+                    }
                     Err(error) => {
                         failure.get_or_insert_with(|| format!("{error:#}"));
-                        None
                     }
                 }
-            };
+            }
             let local = Local {
                 images,
                 release_id,
+                album,
+                artist,
                 failure,
             };
             if let Some(cache) = &mut self.cache {
@@ -502,83 +547,205 @@ impl Engine {
         if self.stop.load(Ordering::Acquire) {
             return Artwork::unavailable("artwork request cancelled");
         }
-        let Some(release_id) = local.release_id else {
-            return local
-                .failure
-                .map(Artwork::unavailable)
-                .unwrap_or_else(Artwork::missing);
-        };
-        let release_id = match uuid::Uuid::parse_str(&release_id) {
-            Ok(id) => id.hyphenated().to_string(),
-            Err(_) => return Artwork::unavailable("invalid MusicBrainz release ID"),
-        };
-        let key = format!("release:{release_id}");
-        let online = if let Some(cached) = self
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.get::<Online>(&key))
-        {
-            cached
-        } else {
-            // Only cold provider requests serialize; local discovery and cached
-            // online hits stay independent. Recheck persistence after the gate
-            // so simultaneous thumbnail/display requests download only once.
-            let _fetch = self.provider_gate.lock().unwrap_or_else(|p| p.into_inner());
+        let mut failure = local.failure;
+        // The order and credential identity are part of the remote namespace. A
+        // disabled provider cannot be selected, even when old cache rows survive.
+        let mut hash = Sha256::new();
+        hash.update(b"remote-artwork-v2\0");
+        for identity in [
+            local.release_id.as_deref().unwrap_or(""),
+            &local.album,
+            &local.artist,
+        ] {
+            hash.update((identity.len() as u64).to_le_bytes());
+            hash.update(identity.as_bytes());
+        }
+        for provider in &request.providers {
+            hash.update([match provider {
+                ArtworkProvider::CoverArtArchive => 0,
+                ArtworkProvider::Deezer => 1,
+                ArtworkProvider::Discogs => 2,
+            }]);
+        }
+        if let Some(token) = &request.discogs_token {
+            hash.update(token.expose().as_bytes());
+        }
+        let namespace = format!("{:x}", hash.finalize());
+        for selected in &request.providers {
             if self.stop.load(Ordering::Acquire) {
                 return Artwork::unavailable("artwork request cancelled");
             }
-            if self.cache.is_none() {
-                self.cache = cache::Cache::open(&self.cache_path).ok();
-            }
-            if let Some(cached) = self
+            let key = format!("remote:{namespace}:{selected:?}");
+            let cached = self
                 .cache
                 .as_ref()
-                .and_then(|cache| cache.get::<Online>(&key))
-            {
-                match cached {
-                    Online::Found(images) => return images.select(size),
-                    Online::Missing => {
-                        return local
-                            .failure
-                            .map(Artwork::unavailable)
-                            .unwrap_or_else(Artwork::missing);
+                .and_then(|cache| cache.get::<Online>(&key));
+            let online = if let Some(cached) = cached {
+                cached
+            } else {
+                let gate = Arc::clone(&self.provider_gate);
+                let _fetch = loop {
+                    if self.stop.load(Ordering::Acquire) || Instant::now() >= deadline {
+                        return Artwork::unavailable(
+                            "artwork request cancelled or deadline exceeded",
+                        );
                     }
-                    Online::Unavailable(message) => return Artwork::unavailable(message),
+                    match gate.try_lock() {
+                        Ok(guard) => break guard,
+                        Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            thread::sleep(Duration::from_millis(10))
+                        }
+                    }
+                };
+                // Another worker may have filled persistence while we waited.
+                if let Some(cached) = self
+                    .cache
+                    .as_ref()
+                    .and_then(|cache| cache.get::<Online>(&key))
+                {
+                    cached
+                } else {
+                    let online = self.fetch_remote(
+                        *selected,
+                        &local.release_id,
+                        &local.album,
+                        &local.artist,
+                        request.discogs_token.as_ref(),
+                        deadline,
+                    );
+                    let ttl = match &online {
+                        Ok(Some(images)) => images
+                            .display
+                            .expires_at
+                            .map(|expires| expires.saturating_sub(unix_time())),
+                        Ok(None) => Some(NEGATIVE_TTL),
+                        Err(_) => Some(FAILURE_TTL),
+                    };
+                    // Deezer permits active display only, never a reusable image cache.
+                    if !matches!(&online, Ok(Some(images)) if images.display.cache_policy == ArtworkCachePolicy::DisplayOnly)
+                        && let Some(cache) = &mut self.cache
+                    {
+                        cache.put(&key, &online, ttl);
+                    }
+                    online
+                }
+            };
+            match online {
+                Ok(Some(images)) => {
+                    let mut artwork = images.select(size);
+                    if artwork
+                        .expires_at
+                        .is_some_and(|expires| expires <= unix_time())
+                    {
+                        failure = Some("Artwork provider image expired".into());
+                        continue;
+                    }
+                    artwork.message = failure;
+                    return artwork;
+                }
+                Ok(None) => {}
+                Err(message) => {
+                    // Preserve actionable authentication failures through fallback.
+                    if !failure
+                        .as_deref()
+                        .is_some_and(|message| message.contains("Discogs"))
+                    {
+                        failure = Some(message);
+                    }
                 }
             }
-            let online = match &self.provider {
-                Ok(provider) => match provider.fetch_front(&release_id) {
-                    FetchOutcome::Found(bytes) => match discovery::normalize(
-                        &bytes,
-                        crate::protocol::ArtworkSource::CoverArtArchive,
-                    ) {
-                        Ok(images) => Online::Found(images),
-                        Err(error) => {
-                            Online::Unavailable(format!("invalid provider artwork: {error:#}"))
-                        }
-                    },
-                    FetchOutcome::Missing => Online::Missing,
-                    FetchOutcome::Unavailable(message) => Online::Unavailable(message),
-                },
-                Err(message) => Online::Unavailable(message.clone()),
-            };
-            let ttl = match &online {
-                Online::Found(_) => None,
-                Online::Missing => Some(NEGATIVE_TTL),
-                Online::Unavailable(_) => Some(FAILURE_TTL),
-            };
-            if let Some(cache) = &mut self.cache {
-                cache.put(&key, &online, ttl);
-            }
-            online
+        }
+        failure
+            .map(Artwork::unavailable)
+            .unwrap_or_else(Artwork::missing)
+    }
+
+    fn fetch_remote(
+        &self,
+        selected: ArtworkProvider,
+        release: &Option<String>,
+        album: &str,
+        artist: &str,
+        token: Option<&DiscogsToken>,
+        deadline: Instant,
+    ) -> Online {
+        let provider = match &self.provider {
+            Ok(provider) => provider.before(deadline),
+            Err(message) => return Err(message.clone()),
         };
-        match online {
-            Online::Found(images) => images.select(size),
-            Online::Missing => local
-                .failure
-                .map(Artwork::unavailable)
-                .unwrap_or_else(Artwork::missing),
-            Online::Unavailable(message) => Artwork::unavailable(message),
+        let (bytes, source, source_url) = match selected {
+            ArtworkProvider::CoverArtArchive => {
+                let Some(release) = release else {
+                    return Ok(None);
+                };
+                let release = match uuid::Uuid::parse_str(release) {
+                    Ok(id) => id.hyphenated().to_string(),
+                    Err(_) => return Err("invalid MusicBrainz release ID".into()),
+                };
+                match provider.fetch_front(&release) {
+                    FetchOutcome::Found(bytes) => (
+                        bytes,
+                        ArtworkSource::CoverArtArchive,
+                        format!("https://musicbrainz.org/release/{release}"),
+                    ),
+                    FetchOutcome::Missing => return Ok(None),
+                    FetchOutcome::Unavailable(message) => return Err(message),
+                }
+            }
+            ArtworkProvider::Deezer | ArtworkProvider::Discogs => {
+                if album.trim().is_empty()
+                    || artist.trim().is_empty()
+                    || album == "Unknown Album"
+                    || artist == "Unknown Artist"
+                    || album.len() > 4096
+                    || artist.len() > 4096
+                {
+                    return Ok(None);
+                }
+                let outcome = if selected == ArtworkProvider::Deezer {
+                    provider.fetch_deezer(album, artist)
+                } else {
+                    let Some(token) = token else {
+                        return Err("Discogs requires a saved token".into());
+                    };
+                    provider.fetch_discogs(album, artist, token.expose())
+                };
+                match outcome {
+                    Ok(Some(image)) => (
+                        image.bytes,
+                        if selected == ArtworkProvider::Deezer {
+                            ArtworkSource::Deezer
+                        } else {
+                            ArtworkSource::Discogs
+                        },
+                        image.source_url,
+                    ),
+                    Ok(None) => return Ok(None),
+                    Err(message) => return Err(message.into()),
+                }
+            }
+        };
+        let expires_at = (selected == ArtworkProvider::Discogs).then(|| unix_time() + 6 * 60 * 60);
+        match discovery::normalize(&bytes, source) {
+            Ok(mut images) => {
+                for artwork in [&mut images.thumbnail, &mut images.display] {
+                    artwork.source_url = Some(source_url.clone());
+                    artwork.expires_at = expires_at;
+                    artwork.cache_policy = if selected == ArtworkProvider::Deezer {
+                        ArtworkCachePolicy::DisplayOnly
+                    } else {
+                        ArtworkCachePolicy::Persistent
+                    };
+                    // Identical pixels from different providers have different policies.
+                    artwork.cache_key = artwork
+                        .cache_key
+                        .take()
+                        .map(|key| format!("{selected:?}:{key}"));
+                }
+                Ok(Some(images))
+            }
+            Err(error) => Err(format!("invalid provider artwork: {error:#}")),
         }
     }
 }

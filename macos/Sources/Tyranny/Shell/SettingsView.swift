@@ -1,7 +1,7 @@
 import SwiftUI
 import TyrannyCore
 
-/// The Settings window (⌘,): Connection, Library, Playback and Appearance.
+/// The Settings window (⌘,): Connection, Library, Playback, Appearance and Artwork.
 struct SettingsView: View {
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
@@ -20,6 +20,9 @@ struct SettingsView: View {
             AppearanceSettingsPane(theme: model.theme)
                 .tabItem { Label("Appearance", systemImage: "paintpalette") }
                 .tag(SettingsTab.appearance)
+            ArtworkSettingsPane(settings: model.artwork.settings)
+                .tabItem { Label("Artwork", systemImage: "photo") }
+                .tag(SettingsTab.artwork)
         }
         .frame(width: 600)
         .accessibilityIdentifier("settings")
@@ -231,5 +234,66 @@ struct PlaybackSettingsPane: View {
         .formStyle(.grouped)
         .padding(12).frame(width: 600)
         .task { await notifications.refreshAuthorization() }
+    }
+}
+
+struct ArtworkSettingsPane: View {
+    @Environment(\.themeColours) private var colours
+    let settings: ArtworkSettings
+    @State private var token = ""
+
+    var body: some View {
+        Form {
+            Section("Remote artwork fallback") {
+                Text("Embedded and folder artwork always come first. Enable remote sources and use the arrows to set their fallback order.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(settings.preferences.order, id: \.self) { provider in
+                    HStack {
+                        Toggle(provider.title, isOn: Binding(
+                            get: { settings.preferences.enabled.contains(provider) },
+                            set: { settings.setEnabled(provider, $0) }))
+                            .accessibilityIdentifier("artwork-enabled-\(provider.rawValue)")
+                        Spacer()
+                        Button { settings.move(provider, by: -1) } label: { Image(systemName: "arrow.up") }
+                            .disabled(settings.preferences.order.first == provider)
+                            .accessibilityLabel("Move \(provider.title) earlier")
+                            .accessibilityIdentifier("artwork-up-\(provider.rawValue)")
+                        Button { settings.move(provider, by: 1) } label: { Image(systemName: "arrow.down") }
+                            .disabled(settings.preferences.order.last == provider)
+                            .accessibilityLabel("Move \(provider.title) later")
+                            .accessibilityIdentifier("artwork-down-\(provider.rawValue)")
+                    }
+                }
+            }
+            Section("Discogs personal access token") {
+                SecureField("Token", text: $token)
+                    .accessibilityIdentifier("artwork-discogs-token")
+                HStack {
+                    Button("Save in Keychain") {
+                        if settings.saveToken(token) { token = "" }
+                    }
+                    .accessibilityIdentifier("artwork-discogs-save")
+                    Button("Remove token", action: settings.removeToken)
+                        .disabled(!settings.hasToken)
+                        .accessibilityIdentifier("artwork-discogs-remove")
+                    Text(settings.hasToken ? "Token saved in Keychain" : "No token saved")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Link("Create a personal token at Discogs", destination: URL(string: "https://www.discogs.com/settings/developers")!)
+                if let error = settings.error {
+                    Text(error).foregroundStyle(colours.error).font(.caption)
+                        .accessibilityIdentifier("artwork-settings-error")
+                }
+            }
+            Section {
+                Text("Deezer images are displayed only while needed, not cached for reuse. Discogs images expire within six hours and are hidden if they cannot be refreshed. Both are excluded from notification attachments.")
+                Text("Remote lookup sends album and artist metadata to the enabled providers. Artwork remains subject to its owners’ rights; Deezer and Discogs access is intended for personal, noncommercial use.")
+                Text("This application uses Discogs’ API but is not affiliated with, sponsored or endorsed by Discogs. ‘Discogs’ is a trademark of Zink Media, LLC.")
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+        .padding(12).frame(width: 600, height: 570)
+        .onDisappear { token = "" }
     }
 }
