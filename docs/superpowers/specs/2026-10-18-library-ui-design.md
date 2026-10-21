@@ -133,7 +133,7 @@ Success: the user leaves the window open all day, and every view is one click aw
   - For compilations, the rows add an Artist column.
 - **Artist** grouping: a header row per artist (name, album and track counts), then that artist's tracks.
 - **Artist › Album**: an artist header, then album blocks.
-- Within a group, rows keep the list's sort.
+- With **Album** grouping, column sorting orders album blocks only. Rows inside each album always use ascending disc then track number, regardless of column or direction. Unnumbered tracks follow numbered tracks on the same disc; ties and missing numbers use title, path, then row ID for a deterministic order. Other grouping modes retain the list's row sort.
 - Groups follow the list's sort, using the group's own value for the sort column: the highest value for a descending sort, the lowest for an ascending one. So Recently Added, grouped by Album, puts the album with the newest track first. Sorting by Plays puts the album with the most-played track first. When the sort column is the group key itself (Artist, Album), this reduces to ordering by that key. *(Builder's call recorded here.)*
 - **Regular playlists**: grouping changes the display only. With grouping on, drag-reordering inside the playlist is disabled. Reorder needs grouping set to None, and the UI says so.
 - The group setting is remembered per destination, in client-local preferences.
