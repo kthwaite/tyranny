@@ -317,10 +317,12 @@ mod tests {
         for _ in 0..3 {
             mb.release(A, &Cancellation::new(), deadline()).unwrap();
         }
-        let seen = fixture.seen();
-        assert_eq!(seen.len(), 3);
-        for pair in seen.windows(2) {
-            assert!(pair[1].at - pair[0].at >= Duration::from_secs(1));
+        assert_eq!(fixture.seen().len(), 3);
+        // The gate's own start instants: server arrival times jitter under load.
+        let starts = mb.gate.starts();
+        assert_eq!(starts.len(), 3);
+        for pair in starts.windows(2) {
+            assert!(pair[1] - pair[0] >= Duration::from_secs(1), "{starts:?}");
         }
     }
 

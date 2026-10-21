@@ -28,13 +28,24 @@ const SLEEP_STEP: Duration = Duration::from_millis(20);
 pub(super) struct StartGate {
     next: Arc<Mutex<Instant>>,
     interval: Duration,
+    /// The instant each `wait` let its caller start, so tests can check the
+    /// spacing without timing a server.
+    #[cfg(test)]
+    starts: Arc<Mutex<Vec<Instant>>>,
 }
 impl StartGate {
     pub(super) fn new(interval: Duration) -> Self {
         Self {
             next: Arc::new(Mutex::new(Instant::now())),
             interval,
+            #[cfg(test)]
+            starts: Arc::default(),
         }
+    }
+    /// The start instants `wait` has granted, in order.
+    #[cfg(test)]
+    pub(super) fn starts(&self) -> Vec<Instant> {
+        self.starts.lock().unwrap().clone()
     }
     /// Blocks until this caller may start a request, and reserves the slot after it.
     pub(super) fn wait(&self, cancel: &Cancellation, deadline: Instant) -> Result<(), LookupError> {
@@ -48,6 +59,8 @@ impl StartGate {
                 let now = Instant::now();
                 if now >= *next {
                     *next = now + self.interval;
+                    #[cfg(test)]
+                    self.starts.lock().unwrap().push(now);
                     return Ok(());
                 }
                 if *next >= deadline {

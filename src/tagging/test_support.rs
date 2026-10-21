@@ -18,7 +18,6 @@ use std::{
 };
 
 pub(super) struct Seen {
-    pub at: Instant,
     pub target: String,
     pub headers: String,
 }
@@ -68,7 +67,6 @@ impl HttpFixture {
                         continue;
                     };
                     seen.lock().unwrap().push(Seen {
-                        at: Instant::now(),
                         target: target.clone(),
                         headers,
                     });
@@ -94,7 +92,6 @@ impl HttpFixture {
             .unwrap()
             .iter()
             .map(|s| Seen {
-                at: s.at,
                 target: s.target.clone(),
                 headers: s.headers.clone(),
             })
