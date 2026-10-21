@@ -1,5 +1,7 @@
-use super::{Cancellation, Provider, mirrors, provider::USER_AGENT};
-use crate::protocol::DirectoryStation;
+use super::{
+    Cancellation, DirectoryWorkers, Provider, mirrors, provider::USER_AGENT, validate_query,
+};
+use crate::protocol::{DirectoryStation, ErrorCode, Reply, Response};
 use reqwest::Url;
 use std::{
     io::{Read, Write},
@@ -276,4 +278,38 @@ fn live_mirrors_resolve_and_search() {
         .search("jazz", &Cancellation::idle())
         .unwrap();
     assert!(!stations.is_empty());
+}
+
+fn is_invalid(reply: &Reply) -> bool {
+    matches!(
+        reply,
+        Reply::Error {
+            code: ErrorCode::InvalidCommand,
+            ..
+        }
+    )
+}
+#[tokio::test]
+async fn search_rejects_bad_queries_before_queueing() {
+    let workers = DirectoryWorkers::start();
+    let handle = workers.handle();
+    for query in ["", "   ", &"a".repeat(101), "a\u{7}"] {
+        assert!(is_invalid(&handle.search(query).await), "{query:?}");
+    }
+    assert_eq!(validate_query("  jazz  "), Ok("jazz"));
+    assert!(validate_query(&"a".repeat(100)).is_ok());
+    workers.shutdown();
+}
+#[test]
+fn count_click_rejects_non_uuid_and_replies_without_waiting() {
+    let workers = DirectoryWorkers::start();
+    let handle = workers.handle();
+    assert!(is_invalid(&handle.count_click("not-a-uuid")));
+    workers.shutdown();
+    assert!(matches!(
+        handle.count_click("9617a958-0601-11e8-ae97-52543be04c81"),
+        Reply::Ok {
+            result: Response::DirectoryClickCounted
+        }
+    ));
 }

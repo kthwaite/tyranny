@@ -56,6 +56,12 @@ pub enum Command {
         entry_id: u64,
         library_revision: u64,
     },
+    SearchDirectory {
+        query: String,
+    },
+    CountDirectoryClick {
+        station_uuid: String,
+    },
     QueuePage {
         revision: Option<u64>,
         offset: usize,
@@ -731,6 +737,10 @@ pub enum Response {
     Lyrics {
         lyrics: Lyrics,
     },
+    DirectoryResults {
+        stations: Vec<DirectoryStation>,
+    },
+    DirectoryClickCounted,
     Snapshot {
         snapshot: Box<ControlState>,
     },
@@ -863,6 +873,7 @@ pub enum ErrorCode {
     InvalidFilter,
     Playback,
     Persistence,
+    Unavailable,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1074,6 +1085,61 @@ mod tests {
             unsafe_target[field] = serde_json::json!("untrusted");
             assert!(serde_json::from_value::<Request>(unsafe_target).is_err());
         }
+    }
+
+    #[test]
+    fn directory_commands_and_responses_round_trip() {
+        let search = serde_json::json!({"id":1,"command":"search_directory","query":"jazz"});
+        match serde_json::from_value::<Request>(search.clone())
+            .unwrap()
+            .command
+        {
+            Command::SearchDirectory { query } => assert_eq!(query, "jazz"),
+            other => panic!("decoded as {other:?}"),
+        }
+        let mut extra = search;
+        extra["limit"] = serde_json::json!(5);
+        assert!(serde_json::from_value::<Request>(extra).is_err());
+        let uuid = "9617a958-0601-11e8-ae97-52543be04c81";
+        let click =
+            serde_json::json!({"id":2,"command":"count_directory_click","station_uuid":uuid});
+        match serde_json::from_value::<Request>(click).unwrap().command {
+            Command::CountDirectoryClick { station_uuid } => assert_eq!(station_uuid, uuid),
+            other => panic!("decoded as {other:?}"),
+        }
+        let results = Response::DirectoryResults {
+            stations: vec![DirectoryStation {
+                uuid: uuid.into(),
+                name: "Jazz FM".into(),
+                url: "https://radio.example/jazz.mp3".into(),
+                codec: "MP3".into(),
+                bitrate: 128,
+                country_code: "GB".into(),
+                tags: vec!["jazz".into()],
+            }],
+        };
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json["kind"], "directory_results");
+        assert_eq!(json["stations"][0]["uuid"], uuid);
+        let counted = serde_json::to_value(Response::DirectoryClickCounted).unwrap();
+        assert_eq!(
+            counted,
+            serde_json::json!({"kind":"directory_click_counted"})
+        );
+        let back: Response = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, Response::DirectoryResults { stations } if stations.len() == 1));
+        assert!(matches!(
+            serde_json::from_value::<Response>(counted).unwrap(),
+            Response::DirectoryClickCounted
+        ));
+    }
+
+    #[test]
+    fn unavailable_error_code_is_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ErrorCode::Unavailable).unwrap(),
+            "unavailable"
+        );
     }
 
     #[test]

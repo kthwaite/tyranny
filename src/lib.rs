@@ -4,8 +4,6 @@ pub const BLOCK_FRAMES: usize = 1024;
 
 mod artwork;
 pub mod decoder;
-// wired in by the directory protocol commands
-#[cfg_attr(not(test), expect(dead_code))]
 mod directory;
 pub mod equalizer;
 mod filter;

@@ -3,6 +3,7 @@
 use crate::{
     SAMPLE_RATE,
     artwork::{ArtworkWorkers, Handle as ArtworkHandle, Request as ArtworkRequest},
+    directory::{DirectoryWorkers, Handle as DirectoryHandle},
     library::{Library, LibraryHandle},
     library_types::{
         LibraryCommand, LibraryError, LibraryErrorKind, PageRequest, StaleLibraryRevision,
@@ -51,6 +52,7 @@ pub struct Owner {
     controller: Controller,
     artwork: ArtworkWorkers,
     lyrics: LyricsWorkers,
+    directory: DirectoryWorkers,
     thread: thread::JoinHandle<Result<()>>,
 }
 #[derive(Clone)]
@@ -59,6 +61,7 @@ pub struct Controller {
     library: LibraryHandle,
     artwork: ArtworkHandle,
     lyrics: LyricsHandle,
+    directory: DirectoryHandle,
     resolver: Arc<Resolver>,
 }
 pub struct Subscription {
@@ -106,16 +109,19 @@ impl Owner {
                 let resolver = Arc::new(Resolver::new(database.clone(), capture));
                 let artwork = ArtworkWorkers::start(database.clone());
                 let lyrics = LyricsWorkers::start(database);
+                let directory = DirectoryWorkers::start();
                 Ok(Self {
                     controller: Controller {
                         sender,
                         library,
                         artwork: artwork.handle(),
                         lyrics: lyrics.handle(),
+                        directory: directory.handle(),
                         resolver,
                     },
                     artwork,
                     lyrics,
+                    directory,
                     thread,
                 })
             }
@@ -138,6 +144,7 @@ impl Owner {
     pub async fn shutdown(self) -> Result<()> {
         self.artwork.stop();
         self.lyrics.stop();
+        self.directory.stop();
         let (reply_tx, reply_rx) = oneshot::channel();
         let sent = self.controller.sender.send(Work::Shutdown(reply_tx)).await;
         let result = if sent.is_ok() {
@@ -150,6 +157,7 @@ impl Owner {
         let joined = tokio::task::spawn_blocking(move || {
             self.artwork.shutdown();
             self.lyrics.shutdown();
+            self.directory.shutdown();
             self.thread.join()
         })
         .await
@@ -181,6 +189,19 @@ impl Controller {
                         library_revision,
                     })
                     .await;
+                return Ok(Message::Reply { id, reply });
+            }
+            command @ (Command::SearchDirectory { .. } | Command::CountDirectoryClick { .. }) => {
+                let mut reply = match command {
+                    Command::SearchDirectory { query } => self.directory.search(&query).await,
+                    Command::CountDirectoryClick { station_uuid } => {
+                        self.directory.count_click(&station_uuid)
+                    }
+                    _ => unreachable!("matched directory commands above"),
+                };
+                if let Reply::Error { queue_revision, .. } = &mut reply {
+                    *queue_revision = self.queue_revision(id).await?;
+                }
                 return Ok(Message::Reply { id, reply });
             }
             Command::Artwork {
@@ -357,6 +378,25 @@ impl Controller {
             }
         };
         Ok(Message::Reply { id, reply })
+    }
+
+    async fn queue_revision(&self, id: u64) -> Result<u64> {
+        match self
+            .playback_request(Request {
+                id,
+                command: Command::Snapshot,
+            })
+            .await?
+        {
+            Message::Reply {
+                reply:
+                    Reply::Ok {
+                        result: Response::Snapshot { snapshot },
+                    },
+                ..
+            } => Ok(snapshot.queue_revision),
+            _ => Err(anyhow!("owner did not return its control snapshot")),
+        }
     }
 
     async fn playback_request(&self, request: Request) -> Result<Message> {
@@ -1621,6 +1661,8 @@ impl Actor {
             }
             Command::Artwork { .. }
             | Command::Lyrics { .. }
+            | Command::SearchDirectory { .. }
+            | Command::CountDirectoryClick { .. }
             | Command::AddRoot { .. }
             | Command::Rescan { .. }
             | Command::LibraryRoots { .. }
@@ -1633,7 +1675,9 @@ impl Actor {
             | Command::ListGenres { .. }
             | Command::AlbumSummaries { .. }
             | Command::ListGroups { .. } => {
-                unreachable!("library, artwork and lyrics commands are routed to their own workers")
+                unreachable!(
+                    "library, artwork, lyrics and directory commands are routed to their own workers"
+                )
             }
             Command::Remove {
                 expected_revision,
