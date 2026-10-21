@@ -520,6 +520,56 @@ fn a_radio_play_is_described_by_its_station_text() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Shutdown saves the playback checkpoint before the library drains its
+/// re-index queue, which may take its whole limit.
+#[test]
+fn quit_saves_the_checkpoint_before_the_library_shuts_down() {
+    let root = std::env::temp_dir().join(format!("tyranny-quit-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("song.wav");
+    wav_frames(&source, 96_000);
+    let database_path = root.join("state.sqlite");
+    let mut actor = Actor::open(OwnerConfig {
+        database_path: database_path.clone(),
+        output: OutputConfig::Capture {
+            path: root.join("capture.f32"),
+            clocked: true,
+        },
+    })
+    .unwrap();
+    let expected_revision = actor.revision();
+    applied(
+        &mut actor,
+        Command::Append {
+            expected_revision,
+            path: source.to_str().unwrap().to_owned(),
+        },
+    );
+    applied(&mut actor, Command::Play { entry_id: None });
+    let deadline = Instant::now() + DEADLINE;
+    while actor.player.snapshot().output.position_frames < 4_800 {
+        assert!(Instant::now() < deadline, "output did not start");
+        actor.player.pump().unwrap();
+        thread::sleep(Duration::from_millis(5));
+    }
+    let saved_position = |path: &Path| -> u64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row("SELECT position_frames FROM control", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(saved_position(&database_path), 0);
+    let (seen, saw) = std::sync::mpsc::channel();
+    let path = database_path.clone();
+    actor.library.on_shutdown = Some(Box::new(move || {
+        seen.send(saved_position(&path)).unwrap();
+    }));
+    actor.quit().unwrap();
+    let position = saw.recv().unwrap();
+    assert!(position >= 4_800, "the library shut down first: {position}");
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// The owner exits when every controller is gone. Plays still waiting for a
 /// history write are written first, as on shutdown.
 #[test]

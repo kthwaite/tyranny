@@ -45,6 +45,9 @@ pub struct Library {
     shared: Arc<RwLock<LibraryState>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<Result<()>>>,
+    /// Runs when `shutdown` starts, so a test can see what was saved before it.
+    #[cfg(test)]
+    pub(crate) on_shutdown: Option<Box<dyn FnOnce() + Send>>,
 }
 #[derive(Clone)]
 pub struct LibraryHandle {
@@ -137,6 +140,8 @@ impl Library {
                 shared,
                 stop,
                 worker: Some(worker),
+                #[cfg(test)]
+                on_shutdown: None,
             }),
             outcome => {
                 stop.store(true, Ordering::Release);
@@ -157,6 +162,10 @@ impl Library {
             .clone()
     }
     pub fn shutdown(mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = self.on_shutdown.take() {
+            hook();
+        }
         self.stop_and_join()
     }
     fn stop_and_join(&mut self) -> Result<()> {
