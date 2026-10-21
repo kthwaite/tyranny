@@ -44,6 +44,12 @@ struct PcmBlock {
 struct Updates {
     metadata: Option<PlaybackMetadata>,
     error: Option<String>,
+    /// The title the latest publish showed, or one carried over from an
+    /// earlier decoder of the entry. A connection shows it instead of the
+    /// station name until the station announces a title.
+    title: Option<String>,
+    /// The latest publish showed a title the station announced.
+    announced: bool,
 }
 
 struct Shared {
@@ -67,8 +73,18 @@ impl Shared {
                 >= u128::from(self.deadline_ms.load(Ordering::Acquire))
     }
 
-    fn publish(&self, metadata: &PlaybackMetadata) {
-        self.updates.lock().unwrap().metadata = Some(copy_metadata(metadata));
+    /// Publishes `metadata`. Until the connection's station has `announced`
+    /// a title, the last title shown stays: a reconnect does not flash the
+    /// station name.
+    fn publish(&self, metadata: &PlaybackMetadata, announced: bool) {
+        let mut updates = self.updates.lock().unwrap();
+        let mut metadata = copy_metadata(metadata);
+        if !announced && let Some(title) = &updates.title {
+            metadata.title.clone_from(title);
+        }
+        updates.title = Some(metadata.title.clone());
+        updates.announced = announced;
+        updates.metadata = Some(metadata);
     }
 }
 
@@ -111,7 +127,9 @@ pub(crate) struct StreamDecoder {
 impl StreamDecoder {
     /// Validate and launch only: opening, probing, priming and retries happen on
     /// the worker, never on the owner. A stream has no finite duration or seek.
-    pub(crate) fn open(spec: &StreamSpec, mode: GainMode) -> Result<Self> {
+    /// A decoder that replaces another passes the title it showed, which
+    /// stays until the station announces one.
+    pub(crate) fn open(spec: &StreamSpec, mode: GainMode, title: Option<String>) -> Result<Self> {
         let spec = StreamSpec::new(spec.url.clone(), spec.title.clone())?;
         let lease = WorkerLease::acquire()?;
         let (ready_writer, ready) = RingBuffer::new(PCM_BLOCKS);
@@ -131,7 +149,10 @@ impl StreamDecoder {
             started: Instant::now(),
             deadline_ms: AtomicU64::new(0),
             gain_bits: AtomicU64::new(0.0_f64.to_bits()),
-            updates: Mutex::new(Updates::default()),
+            updates: Mutex::new(Updates {
+                title,
+                ..Updates::default()
+            }),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -209,6 +230,19 @@ impl StreamDecoder {
         self.shared.updates.try_lock().ok()?.metadata.take()
     }
 
+    /// Shows `title` until the station announces one, as if an earlier
+    /// decoder had shown it. Waits only for a publish in progress.
+    pub(crate) fn carry_title(&self, title: &str) {
+        let mut updates = self.shared.updates.lock().unwrap();
+        if updates.announced {
+            return;
+        }
+        updates.title = Some(title.to_owned());
+        if let Some(metadata) = &mut updates.metadata {
+            title.clone_into(&mut metadata.title);
+        }
+    }
+
     pub(crate) fn gain_db(&self) -> f64 {
         f64::from_bits(self.shared.gain_bits.load(Ordering::Acquire))
     }
@@ -251,8 +285,8 @@ fn run(
                     .store(decoder.gain_db().to_bits(), Ordering::Release);
                 let mut metadata = decoder.take_metadata();
                 let mut icy_packet = Vec::with_capacity(MAX_ICY_BYTES);
-                update_icy(&decoder, spec, &mut metadata, &mut icy_packet);
-                publish_changed(shared, &mut last_metadata, &metadata);
+                let mut announced = update_icy(&decoder, spec, &mut metadata, &mut icy_packet);
+                publish_changed(shared, &mut last_metadata, &metadata, announced);
                 let mut healthy_frames: usize = 0;
                 loop {
                     if shared.cancelled.load(Ordering::Acquire) {
@@ -269,8 +303,8 @@ fn run(
                     };
                     shared.arm(READ_TIMEOUT);
                     let result = decoder.read(&mut block.frames);
-                    update_icy(&decoder, spec, &mut metadata, &mut icy_packet);
-                    publish_changed(shared, &mut last_metadata, &metadata);
+                    announced |= update_icy(&decoder, spec, &mut metadata, &mut icy_packet);
+                    publish_changed(shared, &mut last_metadata, &metadata, announced);
                     match result {
                         Ok(length) if length > 0 => {
                             block.length = length;
@@ -328,6 +362,7 @@ fn publish_changed(
     shared: &Shared,
     previous: &mut Option<PlaybackMetadata>,
     metadata: &PlaybackMetadata,
+    announced: bool,
 ) {
     if previous.as_ref().is_some_and(|old| {
         old.title == metadata.title
@@ -337,31 +372,35 @@ fn publish_changed(
     }) {
         return;
     }
-    shared.publish(metadata);
+    shared.publish(metadata, announced);
     *previous = Some(copy_metadata(metadata));
 }
 
+/// Applies a new ICY packet's title. Returns whether the station announced
+/// one.
 fn update_icy(
     decoder: &Decoder,
     spec: &StreamSpec,
     metadata: &mut PlaybackMetadata,
     previous: &mut Vec<u8>,
-) {
+) -> bool {
     let Some(packet) = decoder.icy_metadata() else {
-        return;
+        return false;
     };
     if packet == previous.as_slice() {
-        return;
+        return false;
     }
     previous.clear();
     previous.extend_from_slice(packet);
-    if let Some(title) = icy_title(packet) {
-        let title = if title.is_empty() { &spec.title } else { title };
-        if title != metadata.title {
-            metadata.title.clear();
-            metadata.title.push_str(title);
-        }
+    let Some(title) = icy_title(packet) else {
+        return false;
+    };
+    let title = if title.is_empty() { &spec.title } else { title };
+    if title != metadata.title {
+        metadata.title.clear();
+        metadata.title.push_str(title);
     }
+    true
 }
 
 fn icy_title(packet: &[u8]) -> Option<&str> {
@@ -417,12 +456,12 @@ mod tests {
             album: String::new(),
             metadata_error: None,
         };
-        publish_changed(&shared, &mut previous, &metadata);
+        publish_changed(&shared, &mut previous, &metadata, true);
         assert_eq!(decoder.take_metadata().unwrap().title, "Station");
-        publish_changed(&shared, &mut previous, &metadata);
+        publish_changed(&shared, &mut previous, &metadata, true);
         assert!(decoder.take_metadata().is_none());
         metadata.title = "Live title".to_owned();
-        publish_changed(&shared, &mut previous, &metadata);
+        publish_changed(&shared, &mut previous, &metadata, true);
         assert_eq!(decoder.take_metadata().unwrap().title, "Live title");
         assert!(decoder.take_metadata().is_none());
 
@@ -468,6 +507,55 @@ mod tests {
     }
 
     #[test]
+    fn a_new_connection_shows_the_last_title_until_the_station_announces_one() {
+        let (_writer, ready) = RingBuffer::new(PCM_BLOCKS);
+        let (recycle, _recycled) = RingBuffer::new(PCM_BLOCKS);
+        let shared = Arc::new(Shared {
+            cancelled: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            started: Instant::now(),
+            deadline_ms: AtomicU64::new(0),
+            gain_bits: AtomicU64::new(0.0_f64.to_bits()),
+            updates: Mutex::new(Updates::default()),
+        });
+        let mut decoder = StreamDecoder {
+            ready,
+            recycle,
+            current: None,
+            offset: 0,
+            shared: Arc::clone(&shared),
+            worker: thread::current(),
+        };
+        let metadata = |title: &str| PlaybackMetadata {
+            title: title.to_owned(),
+            artist: String::new(),
+            album: String::new(),
+            metadata_error: None,
+        };
+        let mut previous = None;
+        let mut publish = |title: &str, announced: bool| {
+            publish_changed(&shared, &mut previous, &metadata(title), announced);
+        };
+        // The first connection shows the station name until a song is announced.
+        publish("Station", false);
+        assert_eq!(decoder.take_metadata().unwrap().title, "Station");
+        publish("Song", true);
+        assert_eq!(decoder.take_metadata().unwrap().title, "Song");
+        // A reconnect starts from the station name: the song stays.
+        publish("Station", false);
+        assert_eq!(decoder.take_metadata().unwrap().title, "Song");
+        publish("Next", true);
+        assert_eq!(decoder.take_metadata().unwrap().title, "Next");
+        // A carried title replaces an unannounced one, not an announced one.
+        publish("Station", false);
+        decoder.carry_title("Restored");
+        assert_eq!(decoder.take_metadata().unwrap().title, "Restored");
+        publish("Live", true);
+        decoder.carry_title("Other");
+        assert_eq!(decoder.take_metadata().unwrap().title, "Live");
+    }
+
+    #[test]
     fn icy_rejects_malformed_or_excessive_metadata() {
         for packet in [
             b"StreamTitle='missing terminator".as_slice(),
@@ -491,7 +579,7 @@ mod tests {
                 url: url.to_owned(),
                 title: "Station".to_owned(),
             };
-            assert!(StreamDecoder::open(&spec, GainMode::Off).is_err());
+            assert!(StreamDecoder::open(&spec, GainMode::Off, None).is_err());
         }
     }
 }

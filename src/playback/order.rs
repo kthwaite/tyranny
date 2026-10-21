@@ -1,14 +1,21 @@
 //! The player's side of its `PlayOrder`: passes over queue entries, what
 //! follows each pass, and which played entries Repeat All keeps.
 
-use super::Player;
+use super::{
+    Player,
+    radio::{self, RadioText},
+};
 use crate::{
+    SAMPLE_RATE,
     listing::unix_now,
     output::{OutputSnapshot, TrackToken},
     play_order::{self, RepeatMode, ShuffleStrategy, Slot},
-    store::{count_threshold_frames, played_overflow},
+    store::{EndReason, count_threshold_frames, played_overflow},
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 /// One decode of a queue entry. Each pass has its own token, so a replay
 /// (Repeat One, a Repeat All wrap, a shuffle revisit) is heard from its start
@@ -32,14 +39,86 @@ pub(super) struct Pass {
     pub counted: bool,
     /// When output started this pass, or the pass it continues: UTC seconds.
     pub started_at: Option<i64>,
+    /// The open play this pass, or the pass it continues, is heard as.
+    pub play: Option<Play>,
 }
 
-/// A pass that counted as a play.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CountedPlay {
-    pub entry_id: u64,
-    /// When output started the pass: UTC seconds.
-    pub started_at: i64,
+/// Listened time at which a radio play counts.
+const RADIO_COUNT_FRAMES: u64 = 60 * SAMPLE_RATE as u64;
+
+/// A change in the life of a play: one pass over a queue entry, or one
+/// announced song on a radio stream. `play` is a key unique to this player.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlayEvent {
+    /// Output started the play. `started_at` is in UTC seconds. A radio play
+    /// carries the station's now-playing text.
+    Opened {
+        play: u64,
+        entry_id: u64,
+        started_at: i64,
+        radio: Option<RadioText>,
+    },
+    /// The play reached its count threshold.
+    Counted { play: u64 },
+    /// The play ended. `ended_at` is in UTC seconds.
+    Closed {
+        play: u64,
+        listened_ms: u64,
+        reason: EndReason,
+        ended_at: i64,
+    },
+}
+
+/// An open play.
+pub(super) struct Play {
+    key: u64,
+    /// Frames output rendered for the play.
+    listened: u64,
+    counted: bool,
+    /// Output has rendered the play since it opened or was restored.
+    heard: bool,
+    /// The play opened on a pass that had already counted, so it never
+    /// counts and closes as stopped.
+    forced: bool,
+    radio: Option<Radio>,
+}
+
+/// The now-playing text a radio play opened with.
+struct Radio {
+    raw: String,
+    junk: bool,
+}
+
+impl Play {
+    fn new(key: u64, radio: Option<&RadioText>) -> Self {
+        Self {
+            key,
+            listened: 0,
+            counted: false,
+            heard: true,
+            forced: false,
+            radio: radio.map(|text| Radio {
+                raw: text.raw.clone(),
+                junk: text.junk,
+            }),
+        }
+    }
+
+    /// Adds listened frames. Returns whether a radio play just reached its
+    /// count threshold; junk radio text never counts.
+    fn listen(&mut self, frames: u64) -> bool {
+        self.listened += frames;
+        let counts = !self.counted
+            && !self.forced
+            && self.listened >= RADIO_COUNT_FRAMES
+            && self.radio.as_ref().is_some_and(|radio| !radio.junk);
+        self.counted |= counts;
+        counts
+    }
+
+    fn listened_ms(&self) -> u64 {
+        self.listened * 1_000 / u64::from(SAMPLE_RATE)
+    }
 }
 
 /// What the player decodes after a pass.
@@ -92,13 +171,82 @@ impl Player {
         std::mem::take(&mut self.advances)
     }
 
-    /// The entry of each pass that counted as a play since the last call,
-    /// oldest first. A pass counts once: when output reaches its threshold
-    /// position, or when it ends naturally. Re-selecting the current entry (a
-    /// seek or gain change) continues its pass; any other selection, and each
-    /// replay (Repeat One, a Repeat All wrap), is a new pass.
-    pub fn take_counted_plays(&mut self) -> Vec<CountedPlay> {
-        std::mem::take(&mut self.counted_plays)
+    /// What happened to plays since the last call, oldest first. A play
+    /// opens when output starts a pass. A file play counts once: when output
+    /// reaches its threshold position, or when it ends naturally. A radio play
+    /// counts after a minute listened. Re-selecting the current entry (a seek
+    /// or gain change) continues its pass and play; any other selection, and
+    /// each replay (Repeat One, a Repeat All wrap), is a new pass and play. A
+    /// change of a station's now-playing text starts a new radio play.
+    pub fn take_play_events(&mut self) -> Vec<PlayEvent> {
+        std::mem::take(&mut self.play_events)
+    }
+
+    /// The open play's key and listened milliseconds, as of the last pump.
+    pub fn open_play(&self) -> Option<(u64, u64)> {
+        self.passes
+            .iter()
+            .rev()
+            .find_map(|pass| pass.play.as_ref())
+            .map(|play| (play.key, play.listened_ms()))
+    }
+
+    /// Closes the open play with `reason`. A skip closes a radio play, a
+    /// restored play not heard since, or a play opened already counted as
+    /// stopped. What output played since the last pump counts first.
+    pub fn end_play(&mut self, reason: EndReason) {
+        self.count_heard();
+        if let Some(play) = self
+            .passes
+            .iter_mut()
+            .rev()
+            .find_map(|pass| pass.play.take())
+        {
+            self.close(play, reason);
+        }
+    }
+
+    /// Continues the open play of entry `entry_id`, the restored selection,
+    /// from before the restart: `counted`, `listened_ms` and, for a radio
+    /// play, its now-playing text `raw_title` come from its row. Returns the
+    /// play's key. Without the selection's pass the play closes at once as
+    /// stopped.
+    pub fn restore_play(
+        &mut self,
+        entry_id: u64,
+        counted: bool,
+        listened_ms: u64,
+        raw_title: Option<&str>,
+    ) -> u64 {
+        let key = self.next_play_key();
+        // A radio play without its text has the station name's: junk.
+        let text = self
+            .stream_title(entry_id)
+            .map(|station| radio::parse(raw_title.unwrap_or(station), station));
+        let mut play = Play::new(key, text.as_ref());
+        play.listened = listened_ms * u64::from(SAMPLE_RATE) / 1_000;
+        play.counted = counted;
+        play.heard = false;
+        let Some(pass) = self.passes.back_mut().filter(|pass| pass.id == entry_id) else {
+            self.close(play, EndReason::Stopped);
+            return key;
+        };
+        pass.counted = counted;
+        pass.play = Some(play);
+        // The stream shows the restored text until the station announces its
+        // own, so the same text continues the play.
+        if let Some(raw) = raw_title
+            && let Some(index) = self.index_of(entry_id)
+            && self.queue[index].stream.is_some()
+        {
+            if let Some(decoder) = &self.decoder {
+                decoder.carry_title(raw);
+            }
+            if let Some(now) = &mut self.queue[index].metadata {
+                Arc::make_mut(now).title = raw.to_owned();
+            }
+        }
+        key
     }
 
     /// The selection was restored from a checkpoint. At or past its
@@ -114,18 +262,21 @@ impl Player {
         }
     }
 
-    /// Whether `id`'s current pass has counted, and when it started, for a
-    /// selection that re-selects it and so continues it. Completed playback
-    /// has no current pass to continue.
-    pub(super) fn continued_pass(&self, id: u64) -> (bool, Option<i64>) {
+    /// Whether `id`'s current pass has counted, when it started, and its
+    /// play, taken for a selection that re-selects it and so continues it.
+    /// Completed playback has no current pass to continue.
+    pub(super) fn continued_pass(&mut self, id: u64) -> (bool, Option<i64>, Option<Play>) {
         if self.completed() {
-            return (false, None);
+            return (false, None, None);
         }
-        self.current_pass(&self.output.snapshot())
+        let current = self
+            .current_pass(&self.output.snapshot())
             .and_then(|(_, pass, _)| pass)
-            .map(|pass| &self.passes[pass])
-            .filter(|pass| pass.id == id)
-            .map_or((false, None), |pass| (pass.counted, pass.started_at))
+            .filter(|pass| self.passes[*pass].id == id);
+        current.map_or((false, None, None), |pass| {
+            let pass = &mut self.passes[pass];
+            (pass.counted, pass.started_at, pass.play.take())
+        })
     }
 
     /// Clears the played state of `ids`, as the store does for a fresh pass.
@@ -229,6 +380,7 @@ impl Player {
             threshold: count_threshold_frames(duration),
             counted: false,
             started_at: None,
+            play: None,
         });
         self.plan = self.decide(self.cursor);
     }
@@ -255,8 +407,9 @@ impl Player {
             .unwrap_or(self.queue.len());
     }
 
-    /// Notes the passes output has started, oldest first. Passes before the
-    /// latest one ended naturally, and are dropped. Counts plays.
+    /// Notes the passes output has started, oldest first, and opens their
+    /// plays. Passes before the latest one ended naturally, and are dropped.
+    /// Counts plays.
     pub(super) fn hear(&mut self) {
         let output = self.output.snapshot();
         let rendered = output.rendered_frames;
@@ -265,6 +418,7 @@ impl Player {
             .iter()
             .rposition(|pass| pass.token.consumed_by(rendered))
         else {
+            self.listen(rendered);
             return;
         };
         for index in 0..=latest {
@@ -273,8 +427,16 @@ impl Player {
                 continue;
             }
             pass.heard = true;
-            pass.started_at.get_or_insert_with(unix_now);
             let (id, fresh) = (pass.id, pass.fresh.take());
+            // A restored play is heard again.
+            let restored = pass.play.as_ref().is_some_and(|play| !play.heard);
+            if let Some(play) = pass.play.as_mut() {
+                play.heard = true;
+            }
+            self.start_play(index);
+            if restored {
+                self.retitle(index);
+            }
             self.heard(id, fresh);
         }
         self.count(&output, latest);
@@ -286,34 +448,155 @@ impl Player {
     /// meantime must not be lost.
     pub(crate) fn count_heard(&mut self) {
         let output = self.output.snapshot();
-        if let Some(latest) = self
+        match self
             .passes
             .iter()
             .rposition(|pass| pass.token.consumed_by(output.rendered_frames))
         {
-            self.count(&output, latest);
+            Some(latest) => self.count(&output, latest),
+            None => self.listen(output.rendered_frames),
         }
     }
 
     /// Passes before `latest`, the latest pass output started, ended
-    /// naturally: each counts. The latest counts at its threshold, or once
-    /// output drains after it with no failure: the queue ended there.
+    /// naturally: each counts, and its play finishes. The latest counts at its
+    /// threshold, or once output drains after it with no failure: the queue
+    /// ended there, and its play finishes. Radio plays count by listened time
+    /// instead.
     fn count(&mut self, output: &OutputSnapshot, latest: usize) {
         let ended = self.finished && output.drained && self.failure.is_none();
-        for (index, pass) in self.passes.range_mut(..=latest).enumerate() {
+        for index in 0..=latest {
+            let pass = &self.passes[index];
             let reached = output.entry_id == pass.id
                 && pass
                     .threshold
                     .is_some_and(|threshold| output.position_frames >= threshold);
             let counts = index < latest || reached || ended;
-            if !pass.counted && pass.token.is_valid() && counts {
-                pass.counted = true;
-                self.counted_plays.push(CountedPlay {
-                    entry_id: pass.id,
-                    started_at: *pass.started_at.get_or_insert_with(unix_now),
-                });
+            if pass.counted || !pass.token.is_valid() || !counts {
+                continue;
+            }
+            self.start_play(index);
+            let pass = &mut self.passes[index];
+            pass.counted = true;
+            if let Some(play) = pass.play.as_mut().filter(|play| play.radio.is_none()) {
+                play.counted = true;
+                self.play_events.push(PlayEvent::Counted { play: play.key });
             }
         }
+        self.listen(output.rendered_frames);
+        for index in 0..latest {
+            if let Some(play) = self.passes[index].play.take() {
+                self.close(play, EndReason::Finished);
+            }
+        }
+        if ended && let Some(play) = self.passes[latest].play.take() {
+            self.close(play, EndReason::Finished);
+        }
+    }
+
+    /// Gives what output rendered since the last call to the play of the
+    /// latest heard valid pass.
+    fn listen(&mut self, rendered: u64) {
+        let frames = rendered.saturating_sub(self.rendered_frames);
+        self.rendered_frames = rendered;
+        if let Some(play) = self
+            .passes
+            .iter_mut()
+            .rev()
+            .find(|pass| pass.heard && pass.token.is_valid())
+            .and_then(|pass| pass.play.as_mut())
+            && play.listen(frames)
+        {
+            self.play_events.push(PlayEvent::Counted { play: play.key });
+        }
+    }
+
+    /// Pass `index` started, or counts before `hear` noted it: it gets its
+    /// start time and, unless it continues a play, a new play. A pass that
+    /// counted before its play opened (a restored selection with no restored
+    /// play) leaves its play uncounted.
+    fn start_play(&mut self, index: usize) {
+        let pass = &mut self.passes[index];
+        if pass.started_at.is_some() {
+            return;
+        }
+        let started_at = unix_now();
+        pass.started_at = Some(started_at);
+        if pass.play.is_none() {
+            let forced = pass.counted;
+            self.open_play_at(index, started_at);
+            if let Some(play) = &mut self.passes[index].play {
+                play.forced = forced;
+            }
+        }
+    }
+
+    /// Opens a play for pass `index`.
+    fn open_play_at(&mut self, index: usize, started_at: i64) {
+        let key = self.next_play_key();
+        let entry_id = self.passes[index].id;
+        let radio = self.radio_text(entry_id);
+        self.passes[index].play = Some(Play::new(key, radio.as_ref()));
+        self.play_events.push(PlayEvent::Opened {
+            play: key,
+            entry_id,
+            started_at,
+            radio,
+        });
+    }
+
+    /// Follows a change of the now-playing text of pass `index`. When the
+    /// pass is heard and its radio play opened with other text, that play
+    /// finishes and the next one opens.
+    pub(super) fn retitle(&mut self, index: usize) {
+        let pass = &self.passes[index];
+        let Some(text) = self.radio_text(pass.id) else {
+            return;
+        };
+        let changed = pass.heard
+            && pass
+                .play
+                .as_ref()
+                .and_then(|play| play.radio.as_ref())
+                .is_some_and(|radio| radio.raw != text.raw);
+        if !changed {
+            return;
+        }
+        // What output played so far belongs to the earlier play.
+        self.count_heard();
+        if let Some(play) = self.passes[index].play.take() {
+            self.close(play, EndReason::Finished);
+            self.open_play_at(index, unix_now());
+        }
+    }
+
+    /// The now-playing text of stream entry `entry_id`: its latest title, or
+    /// the station name before any.
+    fn radio_text(&self, entry_id: u64) -> Option<RadioText> {
+        let entry = self.queue.iter().find(|entry| entry.id == entry_id)?;
+        let station = &entry.stream.as_ref()?.title;
+        let title = entry.metadata.as_ref().map_or(station, |now| &now.title);
+        Some(radio::parse(title, station))
+    }
+
+    fn close(&mut self, play: Play, reason: EndReason) {
+        let skip_stops = reason == EndReason::Skipped && (play.radio.is_some() || !play.heard);
+        let reason = if play.forced || skip_stops {
+            EndReason::Stopped
+        } else {
+            reason
+        };
+        self.play_events.push(PlayEvent::Closed {
+            play: play.key,
+            listened_ms: play.listened_ms(),
+            reason,
+            ended_at: unix_now(),
+        });
+    }
+
+    fn next_play_key(&mut self) -> u64 {
+        self.next_play += 1;
+        self.next_play
     }
 
     fn heard(&mut self, id: u64, fresh: Option<Vec<u64>>) {
@@ -505,9 +788,9 @@ impl Player {
         if from < self.passes.len() {
             self.decoder = None;
             self.equalizer.reset();
-            for pass in self.passes.drain(from..) {
-                pass.token.invalidate();
-                self.prefilled_frames -= pass.prefilled;
+            let dropped: Vec<Pass> = self.passes.drain(from..).collect();
+            for pass in dropped {
+                self.discard(pass);
             }
         }
         // The kept pass may be older than the entry's latest token.
@@ -531,214 +814,35 @@ impl Player {
             self.decoded_position = 0;
             self.equalizer.reset();
         }
-        let prefilled = &mut self.prefilled_frames;
-        self.passes.retain(|pass| {
-            let gone = removed.contains(&pass.id);
-            if gone {
-                pass.token.invalidate();
-                *prefilled -= pass.prefilled;
-            }
-            !gone
-        });
+        let (gone, kept): (VecDeque<Pass>, _) = std::mem::take(&mut self.passes)
+            .into_iter()
+            .partition(|pass| removed.contains(&pass.id));
+        self.passes = kept;
+        for pass in gone {
+            self.discard(pass);
+        }
     }
 
     /// Drops every pass and what was planned after them.
     pub(super) fn drop_passes(&mut self) {
         self.count_heard();
-        for pass in self.passes.drain(..) {
-            pass.token.invalidate();
-            self.prefilled_frames -= pass.prefilled;
+        for pass in std::mem::take(&mut self.passes) {
+            self.discard(pass);
         }
         self.plan = Plan::default();
         self.opening = None;
         self.silent = 0;
     }
+
+    /// A dropped pass no longer plays. Its open play closes as stopped.
+    fn discard(&mut self, pass: Pass) {
+        pass.token.invalidate();
+        self.prefilled_frames -= pass.prefilled;
+        if let Some(play) = pass.play {
+            self.close(play, EndReason::Stopped);
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        decoder::GainMode,
-        output::OutputConfig,
-        play_order::{RepeatScope, RunInfo},
-        playback::Start,
-        store::LoadedEntry,
-    };
-    use std::{fs, path::PathBuf};
-
-    #[test]
-    fn repeat_all_trim_keeps_the_current_context() -> anyhow::Result<()> {
-        let directory = std::env::temp_dir().join(format!("tyranny-trim-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory)?;
-        // 103 loose songs, then a three-entry album run; every entry is played.
-        let loaded = |id: u64, run_id: u64, scope: RepeatScope| LoadedEntry {
-            id,
-            path: PathBuf::from(format!("/music/{id}.flac")),
-            stream: None,
-            run: Some(RunInfo { run_id, scope }),
-            played_seq: Some(id),
-        };
-        let entries = (1..=103)
-            .map(|id| loaded(id, id, RepeatScope::Queue))
-            .chain((104..=106).map(|id| loaded(id, 104, RepeatScope::Run)))
-            .collect();
-        let mut player = Player::from_loaded(
-            entries,
-            1,
-            107,
-            OutputConfig::Capture {
-                path: directory.join("capture.f32"),
-                clocked: false,
-            },
-            GainMode::Off,
-        )?;
-        let newest_first: Vec<u64> = (1..=106).rev().collect();
-        // Off keeps the newest 100 besides the current entry.
-        assert_eq!(player.trimmed(&newest_first, 106), [5, 4, 3, 2, 1]);
-        player.set_repeat(RepeatMode::All);
-        // The album run is kept whole; 100 of the other played entries stay.
-        assert_eq!(player.trimmed(&newest_first, 106), [3, 2, 1]);
-        // A song's context is the whole queue: nothing is trimmed.
-        assert!(player.trimmed(&newest_first, 50).is_empty());
-        drop(player);
-        fs::remove_dir_all(&directory)?;
-        Ok(())
-    }
-
-    #[test]
-    fn previous_under_repeat_all_wraps_within_the_context() -> anyhow::Result<()> {
-        let directory =
-            std::env::temp_dir().join(format!("tyranny-previous-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory)?;
-        // A loose song, a three-entry album run, then another loose song.
-        let loaded = |id: u64, run_id: u64, scope: RepeatScope| LoadedEntry {
-            id,
-            path: PathBuf::from(format!("/music/{id}.flac")),
-            stream: None,
-            run: Some(RunInfo { run_id, scope }),
-            played_seq: None,
-        };
-        let entries = vec![
-            loaded(1, 1, RepeatScope::Queue),
-            loaded(2, 2, RepeatScope::Run),
-            loaded(3, 2, RepeatScope::Run),
-            loaded(4, 2, RepeatScope::Run),
-            loaded(5, 5, RepeatScope::Queue),
-        ];
-        let mut player = Player::from_loaded(
-            entries,
-            1,
-            6,
-            OutputConfig::Capture {
-                path: directory.join("capture.f32"),
-                clocked: false,
-            },
-            GainMode::Off,
-        )?;
-        // Off steps back one entry, out of the run, and stops at the start.
-        assert_eq!(player.previous_index(1), Some(0));
-        assert_eq!(player.previous_index(0), None);
-        player.set_repeat(RepeatMode::All);
-        // From the run's first entry to its last; inside it, one back.
-        assert_eq!(player.previous_index(1), Some(3));
-        assert_eq!(player.previous_index(2), Some(1));
-        // A loose song's context is the whole queue.
-        assert_eq!(player.previous_index(0), Some(4));
-        // Shuffled, history from before the run does not leave it either.
-        player.set_shuffle(Some(Box::new(Last)));
-        player.order.advanced(1);
-        assert_eq!(player.previous_index(1), Some(3));
-        player.order.advanced(3);
-        player.order.advanced(2);
-        assert_eq!(player.previous_index(1), Some(2));
-        drop(player);
-        fs::remove_dir_all(&directory)?;
-        Ok(())
-    }
-
-    /// 100 frames of stereo 16-bit silence.
-    fn silence(directory: &std::path::Path) -> anyhow::Result<PathBuf> {
-        let source = directory.join("source.wav");
-        let mut bytes = b"RIFF".to_vec();
-        bytes.extend_from_slice(&(36 + 400_u32).to_le_bytes());
-        bytes.extend_from_slice(b"WAVEfmt ");
-        for field in [16_u32, 0x0002_0001, 48_000, 192_000, 0x0010_0004] {
-            bytes.extend_from_slice(&field.to_le_bytes());
-        }
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&400_u32.to_le_bytes());
-        bytes.resize(bytes.len() + 400, 0);
-        fs::write(&source, bytes)?;
-        Ok(source)
-    }
-
-    /// Always picks the last candidate.
-    struct Last;
-    impl ShuffleStrategy for Last {
-        fn choose(&mut self, candidates: &[u64]) -> usize {
-            candidates.len() - 1
-        }
-    }
-
-    #[test]
-    fn shuffled_start_plays_a_pick_within_the_new_run() -> anyhow::Result<()> {
-        let directory =
-            std::env::temp_dir().join(format!("tyranny-start-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory)?;
-        let source = silence(&directory)?;
-        let mut player = Player::new(
-            vec![source.clone()],
-            OutputConfig::Capture {
-                path: directory.join("capture.f32"),
-                clocked: false,
-            },
-            GainMode::Off,
-        )?;
-        player.set_shuffle(Some(Box::new(Last)));
-        // Runs 2..=4 then 5..=7: without a shuffled start the run's first
-        // entry plays; with one, the strategy's pick does.
-        for (start_from, start) in [(Start::First, 2), (Start::Pick, 7)] {
-            let revision = player.snapshot().queue_revision;
-            let prepared = player.prepare_replace_upcoming(
-                vec![source.clone(); 3].into_iter(),
-                crate::protocol::Placement::ReplaceUpcoming,
-                revision,
-                Some(start_from),
-                RepeatScope::Run,
-                &[],
-            )?;
-            assert_eq!(prepared.start_id(), start);
-            player.commit_replace_upcoming(prepared);
-            assert_eq!(player.snapshot().current_id, Some(start));
-        }
-        drop(player);
-        fs::remove_dir_all(&directory)?;
-        Ok(())
-    }
-
-    #[test]
-    fn a_selection_never_inherits_a_planned_fresh_pass() -> anyhow::Result<()> {
-        let directory =
-            std::env::temp_dir().join(format!("tyranny-fresh-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory)?;
-        let source = silence(&directory)?;
-        let mut player = Player::new(
-            vec![source.clone(), source],
-            OutputConfig::Capture {
-                path: directory.join("capture.f32"),
-                clocked: false,
-            },
-            GainMode::Off,
-        )?;
-        player.set_repeat(RepeatMode::All);
-        // The cursor's next pass was planned to start a fresh Repeat All pass.
-        player.opening = Some(vec![1, 2]);
-        let prepared = player.prepare_selection(2, 0, GainMode::Off)?;
-        player.commit_selection(prepared);
-        assert!(player.passes.iter().all(|pass| pass.fresh.is_none()));
-        drop(player);
-        fs::remove_dir_all(&directory)?;
-        Ok(())
-    }
-}
+mod tests;

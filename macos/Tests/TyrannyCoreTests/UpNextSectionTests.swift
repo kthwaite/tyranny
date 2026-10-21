@@ -20,7 +20,7 @@ func snapshot(currentID: UInt64?, currentIndex: Int?, upcoming: Int, shuffle: Bo
          "error":null,"underruns":0,
          "library":{"revision":1,"roots":0,"tracks":0,"duration_ms":0,"size_bytes":0,
                     "scan":{"root_id":null,"phase":"idle","discovered":0,"processed":0,"total":null,"updated":0,"unchanged":0,"failures":0,"skipped":0,"last_error":null}},
-         "history_revision":0,"current_index":\(index),"upcoming_count":\(upcoming)}
+         "history_revision":0,"stats_revision":0,"current_index":\(index),"upcoming_count":\(upcoming)}
         """
     return try JSONDecoder().decode(ControlState.self, from: Data(text.utf8))
 }

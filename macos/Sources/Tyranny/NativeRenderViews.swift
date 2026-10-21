@@ -96,6 +96,17 @@ enum NativeRenderViews {
                     navigation.destination = .playlist(playlist.id)
                     await shot("11-playlist-regular")
                 } else { log.append("playlist: none") }
+                // Stats, on the history render_views.py seeds. The user's period kind is put back.
+                let savedPeriod = model.stats.period
+                navigation.destination = .stats
+                model.stats.period = .current(.week, now: Date())
+                await shot("29-stats-week", settle: 3)
+                model.stats.period = .current(.year, now: Date())
+                await shot("30-stats-year", settle: 3)
+                navigation.destination = .songs
+                model.stats.period = .current(.week, now: Date())
+                log.append(await renderStatsPage(model, navigation, into: output))
+                model.stats.period = savedPeriod
                 // The player bar: thumbnail in the bar, art expanded into the sidebar, minimum width.
                 navigation.destination = .songs
                 navigation.nowPlayingArtExpanded = false
@@ -270,6 +281,24 @@ enum NativeRenderViews {
         guard let window = NSApp.windows.first(where: { $0.title == "Tyranny" }),
               let frame = window.contentView?.superview else { return "\(name): no window" }
         return write(frame, name, into: output)
+    }
+
+    /// The whole Stats page, taller than the window, in an off-screen hosting view.
+    private static func renderStatsPage(_ model: PlayerModel, _ navigation: NavigationModel,
+                                        into output: URL) async -> String {
+        let host = NSHostingView(rootView: StatsView(model: model.stats, player: model, navigation: navigation)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .colourTheme(model.theme))
+        host.appearance = NSApp.effectiveAppearance
+        host.frame = NSRect(x: 0, y: 0, width: 980, height: 1500)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        try? await Task.sleep(for: .seconds(3))
+        host.layoutSubtreeIfNeeded()
+        let line = write(host, "31-stats-page-week", into: output)
+        window.contentView = nil
+        return line
     }
 
     /// Settings lives in its own scene; render its tabs in an off-screen hosting view.

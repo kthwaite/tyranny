@@ -53,7 +53,7 @@ private func stateJSON(stations revision: UInt64) -> String {
      "error":null,"underruns":0,
      "library":{"revision":1,"roots":0,"tracks":0,"duration_ms":0,"size_bytes":0,
                 "scan":{"root_id":null,"phase":"idle","discovered":0,"processed":0,"total":null,"updated":0,"unchanged":0,"failures":0,"skipped":0,"last_error":null}},
-     "history_revision":0,"current_index":null,"upcoming_count":0}
+     "history_revision":0,"stats_revision":0,"current_index":null,"upcoming_count":0}
     """
 }
 

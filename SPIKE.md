@@ -48,7 +48,7 @@ The scanner accepts `.mod`, `.xm`, `.it`, and `.s3m`, case-insensitively. Rescan
 existing music roots to discover these files. Native libopenmpt decoding through
 FFmpeg preserves embedded module titles and shows the format as `Tracker`.
 No BASS runtime or decoder subprocess is used.
-Tracker support integrated at protocol **14**; the current version is **16**.
+Tracker support integrated at protocol **14**; the current version is **17**.
 The version bump follows the merge policy; the wire shape and database schema
 are unchanged by tracker support.
 
@@ -151,7 +151,7 @@ Settings are persisted before applying/publishing; invalid input or a failed
 write does not change audio/settings. Reconnection fetches authoritative server
 state rather than replaying abandoned client edits.
 
-Parametric EQ integrated at protocol **v15**; the current version is **v16**; upgrade client and server together.
+Parametric EQ integrated at protocol **v15**; the current version is **v17**; upgrade client and server together.
 The merge bumps the version from 14 because the EQ wire shape changed.
 `set_equalizer` takes a complete object, also returned in
 `snapshot.settings.equalizer`:

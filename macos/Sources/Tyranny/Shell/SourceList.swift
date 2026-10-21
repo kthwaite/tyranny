@@ -205,8 +205,8 @@ struct SourceList: View {
         case .artists: return counts.artists
         case .genres: return counts.genres
         case .upNext: return model.upNext.upcomingCount.map { UInt64($0) }
-        // History and Radio have no count.
-        case .recent, .history, .radio, .playlist: return nil
+        // History, Stats and Radio have no count.
+        case .recent, .history, .stats, .radio, .playlist: return nil
         }
     }
 

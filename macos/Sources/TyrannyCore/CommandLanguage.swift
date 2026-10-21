@@ -118,7 +118,7 @@ public enum CommandLanguage {
         .init(.shuffle, "Set or toggle shuffle.", [.init("on|off|toggle", .choices(toggleValues))]),
         .init(.gain, "Set ReplayGain mode.", [.init("off|track|album", .choices(["off", "track", "album"]))]),
         .init(.resume, "Set or toggle resume on launch.", [.init("on|off|toggle", .choices(toggleValues))]),
-        .init(.go, "Open a library destination.", [.init("destination", .choices(["songs", "albums", "artists", "genres", "recent", "history", "up-next", "radio"]))]),
+        .init(.go, "Open a library destination.", [.init("destination", .choices(["songs", "albums", "artists", "genres", "recent", "history", "up-next", "stats", "radio"]))]),
         .init(.filter, "Set the current filter; an empty quoted string clears it.", [.init("text", .text(allowEmpty: true))]),
         .init(.focusFilter, "Focus the filter field."),
         .init(.revealPlaying, "Reveal the current entry."),

@@ -2,7 +2,7 @@ import SwiftUI
 import TyrannyCore
 
 /// The library window: toolbar filter, source list, main view, the full-width player bar,
-/// and the status bar.
+/// and the status bar. The Wrapped slideshow covers all of it, toolbar included.
 struct MainWindowView: View {
     @Environment(\.themeColours) private var colours
     let model: PlayerModel
@@ -69,7 +69,21 @@ struct MainWindowView: View {
             }
         }
         .frame(minWidth: 940, minHeight: 560)
+        .accessibilityHidden(navigation.wrappedYear != nil)
+        .overlay {
+            Group {
+                if let year = navigation.wrappedYear {
+                    WrappedView(year: year, player: model) { navigation.wrappedYear = nil }
+                        .ignoresSafeArea()
+                        .id(year)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.3), value: navigation.wrappedYear)
+        }
         .toolbar { toolbar }
+        .toolbar(navigation.wrappedYear == nil ? .automatic : .hidden, for: .windowToolbar)
+        .toolbarBackground(navigation.wrappedYear == nil ? .automatic : .hidden, for: .windowToolbar)
         .onAppear {
             let dispatcher = CommandDispatcher(player: model, navigation: navigation, lists: lists)
             navigation.commandSubmission = { try await dispatcher.execute($0) }
@@ -182,6 +196,8 @@ struct MainWindowView: View {
             UpNextView(model: model.upNext, player: model)
         } else if navigation.destination == .history {
             HistoryView(model: lists.history(player: model), player: model)
+        } else if navigation.destination == .stats {
+            StatsView(model: model.stats, player: model, navigation: navigation)
         } else if navigation.destination == .radio {
             RadioView(model: model.stations, player: model)
         } else if let list = currentList {

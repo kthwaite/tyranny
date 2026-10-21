@@ -19,7 +19,10 @@ use std::{
 };
 
 mod order;
-pub use order::CountedPlay;
+mod radio;
+pub use crate::store::EndReason;
+pub use order::PlayEvent;
+pub use radio::RadioText;
 
 const PREBUFFER_FRAMES: usize = SAMPLE_RATE as usize / 2;
 
@@ -33,18 +36,23 @@ struct SourceDecoder {
 }
 
 impl SourceDecoder {
+    /// A stream starts from the title its entry shows, if any: a decoder
+    /// that replaces another (a gain change) keeps the station's last text.
     fn open(entry: &Entry, mode: GainMode) -> Result<Self> {
         match &entry.stream {
-            Some(spec) => Ok(Self {
-                file: None,
-                stream: Some(StreamDecoder::open(spec, mode)?),
-                initial: Some(crate::metadata::PlaybackMetadata {
-                    title: spec.title.clone(),
-                    artist: String::new(),
-                    album: String::new(),
-                    metadata_error: None,
-                }),
-            }),
+            Some(spec) => {
+                let title = entry.metadata.as_ref().map(|now| now.title.clone());
+                Ok(Self {
+                    file: None,
+                    stream: Some(StreamDecoder::open(spec, mode, title.clone())?),
+                    initial: Some(crate::metadata::PlaybackMetadata {
+                        title: title.unwrap_or_else(|| spec.title.clone()),
+                        artist: String::new(),
+                        album: String::new(),
+                        metadata_error: None,
+                    }),
+                })
+            }
             None => Ok(Self {
                 file: Some(Decoder::open(&entry.path, mode)?),
                 stream: None,
@@ -79,6 +87,13 @@ impl SourceDecoder {
 
     fn take_update(&mut self) -> Option<crate::metadata::PlaybackMetadata> {
         self.stream.as_mut().and_then(StreamDecoder::take_metadata)
+    }
+
+    /// A stream shows `title` until its station announces one.
+    fn carry_title(&self, title: &str) {
+        if let Some(stream) = &self.stream {
+            stream.carry_title(title);
+        }
     }
 
     fn duration_frames(&self) -> Option<u64> {
@@ -308,8 +323,12 @@ pub struct Player {
     advances: Vec<(u64, Vec<u64>)>,
     /// The entry last recorded in the play order's history.
     last_heard: Option<u64>,
-    /// The entry of each pass that counted as a play, not yet taken.
-    counted_plays: Vec<CountedPlay>,
+    /// What happened to plays, not yet taken.
+    play_events: Vec<PlayEvent>,
+    /// The last play key handed out.
+    next_play: u64,
+    /// Output's rendered frames when listened time was last given out.
+    rendered_frames: u64,
 }
 
 impl Player {
@@ -425,7 +444,9 @@ impl Player {
             silent: 0,
             advances: Vec::new(),
             last_heard: None,
-            counted_plays: Vec::new(),
+            play_events: Vec::new(),
+            next_play: 0,
+            rendered_frames: 0,
         })
     }
 
@@ -536,6 +557,7 @@ impl Player {
                     self.queue[self.cursor].id,
                     self.mode,
                 ));
+                self.retitle(self.passes.len() - 1);
             }
             let Some((count, discontinuity)) = read else {
                 // Rebuffer before a live source empties the ring. Keep the same
@@ -1643,10 +1665,10 @@ impl Player {
         );
         assert_eq!(self.queue[prepared.index].id, prepared.id);
         // A seek or gain change keeps what was planned after the entry, and
-        // continues its pass, counted as output last played it.
+        // continues its pass and play, counted as output last played it.
         self.count_heard();
         let kept = self.current_plan().filter(|(id, _)| *id == prepared.id);
-        let (counted, started_at) = self.continued_pass(prepared.id);
+        let (counted, started_at, play) = self.continued_pass(prepared.id);
         self.output.set_paused(true);
         self.invalidate_buffer();
         self.queue[prepared.index].metadata = Some(prepared.metadata);
@@ -1662,7 +1684,7 @@ impl Player {
         self.output.mark_end(false);
         self.begin_pass();
         let pass = self.passes.back_mut().expect("a pass just began");
-        (pass.counted, pass.started_at) = (counted, started_at);
+        (pass.counted, pass.started_at, pass.play) = (counted, started_at, play);
         if let Some((_, plan)) = kept {
             self.plan = plan;
         }

@@ -2,15 +2,19 @@
 """Drive the displayed SwiftUI controller against a real isolated Rust server.
 
 The debug app uses an external native Accessibility driver. No synthetic
-server, direct database mutation, Apple Events, or controller-owned playback.
+server, Apple Events, or controller-owned playback. Only the stats scenario writes
+to the database: it seeds a year of plays, as render_views.py does, because
+fifty plays of the two-minute fixture would take too long to play.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import random
 import select
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,7 +34,7 @@ def main():
                         help="Run the app's headless model gate (NativeModelGate, no Accessibility driver) without claiming visual verification")
     parser.add_argument("--commands-only", action="store_true",
                         help="Exercise the command-language dispatcher against a real server (no UI input or visual verification)")
-    parser.add_argument("--scenario", choices=["core", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs"], default="core",
+    parser.add_argument("--scenario", choices=["core", "shell", "songs", "grouping", "albums", "artists", "history", "upnext", "runs", "stats"], default="core",
                         help="core: folder import, a double-click run, the seek slider, filter, rescan, disconnect and a relaunch (default); shell: the library window shell; "
                              "songs: the continuous Songs table and column browser; "
                              "grouping: Artist › Album blocks, block selection and a rescan that adds an album; "
@@ -38,7 +42,8 @@ def main():
                              "artists: Artists with Compilations and Appears On, and Genres; "
                              "history: Recently Added, a played track in History and its Plays count; "
                              "upnext: Up Next sections and Added From labels, Clear, Save as Playlist and the drawer; "
-                             "runs: double-click runs under the Up Next policies, Don't ask again, and Select All then Add to Playlist")
+                             "runs: double-click runs under the Up Next policies, Don't ask again, and Select All then Add to Playlist; "
+                         "stats: the Stats page at ⌘8 on a server with no history, then Wrapped with a few plays and with a full year")
     parser.add_argument("--screenshots", default="spike-results/library-redesign-ui",
                         help="where a passing shell scenario copies its screenshots")
     args = parser.parse_args()
@@ -126,6 +131,10 @@ def main():
                 return
             if args.scenario == "runs":
                 runs(report, run, app, port, ready, source, controller, Path(args.screenshots))
+                report["passed"] = True
+                return
+            if args.scenario == "stats":
+                stats(report, run, app, port, ready, root, controller, Path(args.screenshots))
                 report["passed"] = True
                 return
             paused_at = None
@@ -511,6 +520,80 @@ def runs(report, run, app, port, ready, source, controller, screenshots):
         shutil.copy2(image, screenshots / ("runs-" + image.name if not image.name.startswith("runs") else image.name))
     report["screenshots"] = [str(screenshots / image.name) for image in sorted(output.glob("*.png"))]
 
+
+def stats(report, run, app, port, ready, root, controller, screenshots):
+    """Drive the Stats page and Wrapped, one app launch per history:
+    - empty: ⌘8 opens the page, the header shows this week's label, ‹ and › step the period,
+      every panel shows its empty state, and Go › Wrapped is disabled;
+    - few (12 plays this year): Go › Wrapped opens the "not enough" slide, and esc closes it;
+    - full (a seeded year): the slideshow advances, the keys move and pause it, and esc closes it."""
+    report["scenario"] = "stats"
+    controller.request("add_root", path=str(root))
+    controller.wait(lambda state: state["library"]["scan"]["phase"] == "complete"
+                    and state["library"]["tracks"] == 105, seconds=60)
+    database = run / "state" / "state.sqlite3"
+    year = time.localtime().tm_year
+    rng = random.Random(12)
+    screenshots.mkdir(parents=True, exist_ok=True)
+    report["screenshots"] = []
+    for phase in ["empty", "few", "full"]:
+        if phase == "few":
+            seed_year(database, rng, plays=12, skips=0, radio=0)
+        elif phase == "full":
+            seed_year(database, rng, plays=240, skips=10, radio=4)
+        output = run / f"stats-{phase}"
+        command = [app, "--url", f"ws://127.0.0.1:{port}/ws", "--token-file", ready["token_path"],
+                   "--stats-smoke-output", str(output), "--stats-smoke-phase", phase,
+                   "--ui-driver", str(Path("target/native-ui-driver").resolve())]
+        report[f"app_command_{phase}"] = command
+        with (run / f"stats-{phase}.stdout").open("w") as stdout, (run / f"stats-{phase}.stderr").open("w") as stderr:
+            result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=120)
+        assert result.returncode == 0, f"native app exited {result.returncode} in {phase}"
+        native = json.loads((output / "report.json").read_text())
+        report[f"stats_{phase}"] = native
+        assert native["passed"], (phase, native.get("error"))
+        # The server, not the app, holds the history the page showed.
+        years = controller.request("stats_years")["years"]
+        plays = controller.request("wrapped", year=year)["report"]["plays"]
+        if phase == "empty":
+            assert years == [], years
+        else:
+            assert years == [year] and (plays < 50 if phase == "few" else plays >= 50), (phase, years, plays)
+        report["cases"].append({"name": f"stats-server-holds-{phase}-history", "years": years, "plays": plays})
+        for image in sorted(output.glob("stats*.png")):
+            shutil.copy2(image, screenshots / image.name)
+            report["screenshots"].append(str(screenshots / image.name))
+
+
+def seed_year(database, rng, plays, skips, radio):
+    """Writes plays this year straight into play_history: `plays` counted plays over six artists,
+    `skips` skips of one track, and `radio` 30-minute plays of one station. They fall between
+    1 January and an hour ago."""
+    now = int(time.time())
+    start = int(time.mktime((time.localtime().tm_year, 1, 1, 0, 0, 0, 0, 0, -1)))
+    end = max(start + 1, now - 3600)
+    artists = {"Harbour Lights": 9, "Mara Solis": 7, "The Quiet Engines": 5, "Low Orbit": 4,
+               "Fennel & Rye": 3, "Cass Vey": 2}
+    titles = ["Tidewater", "Paper Moons", "Northbound", "Glasshouse", "Slow Signal", "Afterglow"]
+    rows = []
+    for _ in range(plays):
+        artist = rng.choices(list(artists), weights=list(artists.values()))[0]
+        title = rng.choice(titles[:4] if artist == "Harbour Lights" else titles)
+        duration = rng.randint(180, 330) * 1000
+        rows.append((rng.randrange(start, end), None, f"/fixture/{artist}/{title}", title, artist, f"{artist} LP",
+                     duration, "album", f"{artist} LP", duration, "finished", 1))
+    for _ in range(skips):
+        rows.append((rng.randrange(start, end), None, "/fixture/Low Orbit/Static", "Static", "Low Orbit",
+                     "Low Orbit LP", 240_000, "album", "Low Orbit LP", 9_000, "skipped", 0))
+    for _ in range(radio):
+        rows.append((rng.randrange(start, end), None, "https://example.invalid/Night Owl Radio", "Night Owl",
+                     "", "", None, "stream", "Night Owl Radio", 1_800_000, "stopped", 1))
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            "INSERT INTO play_history(played_at,entry_id,track_id,path,title,artist,album,duration_ms,"
+            "source_kind,source_name,listened_ms,ended_at,end_reason,counted) "
+            "VALUES(?1,0,?2,?3,?4,?5,?6,?7,?8,?9,?10,?1+?10/1000,?11,?12)", sorted(rows))
+        connection.execute("UPDATE history_control SET writes=writes+1")
 
 if __name__ == "__main__":
     main()

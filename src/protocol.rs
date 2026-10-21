@@ -1,10 +1,11 @@
-//! Version 16 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 17 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
     ListTotals, NamedCount, Page, Root, Track, TrackMetadata,
 };
 use crate::listing::ListDescription;
+use crate::stats_types::{PeriodRequest, StatsReport, WrappedReport};
 use crate::{
     decoder::GainMode,
     equalizer::EqualizerSettings,
@@ -13,7 +14,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 16;
+pub const VERSION: u32 = 17;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -56,6 +57,13 @@ pub enum Command {
         entry_id: u64,
         library_revision: u64,
     },
+    Stats {
+        period: PeriodRequest,
+    },
+    Wrapped {
+        year: i32,
+    },
+    StatsYears,
     /// Looks an album up on MusicBrainz into a stored proposal. Nothing is written.
     MusicbrainzLookup {
         album_id: u64,
@@ -702,8 +710,11 @@ pub struct ControlState {
     pub error: Option<String>,
     pub underruns: u64,
     pub library: LibraryState,
-    /// The newest play history ID, or 0. It changes when a play is counted.
+    /// Changes when a play counts: the history and the play counts change then.
     pub history_revision: u64,
+    /// Changes on every play history write: a play opening, counting,
+    /// saving its listened time or closing.
+    pub stats_revision: u64,
     /// The queue position of `current_id`; `None` with nothing current.
     pub current_index: Option<usize>,
     /// The upcoming entries, as `Command::ClearUpcoming` defines them.
@@ -924,6 +935,17 @@ pub enum Response {
     },
     Lyrics {
         lyrics: Lyrics,
+    },
+    Stats {
+        stats_revision: u64,
+        report: Box<StatsReport>,
+    },
+    Wrapped {
+        stats_revision: u64,
+        report: Box<WrappedReport>,
+    },
+    StatsYears {
+        years: Vec<i32>,
     },
     TagProposal {
         proposal: TagProposal,
@@ -1503,7 +1525,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 16);
+        assert_eq!(VERSION, 17);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",
@@ -1782,6 +1804,57 @@ mod tests {
             serde_json::json!({"kind":"history","revision":4,"total":1,"offset":0,
                 "entries":[{"id":4,"played_at":1_700_000_000_i64,"track_id":null,"title":"Loose",
                     "artist":"","album":"","duration_ms":null,"source":null}]})
+        );
+    }
+
+    #[test]
+    fn stats_commands_require_every_field_and_reply_with_a_report() {
+        let command = serde_json::json!({
+            "id":1,"command":"stats","period":{"kind":"week","anchor":"2026-10-21"}
+        });
+        let request = serde_json::from_value::<Request>(command.clone()).unwrap();
+        match request.command {
+            Command::Stats { period } => {
+                assert_eq!(period.kind, crate::stats_types::PeriodKind::Week);
+                assert_eq!(period.anchor, "2026-10-21");
+            }
+            other => panic!("not stats: {other:?}"),
+        }
+        let mut missing = command.clone();
+        missing.as_object_mut().unwrap().remove("period");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+        for bad in [
+            serde_json::json!({"kind":"week"}),
+            serde_json::json!({"anchor":"2026-10-21"}),
+            serde_json::json!({"kind":"Week","anchor":"2026-10-21"}),
+            serde_json::json!({"kind":"week","anchor":"2026-10-21","zone":"UTC"}),
+        ] {
+            let mut invalid = command.clone();
+            invalid["period"] = bad;
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
+        let wrapped = serde_json::json!({"id":2,"command":"wrapped","year":2025});
+        assert!(matches!(
+            serde_json::from_value::<Request>(wrapped.clone())
+                .unwrap()
+                .command,
+            Command::Wrapped { year: 2025 }
+        ));
+        let mut missing = wrapped;
+        missing.as_object_mut().unwrap().remove("year");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+        assert!(matches!(
+            serde_json::from_value::<Request>(serde_json::json!({"id":3,"command":"stats_years"}))
+                .unwrap()
+                .command,
+            Command::StatsYears
+        ));
+        assert_eq!(
+            serde_json::to_value(Response::StatsYears {
+                years: vec![2025, 2026]
+            })
+            .unwrap(),
+            serde_json::json!({"kind":"stats_years","years":[2025,2026]})
         );
     }
 }

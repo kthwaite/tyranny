@@ -183,6 +183,8 @@ struct TyrannyApp: App {
                     }
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }
+                Divider()
+                WrappedMenu(years: model.stats.wrappedYears) { navigation.wrappedYear = $0 }
             }
         }
         Window("Equalizer", id: "equalizer") {
@@ -226,6 +228,7 @@ private struct MainWindow: View {
                 NativeAlbumsSmoke.startIfRequested(model, navigation: navigation)
                 NativeArtistsSmoke.startIfRequested(model, navigation: navigation)
                 NativeHistorySmoke.startIfRequested(model, navigation: navigation)
+                NativeStatsSmoke.startIfRequested(model, navigation: navigation)
                 NativeUpNextSmoke.startIfRequested(model, navigation: navigation)
                 NativePlaylistSmoke.startIfRequested(model, navigation: navigation)
                 NativeSmartPlaylistSmoke.startIfRequested(model, navigation: navigation)

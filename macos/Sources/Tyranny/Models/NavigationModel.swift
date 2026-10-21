@@ -31,6 +31,8 @@ final class NavigationModel {
     var reveal: RevealTarget?
     /// Incremented by ⌘L; the shown track list reveals the playing row when it changes.
     private(set) var revealPlayingRequest = 0
+    /// The year whose Wrapped slideshow covers the window. Setting it opens the slideshow; esc clears it.
+    var wrappedYear: Int?
 
     var columnBrowserVisible: Bool {
         didSet { defaults.set(columnBrowserVisible, forKey: "columnBrowserVisible") }

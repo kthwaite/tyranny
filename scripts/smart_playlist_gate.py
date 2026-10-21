@@ -60,7 +60,7 @@ def main():
         report['cases'].append({'name': name, 'passed': True})
         print('Passed ' + name, flush=True)
 
-    def start(binary, version=16):
+    def start(binary, version=17):
         nonlocal process, client, ready
         index = len(report['launches'])
         command = [str(Path(binary).resolve()), '--state-dir', str(run / 'state'),
@@ -166,7 +166,7 @@ def main():
             assert (restored['current_id'], restored['position_frames'], restored['queue_revision']) == (before['current_id'], before['position_frames'], before['queue_revision'])
             assert restored['transport'] == 'paused'
             with sqlite3.connect(run / 'state/state.sqlite3') as db:
-                assert db.execute('PRAGMA user_version').fetchone()[0] == 7
+                assert db.execute('PRAGMA user_version').fetchone()[0] == 8
             record('real-schema3-migration-preserves-ordinary-duplicates-queue-and-checkpoint')
         rule = 'artist:"Miles Davis" & !album:"Kind of Blue"'
         before = client.state()

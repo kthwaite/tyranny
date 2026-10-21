@@ -46,7 +46,7 @@ fn schema_seven_migrates_from_six_with_empty_catalog() -> Result<()> {
     let store = Store::open(&scratch.0)?;
     let version: i64 =
         Connection::open(&scratch.0)?.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     assert_eq!(store.stations()?, (0, vec![]));
     let loaded = store.load()?;
     assert_eq!(loaded.entries.len(), 2);
