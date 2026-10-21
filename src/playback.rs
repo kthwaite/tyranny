@@ -36,18 +36,23 @@ struct SourceDecoder {
 }
 
 impl SourceDecoder {
+    /// A stream starts from the title its entry shows, if any: a decoder
+    /// that replaces another (a gain change) keeps the station's last text.
     fn open(entry: &Entry, mode: GainMode) -> Result<Self> {
         match &entry.stream {
-            Some(spec) => Ok(Self {
-                file: None,
-                stream: Some(StreamDecoder::open(spec, mode)?),
-                initial: Some(crate::metadata::PlaybackMetadata {
-                    title: spec.title.clone(),
-                    artist: String::new(),
-                    album: String::new(),
-                    metadata_error: None,
-                }),
-            }),
+            Some(spec) => {
+                let title = entry.metadata.as_ref().map(|now| now.title.clone());
+                Ok(Self {
+                    file: None,
+                    stream: Some(StreamDecoder::open(spec, mode, title.clone())?),
+                    initial: Some(crate::metadata::PlaybackMetadata {
+                        title: title.unwrap_or_else(|| spec.title.clone()),
+                        artist: String::new(),
+                        album: String::new(),
+                        metadata_error: None,
+                    }),
+                })
+            }
             None => Ok(Self {
                 file: Some(Decoder::open(&entry.path, mode)?),
                 stream: None,
@@ -82,6 +87,13 @@ impl SourceDecoder {
 
     fn take_update(&mut self) -> Option<crate::metadata::PlaybackMetadata> {
         self.stream.as_mut().and_then(StreamDecoder::take_metadata)
+    }
+
+    /// A stream shows `title` until its station announces one.
+    fn carry_title(&self, title: &str) {
+        if let Some(stream) = &self.stream {
+            stream.carry_title(title);
+        }
     }
 
     fn duration_frames(&self) -> Option<u64> {

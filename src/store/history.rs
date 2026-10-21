@@ -98,6 +98,8 @@ pub(crate) struct OpenPlayRow {
     pub entry_id: u64,
     pub counted: bool,
     pub listened_ms: u64,
+    /// Radio only: the station's now-playing text the play opened with.
+    pub raw_title: Option<String>,
 }
 
 /// One change to a play row, in the order it happened. `play` names the play
@@ -319,7 +321,7 @@ impl Store {
     #[allow(dead_code)] // Task 4 restores open plays at startup
     pub fn open_play_rows(&self) -> Result<Vec<OpenPlayRow>> {
         let mut query = self.connection.prepare(
-            "SELECT id,entry_id,counted,listened_ms FROM play_history
+            "SELECT id,entry_id,counted,listened_ms,raw_title FROM play_history
              WHERE ended_at IS NULL AND listened_ms IS NOT NULL ORDER BY id",
         )?;
         let rows = query
@@ -329,6 +331,7 @@ impl Store {
                     entry_id: row.get(1)?,
                     counted: row.get(2)?,
                     listened_ms: row.get(3)?,
+                    raw_title: row.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -626,7 +629,9 @@ mod tests {
         let (database, mut store) = Database::open();
         let mut rows = vec![];
         for (id, listened) in [(1, 10_000), (2, 20_000), (3, 0)] {
-            let row = store.open_play(&play(id, None, "Open", 100 * id as i64))?;
+            let mut open = play(id, None, "Open", 100 * id as i64);
+            open.raw_title = (id == 2).then(|| "Burial - Archangel".into());
+            let row = store.open_play(&open)?;
             store.checkpoint_play(row, listened)?;
             rows.push(row);
         }
@@ -644,9 +649,15 @@ mod tests {
             store
                 .open_play_rows()?
                 .iter()
-                .map(|open| (open.row, open.entry_id, open.counted, open.listened_ms))
+                .map(|open| (
+                    open.row,
+                    open.entry_id,
+                    open.counted,
+                    open.listened_ms,
+                    open.raw_title.clone()
+                ))
                 .collect::<Vec<_>>(),
-            [(rows[1], 2, false, 20_000)]
+            [(rows[1], 2, false, 20_000, Some("Burial - Archangel".into()))]
         );
         Ok(())
     }
