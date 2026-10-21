@@ -30,6 +30,8 @@ final class PlayerModel {
     let stations = StationsModel()
     /// Plays and adds runs from every list, grid and table, and asks "Clear Up Next?".
     let activation = ActivationModel()
+    /// The MusicBrainz tag lookup and its review sheet.
+    let tagging = TaggingModel()
     /// The music folders for Settings. One bounded page; the server limits a page to 500.
     private(set) var roots: Page<Root>?
     var message: String?
@@ -113,6 +115,7 @@ final class PlayerModel {
         savedPlaylists.attach(self)
         stations.attach(self)
         activation.attach(self)
+        tagging.attach(self)
         updateMediaControls()
     }
 
@@ -172,6 +175,7 @@ final class PlayerModel {
     }
 
     var connected: Bool { connection == "connected" }
+    var serverInstance: String? { connected ? wire.instanceID : nil }
     var playlistConnectionGeneration: UInt64 { playlistSession }
     var canMutate: Bool { connected && !busy && !serverManagementBusy }
     var managesServer: Bool {
