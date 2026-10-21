@@ -45,9 +45,10 @@ Queue copy: insert_tracks binds expected_revision/library_revision, track_ids an
 Moves preserve source order; inserts preserve track_ids order, including duplicates. Selected anchors are no-ops.\n\
 Saved radio stations (protocol 12): stations, add_stations, update_station, remove_station. Edits bind snapshot.stations_revision.\n\
 Add: {\"id\":8,\"command\":\"add_stations\",\"expected_revision\":0,\"stations\":[{\"name\":\"\",\"url\":\"https://radio.example/live.mp3\"}]}\n\
-Station directory (protocol 17): search_directory, count_directory_click.\n\
+Station directory (protocol 16): search_directory, count_directory_click.\n\
 Search: {\"id\":9,\"command\":\"search_directory\",\"query\":\"jazz\"} (query 1..100 bytes, no control characters)\n\
 Count: {\"id\":10,\"command\":\"count_directory_click\",\"station_uuid\":\"<uuid>\"} (replies at once; the click is best effort)\n\
+Listening stats (protocol 17): stats {period:{kind,anchor}}, wrapped {year}, stats_years.\n\
 Parametric EQ: set_equalizer {equalizer:{enabled,preamp_db,bands}} replaces the complete curve (0..16 bands).\n\
 Each band requires enabled,kind,frequency_hz,gain_db,q,shelf_slope,slope_db; kinds: bell,low_shelf,high_shelf,high_pass,low_pass,notch.\n\
 Named EQ presets: save_equalizer_preset {name,equalizer}, rename_equalizer_preset {name,new_name}, remove_equalizer_preset {name}.\n\
