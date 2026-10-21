@@ -188,6 +188,15 @@ public struct TagSelection: Equatable, Sendable {
     }
 }
 
+public enum AcoustIDKey {
+    /// Trimmed key, or nil when empty or not 1–64 ASCII letters/digits (the server's rule).
+    public static func normalized(_ text: String) -> String? {
+        let key = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...64).contains(key.utf8.count), key.utf8.allSatisfy({ ($0 | 0x20) >= 0x61 && ($0 | 0x20) <= 0x7a || ($0 >= 0x30 && $0 <= 0x39) }) else { return nil }
+        return key
+    }
+}
+
 public enum TagRequests {
     public static func lookup(albumID: UInt64, libraryRevision: UInt64, releaseID: String?, acoustIDKey: String?) -> CommandRequest {
         var fields: [String: JSONValue] = ["album_id": .uint(albumID), "library_revision": .uint(libraryRevision)]

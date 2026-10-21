@@ -42,9 +42,7 @@ final class TaggingModel {
     var hasAcoustIDKey: Bool { acoustIDKey != nil }
 
     private var acoustIDKey: String? {
-        let key = UserDefaults.standard.string(forKey: Self.acoustIDKeyDefault)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return key?.isEmpty == false ? key : nil
+        AcoustIDKey.normalized(UserDefaults.standard.string(forKey: Self.acoustIDKeyDefault) ?? "")
     }
 
     @ObservationIgnored private weak var player: PlayerModel?

@@ -137,4 +137,13 @@ import Testing
         #expect(text("request_timeout", "x") == "MusicBrainz took too long to answer.")
         #expect(text("other", "plain") == "plain")
     }
+
+    @Test func acoustIDKeyNormalization() {
+        #expect(AcoustIDKey.normalized("  ab12CD  ") == "ab12CD")
+        #expect(AcoustIDKey.normalized("") == nil)
+        #expect(AcoustIDKey.normalized("has space") == nil)
+        #expect(AcoustIDKey.normalized("ü") == nil)
+        #expect(AcoustIDKey.normalized(String(repeating: "a", count: 65)) == nil)
+        #expect(AcoustIDKey.normalized(String(repeating: "a", count: 64)) == String(repeating: "a", count: 64))
+    }
 }
