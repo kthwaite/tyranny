@@ -134,8 +134,10 @@ private struct StatsReportView: View {
                     .font(.title3.weight(.semibold))
                     .accessibilityAddTraits(.isHeader)
                 HStack(alignment: .top, spacing: 12) {
-                    LapsedLovesPanel(loves: report.lapsed_loves, spanDays: report.history_span_days, open: openArtist)
-                    ShallowDivesPanel(dives: report.shallow_dives, spanDays: report.history_span_days, open: openArtist)
+                    LapsedLovesPanel(loves: report.lapsed_loves, spanDays: report.history_span_days, plays: report.plays,
+                                     open: openArtist)
+                    ShallowDivesPanel(dives: report.shallow_dives, spanDays: report.history_span_days, plays: report.plays,
+                                      open: openArtist)
                 }
             }
         }
@@ -276,6 +278,7 @@ private struct EmptyPanel: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("stats-\(identifier)-empty-detail")
             }
         }
         .frame(maxWidth: .infinity, minHeight: 72)
@@ -651,33 +654,41 @@ private struct StationsPanel: View {
 private let historyDaysNeeded: UInt64 = 90
 
 /// "Not enough history yet": the empty state of an all-history panel while history is young.
+/// With no plays at all, there is no first play to date the fill-in from.
 private struct YoungHistory: View {
     let identifier: String
     let spanDays: UInt64
+    let plays: UInt64
     let fallback: String
 
     var body: some View {
         if spanDays < historyDaysNeeded {
-            let fillsIn = Calendar.statsCalendar().date(
-                byAdding: .day, value: Int(historyDaysNeeded - spanDays), to: Date()) ?? Date()
             EmptyPanel(identifier: identifier, title: "Not enough history yet — fills in after 90 days",
-                       detail: "From \(StatsFormat.date(Int64(fillsIn.timeIntervalSince1970)))")
+                       detail: "From \(fillsIn)")
         } else {
             EmptyPanel(identifier: identifier, title: fallback)
         }
+    }
+
+    private var fillsIn: String {
+        guard spanDays > 0 || plays > 0 else { return "90 days after your first play" }
+        let date = Calendar.statsCalendar().date(
+            byAdding: .day, value: Int(historyDaysNeeded - spanDays), to: Date()) ?? Date()
+        return StatsFormat.date(Int64(date.timeIntervalSince1970))
     }
 }
 
 private struct LapsedLovesPanel: View {
     let loves: [LapsedLove]
     let spanDays: UInt64
+    let plays: UInt64
     let open: (UInt64) -> Void
 
     var body: some View {
         let largest = loves.map(\.plays).max() ?? 0
         Panel(title: "Lapsed loves", identifier: "lapsed-loves") {
             if loves.isEmpty {
-                YoungHistory(identifier: "lapsed-loves", spanDays: spanDays, fallback: "No lapsed loves")
+                YoungHistory(identifier: "lapsed-loves", spanDays: spanDays, plays: plays, fallback: "No lapsed loves")
             } else {
                 Ranked(rows: loves) { _, love in
                     RankRow(rank: nil, name: love.name, detail: "last played \(StatsFormat.date(love.last_played))",
@@ -693,12 +704,13 @@ private struct LapsedLovesPanel: View {
 private struct ShallowDivesPanel: View {
     let dives: [ShallowDive]
     let spanDays: UInt64
+    let plays: UInt64
     let open: (UInt64) -> Void
 
     var body: some View {
         Panel(title: "Shallow dives", identifier: "shallow-dives") {
             if dives.isEmpty {
-                YoungHistory(identifier: "shallow-dives", spanDays: spanDays, fallback: "No shallow dives")
+                YoungHistory(identifier: "shallow-dives", spanDays: spanDays, plays: plays, fallback: "No shallow dives")
             } else {
                 Ranked(rows: dives) { _, dive in
                     RankRow(rank: nil, name: dive.name, detail: detail(dive),

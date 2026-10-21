@@ -91,6 +91,8 @@ enum NativeStatsSmoke {
             try await drive("exists", "stats-\(panel)-empty")
         }
         try await drive("expect-text", "stats-lapsed-loves-empty-title", "Not enough history yet — fills in after 90 days")
+        // With no plays at all, there is no first play to count 90 days from.
+        try await drive("expect-text", "stats-lapsed-loves-empty-detail", "From 90 days after your first play")
         try await Task.sleep(for: .milliseconds(400))
         try capture("stats-empty")
         cases.append("native-stats-empty-history-shows-empty-states")

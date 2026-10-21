@@ -215,6 +215,7 @@ struct CommandDispatcher {
         case "recent": return .recent
         case "history": return .history
         case "up-next": return .upNext
+        case "stats": return .stats
         case "radio": return .radio
         default: throw CommandLanguageError("Unknown destination.")
         }
