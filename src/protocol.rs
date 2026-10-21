@@ -514,8 +514,11 @@ pub struct ControlState {
     pub error: Option<String>,
     pub underruns: u64,
     pub library: LibraryState,
-    /// The newest play history ID, or 0. It changes when a play is counted.
+    /// Changes when a play counts: the history and the play counts change then.
     pub history_revision: u64,
+    /// Changes on every play history write: a play opening, counting,
+    /// saving its listened time or closing.
+    pub stats_revision: u64,
     /// The queue position of `current_id`; `None` with nothing current.
     pub current_index: Option<usize>,
     /// The upcoming entries, as `Command::ClearUpcoming` defines them.

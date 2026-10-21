@@ -11,7 +11,7 @@ use crate::{
     lyrics::{Handle as LyricsHandle, LyricsWorkers, Request as LyricsRequest},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, ShuffleStrategy, UniformShuffle},
-    playback::{PlayEvent, Player, PreparedRemove, Start},
+    playback::{PlayEvent, Player, PreparedRemove, RadioText, Start},
     protocol::{
         Command, ControlState, ErrorCode, MAX_PAGE_SIZE, MAX_SOURCE_NAME_BYTES, Message,
         NowPlaying, Placement, QueueSource, Reply, Request, Response, Settings, SourceKind,
@@ -26,7 +26,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -42,6 +42,9 @@ mod tests;
 use resolve::{Resolution, Resolver};
 
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
+/// How often the open play's listened time is saved, at most. It bounds what
+/// a crash loses.
+const HISTORY_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 const EVENT_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct OwnerConfig {
@@ -603,6 +606,30 @@ fn shuffle_strategy() -> Box<dyn ShuffleStrategy> {
     Box::new(UniformShuffle::from_entropy())
 }
 
+/// Continues the open play from before the restart: the newest open row of
+/// entry `selected`, the restored selection. Every other open row closes as
+/// stopped. Returns the pending history, which knows the continued row.
+fn restore_plays(
+    store: &mut Store,
+    player: &mut Player,
+    selected: Option<u64>,
+) -> Result<PendingHistory> {
+    let rows = store.open_play_rows()?;
+    let kept = selected.and_then(|id| rows.into_iter().rev().find(|row| row.entry_id == id));
+    store.close_open_plays_except(kept.as_ref().map(|row| row.row))?;
+    let mut pending = PendingHistory::default();
+    if let Some(row) = kept {
+        let play = player.restore_play(
+            row.entry_id,
+            row.counted,
+            row.listened_ms,
+            row.raw_title.as_deref(),
+        );
+        pending.adopt(play, row.row);
+    }
+    Ok(pending)
+}
+
 /// Why an entry is selected.
 enum Jump {
     /// A new position in the current entry; nothing is marked.
@@ -631,18 +658,20 @@ struct Actor {
     /// The entry last made the newest played entry. Output starting it again
     /// (after a selection, or a seek) does not mark it twice.
     marked: Option<u64>,
-    /// The newest play history ID, or 0.
+    /// How many plays have counted. It changes when a play counts.
     history_revision: u64,
-    /// Counted plays whose history write has not succeeded yet.
+    /// How many play history writes were made. It changes on every one.
+    stats_revision: u64,
+    /// Play events whose history write has not succeeded yet.
     pending_plays: PendingHistory,
-    /// The last history write failed: pending plays wait for the retry.
+    /// The last history write failed: pending events wait for the retry.
     retrying_plays: bool,
-    /// The entry and start of each open play. Task 4 replaces this.
-    open_plays: HashMap<u64, (u64, i64)>,
+    /// The play and listened time last queued as a checkpoint.
+    checkpointed: Option<(u64, u64)>,
 }
 impl Actor {
     fn open(config: OwnerConfig) -> Result<Self> {
-        let store = Store::open(&config.database_path)?;
+        let mut store = Store::open(&config.database_path)?;
         let loaded = store.load()?;
         let capture_path = capture_destination(&config, &loaded.entries)?;
         let mut player = Player::from_loaded(
@@ -659,6 +688,7 @@ impl Actor {
             player.set_shuffle(Some(shuffle_strategy()));
         }
         let mut fault = None;
+        let (mut selected, mut resume) = (None, false);
         if let Some(id) = loaded.checkpoint.current_id {
             match player.prepare_selection(
                 id,
@@ -672,16 +702,20 @@ impl Actor {
                 Ok(prepared) => {
                     player.commit_selection(prepared);
                     player.restored_selection();
-                    if loaded.settings.resume_on_start && loaded.checkpoint.playing {
-                        player.play();
-                    }
+                    selected = Some(id);
+                    resume = loaded.settings.resume_on_start && loaded.checkpoint.playing;
                 }
                 Err(error) => {
                     fault = Some(format!("restoring selected entry {id}: {error:#}"));
                 }
             }
         }
+        let pending_plays = restore_plays(&mut store, &mut player, selected)?;
+        if resume {
+            player.play();
+        }
         let history_revision = store.history_revision()?;
+        let stats_revision = store.stats_revision()?;
         let stations_revision = store.stations_revision()?;
         let library = Library::start(config.database_path)?;
         let (events, _) = broadcast::channel(32);
@@ -703,6 +737,7 @@ impl Actor {
             underruns: 0,
             library: library.state(),
             history_revision,
+            stats_revision,
             current_index: None,
             upcoming_count: 0,
         };
@@ -720,9 +755,10 @@ impl Actor {
             now_track: RefCell::new(None),
             marked: loaded.checkpoint.current_id,
             history_revision,
-            pending_plays: PendingHistory::default(),
+            stats_revision,
+            pending_plays,
             retrying_plays: false,
-            open_plays: HashMap::new(),
+            checkpointed: None,
         };
         actor.publish();
         Ok(actor)
@@ -773,6 +809,7 @@ impl Actor {
             underruns: state.output.underruns,
             library,
             history_revision: self.history_revision,
+            stats_revision: self.stats_revision,
             current_index,
             upcoming_count,
         }
@@ -924,6 +961,11 @@ impl Actor {
             // Before the selection decides what follows, in the new pass.
             self.player.clear_played(&fresh);
         }
+        // Another entry replaces the current pass and ends its play. A seek or
+        // re-selecting the current entry continues both.
+        if !seek && self.player.snapshot().current_id != Some(entry_id) {
+            self.player.end_play(EndReason::Skipped);
+        }
         self.player.commit_selection(prepared);
         if let Some(removal) = marked {
             self.commit_trim(entry_id, removal);
@@ -992,80 +1034,108 @@ impl Actor {
         Ok(())
     }
 
-    /// Feeds the player's play events to `count_play`. Task 4 replaces this.
+    /// Queues the player's play events for history. An opened play is
+    /// described now, while its entry is still in the store.
     fn take_plays(&mut self) {
         for event in self.player.take_play_events() {
-            match event {
+            let event = match event {
                 PlayEvent::Opened {
                     play,
                     entry_id,
                     started_at,
-                    ..
+                    radio,
                 } => {
-                    self.open_plays.insert(play, (entry_id, started_at));
+                    let Some(record) = self.describe_play(entry_id, started_at, radio) else {
+                        continue;
+                    };
+                    HistoryEvent::Open { play, record }
                 }
-                PlayEvent::Counted { play } => {
-                    if let Some(&(entry_id, started_at)) = self.open_plays.get(&play) {
-                        self.count_play(play, entry_id, started_at);
-                    }
-                }
-                PlayEvent::Closed { play, .. } => {
-                    self.open_plays.remove(&play);
-                }
-            }
+                PlayEvent::Counted { play } => HistoryEvent::Count { play },
+                PlayEvent::Closed {
+                    play,
+                    listened_ms,
+                    reason,
+                    ended_at,
+                } => HistoryEvent::Close {
+                    play,
+                    listened_ms,
+                    reason,
+                    ended_at,
+                },
+            };
+            self.record(event);
         }
     }
 
-    /// A play of entry `entry_id` counted. It waits in `pending_plays` with
-    /// what queue pages show for its entry. An entry already gone from the
-    /// queue has nothing to describe it, and is not recorded.
-    fn count_play(&mut self, play: u64, entry_id: u64, started_at: i64) {
-        match self.store.queue_entry(entry_id) {
-            Ok(Some(item)) => {
-                // Task 4 replaces this: a counted play opens, counts and
-                // closes at once.
-                let events = [
-                    HistoryEvent::Open {
-                        play,
-                        record: PlayRecord::of(item, started_at),
-                    },
-                    HistoryEvent::Count { play },
-                    HistoryEvent::Close {
-                        play,
-                        listened_ms: 0,
-                        reason: EndReason::Finished,
-                        ended_at: started_at,
-                    },
-                ];
-                for event in events {
-                    if self.pending_plays.push(event).is_some() {
-                        eprintln!(
-                            "tyranny: play history writes keep failing; dropped an event of the play of entry {entry_id}"
-                        );
-                    }
-                }
+    /// What history keeps of a play of entry `entry_id`: what queue pages
+    /// show for the entry, with a radio play's own artist and title. An entry
+    /// already gone from the queue has nothing to describe it, and its play
+    /// is not recorded.
+    fn describe_play(
+        &self,
+        entry_id: u64,
+        started_at: i64,
+        radio: Option<RadioText>,
+    ) -> Option<PlayRecord> {
+        let item = match self.store.queue_entry(entry_id) {
+            Ok(item) => item?,
+            Err(error) => {
+                eprintln!(
+                    "tyranny: describing the play of entry {entry_id} failed; not recorded: {error:#}"
+                );
+                return None;
             }
-            Ok(None) => {}
-            Err(error) => eprintln!(
-                "tyranny: describing the play of entry {entry_id} failed; not recorded: {error:#}"
-            ),
+        };
+        let mut record = PlayRecord::of(item, started_at);
+        if let Some(text) = radio {
+            record.artist = text.artist;
+            record.title = text.title;
+            record.raw_title = Some(text.raw);
+            record.duration_ms = None;
+            let station = self.player.stream_title(entry_id).unwrap_or_default();
+            record
+                .source
+                .get_or_insert_with(|| QueueSource::stamped(SourceKind::Stream, station));
+        }
+        Some(record)
+    }
+
+    /// Queues `event`. While writes keep failing, the oldest event is dropped.
+    fn record(&mut self, event: HistoryEvent) {
+        if let Some(dropped) = self.pending_plays.push(event) {
+            eprintln!(
+                "tyranny: play history writes keep failing; dropped an event of play {}",
+                dropped.play()
+            );
         }
     }
 
-    /// Describes the passes that counted since the last pump, while their
-    /// entries are still in the store. Call before a store edit that can
-    /// delete the current entry: output may have reached its threshold since
-    /// the pump, and a deleted entry has nothing to describe its play.
+    /// Queues the open play's listened time, unless it has not changed since
+    /// the last checkpoint, as while paused.
+    fn checkpoint_play(&mut self) {
+        if let Some(open) = self.player.open_play()
+            && self.checkpointed != Some(open)
+        {
+            self.checkpointed = Some(open);
+            let (play, listened_ms) = open;
+            self.record(HistoryEvent::Checkpoint { play, listened_ms });
+        }
+    }
+
+    /// Takes the play events since the last pump, while their entries are
+    /// still in the store. Call before a store edit that can delete the
+    /// current entry: output may have reached its threshold since the pump,
+    /// and a deleted entry has nothing to describe its play.
     fn collect_plays(&mut self) {
         self.player.count_heard();
         self.take_plays();
     }
 
-    /// Writes the pending plays oldest first, one small commit each. The first
-    /// failure stops this attempt; it and the later plays wait for the retry.
-    /// Playback never pauses for history. Returns whether any play was written.
+    /// Writes the pending play events oldest first, one small commit each.
+    /// The first failure stops this attempt; it and the later events wait for
+    /// the retry. Playback never pauses for history. Returns whether a history
+    /// revision changed.
     fn write_plays(&mut self) -> bool {
-        // Task 4 replaces this.
         let result = self.pending_plays.write(&mut self.store);
         if let Some(error) = &result.error {
             eprintln!(
@@ -1073,15 +1143,22 @@ impl Actor {
                 self.pending_plays.len()
             );
         }
-        let written = result.wrote;
         self.retrying_plays = !self.pending_plays.is_empty();
+        if !result.wrote {
+            return false;
+        }
+        let revisions = (self.history_revision, self.stats_revision);
+        match self.store.stats_revision() {
+            Ok(revision) => self.stats_revision = revision,
+            Err(error) => eprintln!("tyranny: reading the stats revision failed: {error:#}"),
+        }
         if result.counted {
             match self.store.history_revision() {
                 Ok(revision) => self.history_revision = revision,
                 Err(error) => eprintln!("tyranny: reading the history revision failed: {error:#}"),
             }
         }
-        written
+        (self.history_revision, self.stats_revision) != revisions
     }
 
     fn playlist_applied(&mut self, change: PlaylistChange) -> CommandResult<Response> {
@@ -1728,6 +1805,9 @@ impl Actor {
                         self.player.next_id(),
                     )
                     .map_err(Failure::persistence)?;
+                if self.player.snapshot().current_id == Some(entry_id) {
+                    self.player.end_play(EndReason::Skipped);
+                }
                 self.player
                     .remove(entry_id, expected_revision)
                     .map_err(Failure::committed)?;
@@ -1758,6 +1838,7 @@ impl Actor {
                 self.store
                     .edit(Edit::Clear, revision, self.player.next_id())
                     .map_err(Failure::persistence)?;
+                self.player.end_play(EndReason::Stopped);
                 self.player
                     .clear(expected_revision)
                     .map_err(Failure::committed)?;
@@ -1876,6 +1957,7 @@ impl Actor {
                 self.store
                     .checkpoint(Checkpoint::default(), &self.settings)
                     .map_err(Failure::persistence)?;
+                self.player.end_play(EndReason::Stopped);
                 self.player.stop();
                 self.fault = None;
                 self.published(None)
@@ -2078,6 +2160,20 @@ impl Actor {
         }
     }
 
+    /// Saves the checkpoint and the pending play events before the owner
+    /// exits. The open play's listened time is saved, but the play stays
+    /// open: the next start continues it or closes it.
+    fn quit(mut self) -> Result<()> {
+        let checkpoint = self.checkpoint();
+        self.player.pause();
+        self.collect_plays();
+        self.checkpoint_play();
+        self.write_plays();
+        let library = self.library.shutdown();
+        let saved = self.store.checkpoint(checkpoint, &self.settings);
+        library.and(saved)
+    }
+
     /// Stops the owner after a fatal failure.
     fn stop(mut self, error: anyhow::Error) -> Result<()> {
         self.player.pause();
@@ -2088,14 +2184,16 @@ impl Actor {
     fn run(mut self, mut receiver: mpsc::Receiver<Work>) -> Result<()> {
         let mut event_time = Instant::now();
         let mut checkpoint_time = Instant::now();
+        let mut history_time = Instant::now();
         loop {
             for _ in 0..8 {
                 if let Err(error) = self.player.pump() {
                     self.player.pause();
                     self.fault = Some(format!("audio output: {error:#}"));
                 }
-                // Before the advances, whose trims may remove a counted entry.
-                // While earlier writes fail, new plays wait for the retry.
+                // Before the advances, whose trims may remove the entry of a
+                // play that just opened. While earlier writes fail, new
+                // events wait for the retry.
                 self.take_plays();
                 let recorded =
                     !self.retrying_plays && !self.pending_plays.is_empty() && self.write_plays();
@@ -2136,12 +2234,7 @@ impl Actor {
                         }
                     }
                     Ok(Work::Shutdown(reply)) => {
-                        let checkpoint = self.checkpoint();
-                        self.player.pause();
-                        self.write_plays();
-                        let library = self.library.shutdown();
-                        let saved = self.store.checkpoint(checkpoint, &self.settings);
-                        let result = library.and(saved);
+                        let result = self.quit();
                         let response = result
                             .as_ref()
                             .map(|_| ())
@@ -2149,20 +2242,17 @@ impl Actor {
                         let _ = reply.send(response);
                         return result;
                     }
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        let checkpoint = self.checkpoint();
-                        self.player.pause();
-                        self.write_plays();
-                        let library = self.library.shutdown();
-                        let saved = self.store.checkpoint(checkpoint, &self.settings);
-                        return library.and(saved);
-                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => return self.quit(),
                     Err(mpsc::error::TryRecvError::Empty) => {}
                 }
             }
             if event_time.elapsed() >= EVENT_INTERVAL {
                 self.publish();
                 event_time = Instant::now();
+            }
+            if history_time.elapsed() >= HISTORY_CHECKPOINT_INTERVAL {
+                self.checkpoint_play();
+                history_time = Instant::now();
             }
             if checkpoint_time.elapsed() >= CHECKPOINT_INTERVAL {
                 if !self.pending_plays.is_empty() && self.write_plays() {

@@ -16,7 +16,7 @@ use std::collections::{HashMap, VecDeque};
 
 /// A play counts after at most this long, however long the track is.
 const MAX_THRESHOLD_SECS: u64 = 240;
-/// The most counted plays kept while their history writes fail.
+/// The most play events kept while their history writes fail.
 pub(crate) const MAX_PENDING_PLAYS: usize = 1_000;
 
 /// The position at which a pass over a track `duration_frames` long counts as
@@ -91,7 +91,6 @@ impl EndReason {
 }
 
 /// A play row that has not ended yet.
-#[allow(dead_code)] // Task 4 restores open plays at startup
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OpenPlayRow {
     pub row: i64,
@@ -113,7 +112,6 @@ pub(crate) enum HistoryEvent {
     Count {
         play: u64,
     },
-    #[allow(dead_code)] // Task 4 checkpoints listened time
     Checkpoint {
         play: u64,
         listened_ms: u64,
@@ -126,7 +124,7 @@ pub(crate) enum HistoryEvent {
     },
 }
 impl HistoryEvent {
-    fn play(&self) -> u64 {
+    pub fn play(&self) -> u64 {
         match self {
             Self::Open { play, .. }
             | Self::Count { play }
@@ -156,19 +154,23 @@ pub(crate) struct PendingHistory {
     rows: HashMap<u64, i64>,
 }
 impl PendingHistory {
-    /// Adds `event` last. Returns the oldest event, dropped to make room.
+    /// Adds `event` last. Returns the oldest event, dropped to make room. A
+    /// play whose close is dropped is forgotten; its row stays open until
+    /// startup closes it.
     pub fn push(&mut self, event: HistoryEvent) -> Option<HistoryEvent> {
         let dropped = if self.events.len() >= MAX_PENDING_PLAYS {
             self.events.pop_front()
         } else {
             None
         };
+        if let Some(HistoryEvent::Close { play, .. }) = &dropped {
+            self.rows.remove(play);
+        }
         self.events.push_back(event);
         dropped
     }
     /// Tells the queue that `play` already has `row`, as for an open row
     /// restored at startup.
-    #[allow(dead_code)] // Task 4 restores open plays at startup
     pub fn adopt(&mut self, play: u64, row: i64) {
         self.rows.insert(play, row);
     }
@@ -282,7 +284,6 @@ impl Store {
     }
 
     /// Saves the listened time of the open row `row`.
-    #[allow(dead_code)] // Task 4 checkpoints listened time
     pub fn checkpoint_play(&mut self, row: i64, listened_ms: u64) -> Result<()> {
         let transaction = self
             .connection
@@ -318,7 +319,6 @@ impl Store {
 
     /// The rows not yet ended, oldest first. A row from before schema 8 has no
     /// listened time and is not open.
-    #[allow(dead_code)] // Task 4 restores open plays at startup
     pub fn open_play_rows(&self) -> Result<Vec<OpenPlayRow>> {
         let mut query = self.connection.prepare(
             "SELECT id,entry_id,counted,listened_ms,raw_title FROM play_history
@@ -340,7 +340,6 @@ impl Store {
 
     /// Closes every open row but `keep` as stopped, ended when its listening
     /// would have stopped. Returns how many it closed.
-    #[allow(dead_code)] // Task 4 closes stale plays at startup
     pub fn close_open_plays_except(&mut self, keep: Option<i64>) -> Result<usize> {
         let transaction = self
             .connection
@@ -400,7 +399,6 @@ impl Store {
     }
 
     /// How many play writes have been made: it moves on every one.
-    #[allow(dead_code)] // Task 6 reads it for stats
     pub fn stats_revision(&self) -> Result<u64> {
         Ok(self
             .connection
@@ -724,6 +722,26 @@ mod tests {
                 .query("SELECT id FROM play_history", |row| row.get::<_, i64>(0))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pending_history_forgets_the_row_of_a_play_whose_close_was_dropped() {
+        let mut pending = PendingHistory::default();
+        pending.adopt(9, 4);
+        pending.push(HistoryEvent::Close {
+            play: 9,
+            listened_ms: 1,
+            reason: EndReason::Finished,
+            ended_at: 100,
+        });
+        for _ in 0..MAX_PENDING_PLAYS - 1 {
+            pending.push(HistoryEvent::Count { play: 10 });
+        }
+        assert!(pending.rows.contains_key(&9));
+        let dropped = pending.push(HistoryEvent::Count { play: 10 });
+        assert!(matches!(dropped, Some(HistoryEvent::Close { play: 9, .. })));
+        // Its row stays open until startup closes it as stopped.
+        assert!(!pending.rows.contains_key(&9));
     }
 
     #[test]

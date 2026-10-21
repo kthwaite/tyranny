@@ -24,10 +24,7 @@ mod playlists;
 mod selection;
 mod stations;
 pub use history::EndReason;
-#[allow(unused_imports)] // Task 4 names HistoryWrite and OpenPlayRow
-pub(crate) use history::{
-    HistoryEvent, HistoryWrite, OpenPlayRow, PendingHistory, PlayRecord, count_threshold_frames,
-};
+pub(crate) use history::{HistoryEvent, PendingHistory, PlayRecord, count_threshold_frames};
 pub(crate) use playlists::{
     PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule, playlist_sources,
 };
