@@ -843,9 +843,10 @@ fn prepare(file: &ProposedFile, omitted: &BTreeSet<TagField>) -> Step {
         Err(error) => return done(TagFileOutcome::Failed, &unreadable(&format!("{error:#}"))),
     };
     // Writing one half of a number pair drops the other half from another tag.
-    // When that half is not written (the user omitted it) and the primary tag
-    // lacks it, it is written there with the dropped copy's value, so the
-    // value stays.
+    // When that half is not written and the primary tag lacks it, it is
+    // written there with the dropped copy's value, so the value stays. Such a
+    // half is always omitted: `propose_file` puts every one in the proposal.
+    // This rule runs before `unpaired_total`, so a kept number pairs a total.
     let fields: BTreeSet<TagField> = values.keys().copied().collect();
     for copy in tags.partners_dropped_with(&fields) {
         if !tags.primary.contains_key(&copy.field) {
@@ -894,15 +895,15 @@ fn unpaired_total(tags: &FileTags, values: &BTreeMap<TagField, String>) -> Optio
 }
 
 /// Writes a journaled file's "before" values back, if every "after" value is
-/// still its primary value and no second home (the ID3 recording ID's UFID)
-/// holds another value.
+/// still its primary value and its second home (the ID3 recording ID's UFID)
+/// still agrees: neither missing nor different.
 fn revert_file(file: &JournalFile) -> Result<(), WriteError> {
     // The stamp comes first, so a change after the check fails the write.
     let expected = stamp(&file.path).map_err(|_| WriteError::Changed)?;
     let tags = read_tags(&file.path)
         .map_err(|error| WriteError::Failed(unreadable(&format!("{error:#}"))))?;
     let unchanged = file.after.iter().all(|(field, value)| {
-        tags.primary.get(field) == value.as_ref() && !tags.second_home_differs(*field)
+        tags.primary.get(field) == value.as_ref() && tags.second_home_agrees(*field)
     });
     if !unchanged {
         return Err(WriteError::Changed);

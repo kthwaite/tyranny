@@ -1593,6 +1593,98 @@ fn revert_skips_a_file_whose_ufid_changed_after_the_edit() {
 }
 
 #[test]
+fn revert_skips_a_file_whose_ufid_was_deleted_after_the_edit() {
+    use lofty::{
+        config::{ParseOptions, WriteOptions},
+        file::AudioFile,
+        id3::v2::Frame,
+        mpeg::MpegFile,
+        tag::TagExt,
+    };
+    let album = LibraryFixture::new(&[("tone.mp3", &[(TagField::MusicbrainzReleaseId, A)])]);
+    let path = &album.files[0];
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    let recording = read_tags(path).unwrap().primary[&TagField::MusicbrainzRecordingId].clone();
+    assert_eq!(musicbrainz_ufids(path), std::slice::from_ref(&recording));
+
+    // Another program deletes only the UFID; the TXXX keeps the written value.
+    let file =
+        MpegFile::read_from(&mut std::fs::File::open(path).unwrap(), ParseOptions::new()).unwrap();
+    let mut id3 = file.id3v2().unwrap().clone();
+    id3.retain(|frame| {
+        !matches!(frame, Frame::UniqueFileIdentifier(ufid) if ufid.owner == "http://musicbrainz.org")
+    });
+    id3.save_to_path(path, WriteOptions::default()).unwrap();
+    assert!(musicbrainz_ufids(path).is_empty());
+    let deleted = read_tags(path).unwrap();
+    assert_eq!(
+        deleted.primary[&TagField::MusicbrainzRecordingId],
+        recording
+    );
+    let outside = bytes(&album);
+
+    let (reverted, written) = engine.revert(applied.edit_id.unwrap(), &running()).unwrap();
+    assert_eq!(
+        outcomes(&reverted),
+        [(TagFileOutcome::Skipped, Some("changed since the edit"))]
+    );
+    assert!(written.is_empty(), "{written:?}");
+    assert_eq!(bytes(&album), outside);
+}
+
+#[test]
+fn omitting_the_track_number_keeps_the_copied_number() {
+    // ID3v2 has no track number; the APE item holds it. Writing only the
+    // total would drop the APE number and leave the total unpaired.
+    let album = mp3_on_track_two_with_ape_track(&[], "3/12");
+    let path = &album.files[0];
+    let before = read_tags(path).unwrap();
+    assert_eq!(before.primary.get(&TagField::TrackNumber), None);
+    assert_eq!(before.current(TagField::TrackNumber), Some("3"));
+    let server = musicbrainz("search.json");
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let changes = &proposal.tracks[0].changes;
+    assert!(
+        changes.contains(&FieldChange {
+            field: TagField::TrackTotal,
+            old: Some("12".into()),
+            new: "3".into(),
+        }),
+        "{changes:?}"
+    );
+
+    let (applied, _) = engine
+        .apply(
+            &apply_request(&proposal, &[TagField::TrackNumber]),
+            &running(),
+        )
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    let tags = read_tags(path).unwrap();
+    assert_eq!(tags.primary[&TagField::TrackNumber], "3");
+    assert_eq!(tags.primary[&TagField::TrackTotal], "3");
+    assert_eq!(ape_track(path), None);
+
+    let (reverted, _) = engine.revert(applied.edit_id.unwrap(), &running()).unwrap();
+    assert_eq!(outcomes(&reverted), [WRITTEN]);
+    assert_eq!(ape_track(path).as_deref(), Some("3/12"));
+    let after = read_tags(path).unwrap();
+    assert_eq!(after.primary, before.primary);
+    assert_eq!(after.copies, before.copies);
+}
+
+#[test]
 fn edits_lists_latest_first_with_counts() {
     let album = stored_a();
     let server = musicbrainz("search.json");
