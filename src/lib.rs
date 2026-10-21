@@ -19,5 +19,7 @@ pub mod playback;
 pub mod protocol;
 mod scanner;
 pub mod server;
+mod stats;
+pub mod stats_types;
 mod store;
 mod stream;
