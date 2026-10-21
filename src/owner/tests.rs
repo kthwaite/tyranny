@@ -1122,3 +1122,64 @@ async fn history_write_failures_queue_events_without_stalling_playback() {
         "{plays:?}"
     );
 }
+
+#[tokio::test]
+async fn stats_replies_do_not_wait_for_the_owner() {
+    let fixture = Fixture::new();
+    let mut control = fixture.control();
+    let revision = snapshot(&control).await.queue_revision;
+    // Nothing reads this channel, so any owner round trip would hang.
+    let (stalled, _unserviced) = mpsc::channel(64);
+    control.sender = stalled;
+    let ask = |id: u64, command: Command| {
+        let control = control.clone();
+        async move {
+            timeout(
+                Duration::from_secs(2),
+                control.request(Request { id, command }),
+            )
+            .await
+            .expect("stats waited for the owner")
+            .unwrap()
+        }
+    };
+    let period = |anchor: &str| crate::stats_types::PeriodRequest {
+        kind: crate::stats_types::PeriodKind::Day,
+        anchor: anchor.into(),
+    };
+    match ask(
+        1,
+        Command::Stats {
+            period: period("2026-10-21"),
+        },
+    )
+    .await
+    {
+        Message::Reply {
+            reply: Reply::Ok {
+                result: Response::Stats { .. },
+            },
+            ..
+        } => {}
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    match ask(
+        2,
+        Command::Stats {
+            period: period("2026-02-30"),
+        },
+    )
+    .await
+    {
+        Message::Reply {
+            reply:
+                Reply::Error {
+                    code: ErrorCode::InvalidCommand,
+                    queue_revision,
+                    ..
+                },
+            ..
+        } => assert_eq!(queue_revision, revision),
+        other => panic!("unexpected reply: {other:?}"),
+    }
+}

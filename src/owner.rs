@@ -31,7 +31,11 @@ use std::{
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc as startup},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc as startup,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -69,6 +73,8 @@ pub struct Controller {
     stats: StatsHandle,
     directory: DirectoryHandle,
     resolver: Arc<Resolver>,
+    /// The queue revision the owner last published, for replies that must not wait for it.
+    queue_revision: Arc<AtomicU64>,
 }
 pub struct Subscription {
     pub snapshot: ControlState,
@@ -93,7 +99,11 @@ impl Owner {
                 let actor = Actor::open(config);
                 match actor {
                     Ok(actor) => {
-                        let ready = (actor.library.handle(), actor.capture_path.clone());
+                        let ready = (
+                            actor.library.handle(),
+                            actor.capture_path.clone(),
+                            Arc::clone(&actor.published_revision),
+                        );
                         if ready_tx.send(Ok(ready)).is_err() {
                             return Ok(());
                         }
@@ -111,7 +121,7 @@ impl Owner {
             Err(error) => Err(error.into()),
         };
         match initialized {
-            Ok((library, capture)) => {
+            Ok((library, capture, queue_revision)) => {
                 let resolver = Arc::new(Resolver::new(database.clone(), capture));
                 let artwork = ArtworkWorkers::start(database.clone());
                 let lyrics = LyricsWorkers::start(database.clone());
@@ -126,6 +136,7 @@ impl Owner {
                         stats: stats.handle(),
                         directory: directory.handle(),
                         resolver,
+                        queue_revision,
                     },
                     artwork,
                     lyrics,
@@ -213,7 +224,7 @@ impl Controller {
                     })
                     .await;
                 if let Reply::Error { queue_revision, .. } = &mut reply {
-                    *queue_revision = self.queue_revision(id).await.unwrap_or(0);
+                    *queue_revision = self.queue_revision.load(Ordering::Acquire);
                 }
                 return Ok(Message::Reply { id, reply });
             }
@@ -673,6 +684,8 @@ struct Actor {
     stations_revision: u64,
     fault: Option<String>,
     last: ControlState,
+    /// `last.queue_revision`, shared with the `Controller`.
+    published_revision: Arc<AtomicU64>,
     events: broadcast::Sender<ControlState>,
     capture_path: Option<PathBuf>,
     library: Library,
@@ -771,6 +784,7 @@ impl Actor {
             playlists_revision: loaded.playlists_revision,
             stations_revision,
             fault,
+            published_revision: Arc::new(AtomicU64::new(last.queue_revision)),
             last,
             events,
             capture_path,
@@ -872,6 +886,8 @@ impl Actor {
                 .checked_add(1)
                 .expect("event sequence exhausted");
             self.last = state.clone();
+            self.published_revision
+                .store(state.queue_revision, Ordering::Release);
             let _ = self.events.send(state);
         }
     }

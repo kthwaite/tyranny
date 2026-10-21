@@ -115,6 +115,7 @@ impl Handle {
 /// the controller fills in.
 enum Failure {
     BadAnchor,
+    BadYear,
     Unavailable(String),
 }
 
@@ -123,6 +124,11 @@ fn failure(error: Failure) -> Reply {
         Failure::BadAnchor => Reply::Error {
             code: ErrorCode::InvalidCommand,
             message: "invalid period anchor".into(),
+            queue_revision: 0,
+        },
+        Failure::BadYear => Reply::Error {
+            code: ErrorCode::InvalidCommand,
+            message: "invalid year".into(),
             queue_revision: 0,
         },
         Failure::Unavailable(message) => unavailable(&message),
@@ -160,6 +166,7 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
     let unavailable = |error: anyhow::Error| Failure::Unavailable(format!("{error:#}"));
     let anchor = match &request {
         Request::Stats(period) => Some(Date::parse(&period.anchor).ok_or(Failure::BadAnchor)?),
+        Request::Wrapped(year) if !(1970..=9999).contains(year) => return Err(Failure::BadYear),
         _ => None,
     };
     let stats_revision: u64 = connection

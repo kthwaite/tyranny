@@ -116,3 +116,30 @@ async fn a_missing_database_is_unavailable_and_stopped_workers_refuse() {
         }
     ));
 }
+
+#[tokio::test]
+async fn wrapped_years_outside_the_calendar_are_rejected_before_any_work() {
+    let database = Database::new();
+    let workers = StatsWorkers::start(database.0.clone());
+    for year in [1969, 10_000, i32::MAX, i32::MIN] {
+        match workers.handle().request(Request::Wrapped(year)).await {
+            Reply::Error { code, message, .. } => {
+                assert_eq!(code, ErrorCode::InvalidCommand, "{year}");
+                assert_eq!(message, "invalid year");
+            }
+            reply => panic!("{year} was not rejected: {reply:?}"),
+        }
+    }
+    for year in [1970, 9999] {
+        assert!(matches!(
+            workers.handle().request(Request::Wrapped(year)).await,
+            Reply::Ok { .. }
+        ));
+    }
+    // The only stats thread is still alive.
+    assert!(matches!(
+        workers.handle().request(all()).await,
+        Reply::Ok { .. }
+    ));
+    workers.shutdown();
+}
