@@ -279,6 +279,35 @@ mod tests {
     }
 
     #[test]
+    fn spring_forward_week_is_167_hours() {
+        // Sunday 2026-03-29 is in the week of Monday 23 March.
+        let b = bounds(&London, PeriodKind::Week, d(2026, 3, 29), None, 0);
+        assert_eq!(b.start, utc_secs(2026, 3, 23, 0));
+        assert_eq!(b.end, utc_secs(2026, 3, 29, 23));
+        assert_eq!(b.end - b.start, 167 * 3600);
+        let days = buckets(&London, PeriodKind::Week, b);
+        assert_eq!(days.len(), 7);
+        assert_eq!(days[6], utc_secs(2026, 3, 29, 0));
+    }
+
+    #[test]
+    fn months_across_dst_have_local_midnight_bounds() {
+        let march = bounds(&London, PeriodKind::Month, d(2026, 3, 15), None, 0);
+        assert_eq!(march.start, utc_secs(2026, 3, 1, 0));
+        // 1 April starts at 00:00 BST, 23:00 UTC the day before.
+        assert_eq!(march.end, utc_secs(2026, 3, 31, 23));
+        assert_eq!(march.end - march.start, (31 * 24 - 1) * 3600);
+        let days = buckets(&London, PeriodKind::Month, march);
+        assert_eq!(days.len(), 31);
+        assert_eq!(days[29], utc_secs(2026, 3, 29, 23));
+        let october = bounds(&London, PeriodKind::Month, d(2026, 10, 15), None, 0);
+        assert_eq!(october.start, utc_secs(2026, 9, 30, 23));
+        assert_eq!(october.end, utc_secs(2026, 11, 1, 0));
+        assert_eq!(october.end - october.start, (31 * 24 + 1) * 3600);
+        assert_eq!(buckets(&London, PeriodKind::Month, october).len(), 31);
+    }
+
+    #[test]
     fn month_and_year_bounds() {
         let z = FixedZone(0);
         let feb = bounds(&z, PeriodKind::Month, d(2026, 2, 10), None, 0);
