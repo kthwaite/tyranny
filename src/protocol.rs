@@ -563,6 +563,18 @@ pub struct Station {
     pub url: String,
 }
 
+/// One radio-browser.info search hit, already filtered to something playable.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectoryStation {
+    pub uuid: String,
+    pub name: String,
+    pub url: String,
+    pub codec: String,
+    pub bitrate: u32,
+    pub country_code: String,
+    pub tags: Vec<String>,
+}
+
 /// A station as a client submits it. A blank name becomes the URL's host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct StationInput {

@@ -1,0 +1,104 @@
+[
+  {
+    "stationuuid": "11111111-1111-1111-1111-111111111111",
+    "name": "Jazz FM",
+    "url": "http://old.example/jazz",
+    "url_resolved": "https://a.example/jazz",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 128,
+    "countrycode": "GB",
+    "tags": "jazz, ,smooth,a,b,c,d,éééééééééééééééééééé",
+    "clickcount": 900
+  },
+  {
+    "stationuuid": "22222222-2222-2222-2222-222222222222",
+    "name": "HLS Radio",
+    "url": "https://h.example/live.m3u8",
+    "url_resolved": "https://h.example/live.m3u8",
+    "hls": 1,
+    "codec": "AAC",
+    "bitrate": 96,
+    "countrycode": "DE",
+    "tags": "news"
+  },
+  {
+    "stationuuid": "33333333-3333-3333-3333-333333333333",
+    "name": "Rock Unresolved",
+    "url": "https://b.example/rock",
+    "url_resolved": "",
+    "hls": 0,
+    "codec": "AAC+",
+    "bitrate": 0,
+    "countrycode": "US",
+    "tags": ""
+  },
+  {
+    "stationuuid": "44444444-4444-4444-4444-444444444444",
+    "name": "Credentials",
+    "url": "http://x.example/",
+    "url_resolved": "http://user:pw@c.example/x",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 64,
+    "countrycode": "FR",
+    "tags": ""
+  },
+  {
+    "stationuuid": "55555555-5555-5555-5555-555555555555",
+    "name": "Not HTTP",
+    "url": "ftp://d.example/x",
+    "url_resolved": "ftp://d.example/x",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 64,
+    "countrycode": "FR",
+    "tags": ""
+  },
+  {
+    "stationuuid": "66666666-6666-6666-6666-666666666666",
+    "name": "Bad\u0001Name",
+    "url": "https://e.example/x",
+    "url_resolved": "https://e.example/x",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 64,
+    "countrycode": "FR",
+    "tags": ""
+  },
+  {
+    "stationuuid": "77777777-7777-7777-7777-777777777777",
+    "name": "Jazz FM Mirror",
+    "url": "https://a.example/jazz",
+    "url_resolved": "https://a.example/jazz",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 128,
+    "countrycode": "GB",
+    "tags": "jazz"
+  },
+  {
+    "stationuuid": "88888888-8888-8888-8888-888888888888",
+    "name": "No URL",
+    "url": "",
+    "url_resolved": "",
+    "hls": 0,
+    "codec": "MP3",
+    "bitrate": 64,
+    "countrycode": "FR",
+    "tags": ""
+  },
+  {
+    "stationuuid": "99999999-9999-9999-9999-999999999999",
+    "name": "  Padded Name  ",
+    "url": "https://f.example/stream",
+    "url_resolved": "https://f.example/stream",
+    "hls": 0,
+    "codec": "OGG",
+    "bitrate": 64,
+    "countrycode": "USA",
+    "tags": "  lo-fi ,chill",
+    "favicon": "",
+    "lastcheckok": 1
+  }
+]
