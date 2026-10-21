@@ -390,10 +390,18 @@ fn build(
             values: parameters.values,
         });
     }
+    // Album blocks retain the column sort only for choosing the block's rank.
+    // Carry the fixed within-album keys only when needed; other lists stay narrow.
+    let album_columns = if list.group == Grouping::Album {
+        ",t.disc_number AS disc_number,NULLIF(t.track_number,0) AS track_number,
+         t.title_sort AS title_sort,a.path AS path"
+    } else {
+        ""
+    };
     let rows = format!(
         "SELECT ROW_NUMBER() OVER (ORDER BY {order}) AS row_order,{row_id} AS row_id,
          t.id AS track_id,{ARTIST_KEY} AS artist_key,t.album_id AS album_key,
-         {available} AS available {from} JOIN ar ON ar.id=t.album_id{} WHERE {}",
+         {available} AS available{album_columns} {from} JOIN ar ON ar.id=t.album_id{} WHERE {}",
         if order.contains("ta.search") {
             TRACK_ARTIST
         } else {
@@ -437,9 +445,15 @@ fn build(
             .iter()
             .map(|key| format!("{key}_first.first_row,"))
             .collect();
+        let within_group = if list.group == Grouping::Album {
+            "listed.disc_number,listed.track_number NULLS LAST,
+             listed.title_sort,listed.path,listed.row_id"
+        } else {
+            "listed.row_order"
+        };
         format!(
             "{ALBUM_RANK},listed AS MATERIALIZED ({rows}){firsts}
-             SELECT ROW_NUMBER() OVER (ORDER BY {order}listed.row_order) AS position,
+             SELECT ROW_NUMBER() OVER (ORDER BY {order}{within_group}) AS position,
              listed.row_id AS row_id,listed.track_id AS track_id,listed.artist_key AS artist_key,
              listed.album_key AS album_key,listed.available AS available
              FROM listed{joins} ORDER BY position"
@@ -760,19 +774,112 @@ mod tests {
     }
 
     #[test]
+    fn album_grouping_keeps_numbered_order_for_every_column_sort() {
+        use SortField::*;
+        let connection = fixture();
+        for field in [
+            Title,
+            Artist,
+            AlbumArtist,
+            Album,
+            Duration,
+            Year,
+            Genre,
+            Format,
+            Plays,
+            DateAdded,
+            LastPlayed,
+            AlbumOrder,
+        ] {
+            for descending in [false, true] {
+                let mut list = sorted(ListSource::Library, field, descending);
+                let ungrouped = run(&connection, &list, 0, 1).unwrap();
+                let mut albums = Vec::new();
+                for row in ungrouped {
+                    if !albums.contains(&row.3) {
+                        albums.push(row.3);
+                    }
+                }
+                let expected: Vec<u64> = albums
+                    .into_iter()
+                    .flat_map(|album| match album {
+                        1 => vec![2, 1],
+                        2 => vec![6],
+                        3 => vec![3, 5, 4],
+                        4 => vec![7],
+                        5 => vec![8, 9],
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                list.group = Grouping::Album;
+                assert_eq!(
+                    row_ids(&connection, &list),
+                    expected,
+                    "{field:?} descending={descending}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn album_grouping_places_unnumbered_tracks_last_with_stable_fallbacks() {
+        let connection = fixture();
+        connection
+            .execute_batch(
+                "UPDATE library_tracks SET disc_number=1 WHERE album_id=3;
+             UPDATE library_tracks SET track_number=0,title_sort='same' WHERE id IN (3,5);",
+            )
+            .unwrap();
+        for descending in [false, true] {
+            let mut list = sorted(
+                ListSource::Album { id: 3 },
+                SortField::DateAdded,
+                descending,
+            );
+            list.group = Grouping::Album;
+            assert_eq!(row_ids(&connection, &list), [4, 3, 5]);
+        }
+        connection
+            .execute("UPDATE library_tracks SET title_sort='zulu' WHERE id=3", [])
+            .unwrap();
+        assert_eq!(
+            row_ids(
+                &connection,
+                &list_of(ListSource::Album { id: 3 }, Grouping::Album)
+            ),
+            [4, 5, 3]
+        );
+    }
+
+    #[test]
+    fn album_grouping_preserves_playlist_occurrences_in_numbered_order() {
+        let connection = fixture();
+        for (descending, expected) in [(false, vec![10, 13, 11, 12]), (true, vec![12, 10, 13, 11])]
+        {
+            let mut list = sorted(
+                ListSource::Playlist { id: 1, revision: 4 },
+                SortField::PlaylistOrder,
+                descending,
+            );
+            list.group = Grouping::Album;
+            assert_eq!(row_ids(&connection, &list), expected);
+        }
+    }
+
+    #[test]
     fn album_grouping_orders_groups_by_newest_track_when_sorted_by_date_added_desc() {
         let connection = fixture();
         let mut list = sorted(ListSource::Library, SortField::DateAdded, true);
         assert_eq!(row_ids(&connection, &list), [8, 9, 4, 3, 5, 2, 6, 1, 7]);
         list.group = Grouping::Album;
         // Arrival's newest track (2500) beats Help (2000), so track 1 moves up with its album.
-        assert_eq!(row_ids(&connection, &list), [8, 9, 4, 3, 5, 2, 1, 6, 7]);
+        assert_eq!(row_ids(&connection, &list), [8, 9, 3, 5, 4, 2, 1, 6, 7]);
         // Ascending: each album takes its oldest known track's value. Giant
         // Steps has only an unknown date (0), so it comes last.
         let mut list = sorted(ListSource::Library, SortField::DateAdded, false);
         assert_eq!(row_ids(&connection, &list), [1, 6, 2, 3, 5, 4, 8, 9, 7]);
         list.group = Grouping::Album;
-        assert_eq!(row_ids(&connection, &list), [1, 2, 6, 3, 5, 4, 8, 9, 7]);
+        assert_eq!(row_ids(&connection, &list), [2, 1, 6, 3, 5, 4, 8, 9, 7]);
         // Recent defaults to date added descending.
         let recent = |group| {
             run(&connection, &list_of(ListSource::Recent, group), 1000, 1)
@@ -782,7 +889,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(recent(Grouping::None), [8, 9, 4, 3, 5, 2, 6, 1]);
-        assert_eq!(recent(Grouping::Album), [8, 9, 4, 3, 5, 2, 1, 6]);
+        assert_eq!(recent(Grouping::Album), [8, 9, 3, 5, 4, 2, 1, 6]);
     }
     fn list_of(source: ListSource, group: Grouping) -> ListDescription {
         ListDescription {
