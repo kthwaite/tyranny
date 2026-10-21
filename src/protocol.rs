@@ -1,4 +1,4 @@
-//! Version 12 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 13 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -13,7 +13,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -55,6 +55,12 @@ pub enum Command {
     Lyrics {
         entry_id: u64,
         library_revision: u64,
+    },
+    SearchDirectory {
+        query: String,
+    },
+    CountDirectoryClick {
+        station_uuid: String,
     },
     QueuePage {
         revision: Option<u64>,
@@ -563,6 +569,18 @@ pub struct Station {
     pub url: String,
 }
 
+/// One radio-browser.info search hit, already filtered to something playable.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectoryStation {
+    pub uuid: String,
+    pub name: String,
+    pub url: String,
+    pub codec: String,
+    pub bitrate: u32,
+    pub country_code: String,
+    pub tags: Vec<String>,
+}
+
 /// A station as a client submits it. A blank name becomes the URL's host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct StationInput {
@@ -719,6 +737,10 @@ pub enum Response {
     Lyrics {
         lyrics: Lyrics,
     },
+    DirectoryResults {
+        stations: Vec<DirectoryStation>,
+    },
+    DirectoryClickCounted,
     Snapshot {
         snapshot: Box<ControlState>,
     },
@@ -851,6 +873,7 @@ pub enum ErrorCode {
     InvalidFilter,
     Playback,
     Persistence,
+    Unavailable,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1065,6 +1088,61 @@ mod tests {
     }
 
     #[test]
+    fn directory_commands_and_responses_round_trip() {
+        let search = serde_json::json!({"id":1,"command":"search_directory","query":"jazz"});
+        match serde_json::from_value::<Request>(search.clone())
+            .unwrap()
+            .command
+        {
+            Command::SearchDirectory { query } => assert_eq!(query, "jazz"),
+            other => panic!("decoded as {other:?}"),
+        }
+        let mut extra = search;
+        extra["limit"] = serde_json::json!(5);
+        assert!(serde_json::from_value::<Request>(extra).is_err());
+        let uuid = "9617a958-0601-11e8-ae97-52543be04c81";
+        let click =
+            serde_json::json!({"id":2,"command":"count_directory_click","station_uuid":uuid});
+        match serde_json::from_value::<Request>(click).unwrap().command {
+            Command::CountDirectoryClick { station_uuid } => assert_eq!(station_uuid, uuid),
+            other => panic!("decoded as {other:?}"),
+        }
+        let results = Response::DirectoryResults {
+            stations: vec![DirectoryStation {
+                uuid: uuid.into(),
+                name: "Jazz FM".into(),
+                url: "https://radio.example/jazz.mp3".into(),
+                codec: "MP3".into(),
+                bitrate: 128,
+                country_code: "GB".into(),
+                tags: vec!["jazz".into()],
+            }],
+        };
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json["kind"], "directory_results");
+        assert_eq!(json["stations"][0]["uuid"], uuid);
+        let counted = serde_json::to_value(Response::DirectoryClickCounted).unwrap();
+        assert_eq!(
+            counted,
+            serde_json::json!({"kind":"directory_click_counted"})
+        );
+        let back: Response = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, Response::DirectoryResults { stations } if stations.len() == 1));
+        assert!(matches!(
+            serde_json::from_value::<Response>(counted).unwrap(),
+            Response::DirectoryClickCounted
+        ));
+    }
+
+    #[test]
+    fn unavailable_error_code_is_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ErrorCode::Unavailable).unwrap(),
+            "unavailable"
+        );
+    }
+
+    #[test]
     fn list_artists_list_field_is_required_and_nullable() {
         let base = |list: Option<serde_json::Value>| {
             let mut request = serde_json::json!({"id":1,"command":"list_artists","query":"",
@@ -1091,7 +1169,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 12);
+        assert_eq!(VERSION, 13);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

@@ -1018,3 +1018,38 @@ async fn artwork_keeps_pipelined_commands_ordered_and_queue_state_unchanged() {
     control.socket.close(None).await.unwrap();
     running.stop().await;
 }
+
+#[tokio::test]
+async fn search_directory_rejects_empty_query() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut socket = running.connect().await;
+    hello(&mut socket, &running.instance_id).await;
+    socket
+        .send(Frame::Text(
+            serde_json::json!({"id":1,"command":"search_directory","query":"  "})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        match receive(&mut socket).await {
+            Message::State { .. } => {}
+            Message::Reply { id, reply } => {
+                assert_eq!(id, 1);
+                assert!(matches!(
+                    reply,
+                    Reply::Error {
+                        code: tyranny::protocol::ErrorCode::InvalidCommand,
+                        ..
+                    }
+                ));
+                break;
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+    socket.close(None).await.unwrap();
+    running.stop().await;
+}

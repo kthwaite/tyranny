@@ -181,6 +181,8 @@ final class PlayerModel {
     }
 
     var connected: Bool { connection == "connected" }
+    /// The server instance this connection belongs to; nil while disconnected.
+    var serverInstance: String? { connected ? wire.instanceID : nil }
     var playlistConnectionGeneration: UInt64 { playlistSession }
     var canMutate: Bool { connected && !busy && !serverManagementBusy }
     var managesServer: Bool {

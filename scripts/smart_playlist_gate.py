@@ -60,7 +60,7 @@ def main():
         report['cases'].append({'name': name, 'passed': True})
         print('Passed ' + name, flush=True)
 
-    def start(binary, version=12):
+    def start(binary, version=13):
         nonlocal process, client, ready
         index = len(report['launches'])
         command = [str(Path(binary).resolve()), '--state-dir', str(run / 'state'),

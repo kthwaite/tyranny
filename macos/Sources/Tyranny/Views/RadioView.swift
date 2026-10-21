@@ -12,6 +12,7 @@ struct RadioView: View {
     let player: PlayerModel
     @State private var selection: Station.ID?
     @State private var sheet: StationSheet.Mode?
+    @State private var finding = false
     @State private var removing: Station?
 
     private var canEdit: Bool { player.canMutate && model.isLoaded }
@@ -29,6 +30,7 @@ struct RadioView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("main-radio")
         .sheet(item: $sheet) { StationSheet(model: model, mode: $0) }
+        .sheet(isPresented: $finding) { DirectorySheet(model: model) }
         .alert("Remove \(removing.map { "“\($0.name)”" } ?? "station")?", isPresented: Binding(
             get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing
         ) { station in
@@ -58,6 +60,9 @@ struct RadioView: View {
                     .accessibilityIdentifier("radio-error")
             }
             Spacer(minLength: 0)
+            Button("Find Stations…") { finding = true }
+                .disabled(!canEdit)
+                .accessibilityIdentifier("radio-find")
             Button("Add Station…") { sheet = .add }
                 .disabled(!canEdit)
                 .accessibilityIdentifier("radio-add")
@@ -81,6 +86,9 @@ struct RadioView: View {
         } description: {
             Text("Add a station by its stream URL, or import a .pls or .m3u file.")
         } actions: {
+            Button("Find Stations…") { finding = true }
+                .disabled(!canEdit)
+                .accessibilityIdentifier("radio-empty-find")
             Button("Add Station…") { sheet = .add }
                 .disabled(!canEdit)
                 .accessibilityIdentifier("radio-empty-add")
