@@ -2,7 +2,8 @@ import SwiftUI
 import TyrannyLikesSmokeCore
 
 /// The library window: toolbar filter, source list, main view, the full-width player bar,
-/// and the status bar. The Wrapped slideshow covers all of it, toolbar included.
+/// and the status bar. The Wrapped slideshow covers all of it, toolbar included. The `:` command
+/// palette floats over the content.
 struct MainWindowView: View {
     @Environment(\.themeColours) private var colours
     let model: PlayerModel
@@ -81,17 +82,30 @@ struct MainWindowView: View {
             }
             .animation(.easeInOut(duration: 0.3), value: navigation.wrappedYear)
         }
+        .overlay {
+            if navigation.palette.isOpen {
+                CommandPaletteView(palette: navigation.palette, theme: model.theme)
+            }
+        }
+        .background(CommandPaletteKeyProbe {
+            guard navigation.wrappedYear == nil, !navigation.palette.isOpen else { return false }
+            navigation.openCommandPalette()
+            return true
+        })
         .toolbar { toolbar }
         .toolbar(navigation.wrappedYear == nil ? .automatic : .hidden, for: .windowToolbar)
         .toolbarBackground(navigation.wrappedYear == nil ? .automatic : .hidden, for: .windowToolbar)
         .onAppear {
             let dispatcher = CommandDispatcher(player: model, navigation: navigation, lists: lists)
             navigation.commandSubmission = { try await dispatcher.execute($0) }
-            navigation.commandCompletion = { dispatcher.completions($0) }
+            navigation.commandSuggestions = { dispatcher.suggestions($0) }
+            navigation.palette.report = { model.message = $0 }
         }
         .onDisappear {
             navigation.commandSubmission = nil
-            navigation.commandCompletion = nil
+            navigation.commandSuggestions = nil
+            // `report` stays: the model outlives the window, so a late failure still reaches it.
+            navigation.palette.close()
         }
         .onChange(of: navigation.settingsRequest) { _, _ in openSettings() }
         .onChange(of: navigation.filterFocusRequest) { _, _ in filterFocused = true }

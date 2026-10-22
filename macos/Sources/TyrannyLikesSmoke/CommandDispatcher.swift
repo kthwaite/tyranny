@@ -11,9 +11,13 @@ struct CommandDispatcher {
     let lists: TrackLists
 
     func completions(_ text: String) -> [String] {
+        suggestions(text).map(\.line)
+    }
+
+    func suggestions(_ text: String) -> [CommandSuggestion] {
         player.savedPlaylists.sync()
         player.savedPlaylists.loadAll()
-        return CommandLanguage.completions(text, playlistNames: player.savedPlaylists.rows.map(\.name))
+        return CommandLanguage.suggestions(text, playlistNames: player.savedPlaylists.rows.map(\.name))
     }
 
     func execute(_ text: String) async throws {
@@ -170,6 +174,8 @@ struct CommandDispatcher {
             var settings = player.theme.settings
             try settings.apply(command)
             player.theme.update(settings)
+        case .history:
+            navigation.openCommandPalette(.history)
         case .help:
             let definitions = CommandLanguage.registry.filter { arguments.isEmpty || $0.id.rawValue == arguments[0] }
             player.message = definitions.map { "\($0.usage) — \($0.summary)" }.joined(separator: "\n")

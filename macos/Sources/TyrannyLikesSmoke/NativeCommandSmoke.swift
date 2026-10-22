@@ -51,6 +51,7 @@ enum NativeCommandSmoke {
         let navigation = NavigationModel(defaults: defaults)
         let lists = TrackLists()
         let commands = CommandDispatcher(player: player, navigation: navigation, lists: lists)
+        navigation.commandSubmission = { try await commands.execute($0) }
         try await wait("connection") { player.connected && player.snapshot != nil }
         await player.addRoot(folder)
         try await wait("three imported tracks") {
@@ -149,6 +150,18 @@ enum NativeCommandSmoke {
         try check(navigation.settingsTab == .appearance, "settings appearance did not open the tab")
         player.theme.update(savedColours)
         cases.append("colour-tint-reset-and-appearance-commands-apply-locally")
+        navigation.openCommandPalette()
+        navigation.palette.text = ":go albums"
+        await navigation.palette.submitText()
+        try check(navigation.destination == .albums && !navigation.palette.isOpen
+            && navigation.palette.history.entries.first == "go albums", "Palette did not run go albums")
+        try await commands.execute("history")
+        try check(navigation.palette.isOpen && navigation.palette.mode == .history, "history did not open the history palette")
+        navigation.openCommandPalette()
+        navigation.palette.text = ":seek +1q"
+        await navigation.palette.submitText()
+        try check(navigation.palette.error != nil && navigation.palette.isOpen, "Palette accepted an invalid command")
+        cases.append("palette-submits-records-history-and-keeps-errors-open")
         try await commands.execute("disconnect")
         do {
             try await commands.execute("play")
