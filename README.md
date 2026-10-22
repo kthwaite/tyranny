@@ -3,10 +3,9 @@
   tyranny likes smoke
 </h1>
 
-tyranny likes smoke is an mpd-style media player with a Rust server and a SwiftUI frontend. With an
-interface based loosely on classic iTunes, tyranny likes smoke borrows features from a variety of
-music players to form a piece of highly-personalised software that satisfies my own
-peculiar desires.
+_tyranny likes smoke_ is an mpd-style media player with a Rust server and (currently only) a SwiftUI frontend.
+With an interface based loosely on classic iTunes, _tyranny likes smoke_ borrows features from a variety of
+music players to form a piece of highly-personalised software that satisfies my own peculiar desires.
 
 ## Features
 
@@ -30,10 +29,6 @@ peculiar desires.
   duplicates, remove selected device copies, and see storage usage and synced
   status in library columns.
 
-Closing the window leaves playback running. Explicitly quitting the app pauses
-playback; the next launch resumes it. The server owns playback and durable state,
-so reconnecting the interface does not create a new player.
-
 ## Build and run
 
 ### Prerequisites
@@ -45,9 +40,8 @@ so reconnecting the interface does not create a new player.
 - Go 1.23 or newer and `pkg-config` for the USB helper.
 - Optional: [`just`](https://github.com/casey/just) (`brew install just`).
 
-Run these commands from the repository root. The first build downloads and
-compiles pinned FFmpeg, libopenmpt, and libusb sources; later builds reuse the
-verified cache. Homebrew FFmpeg and libusb are not required.
+The first build downloads and compiles pinned FFmpeg, libopenmpt, and libusb sources; later builds reuse the
+verified cache.
 
 To assemble and launch the development app:
 
@@ -56,30 +50,24 @@ scripts/build_macos.sh
 open "target/tyranny likes smoke.app"
 ```
 
-Stop any existing tyranny likes smoke app and daemon before rebuilding that app bundle. The
+Stop any existing _tyranny likes smoke_ app and daemon before rebuilding that app bundle. The
 development bundle combines a debug Swift client with a release Rust server and
-bundled native libraries. On launch, the app can bootstrap its local server;
-choose your music folder to import your library.
-
-The rename preserves the existing library, preferences, credentials, and background
-service identity. Compatibility identifiers still use `tyranny`: the application
-support directory, bundle/LaunchAgent IDs, and Walkman `Music/Tyranny` directory and
-upload journals. Existing repository URLs and historical verification artifacts
-also retain their original names.
+bundled native libraries. On launch, the app can bootstrap its local server. Onboarding flow
+prompts you to choose a local music folder to import your library.
 
 ### Development commands
 
-| Command              | Action                                                          |
-| -------------------- | --------------------------------------------------------------- |
-| `just`               | List available recipes.                                         |
-| `just build`         | Build both components in debug mode.                            |
-| `just build-server`  | Build the Rust server and command-line tools.                   |
-| `just build-client`  | Build the SwiftUI client.                                       |
-| `just test`          | Run both components' automated test suites.                     |
-| `just test-server`   | Run Rust unit and integration tests; hardware tests are opt-in. |
-| `just test-client`   | Run the Swift client test suite.                                |
-| `just build-release` | Build both components with release optimizations.               |
-| `just dmg`           | Package a self-contained release app in `target/tyranny likes smoke.dmg`.   |
+| Command              | Action                                                                    |
+| -------------------- | ------------------------------------------------------------------------- |
+| `just`               | List available recipes.                                                   |
+| `just build`         | Build both components in debug mode.                                      |
+| `just build-server`  | Build the Rust server and command-line tools.                             |
+| `just build-client`  | Build the SwiftUI client.                                                 |
+| `just test`          | Run both components' automated test suites.                               |
+| `just test-server`   | Run Rust unit and integration tests; hardware tests are opt-in.           |
+| `just test-client`   | Run the Swift client test suite.                                          |
+| `just build-release` | Build both components with release optimizations.                         |
+| `just dmg`           | Package a self-contained release app in `target/tyranny likes smoke.dmg`. |
 
 Component builds do **not** replace the app bundle. Rust artifacts go into
 `target/portable-rust`; Swift artifacts go into `target/swift-client`.
@@ -106,11 +94,3 @@ downloaded copies.
 
 The current output backend and desktop client target macOS. Broader platform,
 format, and service support remains tracked in the requirements.
-
-## Further reading
-
-- [Development guide and implementation notes](SPIKE.md)
-- [Verification results and known limitations](SPIKE_RESULTS.md)
-- [Product requirements](REQUIREMENTS.md)
-- [Lyrics provider integration notes](docs/lyrics-providers.md)
-- [Sony Walkman setup, sync guarantees, and verification](docs/device-sync.md)
