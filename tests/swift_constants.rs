@@ -1,7 +1,7 @@
 //! The Swift client hard-codes a few protocol constants. These tests read the Swift sources and
 //! fail when a constant drifts from the server's value.
 use std::{fs, path::Path};
-use tyranny::{
+use tyranny_likes_smoke::{
     protocol::{MAX_STATION_BATCH, VERSION},
     transport::MAX_REQUEST_BYTES,
 };
@@ -43,7 +43,7 @@ fn swift_constant(file: &str, owner: &str, name: &str) -> u64 {
 #[test]
 fn swift_wire_protocol_version_matches_server() {
     let swift = swift_constant(
-        "macos/Sources/TyrannyCore/WireModels.swift",
+        "macos/Sources/TyrannyLikesSmokeCore/WireModels.swift",
         "enum WireProtocol",
         "version",
     );
@@ -57,7 +57,7 @@ fn swift_wire_protocol_version_matches_server() {
 #[test]
 fn swift_station_batch_limit_matches_server() {
     let swift = swift_constant(
-        "macos/Sources/TyrannyCore/StationCatalog.swift",
+        "macos/Sources/TyrannyLikesSmokeCore/StationCatalog.swift",
         "class StationCatalog",
         "maximumBatch",
     );
@@ -70,7 +70,7 @@ fn swift_station_batch_limit_matches_server() {
 #[test]
 fn swift_request_frame_limit_matches_server() {
     let swift = swift_constant(
-        "macos/Sources/TyrannyCore/CommandTransport.swift",
+        "macos/Sources/TyrannyLikesSmokeCore/CommandTransport.swift",
         "enum RequestFrame",
         "limit",
     );

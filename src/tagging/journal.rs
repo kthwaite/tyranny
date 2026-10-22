@@ -266,7 +266,10 @@ mod tests {
     use std::path::Path;
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tyranny-journal-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-journal-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir(&dir).unwrap();
         dir
     }

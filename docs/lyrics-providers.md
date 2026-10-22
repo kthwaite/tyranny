@@ -52,19 +52,19 @@ Use authoritative local track metadata and duration. Do not broaden a failed exa
 | `hasWordSync` | Boolean; indicates word timings in `lyricsfile`. |
 | `lyricsfile` | String; raw Lyricsfile YAML, documented as present on every record. |
 
-Tyranny consumes plain text and line-synchronized LRC only; it need not parse Lyricsfile YAML or word timings. Accept additional provider fields without changing the wire protocol.
+tyranny likes smoke consumes plain text and line-synchronized LRC only; it need not parse Lyricsfile YAML or word timings. Accept additional provider fields without changing the wire protocol.
 
 ### Outcome mapping and service etiquette
 
-These are Tyranny integration decisions unless explicitly attributed to the API documentation:
+These are tyranny likes smoke integration decisions unless explicitly attributed to the API documentation:
 
 - Nonempty embedded lyrics take precedence and require no network request. Streams return `missing`; do not search arbitrary stream metadata.
 - HTTP 200 with `instrumental: true` maps to `instrumental`, not a network failure. Otherwise usable plain/LRC text maps to `ready`. An empty non-instrumental record does not establish that a track is instrumental.
 - HTTP 404 (`TrackNotFound`) maps to an expiring `missing` result. Timeouts, malformed responses, 400/401, 429, and 5xx are `unavailable`, not permanent negative matches.
-- Identify requests with `User-Agent: Tyranny/<version> (https://github.com/kthwaite/tyranny)`. LRCLIB requires app name/version and a project URL or contact; it allows `X-User-Agent` or `Lrclib-Client` when `User-Agent` cannot be set.
+- Identify requests with `User-Agent: tyranny-likes-smoke/<version> (https://github.com/kthwaite/tyranny)`. LRCLIB requires app name/version and a project URL or contact; it allows `X-User-Agent` or `Lrclib-Client` when `User-Agent` cannot be set.
 - The docs require honoring `Retry-After` for 429 and document it for 503; wait at least that long before another attempt, with jitter rather than a synchronized retry burst. Do not rely on an error body being JSON. Sequential requests and a 200–500 ms delay are recommended, especially for batch work. Do not scan the whole library for lyrics.
 - Registration is optional. Public `Lrclib-App-Id` identifies registered client-side apps; secret `Lrclib-Api-Key` identifies server-side registrations. Anonymous access is adequate for this slice; do not ship invented credentials or promise fixed quotas, which the docs explicitly say may change.
 - Bound the local cache; expire missing and transient results, and invalidate embedded discovery when files change. Successful online results remain available offline until eviction. Keep transient service failures distinguishable from misses. Run discovery/network work outside the playback owner and use a separate native request connection.
-- Display “Lyrics: LRCLIB” with a provider link; a record URL uses `https://lrclib.net/tracks/{id}` (an [official indexed record page](https://lrclib.net/tracks/13352860) establishes that route). This credit is **Tyranny policy**, not a claim that current API docs mandate that wording or confer copyright permission. Embedded lyrics should be labeled as embedded, not attributed to LRCLIB.
+- Display “Lyrics: LRCLIB” with a provider link; a record URL uses `https://lrclib.net/tracks/{id}` (an [official indexed record page](https://lrclib.net/tracks/13352860) establishes that route). This credit is **tyranny likes smoke policy**, not a claim that current API docs mandate that wording or confer copyright permission. Embedded lyrics should be labeled as embedded, not attributed to LRCLIB.
 
 No provider credentials, production database changes, live-app changes, or builds/tests were needed for this assessment.

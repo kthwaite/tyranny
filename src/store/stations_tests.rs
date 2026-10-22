@@ -8,7 +8,10 @@ use crate::protocol::{MAX_STATION_BATCH, MAX_STATIONS, Station};
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("tyranny-stations-{}.sqlite", uuid::Uuid::new_v4())))
+        Self(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-stations-{}.sqlite",
+            uuid::Uuid::new_v4()
+        )))
     }
 }
 impl Drop for Scratch {

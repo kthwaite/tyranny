@@ -1,6 +1,6 @@
 # Sony Walkman USB song management
 
-Tyranny's macOS client talks directly to a local `tyranny-mtp` helper. The music
+tyranny likes smoke's macOS client talks directly to a local `tyranny-likes-smoke-mtp` helper. The music
 server and its wire protocol are not involved. The supported USB profile is the
 Sony NW-A306 in File Transfer mode (`054c:0e6e`). Interface discovery retains
 OpenMTP's bulk-in/bulk-out/interrupt-in endpoint detection and MTP interface
@@ -13,13 +13,13 @@ Unlock the Walkman, select **USB File Transfer**, and close OpenMTP, Android Fil
 Transfer, or another application holding the MTP interface. Connect with a data
 cable. Discovery only opens a session and reads device/storage information; it
 does not recursively read music. Inventory and content matching are read-only.
-A process-wide advisory lock serializes Tyranny USB sessions; libusb interface
+A process-wide advisory lock serializes tyranny likes smoke USB sessions; libusb interface
 claiming also reports contention with other applications. Discovery uses a
 five-second per-transfer timeout; inventory and content operations use sixty
 seconds for large SD cards. These are per-transfer, not whole-job deadlines.
 A failing close does not reset the device; reconnect after a lost protocol session.
 
-## Using Tyranny
+## Using tyranny likes smoke
 
 The connected player appears under **Devices** in the sidebar. Click it to see
 its audio files, switch between internal storage and SD card, search by filename
@@ -64,7 +64,7 @@ does not erase a failed copy or deletion that still needs attention.
   copy. Digests are reused only within that operation after object revalidation;
   the helper intentionally does not persist unverified metadata-only hash caches.
   The client invalidates confirmed matches when library revision or device
-  inventory changes; an explicit Refresh checks changes made outside Tyranny.
+  inventory changes; an explicit Refresh checks changes made outside tyranny likes smoke.
 - `sync` uses the same content identity across all storages. A song already in
   internal storage is skipped even when SD storage is selected. A different song
   with the same filename is not skipped or overwritten. New audio goes under
@@ -104,7 +104,7 @@ does not erase a failed copy or deletion that still needs attention.
   failure. If refresh fails, the response omits `device` rather than returning
   stale state as current. Errors are not turned into successful empty inventories.
 - MTP does not offer an atomic filesystem transaction or a device-wide lock
-  against Android applications. Tyranny's checks protect its explicit operations,
+  against Android applications. tyranny likes smoke's checks protect its explicit operations,
   but concurrent changes made on the Walkman itself can still cause errors.
 
 ## Helper JSON interface
@@ -148,10 +148,10 @@ selects a device with an empty selector and calls `Configure`;
 [`go-mtpfs` selection](https://github.com/ganeshrvel/go-mtpfs/blob/1c3302b3c476f69e787a0339122a804dd518a007/mtp/select.go)
 opens candidates and rejects multiple matches. The
 [`Configure` implementation](https://github.com/ganeshrvel/go-mtpfs/blob/1c3302b3c476f69e787a0339122a804dd518a007/mtp/mtp.go#L659-L693)
-can reset USB on session-open failure. Those policies do not fit Tyranny's stable
+can reset USB on session-open failure. Those policies do not fit tyranny likes smoke's stable
 selection and nonintrusive discovery requirements.
 
-Tyranny therefore reuses the **same mature native transport**, not a new MTP
+tyranny likes smoke therefore reuses the **same mature native transport**, not a new MTP
 protocol implementation: only the `mtp` package of that exact `go-mtpfs` revision
 is vendored under `tools/mtp/internal/mtp`. It directly uses the upstream
 [object/storage/session operations](https://github.com/ganeshrvel/go-mtpfs/blob/1c3302b3c476f69e787a0339122a804dd518a007/mtp/ops.go),
@@ -159,7 +159,7 @@ including `GetObjectHandles`, `GetObjectInfo`, `GetObject`, `SendObjectInfo`,
 `SendObject`, `SetObjectPropValue`, and `DeleteObject`. The local modifications
 restrict candidate selection to the supported Sony USB profile, verify the MTP
 interface string before claiming USB, propagate claim errors, and remove
-reset-on-close-failure. Tyranny calls `OpenSession`
+reset-on-close-failure. tyranny likes smoke calls `OpenSession`
 rather than `Configure`. FUSE, Electron, and the high-level `go-mtpx` module are
 not linked into the helper.
 
@@ -180,7 +180,7 @@ for checksum-verified libusb source and the Go checksum-pinned USB module.
 scripts/build_mtp.sh
 ```
 
-This prints the pinned native prefix and writes `target/mtp/tyranny-mtp`.
+This prints the pinned native prefix and writes `target/mtp/tyranny-likes-smoke-mtp`.
 `just build-client`, `just build-client-release`, and `scripts/build_macos.sh`
 build the helper. The app packager copies it beside the Swift executable, bundles
 its complete non-system dylib dependency closure into `Contents/Frameworks`,
@@ -210,13 +210,13 @@ claim hardware compatibility. Build the pinned prefix first, then:
 ```sh
 prefix="$(scripts/build_mtp.sh)"
 (cd tools/mtp && PKG_CONFIG_PATH="$prefix/lib/pkgconfig" go test ./...)
-printf '%s\n' '{"operation":"discover"}' | target/mtp/tyranny-mtp
+printf '%s\n' '{"operation":"discover"}' | target/mtp/tyranny-likes-smoke-mtp
 ```
 
 Use the returned device ID in read-only inventory/match requests:
 
 ```sh
-printf '%s\n' '{"operation":"inventory","device_id":"usb:054c:0e6e:31303039303735"}' | target/mtp/tyranny-mtp
+printf '%s\n' '{"operation":"inventory","device_id":"usb:054c:0e6e:31303039303735"}' | target/mtp/tyranny-likes-smoke-mtp
 ```
 
 The serial-specific ID above corresponds to the connected device observed during
@@ -230,7 +230,7 @@ unit test is not evidence that hardware mutation acceptance has been exercised.
 ## Observed hardware validation
 
 On 2026-10-21, the connected NW-A306 exposed internal storage and a SanDisk SD
-card. Tyranny listed 34 and 7,745 songs respectively; 139 macOS resource-fork
+card. tyranny likes smoke listed 34 and 7,745 songs respectively; 139 macOS resource-fork
 sidecars on the card were correctly excluded without removing them. The first
 complete directory walk took approximately 39 seconds.
 

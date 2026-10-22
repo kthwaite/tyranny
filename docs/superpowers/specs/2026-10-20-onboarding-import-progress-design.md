@@ -74,7 +74,7 @@ The import screen has one of six stages, computed from the session's root id and
 | Discovering | phase `discovering` for the session root | Importing Your Music | indeterminate | "Finding music… 1,204 files found" | Browse Library |
 | Indexing | phase `indexing` for the session root | Importing Your Music | determinate, `min(processed, total) / total` | "Reading 412 of 1,129 files" | Browse Library |
 | Done | phase `complete` for the session root, `tracks > 0` | Your Music Is Ready | none; a large checkmark symbol instead | library totals, e.g. "1,129 songs · 3.4 days · 41.7 GB" | **Show Songs** (prominent, default) |
-| Empty | phase `complete` for the session root, `tracks == 0` | No Music Found | none | "Tyranny found no audio files in this folder." | **Choose Another Folder…** (`model.chooseFolder`) |
+| Empty | phase `complete` for the session root, `tracks == 0` | No Music Found | none | "tyranny likes smoke found no audio files in this folder." | **Choose Another Folder…** (`model.chooseFolder`) |
 | Stopped | phase `failed` or `interrupted` for the session root | Import Stopped | none | `last_error`, or "The import did not finish." | **Try Again** (rescans the root), Browse Library |
 
 - Indexing with `total` nil or 0 shows the indeterminate bar and "Reading 412 files".
@@ -106,7 +106,7 @@ fraction passes it or the stage changes. Clamp to `0...1`.
 
 ## Structure
 
-- **TyrannyCore** gets a pure `ImportProgress` type (name is the builder's call): given the session
+- **TyrannyLikesSmokeCore** gets a pure `ImportProgress` type (name is the builder's call): given the session
   root id, the `ScanStatus`, the library track count and the previous shown fraction, it returns the
   stage, title, detail text, failure line, and fraction (nil for indeterminate). All copy above lives
   here so it is unit-tested.
@@ -119,7 +119,7 @@ fraction passes it or the stage changes. Clamp to `0...1`.
 
 ## Verification
 
-- TyrannyCore unit tests for every row of the stage table, the failure line (0, 1, many), nil and
+- TyrannyLikesSmokeCore unit tests for every row of the stage table, the failure line (0, 1, many), nil and
   zero `total`, clamping, the monotonic rule, a status for another root, Empty, and the baseline
   rule.
 - Unit tests for the session start rules (first folder only; launch rule; not on second folder).

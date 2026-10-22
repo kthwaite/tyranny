@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"tyranny-mtp/internal/mtp"
+	"tyranny-likes-smoke-mtp/internal/mtp"
 )
 
 // An in-memory object transport, not a fake sync implementation. It deliberately

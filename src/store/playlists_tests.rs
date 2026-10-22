@@ -9,8 +9,10 @@ use crate::{
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("tyranny-playlist-store-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-playlist-store-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir(&path).unwrap();
         Self(path)
     }

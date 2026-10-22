@@ -83,7 +83,7 @@ system selection.
 
 ## Resolution
 
-Pure logic in TyrannyCore, which has no AppKit or SwiftUI imports:
+Pure logic in TyrannyLikesSmokeCore, which has no AppKit or SwiftUI imports:
 
 - `RGB` (sRGB, components 0...1) with `#RRGGBB` parse and format.
 - `ColourSettings`: an optional custom `RGB` per token, plus `tintFromArtwork: Bool` (default
@@ -160,7 +160,7 @@ They also let a native smoke drive the tint.
 
 ## Verification
 
-- **TyrannyCore tests (swift-testing):**
+- **TyrannyLikesSmokeCore tests (swift-testing):**
   - hex round-trip and rejection;
   - `ColourSettings` load and save with a UserDefaults suite, defaults `tintFromArtwork == true`;
   - contrast ratio known values (black/white = 21);

@@ -8,7 +8,7 @@ original design, not current connection instructions; see [SPIKE.md](../../../SP
 
 **Goal:** Cut ~130 ms from client launch → rows on screen at 50k tracks with a launch prefetch of the first Songs window, cheaper track cells and no redundant first reload, and pin startup with scale_gate budgets.
 
-**Architecture:** A TyrannyCore actor `LaunchPrefetchSlot` holds the one prefetched reply and decides the one-shot claim. An app-side `LaunchPrefetch` opens a short-lived background WebSocket from `PlayerModel.init`, sends the Songs `list_tracks`, and fulfils the slot; `ListModel.fetch` claims it. Table changes are local to `VirtualTrackTable.swift`; budgets go in `scripts/scale_gate.py`.
+**Architecture:** A TyrannyLikesSmokeCore actor `LaunchPrefetchSlot` holds the one prefetched reply and decides the one-shot claim. An app-side `LaunchPrefetch` opens a short-lived background WebSocket from `PlayerModel.init`, sends the Songs `list_tracks`, and fulfils the slot; `ListModel.fetch` claims it. Table changes are local to `VirtualTrackTable.swift`; budgets go in `scripts/scale_gate.py`.
 
 **Tech Stack:** Swift 6 (strict concurrency), SwiftUI/AppKit, URLSessionWebSocketTask, Swift Testing; Python 3 gate script.
 
@@ -23,7 +23,7 @@ original design, not current connection instructions; see [SPIKE.md](../../../SP
 - Claim: first claim only; fields equal as `[String: JSONValue]` (structural); ok reply only; otherwise normal fetch.
 - Prefetch security = `WireClient`'s: validated loopback endpoint, token read only after validation, bearer header, redirects rejected, ephemeral session without caches/cookies/proxies.
 - Budgets (release server, 50k): ready ≤ 300 ms, hello ≤ 50 ms, first Songs page ≤ 250 ms, total ≤ 500 ms; client warm `startup.process_to_model_ready_ms` ≤ 1500 ms independent of Accessibility. Debug server: record, do not assert.
-- Swift builds clean with `-warnings-as-errors` (debug and release); `swift test`; `python3 scripts/client_gate.py --model-only --app macos/.build/debug/Tyranny`.
+- Swift builds clean with `-warnings-as-errors` (debug and release); `swift test`; `python3 scripts/client_gate.py --model-only --app "macos/.build/debug/tyranny likes smoke"`.
 - Native `--app` gates need Accessibility/Screen Recording: not runnable here.
 - Commit messages: plain imperative sentences, no attribution lines. Stage by explicit path. Never touch files outside the task's list.
 
@@ -37,11 +37,11 @@ original design, not current connection instructions; see [SPIKE.md](../../../SP
 
 ---
 
-### Task 1: `LaunchPrefetchSlot` in TyrannyCore
+### Task 1: `LaunchPrefetchSlot` in TyrannyLikesSmokeCore
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/LaunchPrefetch.swift`
-- Test: `macos/Tests/TyrannyCoreTests/LaunchPrefetchTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/LaunchPrefetch.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/LaunchPrefetchTests.swift`
 
 **Interfaces:**
 - Produces:
@@ -83,7 +83,7 @@ Expected: PASS; no warnings (`swift build -Xswiftc -warnings-as-errors`).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/LaunchPrefetch.swift macos/Tests/TyrannyCoreTests/LaunchPrefetchTests.swift
+git add macos/Sources/TyrannyLikesSmokeCore/LaunchPrefetch.swift macos/Tests/TyrannyLikesSmokeCoreTests/LaunchPrefetchTests.swift
 git commit -m "Hold one launch prefetch reply for the first matching fetch"
 ```
 
@@ -92,25 +92,25 @@ git commit -m "Hold one launch prefetch reply for the first matching fetch"
 ### Task 2: Launch prefetch connection and the first-fetch claim
 
 **Files:**
-- Create: `macos/Sources/Tyranny/LaunchPrefetch.swift`
-- Modify: `macos/Sources/Tyranny/WireClient.swift` (make `validateEndpoint`, `readToken`, `RedirectRejector` and the URLSession configuration usable off the main actor — `nonisolated static`, no behaviour change)
-- Modify: `macos/Sources/Tyranny/PlayerModel.swift` (`init` ≈78: start the prefetch after `endpoint`/`tokenPath` are set; add `func claimLaunchPrefetch(_ fields: [String: JSONValue]) async -> Data?`)
-- Modify: `macos/Sources/Tyranny/Models/ListModel.swift` (`fetch` ≈446: claim before `player.send`; shared launch description)
-- Possibly modify: `macos/Sources/Tyranny/Models/NavigationModel.swift` (only to expose the persisted inputs the shared description needs)
+- Create: `macos/Sources/TyrannyLikesSmoke/LaunchPrefetch.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/WireClient.swift` (make `validateEndpoint`, `readToken`, `RedirectRejector` and the URLSession configuration usable off the main actor — `nonisolated static`, no behaviour change)
+- Modify: `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift` (`init` ≈78: start the prefetch after `endpoint`/`tokenPath` are set; add `func claimLaunchPrefetch(_ fields: [String: JSONValue]) async -> Data?`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/ListModel.swift` (`fetch` ≈446: claim before `player.send`; shared launch description)
+- Possibly modify: `macos/Sources/TyrannyLikesSmoke/Models/NavigationModel.swift` (only to expose the persisted inputs the shared description needs)
 
 **Interfaces:**
 - Consumes: Task 1's `LaunchPrefetchSlot`.
 - Produces: `final class LaunchPrefetch: Sendable` (or a `nonisolated` struct + task) with `static func start(endpoint: String, tokenPath: String, request: [String: JSONValue]) -> LaunchPrefetchSlot`; `PlayerModel.claimLaunchPrefetch(_:) async -> Data?` (returns nil after the first call); a pure `static func launchSongsDescription(...) -> ListDescription` (name is the implementer's call) that `ListModel` also uses for its first Songs description.
 
-- [ ] **Step 1: Shared description.** Find how `ListModel` builds its Songs description at launch (`init` ≈122 and `currentDescription()` ≈207: source, browser, query, sort, grouping). Extract one pure function both the prefetch and `ListModel` call with the same persisted inputs (UserDefaults keys via `NavigationModel`'s existing key helpers, e.g. `groupingKey`). If any input cannot be known at `PlayerModel.init`, leave it at the value `ListModel` uses for its first fetch and rely on the claim's equality check. Put the function in TyrannyCore if it is pure; add a unit test that it produces the same description as `ListModel` would for: default defaults; Songs grouped by album.
+- [ ] **Step 1: Shared description.** Find how `ListModel` builds its Songs description at launch (`init` ≈122 and `currentDescription()` ≈207: source, browser, query, sort, grouping). Extract one pure function both the prefetch and `ListModel` call with the same persisted inputs (UserDefaults keys via `NavigationModel`'s existing key helpers, e.g. `groupingKey`). If any input cannot be known at `PlayerModel.init`, leave it at the value `ListModel` uses for its first fetch and rely on the claim's equality check. Put the function in TyrannyLikesSmokeCore if it is pure; add a unit test that it produces the same description as `ListModel` would for: default defaults; Songs grouped by album.
 
-- [ ] **Step 2: Prefetch connection** in `macos/Sources/Tyranny/LaunchPrefetch.swift`, off the main actor: validate endpoint, read token, open an ephemeral URLSession with `RedirectRejector`, `webSocketTask` with the bearer header and `maximumMessageSize` = `WireClient.responseLimit`, resume, receive until the `hello` message, send `{"id": 1, "command": "list_tracks", …request}`, receive until the reply with `id` 1, `fulfil` its body if ok else `fulfil(nil)`, cancel the socket and invalidate the session. A 2 s overall deadline cancels everything and `fulfil(nil)`. Read `WireClient.receive`/`IncomingMessage` for the exact hello and reply shapes; reuse their decoding. Request fields use the same `JSONValue` constructors `ListModel.fetch` uses (`.int(offset)`, `.int(limit)`, `.null`) so structural equality holds.
+- [ ] **Step 2: Prefetch connection** in `macos/Sources/TyrannyLikesSmoke/LaunchPrefetch.swift`, off the main actor: validate endpoint, read token, open an ephemeral URLSession with `RedirectRejector`, `webSocketTask` with the bearer header and `maximumMessageSize` = `WireClient.responseLimit`, resume, receive until the `hello` message, send `{"id": 1, "command": "list_tracks", …request}`, receive until the reply with `id` 1, `fulfil` its body if ok else `fulfil(nil)`, cancel the socket and invalidate the session. A 2 s overall deadline cancels everything and `fulfil(nil)`. Read `WireClient.receive`/`IncomingMessage` for the exact hello and reply shapes; reuse their decoding. Request fields use the same `JSONValue` constructors `ListModel.fetch` uses (`.int(offset)`, `.int(limit)`, `.null`) so structural equality holds.
 
 - [ ] **Step 3: Wire it.** `PlayerModel.init`: after `endpoint`/`tokenPath` are final, `launchPrefetch = LaunchPrefetch.start(...)` with the shared description's request fields. Skip it for harness modes that never show Songs first (none known — note in the report if you find one). `claimLaunchPrefetch` calls `slot.claim(fields, until: start + 2 s)` once, then drops the slot. `ListModel.fetch`: build the fields dictionary first; `if let data = await player.claimLaunchPrefetch(fields)`, decode it as the normal reply (same `ListTracksResponse` path, including `ServerFailure` handling for error bodies); else `player.send` as today.
 
 - [ ] **Step 4: Build and test**
 
-Run: `cd macos && swift build -Xswiftc -warnings-as-errors && swift build -c release -Xswiftc -warnings-as-errors && swift test` then `python3 scripts/client_gate.py --model-only --app macos/.build/debug/Tyranny`
+Run: `cd macos && swift build -Xswiftc -warnings-as-errors && swift build -c release -Xswiftc -warnings-as-errors && swift test` then `python3 scripts/client_gate.py --model-only --app "macos/.build/debug/tyranny likes smoke"`
 Expected: all clean/pass.
 
 - [ ] **Step 5: Prove the claim is used (report only, not committed).** Add a temporary `print` to stderr on claim hit/miss, launch the debug app once with `--scale-output <tmp>` against a server seeded by `target/spikes/client-startup/seed.py` (see `target/spikes/quiet-jade/native.py` for the launch arguments; use harness arguments and an isolated state dir), confirm "hit", then remove the print. Also confirm a miss falls back by launching with Songs grouped differently in the harness defaults suite (`dev.tyranny.controller.harness`) only if the shared function cannot read it — otherwise skip and say why.
@@ -118,7 +118,7 @@ Expected: all clean/pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/LaunchPrefetch.swift macos/Sources/Tyranny/WireClient.swift macos/Sources/Tyranny/PlayerModel.swift macos/Sources/Tyranny/Models/ListModel.swift <any other touched file>
+git add macos/Sources/TyrannyLikesSmoke/LaunchPrefetch.swift macos/Sources/TyrannyLikesSmoke/WireClient.swift macos/Sources/TyrannyLikesSmoke/PlayerModel.swift macos/Sources/TyrannyLikesSmoke/Models/ListModel.swift <any other touched file>
 git commit -m "Prefetch the first Songs window while the window is built"
 ```
 
@@ -127,7 +127,7 @@ git commit -m "Prefetch the first Songs window while the window is built"
 ### Task 3: Cheaper track cells and no redundant first reload
 
 **Files:**
-- Modify: `macos/Sources/Tyranny/Lists/VirtualTrackTable.swift` (`Coordinator.update` ≈159–215; `TrackCellView` ≈575 onward)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Lists/VirtualTrackTable.swift` (`Coordinator.update` ≈159–215; `TrackCellView` ≈575 onward)
 
 **Interfaces:** none new.
 
@@ -137,13 +137,13 @@ git commit -m "Prefetch the first Songs window while the window is built"
 
 - [ ] **Step 3: Build, test, render.**
 
-Run: `cd macos && swift build -Xswiftc -warnings-as-errors && swift build -c release -Xswiftc -warnings-as-errors && swift test` then `cargo build && python3 scripts/render_views.py --app macos/.build/debug/Tyranny --out target/render-startup`
+Run: `cd macos && swift build -Xswiftc -warnings-as-errors && swift build -c release -Xswiftc -warnings-as-errors && swift test` then `cargo build && python3 scripts/render_views.py --app "macos/.build/debug/tyranny likes smoke" --out target/render-startup`
 Expected: clean; renders complete with no `error:` lines. Look at the Songs render with a playing track (the player-bar renders 15–16 play a track): the speaker icon shows on the playing row only, unchanged from before.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/Lists/VirtualTrackTable.swift
+git add macos/Sources/TyrannyLikesSmoke/Lists/VirtualTrackTable.swift
 git commit -m "Share the playing icon and skip the first redundant row reload"
 ```
 

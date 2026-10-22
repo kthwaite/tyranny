@@ -184,7 +184,10 @@ impl LibraryFixture {
     /// gets album "Old Album" and album artist "Old Artist" unless the entry
     /// sets them. All copies must form one album.
     pub(super) fn new(files: &[(&str, &[(TagField, &str)])]) -> Self {
-        let root = std::env::temp_dir().join(format!("tyranny-tagging-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-tagging-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir(&root).unwrap();
         let root = root.canonicalize().unwrap();
         let folder = root.join("Album");

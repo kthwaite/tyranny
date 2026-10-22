@@ -27,7 +27,7 @@ const MAX_TAG_BYTES: usize = 32;
 const MAX_CODEC_BYTES: usize = 16;
 const MAX_UUID_BYTES: usize = 64;
 pub(super) const USER_AGENT: &str = concat!(
-    "Tyranny/",
+    "tyranny-likes-smoke/",
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/kthwaite/tyranny)"
 );
@@ -187,7 +187,7 @@ impl Provider {
                 bail!("radio-browser.info sent a redirect. Try again.")
             }
             status => {
-                eprintln!("tyranny: {origin} answered {status}");
+                eprintln!("tyranny likes smoke: {origin} answered {status}");
                 bail!("radio-browser.info answered with an error. Try again.")
             }
         }
@@ -246,7 +246,7 @@ const UNREACHABLE: &str = "radio-browser.info could not be reached. Try again.";
 /// reqwest's Display includes the full request URL, which has no place in a message the user
 /// sees. The detail goes to stderr, like the owner's other background failures.
 fn failure(origin: &Url, what: &str, error: &dyn std::fmt::Display, shown: &str) -> anyhow::Error {
-    eprintln!("tyranny: directory {what} to {origin} failed: {error}");
+    eprintln!("tyranny likes smoke: directory {what} to {origin} failed: {error}");
     anyhow!("{shown}")
 }
 
@@ -286,7 +286,7 @@ fn read_bounded(
     loop {
         cancel.check(deadline)?;
         let count = response.read(&mut chunk).map_err(|error| {
-            eprintln!("tyranny: reading a directory reply failed: {error}");
+            eprintln!("tyranny likes smoke: reading a directory reply failed: {error}");
             anyhow!(UNREACHABLE)
         })?;
         if count == 0 {
@@ -316,7 +316,7 @@ struct RawStation {
 
 fn parse(bytes: &[u8]) -> Result<Vec<DirectoryStation>> {
     let records: Vec<serde_json::Value> = serde_json::from_slice(bytes).map_err(|error| {
-        eprintln!("tyranny: directory reply is not a JSON list: {error}");
+        eprintln!("tyranny likes smoke: directory reply is not a JSON list: {error}");
         anyhow!("radio-browser.info sent an invalid reply.")
     })?;
     let mut seen = HashSet::new();

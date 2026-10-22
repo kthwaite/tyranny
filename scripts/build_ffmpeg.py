@@ -320,7 +320,7 @@ def build_dependencies(prefix, downloads, work, identity, env):
                              "lib/pkgconfig/libopenmpt.pc", "include/libopenmpt/libopenmpt.h"):
                 if not (prefix / relative).is_file():
                     raise RuntimeError(f"libopenmpt install did not produce {relative}")
-        provenance = prefix / "share/tyranny-ffmpeg/dependencies" / name
+        provenance = prefix / "share/tyranny-likes-smoke-ffmpeg/dependencies" / name
         provenance.mkdir(parents=True)
         shutil.copyfile(archive, provenance / specification["archive"])
         for relative in specification["license_files"]:
@@ -365,7 +365,7 @@ def build(prefix, archive, identity, options, env, root):
                     raise RuntimeError(f"FFmpeg install did not produce {name}")
             if not (prefix / "lib/pkgconfig" / f"lib{library}.pc").is_file():
                 raise RuntimeError(f"FFmpeg install did not produce lib{library}.pc")
-        provenance = prefix / "share/tyranny-ffmpeg"
+        provenance = prefix / "share/tyranny-likes-smoke-ffmpeg"
         provenance.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(archive, provenance / ARCHIVE)
         for name in ("COPYING.LGPLv2.1", "LICENSE.md"):

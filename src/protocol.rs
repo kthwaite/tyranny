@@ -532,7 +532,7 @@ pub struct TagEditSummary {
     pub reverted: bool,
 }
 
-/// A tag field that a MusicBrainz lookup can propose and Tyranny can write.
+/// A tag field that a MusicBrainz lookup can propose and tyranny likes smoke can write.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TagField {

@@ -152,8 +152,8 @@ def fixture(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", default="target/debug/tyranny-server")
-    parser.add_argument("--client", default="target/debug/tyrannyctl")
+    parser.add_argument("--server", default="target/debug/tyranny-likes-smoke-server")
+    parser.add_argument("--client", default="target/debug/tyranny-likes-smoke-ctl")
     parser.add_argument("--work-dir", default="target/server-gate")
     parser.add_argument("--coreaudio", action="store_true")
     args = parser.parse_args()

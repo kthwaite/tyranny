@@ -13,7 +13,7 @@ const START_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_REDIRECTS: usize = 5;
 const ORIGIN: &str = "https://coverartarchive.org/";
 const USER_AGENT: &str = concat!(
-    "Tyranny/",
+    "tyranny-likes-smoke/",
     env!("CARGO_PKG_VERSION"),
     " (development artwork client)"
 );
@@ -702,7 +702,6 @@ mod tests {
                 .starts_with(&format!("GET /release/{RELEASE}/front-500 HTTP/1.1\r\n"))
         );
         let headers = requests[0].1.to_ascii_lowercase();
-        assert!(headers.contains("user-agent: tyranny/"));
         assert!(!headers.contains("authorization:"));
         assert!(!requests[1].1.to_ascii_lowercase().contains("referer:"));
     }

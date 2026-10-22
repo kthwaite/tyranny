@@ -6,8 +6,8 @@
 
 **Architecture:**
 - The server adds an optional `artist_id` to `NowPlaying`, so the bar can link to the artist.
-- The quit and resume decision is pure TyrannyCore logic: `QuitSuspension`, `QuitSuspensionStore` and `Deadline`. The app delegate and `PlayerModel` wire it up.
-- The player bar is a new SwiftUI view in the app target. The toolbar keeps only the filter field. A persisted `NavigationModel` flag places the art, and TyrannyCore's `NowPlayingArt.placement` decides where it shows.
+- The quit and resume decision is pure TyrannyLikesSmokeCore logic: `QuitSuspension`, `QuitSuspensionStore` and `Deadline`. The app delegate and `PlayerModel` wire it up.
+- The player bar is a new SwiftUI view in the app target. The toolbar keeps only the filter field. A persisted `NavigationModel` flag places the art, and TyrannyLikesSmokeCore's `NowPlayingArt.placement` decides where it shows.
 
 **Tech Stack:**
 - Rust (tokio, serde) for the server.
@@ -59,24 +59,24 @@
 | `src/owner.rs` | modify | `describe` fills `artist_id` |
 | `src/playback.rs` | modify | `source_metadata` sets `artist_id: None` |
 | `tests/support/library_lists.rs` | modify | assert `artist_id` in `now_playing_reports_format_and_applied_gain` |
-| `macos/Sources/TyrannyCore/WireModels.swift` | modify | Swift `NowPlaying.artist_id` |
-| `macos/Sources/TyrannyCore/QuitSuspension.swift` | create | `QuitSuspension`, `QuitSuspensionStore`, `Deadline` |
-| `macos/Sources/TyrannyCore/NowPlayingArt.swift` | create | `NowPlayingArt.placement` |
-| `macos/Tests/TyrannyCoreTests/QuitSuspensionTests.swift` | create | Task 2 tests |
-| `macos/Tests/TyrannyCoreTests/NowPlayingArtTests.swift` | create | Task 4 tests |
-| `macos/Tests/TyrannyCoreTests/WireModelTests.swift` | modify | `artist_id` decode tests |
-| `macos/Sources/Tyranny/TyrannyApp.swift` | modify | `applicationShouldTerminate` |
-| `macos/Sources/Tyranny/PlayerModel.swift` | modify | `suspendForQuit()`, resume on launch |
-| `macos/Sources/Tyranny/ManagedServer.swift` | modify | header comment only |
-| `macos/Sources/Tyranny/NativeSmoke.swift` | modify | relaunch waits for resumed playback |
+| `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift` | modify | Swift `NowPlaying.artist_id` |
+| `macos/Sources/TyrannyLikesSmokeCore/QuitSuspension.swift` | create | `QuitSuspension`, `QuitSuspensionStore`, `Deadline` |
+| `macos/Sources/TyrannyLikesSmokeCore/NowPlayingArt.swift` | create | `NowPlayingArt.placement` |
+| `macos/Tests/TyrannyLikesSmokeCoreTests/QuitSuspensionTests.swift` | create | Task 2 tests |
+| `macos/Tests/TyrannyLikesSmokeCoreTests/NowPlayingArtTests.swift` | create | Task 4 tests |
+| `macos/Tests/TyrannyLikesSmokeCoreTests/WireModelTests.swift` | modify | `artist_id` decode tests |
+| `macos/Sources/TyrannyLikesSmoke/TyrannyLikesSmokeApp.swift` | modify | `applicationShouldTerminate` |
+| `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift` | modify | `suspendForQuit()`, resume on launch |
+| `macos/Sources/TyrannyLikesSmoke/ManagedServer.swift` | modify | header comment only |
+| `macos/Sources/TyrannyLikesSmoke/NativeSmoke.swift` | modify | relaunch waits for resumed playback |
 | `scripts/lifecycle_gate.py` | modify | quit pauses, relaunch resumes |
 | `SPIKE.md` | modify | record the reversed quit decision |
-| `macos/Sources/Tyranny/Shell/PlayerBar.swift` | create | the bar (left, centre, right sections) |
-| `macos/Sources/Tyranny/Shell/TransportDisplay.swift` | modify or delete | `NativeSeekSlider` and `VolumeSlider` survive; the toolbar display goes |
-| `macos/Sources/Tyranny/Shell/MainWindowView.swift` | modify | toolbar slimmed; bar above `StatusBar`; split-view visibility binding |
-| `macos/Sources/Tyranny/Shell/SourceList.swift` | modify | large art inset at the sidebar foot |
-| `macos/Sources/Tyranny/Models/NavigationModel.swift` | modify | `nowPlayingArtExpanded` |
-| `macos/Sources/Tyranny/NativeRenderViews.swift` | modify | renders 15–17 |
+| `macos/Sources/TyrannyLikesSmoke/Shell/PlayerBar.swift` | create | the bar (left, centre, right sections) |
+| `macos/Sources/TyrannyLikesSmoke/Shell/TransportDisplay.swift` | modify or delete | `NativeSeekSlider` and `VolumeSlider` survive; the toolbar display goes |
+| `macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift` | modify | toolbar slimmed; bar above `StatusBar`; split-view visibility binding |
+| `macos/Sources/TyrannyLikesSmoke/Shell/SourceList.swift` | modify | large art inset at the sidebar foot |
+| `macos/Sources/TyrannyLikesSmoke/Models/NavigationModel.swift` | modify | `nowPlayingArtExpanded` |
+| `macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift` | modify | renders 15–17 |
 
 ---
 
@@ -84,8 +84,8 @@
 
 **Files:**
 - Modify: `src/protocol.rs:407-421`, `src/store.rs:135-139`, `src/store.rs:357-380`, `src/owner.rs:695-710`, `src/playback.rs:1400-1415`
-- Modify: `macos/Sources/TyrannyCore/WireModels.swift:19-45`
-- Test: `tests/support/library_lists.rs:371-437`, `macos/Tests/TyrannyCoreTests/WireModelTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift:19-45`
+- Test: `tests/support/library_lists.rs:371-437`, `macos/Tests/TyrannyLikesSmokeCoreTests/WireModelTests.swift`
 
 **Interfaces:**
 - Produces:
@@ -118,11 +118,11 @@
 - [ ] **Step 8: Run** the Swift gates and the model gate. Expected: PASS.
 - [ ] **Step 9: Commit** with the message `Report the track artist id with now playing`.
 
-### Task 2: Quit suspension logic in TyrannyCore
+### Task 2: Quit suspension logic in TyrannyLikesSmokeCore
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/QuitSuspension.swift`
-- Test: `macos/Tests/TyrannyCoreTests/QuitSuspensionTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/QuitSuspension.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/QuitSuspensionTests.swift`
 
 **Interfaces:**
 - Produces:
@@ -176,8 +176,8 @@
 ### Task 3: Quit pauses, relaunch resumes
 
 **Files:**
-- Modify: `macos/Sources/Tyranny/TyrannyApp.swift:5-46`, `macos/Sources/Tyranny/PlayerModel.swift` (`accept`, `shutdown` region), `macos/Sources/Tyranny/ManagedServer.swift:4`
-- Modify: `macos/Sources/Tyranny/NativeSmoke.swift:38-42`, `scripts/lifecycle_gate.py:241-252`, `SPIKE.md` (line 9 summary)
+- Modify: `macos/Sources/TyrannyLikesSmoke/TyrannyLikesSmokeApp.swift:5-46`, `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift` (`accept`, `shutdown` region), `macos/Sources/TyrannyLikesSmoke/ManagedServer.swift:4`
+- Modify: `macos/Sources/TyrannyLikesSmoke/NativeSmoke.swift:38-42`, `scripts/lifecycle_gate.py:241-252`, `SPIKE.md` (line 9 summary)
 
 **Interfaces:**
 - Consumes: `QuitSuspension`, `QuitSuspensionStore` and `Deadline` from Task 2.
@@ -195,7 +195,7 @@
   - In `accept(_:newInstance:)`, on the first call with `newInstance == true` while `!launchSuspensionChecked`, set the flag first.
   - Then, if `QuitSuspensionStore.take()` returns a note and `shouldResume(socketPath: socketPath, transport: state.transport, currentID: state.current_id)` is true, call `transport.play()`.
   - Later reconnects never check again.
-- [ ] **Step 3: The delegate.** `TyrannyAppDelegate.applicationShouldTerminate(_:) -> NSApplication.TerminateReply`:
+- [ ] **Step 3: The delegate.** `TyrannyLikesSmokeAppDelegate.applicationShouldTerminate(_:) -> NSApplication.TerminateReply`:
   - If a suspension is already in flight, return `.terminateLater`. AppKit is already waiting for that reply, so a second ⌘Q adds nothing.
   - Otherwise, if `model?.connected == true`, return `.terminateLater`, then `Task { await model.suspendForQuit(); NSApp.reply(toApplicationShouldTerminate: true) }`.
   - Else return `.terminateNow`.
@@ -214,14 +214,14 @@
 ### Task 4: Full-width player bar
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Shell/PlayerBar.swift`, `macos/Sources/TyrannyCore/NowPlayingArt.swift`, `macos/Tests/TyrannyCoreTests/NowPlayingArtTests.swift`
-- Modify: `macos/Sources/Tyranny/Shell/MainWindowView.swift:51-142`, `macos/Sources/Tyranny/Shell/TransportDisplay.swift`, `macos/Sources/Tyranny/Shell/SourceList.swift`, `macos/Sources/Tyranny/Models/NavigationModel.swift:30-45`, `macos/Sources/Tyranny/NativeRenderViews.swift:36-90`
+- Create: `macos/Sources/TyrannyLikesSmoke/Shell/PlayerBar.swift`, `macos/Sources/TyrannyLikesSmokeCore/NowPlayingArt.swift`, `macos/Tests/TyrannyLikesSmokeCoreTests/NowPlayingArtTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift:51-142`, `macos/Sources/TyrannyLikesSmoke/Shell/TransportDisplay.swift`, `macos/Sources/TyrannyLikesSmoke/Shell/SourceList.swift`, `macos/Sources/TyrannyLikesSmoke/Models/NavigationModel.swift:30-45`, `macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift:36-90`
 
 **Interfaces:**
 - Consumes: `NowPlaying.artist_id` and `album_id` (Task 1); `NavigationModel.reveal` and `revealPlaying()`; `ArtworkView` and `ArtworkStore.nowPlayingRequest`; `NativeSeekSlider` and `VolumeSlider`.
 - Produces:
   ```swift
-  // TyrannyCore
+  // TyrannyLikesSmokeCore
   public enum NowPlayingArt {
       public enum Placement: Equatable, Sendable { case bar, sidebar }
       /// Expanded art shows in the sidebar only while the sidebar is visible.

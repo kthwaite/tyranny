@@ -4,7 +4,7 @@
 
 **Goal:** Replace the spike's toolbar-toggle window with the approved shell. That means a source list, toolbar transport, status bar, and continuous virtualized lists. The views are Songs (with column browser and grouping), the album grid, Artists, Genres, Recently Added, Up Next (view and drawer), History and playlists. iTunes-style double-click runs complete it.
 
-**Architecture:** Pure, testable logic moves into a new `TyrannyCore` Swift library target with a test target. That covers wire models, the list window cache, group layout, and selection encoding. The app target keeps AppKit tables (`NSTableView`, `NSCollectionView`), which are needed for native drag and drop, wrapped for SwiftUI. Views read rows through `ListWindowCache`, which fetches bounded windows from the v9 server and never holds a whole list.
+**Architecture:** Pure, testable logic moves into a new `TyrannyLikesSmokeCore` Swift library target with a test target. That covers wire models, the list window cache, group layout, and selection encoding. The app target keeps AppKit tables (`NSTableView`, `NSCollectionView`), which are needed for native drag and drop, wrapped for SwiftUI. Views read rows through `ListWindowCache`, which fetches bounded windows from the v9 server and never holds a whole list.
 
 **Tech Stack:** Swift 6.3, SwiftUI + AppKit, macOS 14, Swift Testing (`swift test`).
 
@@ -61,37 +61,37 @@ The server plan was executed first. See `docs/superpowers/plans/2026-10-18-libra
 
 | File | Responsibility |
 |---|---|
-| `macos/Package.swift` (modify) | add `TyrannyCore` library and `TyrannyCoreTests` test target |
-| `macos/Sources/TyrannyCore/WireModels.swift` (move + extend) | Codable wire types, public, including v9 list/selection types |
-| `macos/Sources/TyrannyCore/JSONValue.swift` (create) | request field encoding with nested objects |
-| `macos/Sources/TyrannyCore/ListWindowCache.swift` (create) | sparse windowed rows, revision handling, anchors |
-| `macos/Sources/TyrannyCore/GroupLayout.swift` (create) | display rows from `GroupSpan`s |
-| `macos/Sources/TyrannyCore/SelectionEncoder.swift` (create) | runs, selections, Up Next policy |
-| `macos/Tests/TyrannyCoreTests/*.swift` (create) | tests for the above |
-| `macos/Sources/Tyranny/Shell/*.swift` (create) | `MainWindowView`, `SourceList`, `TransportDisplay`, `StatusBar`, `SettingsView`, `Destination` |
-| `macos/Sources/Tyranny/Lists/*.swift` (create) | `VirtualTrackTable`, `ColumnBrowser`, `AlbumBlockCell`, `TrackListView` |
-| `macos/Sources/Tyranny/Albums/*.swift` (create) | `AlbumGridView`, `AlbumExpansionView` |
-| `macos/Sources/Tyranny/Views/*.swift` (create) | `ArtistsView`, `GenresView`, `HistoryView`, `UpNextView`, `UpNextDrawer` |
-| `macos/Sources/Tyranny/Models/*.swift` (create) | `TransportModel`, `ListModel`, `NavigationModel` split out of `PlayerModel` |
-| `macos/Sources/Tyranny/PlayerModel.swift` (modify, shrink) | connection, session, `send`, shared state; legacy paging removed in Task 14 |
-| `macos/Sources/Tyranny/ContentView.swift`, `PlaylistView.swift` (delete in Task 14) | spike shell |
-| `macos/Sources/Tyranny/Native*.swift`, `scripts/*_gate.py` (modify) | smoke harnesses for the new shell |
+| `macos/Package.swift` (modify) | add `TyrannyLikesSmokeCore` library and `TyrannyLikesSmokeCoreTests` test target |
+| `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift` (move + extend) | Codable wire types, public, including v9 list/selection types |
+| `macos/Sources/TyrannyLikesSmokeCore/JSONValue.swift` (create) | request field encoding with nested objects |
+| `macos/Sources/TyrannyLikesSmokeCore/ListWindowCache.swift` (create) | sparse windowed rows, revision handling, anchors |
+| `macos/Sources/TyrannyLikesSmokeCore/GroupLayout.swift` (create) | display rows from `GroupSpan`s |
+| `macos/Sources/TyrannyLikesSmokeCore/SelectionEncoder.swift` (create) | runs, selections, Up Next policy |
+| `macos/Tests/TyrannyLikesSmokeCoreTests/*.swift` (create) | tests for the above |
+| `macos/Sources/TyrannyLikesSmoke/Shell/*.swift` (create) | `MainWindowView`, `SourceList`, `TransportDisplay`, `StatusBar`, `SettingsView`, `Destination` |
+| `macos/Sources/TyrannyLikesSmoke/Lists/*.swift` (create) | `VirtualTrackTable`, `ColumnBrowser`, `AlbumBlockCell`, `TrackListView` |
+| `macos/Sources/TyrannyLikesSmoke/Albums/*.swift` (create) | `AlbumGridView`, `AlbumExpansionView` |
+| `macos/Sources/TyrannyLikesSmoke/Views/*.swift` (create) | `ArtistsView`, `GenresView`, `HistoryView`, `UpNextView`, `UpNextDrawer` |
+| `macos/Sources/TyrannyLikesSmoke/Models/*.swift` (create) | `TransportModel`, `ListModel`, `NavigationModel` split out of `PlayerModel` |
+| `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift` (modify, shrink) | connection, session, `send`, shared state; legacy paging removed in Task 14 |
+| `macos/Sources/TyrannyLikesSmoke/ContentView.swift`, `PlaylistView.swift` (delete in Task 14) | spike shell |
+| `macos/Sources/TyrannyLikesSmoke/Native*.swift`, `scripts/*_gate.py` (modify) | smoke harnesses for the new shell |
 
 ---
 
-### Task 1: `TyrannyCore` target and v9 wire models
+### Task 1: `TyrannyLikesSmokeCore` target and v9 wire models
 
 **Files:**
 - Modify: `macos/Package.swift`
-- Move: `macos/Sources/Tyranny/WireModels.swift` → `macos/Sources/TyrannyCore/WireModels.swift` (types become `public`)
-- Create: `macos/Sources/TyrannyCore/JSONValue.swift`, `macos/Tests/TyrannyCoreTests/WireModelTests.swift`
-- Modify: every app file using the moved types (`import TyrannyCore`)
+- Move: `macos/Sources/TyrannyLikesSmoke/WireModels.swift` → `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift` (types become `public`)
+- Create: `macos/Sources/TyrannyLikesSmokeCore/JSONValue.swift`, `macos/Tests/TyrannyLikesSmokeCoreTests/WireModelTests.swift`
+- Modify: every app file using the moved types (`import TyrannyLikesSmokeCore`)
 
 **Interfaces:**
 - Package:
-  - `.target(name: "TyrannyCore")`
-  - `.executableTarget(name: "Tyranny", dependencies: ["TyrannyCore"])`
-  - `.testTarget(name: "TyrannyCoreTests", dependencies: ["TyrannyCore"])`
+  - `.target(name: "TyrannyLikesSmokeCore")`
+  - `.executableTarget(name: "tyranny likes smoke", dependencies: ["TyrannyLikesSmokeCore"])`
+  - `.testTarget(name: "TyrannyLikesSmokeCoreTests", dependencies: ["TyrannyLikesSmokeCore"])`
 - Produces public Codable types mirroring the server, with snake_case property names as in the existing models:
   - `ListSource` (enum with associated values, custom coding on `kind`), `Browser`, `SortField`, `SortKey`, `Grouping`, `ListDescription`
   - `ListRow`, `TrackSummary`, `ListTotals`, `AlbumSummary`, `NamedCount`, `AlbumSort`, `GroupSpan`
@@ -105,12 +105,12 @@ The server plan was executed first. See `docs/superpowers/plans/2026-10-18-libra
 - [ ] **Step 2: Run** `swift test --package-path macos --scratch-path target/swift-client` — expect FAIL (no target).
 - [ ] **Step 3: Implement** the package change, the move, and the types.
 - [ ] **Step 4: Run** the tests, then both builds — expect PASS. The app behaves exactly as after server Task 16.
-- [ ] **Step 5: Commit** `git commit -m "Add TyrannyCore with v9 wire models"`.
+- [ ] **Step 5: Commit** `git commit -m "Add TyrannyLikesSmokeCore with v9 wire models"`.
 
 ### Task 2: `ListWindowCache`
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/ListWindowCache.swift`, `macos/Tests/TyrannyCoreTests/ListWindowCacheTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/ListWindowCache.swift`, `macos/Tests/TyrannyLikesSmokeCoreTests/ListWindowCacheTests.swift`
 
 **Interfaces:**
 ```swift
@@ -153,7 +153,7 @@ public enum WindowFetchError: Error { case stale, failed(String) }
 ### Task 3: `GroupLayout`
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/GroupLayout.swift`, `macos/Tests/TyrannyCoreTests/GroupLayoutTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/GroupLayout.swift`, `macos/Tests/TyrannyLikesSmokeCoreTests/GroupLayoutTests.swift`
 
 **Interfaces:**
 ```swift
@@ -187,7 +187,7 @@ public struct GroupLayout: Sendable {
 ### Task 4: `SelectionEncoder` and Up Next policy
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/SelectionEncoder.swift`, `macos/Tests/TyrannyCoreTests/SelectionEncoderTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/SelectionEncoder.swift`, `macos/Tests/TyrannyLikesSmokeCoreTests/SelectionEncoderTests.swift`
 
 **Interfaces:**
 ```swift
@@ -222,8 +222,8 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 5: Window shell, toolbar transport, status bar, Settings
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Shell/{MainWindowView,SourceList,Destination,TransportDisplay,StatusBar,SettingsView}.swift`, `macos/Sources/Tyranny/Models/{TransportModel,NavigationModel}.swift`
-- Modify: `TyrannyApp.swift` (window shows `MainWindowView`; add a `Settings` scene), `PlayerModel.swift` (expose `func send<T: Decodable>(_ command: String, _ fields: [String: JSONValue]) async throws -> T`; move transport commands to `TransportModel`), `SystemMediaControls.swift` (enable shuffle and repeat commands → `TransportModel`)
+- Create: `macos/Sources/TyrannyLikesSmoke/Shell/{MainWindowView,SourceList,Destination,TransportDisplay,StatusBar,SettingsView}.swift`, `macos/Sources/TyrannyLikesSmoke/Models/{TransportModel,NavigationModel}.swift`
+- Modify: `TyrannyLikesSmokeApp.swift` (window shows `MainWindowView`; add a `Settings` scene), `PlayerModel.swift` (expose `func send<T: Decodable>(_ command: String, _ fields: [String: JSONValue]) async throws -> T`; move transport commands to `TransportModel`), `SystemMediaControls.swift` (enable shuffle and repeat commands → `TransportModel`)
 
 **Interfaces:**
 - `enum Destination: Hashable { case songs, albums, artists, genres, recent, upNext, history, playlist(UInt64) }`. `NavigationModel` holds `destination`, `filter`, `columnBrowserVisible`, `upNextDrawerVisible`, and `grouping(for:)`/`setGrouping(_:for:)` (persisted under `group.<destination>`).
@@ -254,13 +254,13 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 - [ ] **Step 1: Build** the shell with placeholder main views ("Songs" text) for each destination.
 - [ ] **Step 2: Run** both builds — expect PASS.
 - [ ] **Step 3: Add** `NativeShellSmoke.swift` (pattern: `NativeSmoke.startIfRequested`). It drives every `source-*` item, the transport buttons, volume, shuffle and repeat. It asserts the snapshot's `settings.volume`, `repeat` and `shuffle` change, and that the status bar shows scan progress during a rescan. Wire it into `scripts/client_gate.py` as `--scenario shell`.
-- [ ] **Step 4: Run** `python3 scripts/client_gate.py --server target/debug/tyranny-server --app target/Tyranny.app --scenario shell` — expect PASS. Capture a screenshot to `spike-results/library-redesign-ui/shell.png`.
+- [ ] **Step 4: Run** `python3 scripts/client_gate.py --server target/debug/tyranny-likes-smoke-server --app "target/tyranny likes smoke.app" --scenario shell` — expect PASS. Capture a screenshot to `spike-results/library-redesign-ui/shell.png`.
 - [ ] **Step 5: Commit** `git commit -m "Replace spike shell with source list, toolbar transport and status bar"`.
 
 ### Task 6: Songs view with continuous table and column browser
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Lists/{VirtualTrackTable,TrackListView,ColumnBrowser,TrackColumns}.swift`, `macos/Sources/Tyranny/Models/ListModel.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Lists/{VirtualTrackTable,TrackListView,ColumnBrowser,TrackColumns}.swift`, `macos/Sources/TyrannyLikesSmoke/Models/ListModel.swift`
 - Modify: `TrackDrag.swift` (drag payload carries a `TrackSelection` produced by `SelectionEncoder`; existing queue/playlist reorder payloads unchanged)
 
 **Interfaces:**
@@ -300,7 +300,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 7: Grouping and album blocks
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Lists/{AlbumBlockCell,ArtistHeaderCell}.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Lists/{AlbumBlockCell,ArtistHeaderCell}.swift`
 - Modify: `ListModel.swift` (fetch `list_groups` when grouping ≠ none; rebuild `GroupLayout` on revision change), `VirtualTrackTable.swift` (row kinds from `GroupLayout.row(at:)`)
 
 **Interfaces:**
@@ -325,7 +325,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 8: Album grid with inline expansion
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Albums/{AlbumGridView,AlbumGridItem,AlbumExpansionView}.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Albums/{AlbumGridView,AlbumGridItem,AlbumExpansionView}.swift`
 
 **Interfaces:**
 - An `NSCollectionView` flow layout reads a `ListWindowCache<AlbumSummary>`, which fetches `list_albums` with source `.library`, the filter, and the sort `album_artist|year|date_added` (`album-sort`).
@@ -354,7 +354,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 9: Artists and Genres
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Views/{ArtistsView,GenresView}.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Views/{ArtistsView,GenresView}.swift`
 
 **Interfaces:**
 - **Left list.** It is 220 pt wide and continuous through `ListWindowCache<NamedCount>`:
@@ -375,7 +375,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 10: Recently Added and History
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Views/HistoryView.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Views/HistoryView.swift`
 - Modify: `Destination`/`TrackListView` (Recently Added uses source `.recent`, default sort date added descending, grouped Album)
 
 **Interfaces:**
@@ -393,7 +393,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 11: Up Next view and drawer
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Views/{UpNextView,UpNextDrawer}.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Views/{UpNextView,UpNextDrawer}.swift`
 - Modify: `PlayerModel.swift` (queue reads go through `ListWindowCache<QueueItem>`; remove the queue offset paging)
 
 **Interfaces:**
@@ -419,7 +419,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 
 **Files:**
 - Modify: `SourceList.swift`, `TrackListView.swift`
-- Move: smart-rule editor and add-to-playlist picker out of `PlaylistView.swift` into `macos/Sources/Tyranny/Views/PlaylistSheets.swift`
+- Move: smart-rule editor and add-to-playlist picker out of `PlaylistView.swift` into `macos/Sources/TyrannyLikesSmoke/Views/PlaylistSheets.swift`
 
 **Interfaces:**
 - The PLAYLISTS section reads `saved_playlists` through `ListWindowCache<Playlist>`. Regular and smart playlists get distinct icons. Counts are shown for regular playlists only.
@@ -438,7 +438,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 13: Double-click runs, selection actions, keyboard
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Lists/UpNextPrompt.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Lists/UpNextPrompt.swift`
 - Modify: `ListModel.swift`, `VirtualTrackTable.swift`, `MainWindowView.swift` (commands menu)
 
 **Interfaces:**
@@ -481,7 +481,7 @@ public struct SelectionTooScattered: Error {}   // message: "Selection is too sc
 ### Task 15: Final verification and merge
 
 - [ ] **Step 1: Run** the full server gates (server plan Task 18, Step 1) and the client gates (Task 14, Step 3). Expect PASS.
-- [ ] **Step 2: Build** `scripts/build_macos.sh`, launch `target/Tyranny.app` outside the build shell, and walk the spec §8 native workflow by hand. Capture screenshots for each view into `spike-results/library-redesign-ui/`, and compare them with the mockups.
+- [ ] **Step 2: Build** `scripts/build_macos.sh`, launch `"target/tyranny likes smoke.app"` outside the build shell, and walk the spec §8 native workflow by hand. Capture screenshots for each view into `spike-results/library-redesign-ui/`, and compare them with the mockups.
 - [ ] **Step 3: Append** a "Library redesign — client" section to `SPIKE_RESULTS.md` with the gate counts, scale numbers and screenshots.
 - [ ] **Step 4: Request** a whole-branch review (superpowers:requesting-code-review). Address the findings.
 - [ ] **Step 5: Merge** `feature/library-redesign` into `main` (superpowers:finishing-a-development-branch).

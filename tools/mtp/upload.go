@@ -14,12 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"tyranny-mtp/internal/mtp"
+	"tyranny-likes-smoke-mtp/internal/mtp"
 )
 
 // A durable intent precedes SendObjectInfo. Its unpredictable temporary name
 // identifies our own orphan even if the process dies before recording the handle.
 // No general directory sweep or removal of unjournaled objects is performed.
+// Keep /Music/Tyranny and the .tyranny- / .tyranny-partial markers unchanged:
+// existing journals must still identify and recover uploads created before the rename.
 type pendingUpload struct {
 	DeviceID  string `json:"device_id"`
 	StorageID uint32 `json:"storage_id"`

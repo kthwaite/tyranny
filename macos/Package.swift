@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "Tyranny",
+    name: "TyrannyLikesSmoke",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "Tyranny", targets: ["Tyranny"])],
+    products: [.executable(name: "tyranny likes smoke", targets: ["TyrannyLikesSmoke"])],
     targets: [
-        .target(name: "TyrannyCore"),
-        .executableTarget(name: "Tyranny", dependencies: ["TyrannyCore"]),
-        .testTarget(name: "TyrannyCoreTests", dependencies: ["TyrannyCore"]),
+        .target(name: "TyrannyLikesSmokeCore"),
+        .executableTarget(name: "TyrannyLikesSmoke", dependencies: ["TyrannyLikesSmokeCore"]),
+        .testTarget(name: "TyrannyLikesSmokeCoreTests", dependencies: ["TyrannyLikesSmokeCore"]),
     ]
 )

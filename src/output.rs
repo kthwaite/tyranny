@@ -771,7 +771,7 @@ mod tests {
     /// (None leaves the default) and returns the captured samples.
     fn capture(percent: Option<u8>, blocks: usize, source: impl Fn(usize) -> Frame) -> Vec<f32> {
         let path = std::env::temp_dir().join(format!(
-            "tyranny-volume-{}-{}.f32",
+            "tyranny-likes-smoke-volume-{}-{}.f32",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

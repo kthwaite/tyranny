@@ -61,8 +61,8 @@
 | `src/store/selection.rs` (create) | resolve `TrackSelection` to `(track_id, path)` inside one read transaction |
 | `src/protocol.rs` (modify) | v9 commands, responses, settings, state fields |
 | `tests/support/library_lists.rs` (create) | wire-level integration tests, included from `tests/server_transport.rs` |
-| `src/bin/tyrannyctl.rs`, `scripts/server_gate.py`, `scripts/scale_gate.py` (modify) | v9 and scale measurements |
-| `macos/Sources/Tyranny/WireClient.swift`, `WireModels.swift` (modify) | v9 compatibility only (Task 16) |
+| `src/bin/tyranny-likes-smoke-ctl.rs`, `scripts/server_gate.py`, `scripts/scale_gate.py` (modify) | v9 and scale measurements |
+| `macos/Sources/TyrannyLikesSmoke/WireClient.swift`, `WireModels.swift` (modify) | v9 compatibility only (Task 16) |
 
 ---
 
@@ -536,7 +536,7 @@ impl PlayOrder {
 ### Task 16: v9 compatibility for existing clients and gates
 
 **Files:**
-- Modify: `macos/Sources/Tyranny/WireClient.swift` (version 9 in hello check and messages), `macos/Sources/Tyranny/WireModels.swift` (decode new `ControlState`, `Settings`, `LibraryState`, `QueueItem` fields), `src/bin/tyrannyctl.rs`, `scripts/server_gate.py` (`expected_version`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/WireClient.swift` (version 9 in hello check and messages), `macos/Sources/TyrannyLikesSmoke/WireModels.swift` (decode new `ControlState`, `Settings`, `LibraryState`, `QueueItem` fields), `src/bin/tyranny-likes-smoke-ctl.rs`, `scripts/server_gate.py` (`expected_version`)
 - Test: Swift builds; existing Python gates
 
 **Interfaces:**
@@ -545,7 +545,7 @@ impl PlayOrder {
 - [ ] **Step 1: Run** `swift build --package-path macos --scratch-path target/swift-client -Xswiftc -warnings-as-errors`. Expect success before the edits; this is the baseline.
 - [ ] **Step 2: Edit** the files named above.
 - [ ] **Step 3: Run** the same Swift build in debug and in release (`-c release`) — expect success.
-- [ ] **Step 4: Run** `python3 scripts/server_gate.py --server target/debug/tyranny-server` (after `cargo build --locked --bins`). Expect it to pass. Fix only version and field expectations.
+- [ ] **Step 4: Run** `python3 scripts/server_gate.py --server target/debug/tyranny-likes-smoke-server` (after `cargo build --locked --bins`). Expect it to pass. Fix only version and field expectations.
 - [ ] **Step 5: Commit** `git commit -m "Speak protocol v9 from the existing client and gates"`.
 
 ### Task 17: Scale measurements for lists and runs
@@ -566,7 +566,7 @@ impl PlayOrder {
 - Targets: p95 < 100 ms for list families. `enqueue_run_50k` is reported without a target (spec 8).
 
 - [ ] **Step 1: Extend** `seed` and add the families.
-- [ ] **Step 2: Run** `python3 scripts/scale_gate.py --server target/release/tyranny-server --app target/Tyranny.app --work-dir target/scale/gate` after `scripts/build_macos.sh`. Record the results in `spike-results/scale-gate.json`.
+- [ ] **Step 2: Run** `python3 scripts/scale_gate.py --server target/release/tyranny-likes-smoke-server --app "target/tyranny likes smoke.app" --work-dir target/scale/gate` after `scripts/build_macos.sh`. Record the results in `spike-results/scale-gate.json`.
 - [ ] **Step 3: If** any list family misses p95 < 100 ms, report it with the query plan (`EXPLAIN QUERY PLAN`). Fix it only by adding indexes or rewriting the SQL inside `listing::compile`. Do not change the wire. Rerun.
 - [ ] **Step 4: Commit** `git commit -m "Measure list and run enqueue at 50k tracks"`.
 

@@ -9,7 +9,7 @@ build: build-server build-client
 # Build both components with release optimizations (does not replace the app bundle).
 build-release: build-server-release build-client-release
 
-# Build a self-contained release app and package target/Tyranny.dmg.
+# Build a self-contained release app and package target/tyranny likes smoke.dmg.
 dmg:
     scripts/build_dmg.sh
 

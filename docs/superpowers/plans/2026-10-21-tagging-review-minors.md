@@ -18,7 +18,7 @@ applies throughout: never damage a file, and never lose a value the user did not
   (cut from `dev` at 16fa207). It merges into `dev`.
 - No protocol change. `VERSION` stays 16. No new dependencies.
 - Tests first. A Rust test lives next to the code it tests (`src/tagging/tests.rs`,
-  `src/library/tests.rs`). A Swift test uses swift-testing in `macos/Tests/TyrannyCoreTests`.
+  `src/library/tests.rs`). A Swift test uses swift-testing in `macos/Tests/TyrannyLikesSmokeCoreTests`.
 - Commits: one plain imperative sentence. No attribution or Co-Authored-By lines. Stage by
   explicit path. Never stage `.claude/`. Other tasks commit at the same time: retry on
   `.git/index.lock`.
@@ -64,9 +64,9 @@ applies throughout: never damage a file, and never lose a value the user did not
 ### Task 2: Edit-list timeout message
 
 **Files:**
-- Modify: `macos/Sources/TyrannyCore/Tagging.swift` (`TagEditMessage`)
-- Modify: `macos/Sources/Tyranny/Models/TaggingModel.swift` (`refreshEdits`)
-- Test: `macos/Tests/TyrannyCoreTests/TaggingTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/Tagging.swift` (`TagEditMessage`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/TaggingModel.swift` (`refreshEdits`)
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/TaggingTests.swift`
 
 - `refreshEdits` maps a `tag_edits` failure through `TagLookupMessage`, so a timeout reads
   "MusicBrainz took too long to answer.". That message is wrong for a journal read.

@@ -102,7 +102,7 @@ pub struct TagCopy {
 }
 
 /// The reason a file is not writable when a read-only tag holds a changed field.
-pub const READ_ONLY_REASON: &str = "Has an old ID3 tag Tyranny can't edit";
+pub const READ_ONLY_REASON: &str = "Has an old ID3 tag tyranny likes smoke can't edit";
 
 /// `edit_tags` fails with this (find it with `downcast_ref`) when a read-only tag
 /// holds a copy of a field it would set. It displays as `READ_ONLY_REASON`.
@@ -531,7 +531,7 @@ type Entries = BTreeMap<TagField, Vec<(CopyKey, String)>>;
 impl Parsed {
     fn read(file: &mut File) -> Result<Self> {
         let format = writable_format_file(file)?
-            .ok_or_else(|| anyhow!("Tyranny can't write tags to this format"))?;
+            .ok_or_else(|| anyhow!("tyranny likes smoke can't write tags to this format"))?;
         file.rewind()?;
         let tagged = Probe::new(BufReader::new(&mut *file))
             .guess_file_type()?
@@ -1445,7 +1445,8 @@ mod tests {
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("tyranny-tags-{}", uuid::Uuid::new_v4()));
+            let path = std::env::temp_dir()
+                .join(format!("tyranny-likes-smoke-tags-{}", uuid::Uuid::new_v4()));
             fs::create_dir(&path).unwrap();
             Self(path.canonicalize().unwrap())
         }

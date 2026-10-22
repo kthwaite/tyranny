@@ -42,9 +42,9 @@ fi
     # prefix in its compiler/linker flags so a different native build cannot be reused.
     export CGO_CFLAGS="-O2 -I$PREFIX/include/libusb-1.0 -arch $ARCH -mmacosx-version-min=14.0"
     export CGO_LDFLAGS="-L$PREFIX/lib -arch $ARCH -mmacosx-version-min=14.0 -Wl,-headerpad_max_install_names"
-    go build -mod=readonly -trimpath -o "$BUILD/tyranny-mtp" .
+    go build -mod=readonly -trimpath -o "$BUILD/tyranny-likes-smoke-mtp" .
 ) >&2
-CREDITS="$PREFIX/share/tyranny-mtp"
+CREDITS="$PREFIX/share/tyranny-likes-smoke-mtp"
 mkdir -p "$CREDITS"
 install -m 644 "$SOURCE/COPYING" "$CREDITS/libusb-COPYING"
 install -m 644 "$ARCHIVE" "$CREDITS/libusb-$VERSION.tar.bz2"

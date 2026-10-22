@@ -36,7 +36,7 @@ def audio(path, title, album, image=None, release=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--server', default='target/release/tyranny-server')
+    parser.add_argument('--server', default='target/release/tyranny-likes-smoke-server')
     parser.add_argument('--app')
     parser.add_argument('--ui-driver', default='target/native-ui-driver')
     parser.add_argument('--release-id', default='76df3287-6cda-33eb-8e9a-044b5e15ffdd')

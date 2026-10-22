@@ -16,13 +16,13 @@ SCRIPT = Path(__file__).with_name("macos_dependencies.py")
                      "requires macOS and Xcode command-line tools")
 class BundleTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="tyranny-native-tests-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="tyranny-likes-smoke-native-tests-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.prefix = self.root / "native source é"
         self.lib = self.prefix / "lib"
         self.lib.mkdir(parents=True)
-        self.app = self.root / "Tyranny.app"
+        self.app = self.root / "tyranny likes smoke.app"
         self.macos = self.app / "Contents/MacOS"
         self.macos.mkdir(parents=True)
         self.sequence = 0
@@ -47,7 +47,7 @@ class BundleTests(unittest.TestCase):
         codec = self.compile(self.lib / "libavcodec.63.dylib",
                              "int utility(void); int codec(void) { return utility() + 1; }",
                              [utility], identity="@rpath/libavcodec.63.dylib")
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int codec(void); int main(void) { return codec() == 8 ? 0 : 1; }",
                      [codec], runpaths=[self.lib])
         return utility, codec
@@ -73,12 +73,12 @@ class BundleTests(unittest.TestCase):
         self.assertEqual([node["path"] for node in report["non_system_images"]], [
             "Contents/Frameworks/libavcodec.63.dylib",
             "Contents/Frameworks/libavutil.61.dylib",
-            "Contents/MacOS/tyranny-server",
+            "Contents/MacOS/tyranny-likes-smoke-server",
         ])
         links = {(edge["from"], edge["install_name"]) for edge in report["dependencies"]
                  if not edge["system"]}
         self.assertEqual(links, {
-            ("Contents/MacOS/tyranny-server", "@loader_path/../Frameworks/libavcodec.63.dylib"),
+            ("Contents/MacOS/tyranny-likes-smoke-server", "@loader_path/../Frameworks/libavcodec.63.dylib"),
             ("Contents/Frameworks/libavcodec.63.dylib", "@loader_path/libavutil.61.dylib"),
         })
         self.assertTrue(all(not node["rpaths"] for node in report["non_system_images"]))
@@ -86,12 +86,12 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(report_path.read_text(), serialized)
         # Signing the executables is the caller's responsibility, after relocation.
         subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
-                        str(self.macos / "tyranny-server")], check=True, capture_output=True)
+                        str(self.macos / "tyranny-likes-smoke-server")], check=True, capture_output=True)
         shutil.rmtree(self.prefix)
-        relocated = self.root / "moved app é/Tyranny.app"
+        relocated = self.root / "moved app é/tyranny likes smoke.app"
         relocated.parent.mkdir()
         self.app.rename(relocated)
-        subprocess.run([str(relocated / "Contents/MacOS/tyranny-server")], check=True,
+        subprocess.run([str(relocated / "Contents/MacOS/tyranny-likes-smoke-server")], check=True,
                        env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=10)
 
     def test_rebuilding_executable_replaces_previous_pinned_library(self):
@@ -99,14 +99,14 @@ class BundleTests(unittest.TestCase):
         self.invoke()
         self.compile(utility, "int utility(void) { return 17; }",
                      identity="@rpath/libavutil.61.dylib")
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int codec(void); int main(void) { return codec() == 18 ? 0 : 1; }",
                      [codec], runpaths=[self.lib])
         self.invoke()
         subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
-                        str(self.macos / "tyranny-server")], check=True, capture_output=True)
+                        str(self.macos / "tyranny-likes-smoke-server")], check=True, capture_output=True)
         shutil.rmtree(self.prefix)
-        subprocess.run([str(self.macos / "tyranny-server")], check=True,
+        subprocess.run([str(self.macos / "tyranny-likes-smoke-server")], check=True,
                        env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=10)
 
     def test_tracker_library_closure_uses_only_system_cpp_runtime(self):
@@ -117,7 +117,7 @@ class BundleTests(unittest.TestCase):
             self.lib / "libavformat.63.dylib",
             "int tracker(void); int demuxer(void) { return tracker(); }",
             [tracker], identity=str(self.lib / "libavformat.63.dylib"))
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int demuxer(void); int main(void) { return demuxer() == 9 ? 0 : 1; }",
                      [demuxer])
         self.invoke()
@@ -126,17 +126,17 @@ class BundleTests(unittest.TestCase):
         self.assertEqual([node["path"] for node in report["non_system_images"]], [
             "Contents/Frameworks/libavformat.63.dylib",
             "Contents/Frameworks/libopenmpt.0.dylib",
-            "Contents/MacOS/tyranny-server",
+            "Contents/MacOS/tyranny-likes-smoke-server",
         ])
         self.assertTrue(any(edge["system"] and edge["install_name"] == "/usr/lib/libc++.1.dylib"
                             for edge in report["dependencies"]))
         subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
-                        str(self.macos / "tyranny-server")], check=True, capture_output=True)
+                        str(self.macos / "tyranny-likes-smoke-server")], check=True, capture_output=True)
         shutil.rmtree(self.prefix)
-        relocated = self.root / "moved tracker app/Tyranny.app"
+        relocated = self.root / "moved tracker app/tyranny likes smoke.app"
         relocated.parent.mkdir()
         self.app.rename(relocated)
-        subprocess.run([str(relocated / "Contents/MacOS/tyranny-server")], check=True,
+        subprocess.run([str(relocated / "Contents/MacOS/tyranny-likes-smoke-server")], check=True,
                        env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=10)
 
     def test_rejects_non_system_cpp_runtime(self):
@@ -146,7 +146,7 @@ class BundleTests(unittest.TestCase):
         tracker = self.compile(self.lib / "libopenmpt.0.dylib",
                                "int runtime(void); int tracker(void) { return runtime(); }",
                                [runtime], identity=str(self.lib / "libopenmpt.0.dylib"))
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int tracker(void); int main(void) { return tracker(); }", [tracker])
         self.assertIn("Unapproved non-system dependency", self.invoke(success=False).stderr)
         self.assertFalse((self.app / "Contents/Frameworks").exists())
@@ -160,7 +160,7 @@ class BundleTests(unittest.TestCase):
     def test_rejects_external_library_even_with_approved_basename(self):
         external = self.root / "outside/libavutil.61.dylib"
         self.compile(external, "int utility(void) { return 0; }", identity=str(external))
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int utility(void); int main(void) { return utility(); }", [external])
         self.assertIn("Unapproved non-system dependency", self.invoke(success=False).stderr)
         self.assertFalse((self.app / "Contents/Frameworks").exists())
@@ -170,14 +170,14 @@ class BundleTests(unittest.TestCase):
         link = self.lib / external.name
         self.compile(external, "int utility(void) { return 0; }", identity=str(link))
         link.symlink_to(external)
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int utility(void); int main(void) { return utility(); }", [link])
         self.assertIn("Unapproved non-system dependency", self.invoke(success=False).stderr)
 
     def test_rejects_unapproved_library_inside_prefix(self):
         external = self.lib / "libexternal.dylib"
         self.compile(external, "int external(void) { return 0; }", identity=str(external))
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int external(void); int main(void) { return external(); }", [external])
         self.assertIn("Unapproved non-system dependency", self.invoke(success=False).stderr)
 
@@ -186,7 +186,7 @@ class BundleTests(unittest.TestCase):
         second = self.lib / "two/libavutil.61.dylib"
         self.compile(first, "int first(void) { return 0; }", identity=str(first))
         self.compile(second, "int second(void) { return 0; }", identity=str(second))
-        self.compile(self.macos / "tyranny-server",
+        self.compile(self.macos / "tyranny-likes-smoke-server",
                      "int first(void); int second(void); int main(void) { return first() + second(); }",
                      [first, second])
         self.assertIn("Dylib basename collision", self.invoke(success=False).stderr)

@@ -52,11 +52,11 @@ pub(crate) fn stamp(path: &Path) -> std::io::Result<FileStamp> {
     })
 }
 
-/// `<dir>/.<file name>.tyranny-tmp`
+/// `<dir>/.<file name>.tyranny-likes-smoke-tmp`
 pub(crate) fn temp_path(path: &Path) -> PathBuf {
     let mut name = std::ffi::OsString::from(".");
     name.push(path.file_name().unwrap_or_default());
-    name.push(".tyranny-tmp");
+    name.push(".tyranny-likes-smoke-tmp");
     path.with_file_name(name)
 }
 
@@ -222,7 +222,8 @@ mod tests {
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("tyranny-safe-{}", uuid::Uuid::new_v4()));
+            let path = std::env::temp_dir()
+                .join(format!("tyranny-likes-smoke-safe-{}", uuid::Uuid::new_v4()));
             fs::create_dir(&path).unwrap();
             Self(path.canonicalize().unwrap())
         }

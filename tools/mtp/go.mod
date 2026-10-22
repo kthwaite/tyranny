@@ -1,4 +1,4 @@
-module tyranny-mtp
+module tyranny-likes-smoke-mtp
 
 go 1.23
 

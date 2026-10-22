@@ -14,7 +14,7 @@ import build_ffmpeg
 
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="tyranny-ffmpeg-config-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="tyranny-likes-smoke-ffmpeg-config-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.components = "\n".join(
@@ -77,7 +77,7 @@ class ConfigurationTests(unittest.TestCase):
 
 class DependencyTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="tyranny-native-config-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="tyranny-likes-smoke-native-config-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 

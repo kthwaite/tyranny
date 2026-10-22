@@ -25,7 +25,7 @@ FINISHED = {"complete", "failed", "interrupted"}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", default="target/debug/tyranny-server")
+    parser.add_argument("--server", default="target/debug/tyranny-likes-smoke-server")
     parser.add_argument("--work-dir", default="target/library-gate")
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--bulk-tracks", type=int, default=2048)

@@ -4,9 +4,9 @@
 
 **Goal:** After the user chooses their first music folder, the main area shows a large import progress screen that fills, then a clear "ready" screen.
 
-**Architecture:** A pure TyrannyCore `ImportSession` turns the session root, the live `ScanStatus` and library totals into an `ImportProgress` value (stage, copy, fraction). `PlayerModel` owns the optional session, starts and ends it, and stores the latest `ImportProgress`. A new `ImportProgressView` renders it in `MainWindowView`'s main-area branch.
+**Architecture:** A pure TyrannyLikesSmokeCore `ImportSession` turns the session root, the live `ScanStatus` and library totals into an `ImportProgress` value (stage, copy, fraction). `PlayerModel` owns the optional session, starts and ends it, and stores the latest `ImportProgress`. A new `ImportProgressView` renders it in `MainWindowView`'s main-area branch.
 
-**Tech Stack:** Swift 6, SwiftUI/AppKit, Swift Testing (TyrannyCore), the native smoke and render harnesses (DEBUG).
+**Tech Stack:** Swift 6, SwiftUI/AppKit, Swift Testing (TyrannyLikesSmokeCore), the native smoke and render harnesses (DEBUG).
 
 **Spec:** `docs/superpowers/specs/2026-10-20-onboarding-import-progress-design.md`
 
@@ -29,14 +29,14 @@
 
 ---
 
-### Task 1: `ImportSession` and `ImportProgress` in TyrannyCore
+### Task 1: `ImportSession` and `ImportProgress` in TyrannyLikesSmokeCore
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/ImportProgress.swift`
-- Test: `macos/Tests/TyrannyCoreTests/ImportProgressTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/ImportProgress.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/ImportProgressTests.swift`
 
 **Interfaces:**
-- Consumes: `ScanStatus`, `LibraryState`, `ListTotals`, `DisplayFormat.count(_:)`, `DisplayFormat.totals(_:of:)` (all existing in TyrannyCore).
+- Consumes: `ScanStatus`, `LibraryState`, `ListTotals`, `DisplayFormat.count(_:)`, `DisplayFormat.totals(_:of:)` (all existing in TyrannyLikesSmokeCore).
 - Produces:
 
 ```swift
@@ -86,7 +86,7 @@ Rules the body must follow (from the spec):
   - `fractionResetsWhenStageChanges`: 6/10 indexing, then discovering, then indexing 2/10 → 0.2.
   - `failureLineCountsFailuresAndSkipped`: (0,0) → nil; (1,0) → "1 file couldn't be read"; (10,2) → "12 files couldn't be read".
   - `completeWithTracksIsDone`: tracks 1129, durationMs 293_760_000, bytes 41_700_000_000 → `.done`, title "Your Music Is Ready", detail `DisplayFormat.totals(ListTotals(tracks: 1129, duration_ms: 293_760_000, size_bytes: 41_700_000_000))`, fraction nil.
-  - `completeWithNoTracksIsEmpty`: → `.empty`, title "No Music Found", detail "Tyranny found no audio files in this folder.".
+  - `completeWithNoTracksIsEmpty`: → `.empty`, title "No Music Found", detail "tyranny likes smoke found no audio files in this folder.".
   - `failedIsStopped`: failed with error "disk vanished" → `.stopped`, title "Import Stopped", detail "disk vanished".
   - `interruptedWithoutErrorIsStopped`: → `.stopped`, detail "The import did not finish.".
   - `terminalBaselineReadsAsPreparing`: session baseline = failed status S; progress(S) → `.preparing`.
@@ -114,8 +114,8 @@ Expected: all pass (previous total 202 tests plus the new ones).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/ImportProgress.swift macos/Tests/TyrannyCoreTests/ImportProgressTests.swift
-git commit -m "Model the onboarding import screen in TyrannyCore"
+git add macos/Sources/TyrannyLikesSmokeCore/ImportProgress.swift macos/Tests/TyrannyLikesSmokeCoreTests/ImportProgressTests.swift
+git commit -m "Model the onboarding import screen in TyrannyLikesSmokeCore"
 ```
 
 ---
@@ -123,10 +123,10 @@ git commit -m "Model the onboarding import screen in TyrannyCore"
 ### Task 2: Session wiring, `ImportProgressView`, and the smokes
 
 **Files:**
-- Modify: `macos/Sources/Tyranny/PlayerModel.swift` (`accept(_:newInstance:)` ~273, `addRoot` ~378, `rescan` ~397)
-- Create: `macos/Sources/Tyranny/Shell/ImportProgressView.swift`
-- Modify: `macos/Sources/Tyranny/Shell/MainWindowView.swift` (main-area branch ~130-170)
-- Modify: `macos/Sources/Tyranny/NativeShellSmoke.swift` (~49-63), `macos/Sources/Tyranny/NativeSmoke.swift` (~72-80)
+- Modify: `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift` (`accept(_:newInstance:)` ~273, `addRoot` ~378, `rescan` ~397)
+- Create: `macos/Sources/TyrannyLikesSmoke/Shell/ImportProgressView.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift` (main-area branch ~130-170)
+- Modify: `macos/Sources/TyrannyLikesSmoke/NativeShellSmoke.swift` (~49-63), `macos/Sources/TyrannyLikesSmoke/NativeSmoke.swift` (~72-80)
 
 **Interfaces:**
 - Consumes: Task 1's `ImportSession`, `ImportProgress`.
@@ -169,7 +169,7 @@ Expected: builds clean, all tests pass, gate passes. (Native `--app` gates need 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/PlayerModel.swift macos/Sources/Tyranny/Shell/ImportProgressView.swift macos/Sources/Tyranny/Shell/MainWindowView.swift macos/Sources/Tyranny/NativeShellSmoke.swift macos/Sources/Tyranny/NativeSmoke.swift
+git add macos/Sources/TyrannyLikesSmoke/PlayerModel.swift macos/Sources/TyrannyLikesSmoke/Shell/ImportProgressView.swift macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift macos/Sources/TyrannyLikesSmoke/NativeShellSmoke.swift macos/Sources/TyrannyLikesSmoke/NativeSmoke.swift
 git commit -m "Show the import progress screen after the first music folder"
 ```
 
@@ -178,7 +178,7 @@ git commit -m "Show the import progress screen after the first music folder"
 ### Task 3: Renders of every stage
 
 **Files:**
-- Modify: `macos/Sources/Tyranny/NativeRenderViews.swift` (after the `20-player-bar-error` shot, before `renderSettings`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift` (after the `20-player-bar-error` shot, before `renderSettings`)
 - Output: `spike-results/onboarding-ui/` (run `scripts/render_views.py --out spike-results/onboarding-ui`)
 
 **Interfaces:**
@@ -194,6 +194,6 @@ Expected: the run log lists 21–25 with no `error:` line; the five PNGs exist. 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/NativeRenderViews.swift spike-results/onboarding-ui
+git add macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift spike-results/onboarding-ui
 git commit -m "Render the onboarding import screen stages"
 ```

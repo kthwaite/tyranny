@@ -186,7 +186,7 @@ impl Owner {
             .await
             .is_err()
         {
-            eprintln!("tyranny: joining the tagging worker failed during shutdown");
+            eprintln!("tyranny likes smoke: joining the tagging worker failed during shutdown");
         }
         self.controller.tagging.settle(TAGGING_SETTLE_LIMIT).await;
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -714,12 +714,14 @@ fn shuffle_strategy() -> Box<dyn ShuffleStrategy> {
 /// rows it left open close on the next start.
 fn restore_plays(store: &mut Store, player: &mut Player, selected: Option<u64>) -> PendingHistory {
     let rows = store.open_play_rows().unwrap_or_else(|error| {
-        eprintln!("tyranny: reading open plays failed; none is continued: {error:#}");
+        eprintln!("tyranny likes smoke: reading open plays failed; none is continued: {error:#}");
         Vec::new()
     });
     let kept = selected.and_then(|id| rows.into_iter().rev().find(|row| row.entry_id == id));
     if let Err(error) = store.close_open_plays_except(kept.as_ref().map(|row| row.row)) {
-        eprintln!("tyranny: closing stale plays failed; they close on the next start: {error:#}");
+        eprintln!(
+            "tyranny likes smoke: closing stale plays failed; they close on the next start: {error:#}"
+        );
     }
     let mut pending = PendingHistory::default();
     if let Some(row) = kept {
@@ -1192,7 +1194,7 @@ impl Actor {
             Ok(item) => item?,
             Err(error) => {
                 eprintln!(
-                    "tyranny: describing the play of entry {entry_id} failed; not recorded: {error:#}"
+                    "tyranny likes smoke: describing the play of entry {entry_id} failed; not recorded: {error:#}"
                 );
                 return None;
             }
@@ -1215,7 +1217,7 @@ impl Actor {
     fn record(&mut self, event: HistoryEvent) {
         if let Some(dropped) = self.pending_plays.push(event) {
             eprintln!(
-                "tyranny: play history writes keep failing; dropped an event of play {}",
+                "tyranny likes smoke: play history writes keep failing; dropped an event of play {}",
                 dropped.play()
             );
         }
@@ -1250,7 +1252,7 @@ impl Actor {
         let result = self.pending_plays.write(&mut self.store);
         if let Some(error) = &result.error {
             eprintln!(
-                "tyranny: recording a play failed; {} events waiting to retry: {error:#}",
+                "tyranny likes smoke: recording a play failed; {} events waiting to retry: {error:#}",
                 self.pending_plays.len()
             );
         }
@@ -1261,12 +1263,16 @@ impl Actor {
         let revisions = (self.history_revision, self.stats_revision);
         match self.store.stats_revision() {
             Ok(revision) => self.stats_revision = revision,
-            Err(error) => eprintln!("tyranny: reading the stats revision failed: {error:#}"),
+            Err(error) => {
+                eprintln!("tyranny likes smoke: reading the stats revision failed: {error:#}")
+            }
         }
         if result.counted {
             match self.store.history_revision() {
                 Ok(revision) => self.history_revision = revision,
-                Err(error) => eprintln!("tyranny: reading the history revision failed: {error:#}"),
+                Err(error) => {
+                    eprintln!("tyranny likes smoke: reading the history revision failed: {error:#}")
+                }
             }
         }
         (self.history_revision, self.stats_revision) != revisions
@@ -2404,7 +2410,7 @@ impl Actor {
                 for (id, fresh) in self.player.take_advances() {
                     if let Err(error) = self.advance(id, &fresh) {
                         eprintln!(
-                            "tyranny: recording entry {id} as played failed; still playing: {error:#}"
+                            "tyranny likes smoke: recording entry {id} as played failed; still playing: {error:#}"
                         );
                     }
                 }

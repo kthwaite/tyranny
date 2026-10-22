@@ -39,7 +39,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("tyranny-owner-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-owner-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(root.join("music")).unwrap();
         let mut fixture = Self { root, owner: None };
         fixture.start();
@@ -579,7 +582,10 @@ fn applied(actor: &mut Actor, command: Command) -> Response {
 #[test]
 fn a_play_counted_just_before_its_entry_is_deleted_is_recorded() {
     for clear in [false, true] {
-        let root = std::env::temp_dir().join(format!("tyranny-count-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-count-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&root).unwrap();
         // Two seconds: the play counts at one.
         let source = root.join("song.wav");
@@ -646,7 +652,10 @@ fn a_play_counted_just_before_its_entry_is_deleted_is_recorded() {
 /// title, and the station as its source.
 #[test]
 fn a_radio_play_is_described_by_its_station_text() {
-    let root = std::env::temp_dir().join(format!("tyranny-radio-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-radio-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir_all(&root).unwrap();
     let mut actor = Actor::open(OwnerConfig {
         database_path: root.join("state.sqlite"),
@@ -710,7 +719,8 @@ fn a_radio_play_is_described_by_its_station_text() {
 /// re-index queue, which may take its whole limit.
 #[test]
 fn quit_saves_the_checkpoint_before_the_library_shuts_down() {
-    let root = std::env::temp_dir().join(format!("tyranny-quit-{}", uuid::Uuid::new_v4()));
+    let root =
+        std::env::temp_dir().join(format!("tyranny-likes-smoke-quit-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let source = root.join("song.wav");
     wav_frames(&source, 96_000);
@@ -760,7 +770,8 @@ fn quit_saves_the_checkpoint_before_the_library_shuts_down() {
 /// history write are written first, as on shutdown.
 #[test]
 fn a_disconnected_owner_writes_its_pending_plays() {
-    let root = std::env::temp_dir().join(format!("tyranny-exit-{}", uuid::Uuid::new_v4()));
+    let root =
+        std::env::temp_dir().join(format!("tyranny-likes-smoke-exit-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let database_path = root.join("state.sqlite");
     let mut actor = Actor::open(OwnerConfig {
@@ -879,7 +890,10 @@ async fn equalizer_rejects_invalid_values_without_mutating_state_or_storage() {
 
 #[test]
 fn equalizer_persistence_failure_does_not_publish_or_change_settings() {
-    let root = std::env::temp_dir().join(format!("tyranny-equalizer-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-equalizer-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir_all(&root).unwrap();
     let database_path = root.join("state.sqlite");
     let mut actor = Actor::open(OwnerConfig {

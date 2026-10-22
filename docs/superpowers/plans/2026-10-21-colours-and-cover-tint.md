@@ -4,7 +4,7 @@
 
 **Goal:** Six colour tokens (`accent`, `playing`, `selection`, `success`, `warning`, `error`) that the user can set in Settings → Appearance or by command. While a track with artwork plays, `accent` and `playing` follow the cover's dominant colour, which is on by default.
 
-**Architecture:** TyrannyCore holds the pure logic. That is `RGB` and hex, `ColourSettings` in UserDefaults, `Contrast` (WCAG and an OKLCH lightness raise), `ArtworkPalette` (dominant colour), `ThemeResolver` (precedence) and `ArtTint` (the art-colour state machine and its 64-entry cache). The app adds one `@MainActor @Observable ColourTheme`, which `PlayerModel` owns. SwiftUI views read the tokens from the environment. AppKit tables get a `TableColours` value as a parameter and draw selection through one `TokenRowView`.
+**Architecture:** TyrannyLikesSmokeCore holds the pure logic. That is `RGB` and hex, `ColourSettings` in UserDefaults, `Contrast` (WCAG and an OKLCH lightness raise), `ArtworkPalette` (dominant colour), `ThemeResolver` (precedence) and `ArtTint` (the art-colour state machine and its 64-entry cache). The app adds one `@MainActor @Observable ColourTheme`, which `PlayerModel` owns. SwiftUI views read the tokens from the environment. AppKit tables get a `TableColours` value as a parameter and draw selection through one `TokenRowView`.
 
 **Tech Stack:** Swift 6.2 package (`macos/Package.swift`, macOS 14, strict concurrency), SwiftUI + AppKit, CoreGraphics, swift-testing.
 
@@ -14,9 +14,9 @@
 
 - Work only in the worktree `/Users/kit/Source/_p.music/tyranny-colours`, on branch `feature/colours` (cut from `dev`). At the end it merges into `dev`, never `prod` (`CLAUDE.md`).
 - macOS client only. No change to the Rust server, the protocol, or `scripts/*_gate.py`.
-- `TyrannyCore` imports only `Foundation` and `CoreGraphics`. It never imports AppKit or SwiftUI.
+- `TyrannyLikesSmokeCore` imports only `Foundation` and `CoreGraphics`. It never imports AppKit or SwiftUI.
 - Swift 6 strict concurrency. App models are `@MainActor`. Colour extraction runs in `Task.detached(priority: .utility)` and never on the main thread.
-- Tests use swift-testing (`import Testing`, `@Suite`, `@Test`, `#expect`) with `@testable import TyrannyCore`. A defaults test uses a fresh `UserDefaults(suiteName:)` and removes it afterwards, as `ImportNoteTests.withFreshDefaults` does.
+- Tests use swift-testing (`import Testing`, `@Suite`, `@Test`, `#expect`) with `@testable import TyrannyLikesSmokeCore`. A defaults test uses a fresh `UserDefaults(suiteName:)` and removes it afterwards, as `ImportNoteTests.withFreshDefaults` does.
 - UserDefaults keys, verbatim: `colour.accent`, `colour.playing`, `colour.selection`, `colour.success`, `colour.warning`, `colour.error` hold `#RRGGBB` strings; an absent key means System. `colour.tintFromArtwork` is a Bool; an absent key means `true`.
 - Fixed values:
   - contrast floor `3.0`;
@@ -41,8 +41,8 @@
 - No app-wide `.tint(...)`. Stock controls keep the system accent. The "connecting" status dot stays `.yellow`.
 - Gates every task keeps green:
   - from `macos/`: `swift build -Xswiftc -warnings-as-errors`, `swift build -c release -Xswiftc -warnings-as-errors`, `swift test`;
-  - from the repo root: `python3 scripts/client_gate.py --model-only --app macos/.build/debug/Tyranny`.
-  - The script's default `--app` is `target/Tyranny.app`, a bundle that only `scripts/build_macos.sh` refreshes. So pass the fresh debug binary. The script needs `target/debug/tyranny-server`; run `cargo build --locked --bins` if it is missing.
+  - from the repo root: `python3 scripts/client_gate.py --model-only --app "macos/.build/debug/tyranny likes smoke"`.
+  - The script's default `--app` is `"target/tyranny likes smoke.app"`, a bundle that only `scripts/build_macos.sh` refreshes. So pass the fresh debug binary. The script needs `target/debug/tyranny-likes-smoke-server`; run `cargo build --locked --bins` if it is missing.
   - Expected: both builds print `Build complete!`, `swift test` reports no failures, and the gate exits 0.
 - Commits: one plain imperative sentence, sentence case, no prefix, no attribution or `Co-Authored-By` lines. Stage files by explicit path. Never stage `.claude/`.
 
@@ -71,8 +71,8 @@
 ### Task 1: `RGB`, `ColourToken` and `ColourSettings`
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/ColourSettings.swift`
-- Test: `macos/Tests/TyrannyCoreTests/ColourSettingsTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/ColourSettings.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/ColourSettingsTests.swift`
 
 **Interfaces:**
 - Produces:
@@ -125,15 +125,15 @@ public struct ColourSettings: Equatable, Sendable {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/ColourSettings.swift macos/Tests/TyrannyCoreTests/ColourSettingsTests.swift
+git add macos/Sources/TyrannyLikesSmokeCore/ColourSettings.swift macos/Tests/TyrannyLikesSmokeCoreTests/ColourSettingsTests.swift
 git commit -m "Add colour tokens and their saved settings"
 ```
 
 ### Task 2: `Contrast`
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/Contrast.swift`
-- Test: `macos/Tests/TyrannyCoreTests/ContrastTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/Contrast.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/ContrastTests.swift`
 
 **Interfaces:**
 - Consumes: `RGB` (Task 1).
@@ -197,15 +197,15 @@ No colour fails against both backgrounds. That would need luminance above 0.246 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/Contrast.swift macos/Tests/TyrannyCoreTests/ContrastTests.swift
+git add macos/Sources/TyrannyLikesSmokeCore/Contrast.swift macos/Tests/TyrannyLikesSmokeCoreTests/ContrastTests.swift
 git commit -m "Add WCAG contrast and an OKLCH lightness raise"
 ```
 
 ### Task 3: `ArtworkPalette`
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/ArtworkPalette.swift` (imports `CoreGraphics`)
-- Test: `macos/Tests/TyrannyCoreTests/ArtworkPaletteTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/ArtworkPalette.swift` (imports `CoreGraphics`)
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/ArtworkPaletteTests.swift`
 
 **Interfaces:**
 - Consumes: `RGB` (Task 1).
@@ -243,17 +243,17 @@ public enum ArtworkPalette {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/ArtworkPalette.swift macos/Tests/TyrannyCoreTests/ArtworkPaletteTests.swift
+git add macos/Sources/TyrannyLikesSmokeCore/ArtworkPalette.swift macos/Tests/TyrannyLikesSmokeCoreTests/ArtworkPaletteTests.swift
 git commit -m "Find a cover's dominant colour"
 ```
 
 ### Task 4: `ThemeResolver` and `ArtTint`
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/ThemeResolver.swift`
-- Create: `macos/Sources/TyrannyCore/ArtTint.swift`
-- Test: `macos/Tests/TyrannyCoreTests/ThemeResolverTests.swift`
-- Test: `macos/Tests/TyrannyCoreTests/ArtTintTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/ThemeResolver.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/ArtTint.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/ThemeResolverTests.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/ArtTintTests.swift`
 
 **Interfaces:**
 - Consumes: `RGB`, `ColourToken`, `ColourSettings` (Task 1), and `RecentKeys` (existing, `RecentKeys.swift`).
@@ -327,17 +327,17 @@ public struct ArtTint: Sendable {
 - [ ] **Step 6: Commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/ThemeResolver.swift macos/Sources/TyrannyCore/ArtTint.swift macos/Tests/TyrannyCoreTests/ThemeResolverTests.swift macos/Tests/TyrannyCoreTests/ArtTintTests.swift
+git add macos/Sources/TyrannyLikesSmokeCore/ThemeResolver.swift macos/Sources/TyrannyLikesSmokeCore/ArtTint.swift macos/Tests/TyrannyLikesSmokeCoreTests/ThemeResolverTests.swift macos/Tests/TyrannyLikesSmokeCoreTests/ArtTintTests.swift
 git commit -m "Resolve colour tokens and track the cover-art colour"
 ```
 
 ### Task 5: `ColourTheme`, environment injection and the SwiftUI call sites
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Models/ColourTheme.swift`
-- Modify: `macos/Sources/Tyranny/PlayerModel.swift` (`let theme`, `init` parameter)
-- Modify: `macos/Sources/Tyranny/TyrannyApp.swift` (the `PlayerModel(...)` call; `.colourTheme(model.theme)` on the `MainWindow`, `EqualizerView` and `SettingsView` roots)
-- Modify: `macos/Sources/Tyranny/NativeRenderViews.swift` (`renderSettings`'s `NSHostingView` root gets `.colourTheme(model.theme)`)
+- Create: `macos/Sources/TyrannyLikesSmoke/Models/ColourTheme.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift` (`let theme`, `init` parameter)
+- Modify: `macos/Sources/TyrannyLikesSmoke/TyrannyLikesSmokeApp.swift` (the `PlayerModel(...)` call; `.colourTheme(model.theme)` on the `MainWindow`, `EqualizerView` and `SettingsView` roots)
+- Modify: `macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift` (`renderSettings`'s `NSHostingView` root gets `.colourTheme(model.theme)`)
 - Modify the call sites:
   - `Shell/PlayerBar.swift`: lines 63, 114, 144, 173, 222 and 233;
   - `Views/LyricsPane.swift`: line 98;
@@ -387,9 +387,9 @@ final class ColourTheme {
   - `selection`: `.selectedContentBackgroundColor`;
   - `success`, `warning`, `error`: `.systemGreen`, `.systemOrange`, `.systemRed`.
 - `colours` uses `Color(nsColor: nsColour(token))` for each non-`.system` token and the `ThemeColours` default for `.system`.
-- `PlayerModel.init(quitSuspensions:importNotes:theme:)` stores `let theme: ColourTheme`. `TyrannyApp` passes `.forLaunch(arguments: CommandLine.arguments)`.
+- `PlayerModel.init(quitSuspensions:importNotes:theme:)` stores `let theme: ColourTheme`. `TyrannyLikesSmokeApp` passes `.forLaunch(arguments: CommandLine.arguments)`.
 
-- [ ] **Step 1: Implement** `ColourTheme.swift` and the `PlayerModel` / `TyrannyApp` / `NativeRenderViews` changes.
+- [ ] **Step 1: Implement** `ColourTheme.swift` and the `PlayerModel` / `TyrannyLikesSmokeApp` / `NativeRenderViews` changes.
 - [ ] **Step 2: Migrate each SwiftUI call site** to `@Environment(\.themeColours) private var colours`:
   - `Color.accentColor` and `.accentColor` become `colours.accent`;
   - `.green` becomes `colours.success`;
@@ -399,30 +399,30 @@ final class ColourTheme {
 - [ ] **Step 3: Verify no SwiftUI site is left.** Run from the repo root:
 
 ```bash
-grep -rnE "Color\.accentColor|\.foregroundStyle\(\.(green|orange|red)\)|Color\.(green|orange|red)\b|^[[:space:]]*case .*: \.(green|red)$" macos/Sources/Tyranny --include='*.swift' | grep -v '/Native' | grep -v ColourTheme.swift
-grep -rn "Environment(ColourTheme.self)" macos/Sources/Tyranny --include='*.swift'
+grep -rnE "Color\.accentColor|\.foregroundStyle\(\.(green|orange|red)\)|Color\.(green|orange|red)\b|^[[:space:]]*case .*: \.(green|red)$" macos/Sources/tyranny likes smoke --include='*.swift' | grep -v '/Native' | grep -v ColourTheme.swift
+grep -rn "Environment(ColourTheme.self)" macos/Sources/tyranny likes smoke --include='*.swift'
 ```
 
 Expected: both print nothing. Outside `ColourTheme.swift`, `controlAccentColor` remains only in `VirtualTrackTable.swift`, `UpNextTable.swift` and `AlbumGridItem.swift`, which Task 6 handles.
-- [ ] **Step 4: Run the gates.** Then run `cargo build --locked --bins && python3 scripts/render_views.py --app macos/.build/debug/Tyranny --out target/render-colours`, and look at `15-player-bar-collapsed.png`, `19-player-bar-disconnected.png`, `20-player-bar-error.png` and `14-settings-playback.png`. Expected: they look exactly as before, because the harness suite has no custom colours.
+- [ ] **Step 4: Run the gates.** Then run `cargo build --locked --bins && python3 scripts/render_views.py --app "macos/.build/debug/tyranny likes smoke" --out target/render-colours`, and look at `15-player-bar-collapsed.png`, `19-player-bar-disconnected.png`, `20-player-bar-error.png` and `14-settings-playback.png`. Expected: they look exactly as before, because the harness suite has no custom colours.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/Models/ColourTheme.swift macos/Sources/Tyranny/PlayerModel.swift macos/Sources/Tyranny/TyrannyApp.swift macos/Sources/Tyranny/NativeRenderViews.swift macos/Sources/Tyranny/Shell/PlayerBar.swift macos/Sources/Tyranny/Views/LyricsPane.swift macos/Sources/Tyranny/TrackDrag.swift macos/Sources/Tyranny/Shell/ImportProgressView.swift macos/Sources/Tyranny/Shell/StatusBar.swift macos/Sources/Tyranny/Shell/SettingsView.swift macos/Sources/Tyranny/Shell/EqualizerView.swift macos/Sources/Tyranny/Views/UpNextView.swift macos/Sources/Tyranny/Views/PlaylistSheets.swift macos/Sources/Tyranny/Views/RadioView.swift macos/Sources/Tyranny/Shell/MainWindowView.swift
+git add macos/Sources/TyrannyLikesSmoke/Models/ColourTheme.swift macos/Sources/TyrannyLikesSmoke/PlayerModel.swift macos/Sources/TyrannyLikesSmoke/TyrannyLikesSmokeApp.swift macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift macos/Sources/TyrannyLikesSmoke/Shell/PlayerBar.swift macos/Sources/TyrannyLikesSmoke/Views/LyricsPane.swift macos/Sources/TyrannyLikesSmoke/TrackDrag.swift macos/Sources/TyrannyLikesSmoke/Shell/ImportProgressView.swift macos/Sources/TyrannyLikesSmoke/Shell/StatusBar.swift macos/Sources/TyrannyLikesSmoke/Shell/SettingsView.swift macos/Sources/TyrannyLikesSmoke/Shell/EqualizerView.swift macos/Sources/TyrannyLikesSmoke/Views/UpNextView.swift macos/Sources/TyrannyLikesSmoke/Views/PlaylistSheets.swift macos/Sources/TyrannyLikesSmoke/Views/RadioView.swift macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift
 git commit -m "Draw accent and status colours from colour tokens"
 ```
 
 ### Task 6: `TokenRowView` and colours in the AppKit tables and grid
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Lists/TokenRowView.swift`
-- Modify: `macos/Sources/Tyranny/Models/ColourTheme.swift` (add `TableColours`, `var tableColours`)
-- Modify: `macos/Sources/Tyranny/Lists/VirtualTrackTable.swift`. That covers the `colours` property, `rowViewForRow`, the redraw in `update`, and `TrackCellView`.
-- Modify: `macos/Sources/Tyranny/Lists/TrackListView.swift`, which passes `colours: player.theme.tableColours`.
-- Modify: `macos/Sources/Tyranny/Views/UpNextTable.swift`. `QueueRowView` becomes `TokenRowView`'s subclass; `QueueCellView` changes too.
-- Modify: `macos/Sources/Tyranny/Views/UpNextView.swift`, which passes `colours`.
-- Modify: `macos/Sources/Tyranny/Albums/AlbumTrackTable.swift` and `AlbumExpansionView.swift`, which passes `colours`.
-- Modify: `macos/Sources/Tyranny/Albums/AlbumGridItem.swift` and `AlbumGridView.swift`. `AlbumCollection` gets `colours`.
+- Create: `macos/Sources/TyrannyLikesSmoke/Lists/TokenRowView.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/ColourTheme.swift` (add `TableColours`, `var tableColours`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Lists/VirtualTrackTable.swift`. That covers the `colours` property, `rowViewForRow`, the redraw in `update`, and `TrackCellView`.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Lists/TrackListView.swift`, which passes `colours: player.theme.tableColours`.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Views/UpNextTable.swift`. `QueueRowView` becomes `TokenRowView`'s subclass; `QueueCellView` changes too.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Views/UpNextView.swift`, which passes `colours`.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Albums/AlbumTrackTable.swift` and `AlbumExpansionView.swift`, which passes `colours`.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Albums/AlbumGridItem.swift` and `AlbumGridView.swift`. `AlbumCollection` gets `colours`.
 
 **Interfaces:**
 - Consumes: `ColourTheme.nsColour(_:)`, `ColourTheme.revision`, `ColourTheme.tokens` (Task 5), and `Contrast.composite`, `Contrast.prefersLightText`, `Contrast.lightBackground`, `Contrast.darkBackground` (Task 2).
@@ -469,20 +469,20 @@ class TokenRowView: NSTableRowView {
 - [ ] **Step 1: Implement** `TokenRowView.swift` and `TableColours`.
 - [ ] **Step 2: Wire the three tables.** Each `rowViewForRow` makes a `TokenRowView` (`QueueRowView` in Up Next) and sets `selection`. Each status cell passes `parent.colours.playing`. Add the redraw on revision change.
 - [ ] **Step 3: Wire the album grid border** through `AlbumCollection.colours.accent`.
-- [ ] **Step 4: Verify.** Running `grep -rn "controlAccentColor" macos/Sources/Tyranny --include='*.swift'` prints only lines in `ColourTheme.swift`. Run the gates. Re-run the render-views command from Task 5. Expected: `01-songs-ungrouped`, `05-albums-grid-expanded` and `10-up-next` look as before (System selection, system accent speaker).
+- [ ] **Step 4: Verify.** Running `grep -rn "controlAccentColor" macos/Sources/tyranny likes smoke --include='*.swift'` prints only lines in `ColourTheme.swift`. Run the gates. Re-run the render-views command from Task 5. Expected: `01-songs-ungrouped`, `05-albums-grid-expanded` and `10-up-next` look as before (System selection, system accent speaker).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/Lists/TokenRowView.swift macos/Sources/Tyranny/Models/ColourTheme.swift macos/Sources/Tyranny/Lists/VirtualTrackTable.swift macos/Sources/Tyranny/Lists/TrackListView.swift macos/Sources/Tyranny/Views/UpNextTable.swift macos/Sources/Tyranny/Views/UpNextView.swift macos/Sources/Tyranny/Albums/AlbumTrackTable.swift macos/Sources/Tyranny/Albums/AlbumExpansionView.swift macos/Sources/Tyranny/Albums/AlbumGridItem.swift macos/Sources/Tyranny/Albums/AlbumGridView.swift
+git add macos/Sources/TyrannyLikesSmoke/Lists/TokenRowView.swift macos/Sources/TyrannyLikesSmoke/Models/ColourTheme.swift macos/Sources/TyrannyLikesSmoke/Lists/VirtualTrackTable.swift macos/Sources/TyrannyLikesSmoke/Lists/TrackListView.swift macos/Sources/TyrannyLikesSmoke/Views/UpNextTable.swift macos/Sources/TyrannyLikesSmoke/Views/UpNextView.swift macos/Sources/TyrannyLikesSmoke/Albums/AlbumTrackTable.swift macos/Sources/TyrannyLikesSmoke/Albums/AlbumExpansionView.swift macos/Sources/TyrannyLikesSmoke/Albums/AlbumGridItem.swift macos/Sources/TyrannyLikesSmoke/Albums/AlbumGridView.swift
 git commit -m "Draw table selection and the playing icon from colour tokens"
 ```
 
 ### Task 7: Cover-art tint
 
 **Files:**
-- Modify: `macos/Sources/Tyranny/ArtworkStore.swift`. Add `hasContext` and `onNowPlayingChange`, called at the end of `synchronize(...)` and of `insert(_:for:)`.
-- Modify: `macos/Sources/Tyranny/Models/ColourTheme.swift`. Add `artColour`, `artworkChanged`, the extraction and the animation.
-- Modify: `macos/Sources/Tyranny/PlayerModel.swift`, which installs the hook in `init`.
+- Modify: `macos/Sources/TyrannyLikesSmoke/ArtworkStore.swift`. Add `hasContext` and `onNowPlayingChange`, called at the end of `synchronize(...)` and of `insert(_:for:)`.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/ColourTheme.swift`. Add `artColour`, `artworkChanged`, the extraction and the animation.
+- Modify: `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift`, which installs the hook in `init`.
 
 **Interfaces:**
 - Consumes: `ArtTint`, `ArtTint.artwork(hasContext:playing:state:cacheKey:)` (Task 4), `ArtworkPalette.dominant(image:)` (Task 3), and `ArtworkImage` (existing, `@unchecked Sendable`).
@@ -507,21 +507,21 @@ func artworkChanged(hasContext: Bool, playing: Bool, image: ArtworkImage)
 
 - [ ] **Step 1: Implement** the three changes above.
 - [ ] **Step 2: Run the gates.** All `ArtTint` behaviour is pinned by Task 4's tests. Task 9 extends `NativeArtworkSmoke` to exercise it end to end.
-- [ ] **Step 3: Self-check.** Run `grep -n "Task.detached" macos/Sources/Tyranny/Models/ColourTheme.swift`; it shows the one extraction. No `ArtworkPalette` call runs outside it.
+- [ ] **Step 3: Self-check.** Run `grep -n "Task.detached" macos/Sources/TyrannyLikesSmoke/Models/ColourTheme.swift`; it shows the one extraction. No `ArtworkPalette` call runs outside it.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/ArtworkStore.swift macos/Sources/Tyranny/Models/ColourTheme.swift macos/Sources/Tyranny/PlayerModel.swift
+git add macos/Sources/TyrannyLikesSmoke/ArtworkStore.swift macos/Sources/TyrannyLikesSmoke/Models/ColourTheme.swift macos/Sources/TyrannyLikesSmoke/PlayerModel.swift
 git commit -m "Tint the accent from the playing cover"
 ```
 
 ### Task 8: Settings → Appearance
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Shell/AppearanceSettingsPane.swift`
-- Modify: `macos/Sources/Tyranny/Models/NavigationModel.swift` (`SettingsTab.appearance`)
-- Modify: `macos/Sources/Tyranny/Shell/SettingsView.swift` (fourth tab, update the doc comment)
-- Modify: `macos/Sources/Tyranny/NativeRenderViews.swift` (`renderSettings` tab list and two extra renders)
+- Create: `macos/Sources/TyrannyLikesSmoke/Shell/AppearanceSettingsPane.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/NavigationModel.swift` (`SettingsTab.appearance`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/SettingsView.swift` (fourth tab, update the doc comment)
+- Modify: `macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift` (`renderSettings` tab list and two extra renders)
 
 **Interfaces:**
 - Consumes: `ColourTheme.settings`, `update(_:)`, `nsColour(_:)` (Task 5); `Contrast.warning(for:)` (Task 2); `ColourToken`, `RGB` (Task 1).
@@ -545,25 +545,25 @@ git commit -m "Tint the accent from the playing cover"
   - Restore the saved settings with `theme.update(saved)` afterwards.
 
 - [ ] **Step 1: Implement** the tab, the pane and the renders.
-- [ ] **Step 2: Run the gates.** Then run `python3 scripts/render_views.py --app macos/.build/debug/Tyranny --out target/render-colours` and look at PNGs 26–28. Expected:
+- [ ] **Step 2: Run the gates.** Then run `python3 scripts/render_views.py --app "macos/.build/debug/tyranny likes smoke" --out target/render-colours` and look at PNGs 26–28. Expected:
   - every row and the toggle show; "Same as Accent" is on the playing row;
   - 27 shows "Low contrast in Light appearance" under Accent and "Low contrast in Dark appearance" under Error;
   - 28 is legible in dark.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add macos/Sources/Tyranny/Shell/AppearanceSettingsPane.swift macos/Sources/Tyranny/Models/NavigationModel.swift macos/Sources/Tyranny/Shell/SettingsView.swift macos/Sources/Tyranny/NativeRenderViews.swift
+git add macos/Sources/TyrannyLikesSmoke/Shell/AppearanceSettingsPane.swift macos/Sources/TyrannyLikesSmoke/Models/NavigationModel.swift macos/Sources/TyrannyLikesSmoke/Shell/SettingsView.swift macos/Sources/TyrannyLikesSmoke/NativeRenderViews.swift
 git commit -m "Add the Appearance settings tab"
 ```
 
 ### Task 9: Colour commands, smokes and final gates
 
 **Files:**
-- Modify: `macos/Sources/TyrannyCore/CommandLanguage.swift`
-- Modify: `macos/Sources/TyrannyCore/ColourSettings.swift` (add `apply`)
-- Test: `macos/Tests/TyrannyCoreTests/CommandLanguageTests.swift`, `macos/Tests/TyrannyCoreTests/ColourSettingsTests.swift`
-- Modify: `macos/Sources/Tyranny/CommandDispatcher.swift`
-- Modify: `macos/Sources/Tyranny/NativeCommandSmoke.swift`, `macos/Sources/Tyranny/NativeArtworkSmoke.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/CommandLanguage.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/ColourSettings.swift` (add `apply`)
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/CommandLanguageTests.swift`, `macos/Tests/TyrannyLikesSmokeCoreTests/ColourSettingsTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/CommandDispatcher.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/NativeCommandSmoke.swift`, `macos/Sources/TyrannyLikesSmoke/NativeArtworkSmoke.swift`
 
 **Interfaces:**
 - Consumes: `ColourSettings`, `ColourToken`, `RGB` (Task 1); `ColourTheme.settings`, `update(_:)`, `tokens` (Tasks 5, 7); `SettingsTab.appearance` (Task 8).
@@ -619,13 +619,13 @@ git commit -m "Add the Appearance settings tab"
     4. Execute `tint on`. Wait for the same blue `.tinted` value.
     5. Append `native-accent-follows-playing-cover-holds-on-pause-and-reverts-with-tint-off`.
 - [ ] **Step 6: Run** the gates, then the checks below.
-  - `python3 scripts/client_gate.py --commands-only --app macos/.build/debug/Tyranny`. Expected: exit 0, and `commands.json` lists the new case.
+  - `python3 scripts/client_gate.py --commands-only --app "macos/.build/debug/tyranny likes smoke"`. Expected: exit 0, and `commands.json` lists the new case.
   - The standard Rust gates, though no Rust change is expected: `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked --all-targets`. Expected: all pass.
-  - The artwork smoke needs Accessibility and a release server, so the user runs it: `cargo build --locked --release --bin tyranny-server && python3 scripts/artwork_gate.py --app macos/.build/debug/Tyranny`. The user also checks a custom selection colour by eye.
+  - The artwork smoke needs Accessibility and a release server, so the user runs it: `cargo build --locked --release --bin tyranny-likes-smoke-server && python3 scripts/artwork_gate.py --app "macos/.build/debug/tyranny likes smoke"`. The user also checks a custom selection colour by eye.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/CommandLanguage.swift macos/Sources/TyrannyCore/ColourSettings.swift macos/Tests/TyrannyCoreTests/CommandLanguageTests.swift macos/Tests/TyrannyCoreTests/ColourSettingsTests.swift macos/Sources/Tyranny/CommandDispatcher.swift macos/Sources/Tyranny/NativeCommandSmoke.swift macos/Sources/Tyranny/NativeArtworkSmoke.swift
+git add macos/Sources/TyrannyLikesSmokeCore/CommandLanguage.swift macos/Sources/TyrannyLikesSmokeCore/ColourSettings.swift macos/Tests/TyrannyLikesSmokeCoreTests/CommandLanguageTests.swift macos/Tests/TyrannyLikesSmokeCoreTests/ColourSettingsTests.swift macos/Sources/TyrannyLikesSmoke/CommandDispatcher.swift macos/Sources/TyrannyLikesSmoke/NativeCommandSmoke.swift macos/Sources/TyrannyLikesSmoke/NativeArtworkSmoke.swift
 git commit -m "Add colour, colours and tint commands"
 ```
 

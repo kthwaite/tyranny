@@ -49,7 +49,7 @@ This is session-local, not saved across app relaunches. Changing the list descri
 at the top. Other retained track lists use the same table behavior.
 
 Native acceptance: `python3 scripts/client_gate.py --scenario scroll-memory --app
-target/swift-client/debug/Tyranny`. On an isolated 1,129-track library it navigates
+"target/swift-client/debug/tyranny likes smoke"`. On an isolated 1,129-track library it navigates
 Songs → Albums → Songs twice in both None and Artist › Album grouping, checks the
 first visible track and exact viewport offset, captures the restored views, and
 checks that changing grouping resets to the top.
@@ -111,20 +111,20 @@ access; subsequent builds reuse the verified native cache.
 | `just build` | Build both components (debug). |
 | `just build-release` | Build both components with release optimizations. |
 | `just test` | Test both components. |
-| `just dmg` | Build a self-contained release app and package `target/Tyranny.dmg`. |
+| `just dmg` | Build a self-contained release app and package `"target/tyranny likes smoke.dmg"`. |
 
 Server recipes isolate both debug and release artifacts in
 `target/portable-rust/{debug,release}` so unrelated FFmpeg headers/libraries cannot
 be reused accidentally. Swift uses `target/swift-client/debug` and
 `target/swift-client/release`.
-The build recipes do not replace `target/Tyranny.app`. Unbundled release Rust
+The build recipes do not replace `"target/tyranny likes smoke.app"`. Unbundled release Rust
 binaries still reference the pinned build cache; use the app/DMG for relocation.
 
 To package the development app, stop the app/daemon before running
 `scripts/build_macos.sh`; by default it bundles the pinned release server and
 native libraries with a debug client. `scripts/build_macos.sh release` builds both
 components in release mode and assembles a self-contained
-`target/release/Tyranny.app`. An optional second argument selects the app destination.
+`"target/release/tyranny likes smoke.app"`. An optional second argument selects the app destination.
 
 ### Sony Walkman sync
 
@@ -169,7 +169,7 @@ FFMPEG_DIR="$prefix" MACOSX_DEPLOYMENT_TARGET=14.0 \
 `scripts/make_tracker_fixtures.py --libopenmpt "$prefix/lib/libopenmpt.dylib"`
 regenerates the four self-authored module fixtures and measures independent
 48 kHz stereo frame references. Full fixture regeneration requires
-`TYRANNY_LIBOPENMPT="$prefix/lib/libopenmpt.dylib"` as well as its encoder tools.
+`TYRANNY_LIKES_SMOKE_LIBOPENMPT="$prefix/lib/libopenmpt.dylib"` as well as its encoder tools.
 
 
 ### Compilation detection
@@ -280,7 +280,7 @@ saved presets. Build the driver from current source:
 
 ### Client command language
 
-`TyrannyCore.CommandLanguage` defines the client-only grammar, command registry,
+`TyrannyLikesSmokeCore.CommandLanguage` defines the client-only grammar, command registry,
 argument validation, completion, and snapshot-relative transport resolution.
 The Rust protocol still accepts structured commands, not command strings.
 The macOS `CommandDispatcher` maps commands to the existing playback, activation,
@@ -358,7 +358,7 @@ Verification:
 ```sh
 just test-client
 python3 scripts/client_gate.py --commands-only \
-  --app target/swift-client/debug/Tyranny --work-dir target/command-gate
+  --app "target/swift-client/debug/tyranny likes smoke" --work-dir target/command-gate
 ```
 
 The command gate uses an isolated real Rust server and three generated audio
@@ -412,13 +412,13 @@ additional provider scrapers are configured. See the cited
 
 Run `just dmg` or `scripts/build_dmg.sh` to build the release client and server,
 assemble and ad-hoc sign a fresh app bundle, and create a compressed
-`target/Tyranny.dmg`. The image contains `Tyranny.app` (including its server,
+`"target/tyranny likes smoke.dmg"`. The image contains `tyranny likes smoke.app` (including its server,
 FFmpeg libraries, icon, and source/license artifacts) and an Applications
 shortcut. Drag the app to Applications before launching it; do not run the
 managed server from the mounted image.
 
 App upgrades do not require the previous app to remove its LaunchAgent. When
-startup needs a server, Tyranny recognizes its saved job even if the app moved
+startup needs a server, tyranny likes smoke recognizes its saved job even if the app moved
 or the old bundle was deleted, gracefully unloads an owned loaded job, and
 rewrites the helper path for the current bundle. Library, queue, settings, and
 authentication token stay in the existing state directory. An incompatible
@@ -530,26 +530,26 @@ source and do not require Homebrew FFmpeg or pkg-config.
 | `just build` | Build both components (debug). |
 | `just build-release` | Build both components with release optimizations. |
 | `just test` | Test both components. |
-| `just dmg` | Build a self-contained release app and package `target/Tyranny.dmg`. |
+| `just dmg` | Build a self-contained release app and package `"target/tyranny likes smoke.dmg"`. |
 
 Debug Cargo builds use `target/debug` unless overridden by `CARGO_TARGET_DIR`.
 Release recipes isolate their Rust artifacts in `target/portable-rust/release`
 so development headers/libraries cannot be reused accidentally. Swift uses
 `target/swift-client/debug` and `target/swift-client/release`.
-The build recipes do not replace `target/Tyranny.app`. Unbundled release Rust
+The build recipes do not replace `"target/tyranny likes smoke.app"`. Unbundled release Rust
 binaries still reference the pinned build cache; use the app/DMG for relocation.
 
 To package the development app, stop the app/daemon before running
 `scripts/build_macos.sh`; by default it bundles a Homebrew-linked release server
 with a debug client. `scripts/build_macos.sh release` instead builds both
 components in release mode and assembles a self-contained
-`target/release/Tyranny.app`. An optional second argument selects the app destination.
+`"target/release/tyranny likes smoke.app"`. An optional second argument selects the app destination.
 
 ### Release disk image
 
 Run `just dmg` or `scripts/build_dmg.sh` to build the release client and server,
 assemble and ad-hoc sign a fresh app bundle, and create a compressed
-`target/Tyranny.dmg`. The image contains `Tyranny.app` (including its server,
+`"target/tyranny likes smoke.dmg"`. The image contains `tyranny likes smoke.app` (including its server,
 FFmpeg libraries, icon, and source/license artifacts) and an Applications
 shortcut. Drag the app to Applications before launching it; do not run the
 managed server from the mounted image.
@@ -630,7 +630,7 @@ This is a macOS-first architectural spike, not a commitment to drop anything in 
 
 Five parallel read-only scans covered all sibling reference repositories. These are implementation observations, not runtime validation of those apps.
 
-| Reference | Evidence and lesson | Decision for tyranny |
+| Reference | Evidence and lesson | Decision for tyranny likes smoke |
 | --- | --- | --- |
 | MPD | Server partitions own queue/player/outputs; queue entries have their own IDs and change versions. `idle` signals changes rather than providing durable event replay. [Partition](../mpd/src/Partition.hxx), [queue IDs](../mpd/src/queue/Queue.hxx#L37-L74), [idle](../mpd/src/client/Idle.cxx) | Server authority; stable queue-entry IDs; explicit reconnect snapshots. Do not reproduce partitions, plugin infrastructure, or MPD compatibility in the spike. |
 | Resonance | Rust wraps GStreamer `playbin3`; its EOS handler stops playback before notifying the queue. Import embeds Python and Mutagen; models depend on GTK/GLib. [backend](../resonance/src/player/gst_backend.rs#L53-L110), [EOS](../resonance/src/player/gst_backend.rs#L332-L335), [importer](../resonance/src/importer.rs) | Rust/GStreamer is a concrete starting point, but this implementation is not evidence of gapless playback. Keep plain Rust models; do not inherit GTK or embedded Python. |
@@ -740,7 +740,7 @@ Request bounded pages for both library and queue. Preserve selection by ID acros
 
 **Gate:** complete the choose-folder-to-play workflow through the actual SwiftUI surface. Close and reopen the client while the daemon keeps playing. Seek, pause, enqueue a selection, and change the queue without duplicate commands or stale highlighting. Filtering/browsing must remain responsive while scanning and playing.
 
-**Executed:** the ad-hoc-signed development `Tyranny.app` completes the actual native picker-to-play workflow against the Rust server in clock-paced and CoreAudio modes. Native controls exercise three-pane selection, bounded page replacement, multiselection playback, pause/seek/resume, queue reorder/removal, filtering during an active rescan, persisted resume settings, disconnect/reconnect, and quit/relaunch without interrupting server playback. The fixture grows from 105 to 1,129 real audio paths; the UI keeps 100-row pages. Composited screenshots and separate Swift transport/model regressions are retained with the results. This proves the controller surface, not managed daemon startup, human listening, or production-scale latency.
+**Executed:** the ad-hoc-signed development `tyranny likes smoke.app` completes the actual native picker-to-play workflow against the Rust server in clock-paced and CoreAudio modes. Native controls exercise three-pane selection, bounded page replacement, multiselection playback, pause/seek/resume, queue reorder/removal, filtering during an active rescan, persisted resume settings, disconnect/reconnect, and quit/relaunch without interrupting server playback. The fixture grows from 105 to 1,129 real audio paths; the UI keeps 100-row pages. Composited screenshots and separate Swift transport/model regressions are retained with the results. This proves the controller surface, not managed daemon startup, human listening, or production-scale latency.
 
 ### 5. Prove the macOS process and scale assumptions
 
@@ -776,4 +776,4 @@ Proceed with the native FFmpeg/CoreAudio engine only on the strength of its meas
 
 ### Research-time environment observations
 
-At initial planning time the repository had an empty dependency list and a `Hello, world!` entry point. Rust/Cargo 1.99.1, Swift 6.3.3, and an Xcode developer directory were detected. `ffmpeg`, `mpd`, and `pkg-config` were on PATH; GStreamer was not installed. Subsequent experiments installed GStreamer, FFmpeg development libraries, and LAME. Current executables are `audio-probe`, `tyranny-server`, `tyrannyctl`, and the native `Tyranny.app` controller; the hello-world entrypoint and GStreamer Rust dependencies have been removed. See the result document for current build instructions rather than treating these historical observations as prerequisites.
+At initial planning time the repository had an empty dependency list and a `Hello, world!` entry point. Rust/Cargo 1.99.1, Swift 6.3.3, and an Xcode developer directory were detected. `ffmpeg`, `mpd`, and `pkg-config` were on PATH; GStreamer was not installed. Subsequent experiments installed GStreamer, FFmpeg development libraries, and LAME. Current executables are `audio-probe`, `tyranny-likes-smoke-server`, `tyranny-likes-smoke-ctl`, and the native `tyranny likes smoke.app` controller; the hello-world entrypoint and GStreamer Rust dependencies have been removed. See the result document for current build instructions rather than treating these historical observations as prerequisites.

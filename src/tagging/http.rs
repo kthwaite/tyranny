@@ -15,7 +15,7 @@ use std::{
 };
 
 pub(super) const USER_AGENT: &str = concat!(
-    "Tyranny/",
+    "tyranny-likes-smoke/",
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/kthwaite/tyranny)"
 );

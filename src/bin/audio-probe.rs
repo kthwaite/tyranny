@@ -10,7 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tyranny::{SAMPLE_RATE, decoder::GainMode, output::OutputConfig, playback::Player};
+use tyranny_likes_smoke::{SAMPLE_RATE, decoder::GainMode, output::OutputConfig, playback::Player};
 
 const USAGE: &str = "audio-probe --output <coreaudio|/absolute/capture.f32> --gain <off|track|album> [--exercise-transport] [--clocked] [--exercise-queue <remove-next|move-next>] <absolute media paths...>";
 

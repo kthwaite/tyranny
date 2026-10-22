@@ -24,7 +24,7 @@ from server_gate import UnixSocket, fixture, private_socket, run_directory
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", default="target/Tyranny.app")
+    parser.add_argument("--app", default="target/tyranny likes smoke.app")
     parser.add_argument("--ui-driver", default="target/native-ui-driver")
     parser.add_argument("--work-dir", default="target/lifecycle-gate")
     parser.add_argument("--coreaudio", action="store_true")
@@ -37,14 +37,14 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     run = run_directory(work)
     os.chmod(run, 0o700)
-    app = run / "Tyranny.app"
+    app = run / "tyranny likes smoke.app"
     source_app = Path(args.app).resolve()
     shutil.copytree(source_app, app, symlinks=True)
-    helper = app / "Contents/MacOS/tyranny-server"
+    helper = app / "Contents/MacOS/tyranny-likes-smoke-server"
     driver = Path(args.ui_driver).resolve()
     environment = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"}
     domain = f"gui/{os.getuid()}"
-    label = "dev.tyranny.spike." + uuid.uuid4().hex
+    label = "dev.tyranny-likes-smoke.spike." + uuid.uuid4().hex
     agents = run / "agents"
     state = run / "state"
     socket_path = str(state / "control.sock")
@@ -356,9 +356,9 @@ def main():
 
         # New app locations may inherit either a loaded job or just its plist.
         # Neither case may require the previous app to uninstall itself.
-        upgraded = run / "Updated Tyranny – 日本語.app"
+        upgraded = run / "Updated tyranny likes smoke – 日本語.app"
         shutil.copytree(app, upgraded, symlinks=True)
-        upgraded_helper = upgraded / "Contents/MacOS/tyranny-server"
+        upgraded_helper = upgraded / "Contents/MacOS/tyranny-likes-smoke-server"
         private_socket(socket_path)
 
         # A loaded KeepAlive job whose app disappeared cannot restart its helper.
@@ -497,12 +497,12 @@ def main():
 
         broken = run / "MissingDecoder.app"
         shutil.copytree(app, broken, symlinks=True)
-        broken_helper = broken / "Contents/MacOS/tyranny-server"
+        broken_helper = broken / "Contents/MacOS/tyranny-likes-smoke-server"
         links = command(["/usr/bin/otool", "-L", broken_helper]).stdout
         dependency = next((line.strip().split(" (compatibility", 1)[0] for line in links.splitlines()
                            if "libavformat." in line), None)
         assert dependency, "The bundled helper must dynamically link the actual FFmpeg decoder"
-        missing = "@loader_path/tyranny-missing-avformat.dylib"
+        missing = "@loader_path/tyranny-likes-smoke-missing-avformat.dylib"
         command(["/usr/bin/install_name_tool", "-change", dependency, missing, broken_helper])
         command(["/usr/bin/codesign", "--force", "--sign", "-", broken_helper])
         command(["/usr/bin/codesign", "--force", "--sign", "-", broken])
@@ -514,7 +514,7 @@ def main():
                                 managed_state=broken_state, expect_connected=False)
         assert missing_result["error"] and "helper-check.log" in missing_result["error"]
         diagnostics = (broken_state / "helper-check.log").read_text()
-        assert "Library not loaded" in diagnostics and "tyranny-missing-avformat" in diagnostics
+        assert "Library not loaded" in diagnostics and "tyranny-likes-smoke-missing-avformat" in diagnostics
         assert ctl("print", broken_target, check=False).returncode != 0
         assert not (agents / f"{broken_label}.plist").exists(), "Missing dependency registered a restart loop"
         record("missing-decoder-preflight-visible-error-without-launchd-restart-loop", replaced_dependency=dependency,

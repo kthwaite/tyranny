@@ -19,7 +19,8 @@ use std::{
 
 #[test]
 fn repeat_all_trim_keeps_the_current_context() -> anyhow::Result<()> {
-    let directory = std::env::temp_dir().join(format!("tyranny-trim-{}", uuid::Uuid::new_v4()));
+    let directory =
+        std::env::temp_dir().join(format!("tyranny-likes-smoke-trim-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&directory)?;
     // 103 loose songs, then a three-entry album run; every entry is played.
     let loaded = |id: u64, run_id: u64, scope: RepeatScope| LoadedEntry {
@@ -58,7 +59,10 @@ fn repeat_all_trim_keeps_the_current_context() -> anyhow::Result<()> {
 
 #[test]
 fn previous_under_repeat_all_wraps_within_the_context() -> anyhow::Result<()> {
-    let directory = std::env::temp_dir().join(format!("tyranny-previous-{}", uuid::Uuid::new_v4()));
+    let directory = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-previous-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir(&directory)?;
     // A loose song, a three-entry album run, then another loose song.
     let loaded = |id: u64, run_id: u64, scope: RepeatScope| LoadedEntry {
@@ -132,7 +136,10 @@ impl ShuffleStrategy for Last {
 
 #[test]
 fn shuffled_start_plays_a_pick_within_the_new_run() -> anyhow::Result<()> {
-    let directory = std::env::temp_dir().join(format!("tyranny-start-{}", uuid::Uuid::new_v4()));
+    let directory = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-start-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir(&directory)?;
     let source = silence(&directory, 100)?;
     let mut player = Player::new(
@@ -167,7 +174,10 @@ fn shuffled_start_plays_a_pick_within_the_new_run() -> anyhow::Result<()> {
 
 #[test]
 fn a_selection_never_inherits_a_planned_fresh_pass() -> anyhow::Result<()> {
-    let directory = std::env::temp_dir().join(format!("tyranny-fresh-{}", uuid::Uuid::new_v4()));
+    let directory = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-fresh-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir(&directory)?;
     let source = silence(&directory, 100)?;
     let mut player = Player::new(
@@ -250,7 +260,10 @@ fn counted(events: &[PlayEvent]) -> Vec<u64> {
 }
 
 fn scratch(name: &str) -> anyhow::Result<PathBuf> {
-    let directory = std::env::temp_dir().join(format!("tyranny-{name}-{}", uuid::Uuid::new_v4()));
+    let directory = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-{name}-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir(&directory)?;
     Ok(directory)
 }

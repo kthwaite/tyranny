@@ -155,8 +155,8 @@ def binary_identity(path, declared_profile):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", default="target/Tyranny.app/Contents/MacOS/tyranny-server")
-    parser.add_argument("--app", default="target/Tyranny.app")
+    parser.add_argument("--server", default="target/tyranny likes smoke.app/Contents/MacOS/tyranny-likes-smoke-server")
+    parser.add_argument("--app", default="target/tyranny likes smoke.app")
     parser.add_argument("--ui-driver", default="target/native-ui-driver")
     parser.add_argument("--work-dir", default="target/scale-gate")
     parser.add_argument("--server-profile", choices=["debug", "release", "unknown"], default="release")
@@ -173,7 +173,7 @@ def main():
         parser.error("require samples >=20, native-runs >=2, scan-files >=1")
     server = Path(args.server).resolve()
     app = Path(args.app).resolve()
-    executable = app / "Contents/MacOS/Tyranny" if app.suffix == ".app" else app
+    executable = app / "Contents/MacOS/tyranny likes smoke" if app.suffix == ".app" else app
     driver = Path(args.ui_driver).resolve()
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -353,7 +353,7 @@ def main():
             assert executable.is_file() and driver.is_file(), "Build debug native app and Accessibility driver first"
             report["binaries"]["native"] = binary_identity(executable, args.native_profile)
             report["binaries"]["accessibility_driver"] = binary_identity(driver, "unknown")
-            bundled_helper = app / "Contents/MacOS/tyranny-server"
+            bundled_helper = app / "Contents/MacOS/tyranny-likes-smoke-server"
             if bundled_helper.is_file():
                 report["binaries"]["bundled_helper"] = binary_identity(bundled_helper, "unknown")
                 report["binaries"]["measured_server_matches_bundle"] = (

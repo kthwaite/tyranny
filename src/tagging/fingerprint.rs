@@ -76,7 +76,10 @@ mod tests {
 
     #[test]
     fn fingerprint_of_a_generated_tone_is_url_safe_chromaprint() {
-        let path = std::env::temp_dir().join(format!("tyranny-tone-{}.wav", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-tone-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
         write_tone_wav(&path, 10);
         let _remove = Remove(path.clone());
         let print = fingerprint(

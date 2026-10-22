@@ -13,7 +13,7 @@ func candidateFromDeviceDescriptor(d *usb.Device) *Device {
 	if err != nil {
 		return nil
 	}
-	// Tyranny's supported Walkman profile: never claim unrelated USB devices.
+	// tyranny likes smoke's supported Walkman profile: never claim unrelated USB devices.
 	if dd.IdVendor != 0x054c || dd.IdProduct != 0x0e6e {
 		return nil
 	}

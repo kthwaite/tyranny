@@ -32,7 +32,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
-use tyranny::{
+use tyranny_likes_smoke::{
     Frame,
     decoder::{Decoder, GainMode},
     library::Library,
@@ -105,7 +105,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tyranny-formats-{}-{}",
+            "tyranny-likes-smoke-formats-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

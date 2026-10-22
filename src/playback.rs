@@ -1740,8 +1740,10 @@ mod batch_tests {
 
     #[test]
     fn prepared_batch_edits_keep_current_pcm_and_replace_the_prepared_future() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let current = source(&scratch.0, "current.wav", 48_000, 1000);
         let second = source(&scratch.0, "second.wav", 311, 2000);
@@ -1871,8 +1873,9 @@ mod batch_tests {
 
     #[test]
     fn equalizer_processes_pending_pcm_once_and_changes_do_not_discard_buffers() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-eq-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("tyranny-likes-smoke-eq-{}", uuid::Uuid::new_v4())),
+        );
         fs::create_dir(&scratch.0)?;
         let total = BLOCK_FRAMES * 70 + 137;
         let source = source(&scratch.0, "source.wav", total as u32, 1000);
@@ -1931,8 +1934,9 @@ mod batch_tests {
 
     #[test]
     fn equalizer_history_survives_natural_gapless_track_boundaries() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-eq-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("tyranny-likes-smoke-eq-{}", uuid::Uuid::new_v4())),
+        );
         fs::create_dir(&scratch.0)?;
         // Cross the boundary after the live transition, so resetting filter
         // history at the next track would change the captured PCM.
@@ -1966,8 +1970,9 @@ mod batch_tests {
 
     #[test]
     fn equalizer_history_resets_on_stop_seek_and_reselection() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-eq-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("tyranny-likes-smoke-eq-{}", uuid::Uuid::new_v4())),
+        );
         fs::create_dir(&scratch.0)?;
         let source = source(&scratch.0, "source.wav", 10_000, 1000);
         for transition in 0..3 {
@@ -2005,8 +2010,10 @@ mod batch_tests {
 
     #[test]
     fn replace_upcoming_keeps_current_pcm_and_played_entries() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let played = source(&scratch.0, "played.wav", 97, 500);
         let current = source(&scratch.0, "current.wav", 48_000, 1000);
@@ -2128,8 +2135,10 @@ mod batch_tests {
     }
     #[test]
     fn clear_upcoming_keeps_current_audible() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let played = source(&scratch.0, "played.wav", 97, 500);
         let current = source(&scratch.0, "current.wav", 48_000, 1000);
@@ -2223,8 +2232,10 @@ mod batch_tests {
     }
     #[test]
     fn upcoming_follows_queue_order_without_shuffle_and_played_marks_with_it() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let skipped = source(&scratch.0, "skipped.wav", 97, 500);
         let current = source(&scratch.0, "current.wav", 48_000, 1000);
@@ -2307,8 +2318,10 @@ mod batch_tests {
     }
     #[test]
     fn played_run_with_trim_goes_straight_after_the_current_entry() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let played = source(&scratch.0, "played.wav", 97, 500);
         let current = source(&scratch.0, "current.wav", 48_000, 1000);
@@ -2399,8 +2412,10 @@ mod batch_tests {
     }
     #[test]
     fn shuffle_upcoming_clamps_an_out_of_range_pick() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let paths = (0..4)
             .map(|index| source(&scratch.0, &format!("{index}.wav"), 137, 1000))
@@ -2420,8 +2435,10 @@ mod batch_tests {
     }
     #[test]
     fn shuffle_upcoming_stays_anchored_when_output_reaches_a_shuffled_entry() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let runs = [
             (4_800, 1000),
@@ -2494,8 +2511,10 @@ mod batch_tests {
     }
     #[test]
     fn replace_upcoming_stays_anchored_when_output_reaches_a_removed_entry() -> Result<()> {
-        let scratch =
-            Scratch(std::env::temp_dir().join(format!("tyranny-batch-{}", uuid::Uuid::new_v4())));
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
         fs::create_dir(&scratch.0)?;
         let current = source(&scratch.0, "current.wav", 4_800, 1000);
         let second = source(&scratch.0, "second.wav", 48_000, 2000);
