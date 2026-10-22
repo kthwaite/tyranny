@@ -11,9 +11,7 @@ struct CommandDispatcher {
     let lists: TrackLists
 
     func completions(_ text: String) -> [String] {
-        player.savedPlaylists.sync()
-        player.savedPlaylists.loadAll()
-        return CommandLanguage.completions(text, playlistNames: player.savedPlaylists.rows.map(\.name))
+        suggestions(text).map(\.line)
     }
 
     func suggestions(_ text: String) -> [CommandSuggestion] {

@@ -196,5 +196,4 @@ import Testing
         #expect(try CommandLanguage.parse(":history") == ParsedCommand(id: .history, arguments: []))
         #expect(CommandLanguage.registry.first { $0.id == .history }?.summary == "Pick a previous command.")
     }
-
 }

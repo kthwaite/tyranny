@@ -84,7 +84,7 @@ struct MainWindowView: View {
         }
         .overlay {
             if navigation.palette.isOpen {
-                CommandPaletteView(palette: navigation.palette)
+                CommandPaletteView(palette: navigation.palette, theme: model.theme)
             }
         }
         .background(CommandPaletteKeyProbe {
@@ -104,7 +104,8 @@ struct MainWindowView: View {
         .onDisappear {
             navigation.commandSubmission = nil
             navigation.commandSuggestions = nil
-            navigation.palette.report = { _ in }
+            // `report` stays: the model outlives the window, so a late failure still reaches it.
+            navigation.palette.close()
         }
         .onChange(of: navigation.settingsRequest) { _, _ in openSettings() }
         .onChange(of: navigation.filterFocusRequest) { _, _ in filterFocused = true }

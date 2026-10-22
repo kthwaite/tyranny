@@ -6,7 +6,9 @@ import TyrannyLikesSmokeCore
 /// The panel floats over the window content, with its centre a third of the way down.
 struct CommandPaletteView: View {
     @Environment(\.themeColours) private var colours
+    @Environment(\.colorScheme) private var colorScheme
     let palette: CommandPaletteModel
+    let theme: ColourTheme
 
     private static let width: CGFloat = 560
     private static let rowHeight: CGFloat = 26
@@ -80,6 +82,11 @@ struct CommandPaletteView: View {
                     ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
                         rowView(row, highlighted: index == palette.highlighted)
                             .id(index)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                palette.highlight(index)
+                                palette.acceptHighlighted()
+                            }
                     }
                 }
             }
@@ -91,15 +98,28 @@ struct CommandPaletteView: View {
         .accessibilityIdentifier("command-palette-rows")
     }
 
+    /// The text colour on the highlighted row: light on a dark accent, dark on a light one,
+    /// as on a custom table selection. The accent is resolved in this view's appearance.
+    private var highlightedText: Color {
+        var accent: NSColor?
+        NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)?.performAsCurrentDrawingAppearance {
+            accent = theme.nsColour(.accent).usingColorSpace(.sRGB)
+        }
+        guard let accent else { return .white }
+        let fill = RGB(red: accent.redComponent, green: accent.greenComponent, blue: accent.blueComponent)
+        return Contrast.prefersLightText(on: fill) ? .white : .black
+    }
+
     private func rowView(_ row: CommandPaletteModel.Row, highlighted: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        let foreground = highlighted ? highlightedText : nil
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(row.value)
                 .font(.system(.body, design: .monospaced))
-                .foregroundStyle(highlighted ? Color.white : Color.primary)
+                .foregroundStyle(foreground ?? Color.primary)
             if let summary = row.summary {
                 Text(summary)
                     .font(.callout)
-                    .foregroundStyle(highlighted ? Color.white.opacity(0.8) : Color.secondary)
+                    .foregroundStyle(foreground?.opacity(0.8) ?? Color.secondary)
             }
             Spacer(minLength: 0)
         }
@@ -137,7 +157,12 @@ private struct CommandPaletteInput: NSViewRepresentable {
     func updateNSView(_ field: InputField, context: Context) {
         context.coordinator.palette = palette
         guard field.stringValue != text else { return }
-        field.stringValue = text
+        if let editor = field.currentEditor() {
+            // Setting `stringValue` mid-edit can end editing, and that closes the palette.
+            editor.string = text
+        } else {
+            field.stringValue = text
+        }
         field.moveCaretToEnd()
     }
 
@@ -152,10 +177,18 @@ private struct CommandPaletteInput: NSViewRepresentable {
             palette.text = field.stringValue
         }
 
+        /// Focus left the input, for example to the toolbar filter. The palette closes with it,
+        /// so it is never open without focus.
+        func controlTextDidEndEditing(_ notification: Notification) {
+            if palette.isOpen { palette.close() }
+        }
+
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
             switch selector {
             case #selector(NSResponder.insertTab(_:)):
                 palette.acceptHighlighted()
+            case #selector(NSResponder.insertBacktab(_:)):
+                break   // Shift-Tab would move focus out of the palette.
             case #selector(NSResponder.insertNewline(_:)):
                 let palette = palette
                 Task { await palette.submitText() }
@@ -199,7 +232,7 @@ private struct CommandPaletteInput: NSViewRepresentable {
         /// Puts the caret after the text instead of selecting all of it.
         func moveCaretToEnd() {
             guard let editor = currentEditor() else { return }
-            editor.selectedRange = NSRange(location: (stringValue as NSString).length, length: 0)
+            editor.selectedRange = NSRange(location: (editor.string as NSString).length, length: 0)
         }
     }
 }
@@ -222,6 +255,8 @@ struct CommandPaletteKeyProbe: NSViewRepresentable {
     final class ProbeView: NSView {
         var open: (() -> Bool)?
         private var monitor: Any?
+
+        isolated deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()

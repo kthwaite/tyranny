@@ -87,6 +87,12 @@ public final class CommandPaletteModel {
         self.highlighted = min(max(highlighted + delta, 0), rows.count - 1)
     }
 
+    /// A row click. Highlights the row at `index`, clamped to the rows.
+    public func highlight(_ index: Int) {
+        guard case .rows(let rows) = dropdown else { return }
+        highlighted = min(max(index, 0), rows.count - 1)
+    }
+
     /// Tab. Puts the highlighted row in the input line. In history mode, also returns to commands.
     public func acceptHighlighted() {
         guard !isRunning, let row = highlightedRow else { return }

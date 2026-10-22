@@ -150,8 +150,9 @@ struct TyrannyLikesSmokeApp: App {
                 // The main window's key probe opens the palette on `:` instead.
                 Button("Command…") {
                     openWindow(id: "main")
-                    navigation.openCommandPalette()
+                    if !navigation.palette.isOpen { navigation.openCommandPalette() }
                 }
+                .disabled(navigation.wrappedYear != nil)
             }
             CommandGroup(after: .sidebar) {
                 Button(navigation.columnBrowserVisible ? "Hide Column Browser" : "Show Column Browser") {

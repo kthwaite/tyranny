@@ -97,6 +97,41 @@ private func fixedRows(_ count: Int) -> [CommandSuggestion] {
         #expect(model.highlighted == 1)
     }
 
+    @Test func highlightPicksARowClampedToTheRows() {
+        defer { clear() }
+        let model = model()
+        model.suggest = { _ in fixedRows(3) }
+        model.open()
+        model.highlight(2)
+        #expect(model.highlighted == 2)
+        model.highlight(9)
+        #expect(model.highlighted == 2)
+        model.highlight(-1)
+        #expect(model.highlighted == 0)
+    }
+
+    @Test func highlightWithoutRowsDoesNothing() {
+        defer { clear() }
+        let model = model()
+        model.open()
+        model.text = ":seek +1"
+        model.highlight(0)
+        #expect(model.highlighted == nil)
+    }
+
+    @Test func clickingARowAcceptsItLikeTab() {
+        defer { clear() }
+        let model = model()
+        model.open()
+        model.text = ":rep"
+        model.highlight(0)
+        model.acceptHighlighted()
+        model.highlight(3)
+        model.acceptHighlighted()
+        #expect(model.text == ":repeat one")
+        #expect(calls.submitted.isEmpty)
+    }
+
     @Test func tabAcceptsAndAddsSpaceWhenContinuing() {
         defer { clear() }
         let model = model()
