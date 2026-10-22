@@ -47,6 +47,7 @@ import Testing
             ("browser-album 9", .browserAlbum, ["9"]),
             ("up-next-policy replace", .upNextPolicy, ["replace"]),
             ("prompt clear", .prompt, ["clear"]), ("help seek", .help, ["seek"]),
+            ("history", .history, []),
         ]
         for (text, id, arguments) in cases {
             let result = try CommandLanguage.parse(text)
@@ -164,6 +165,36 @@ import Testing
         let unicode = CommandLanguage.completions("playlist-open 'Bjö", playlistNames: ["Björk's Mix"])
         #expect(try unicode.map { try CommandLanguage.parse($0).arguments } == [["Björk's Mix"]])
         #expect(CommandLanguage.completions("playlist-rename 'Road Trip' ", playlistNames: names).isEmpty)
+    }
+
+    @Test func suggestionsCarryQuotedLinesAndBareValues() {
+        let rows = CommandLanguage.suggestions(":playlist-play R", playlistNames: ["Road Trip"])
+        #expect(rows == [CommandSuggestion(line: ":playlist-play \"Road Trip\"", value: "Road Trip", summary: nil, continues: false)])
+        let names = CommandLanguage.suggestions(":se")
+        #expect(names.first == CommandSuggestion(line: ":seek", value: "seek",
+            summary: "Seek absolutely, or relatively with a sign; default unit is seconds.", continues: true))
+        #expect(names.map(\.value).contains("settings"))
+        #expect(CommandLanguage.completions(":se") == names.map(\.line))
+    }
+
+    @Test func continuesFollowsRemainingArguments() {
+        #expect(CommandLanguage.suggestions("play").first?.continues == false)
+        #expect(CommandLanguage.suggestions("colour ac").first?.continues == true)
+        #expect(CommandLanguage.suggestions("colour accent ").first?.continues == false)
+        #expect(CommandLanguage.suggestions("sort n").first { $0.value == "none" }?.continues == false)
+        #expect(CommandLanguage.suggestions("help").first?.continues == true)   // optional argument
+    }
+
+    @Test func usageHintOnlyAtArgumentStage() {
+        #expect(CommandLanguage.usageHint(":seek +1")?.id == .seek)
+        #expect(CommandLanguage.usageHint(":seek ")?.id == .seek)
+        #expect(CommandLanguage.usageHint(":seek") == nil)
+        #expect(CommandLanguage.usageHint(":nope 1") == nil)
+    }
+
+    @Test func historyIsARegisteredCommand() throws {
+        #expect(try CommandLanguage.parse(":history") == ParsedCommand(id: .history, arguments: []))
+        #expect(CommandLanguage.registry.first { $0.id == .history }?.summary == "Pick a previous command.")
     }
 
 }

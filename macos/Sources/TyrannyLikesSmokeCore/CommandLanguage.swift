@@ -45,7 +45,7 @@ public enum CommandID: String, CaseIterable, Sendable {
     case browserArtist = "browser-artist"
     case browserAlbum = "browser-album"
     case upNextPolicy = "up-next-policy"
-    case prompt, help
+    case prompt, help, history
     case colour, colours, tint
 }
 
@@ -82,6 +82,14 @@ public struct CommandArgument: Equatable, Sendable {
         self.kind = kind
         self.optional = optional
     }
+}
+
+/// One row of the suggestion list. `line` replaces the whole input; `value` is the bare candidate.
+public struct CommandSuggestion: Equatable, Sendable {
+    public let line: String
+    public let value: String
+    public let summary: String?
+    public let continues: Bool
 }
 
 public struct CommandDefinition: Equatable, Sendable {
@@ -171,6 +179,7 @@ public enum CommandLanguage {
         .init(.upNextPolicy, "Choose how new playback treats upcoming entries.", [.init("ask|keep|replace", .choices(["ask", "keep", "replace"]))]),
         .init(.prompt, "Resolve the pending Up Next prompt.", [.init("keep|clear|cancel", .choices(["keep", "clear", "cancel"]))]),
         .init(.help, "Show command help.", [.init("command", .command, optional: true)]),
+        .init(.history, "Pick a previous command."),
         .init(.colour, "Set a colour token, or return it to System.", [.init("token", .choices(ColourToken.allCases.map(\.rawValue))), .init("#rrggbb|system", .colour)]),
         .init(.colours, "Return every colour to System and turn the cover tint on.", [.init("reset", .choices(["reset"]))]),
         .init(.tint, "Turn the accent tint from cover art on or off.", [.init("on|off", .choices(["on", "off"]))]),
@@ -197,12 +206,19 @@ public enum CommandLanguage {
 
     /// Returns complete replacement lines, suitable for parsing after accepting a suggestion.
     public static func completions(_ text: String, playlistNames: [String] = []) -> [String] {
+        suggestions(text, playlistNames: playlistNames).map(\.line)
+    }
+
+    /// Returns suggestion rows. `continues` is true when the command takes another argument after the row.
+    public static func suggestions(_ text: String, playlistNames: [String] = []) -> [CommandSuggestion] {
         guard let scan = try? tokenize(body(text), incomplete: true) else { return [] }
         let colon = text.drop(while: { $0.isWhitespace }).hasPrefix(":") ? ":" : ""
         var tokens = scan.tokens
         if !scan.active { tokens.append("") }
         if tokens.count == 1 {
-            return registry.map { $0.id.rawValue }.filter { $0.hasPrefix(tokens[0]) }.map { colon + $0 }
+            return registry.filter { $0.id.rawValue.hasPrefix(tokens[0]) }.map {
+                CommandSuggestion(line: colon + $0.id.rawValue, value: $0.id.rawValue, summary: $0.summary, continues: !$0.arguments.isEmpty)
+            }
         }
         guard let definition = registry.first(where: { $0.id.rawValue == tokens[0] }) else { return [] }
         let index = tokens.count - 2
@@ -222,7 +238,16 @@ public enum CommandLanguage {
         }
         let prefix = tokens.removeLast()
         let stem = colon + tokens.map(quote).joined(separator: " ") + " "
-        return Set(candidates).sorted().filter { $0.hasPrefix(prefix) }.map { stem + quote($0) }
+        return Set(candidates).sorted().filter { $0.hasPrefix(prefix) }.map { value in
+            let more = index + 1 < definition.arguments.count && !(definition.id == .sort && index == 0 && value == "none")
+            return CommandSuggestion(line: stem + quote(value), value: value, summary: nil, continues: more)
+        }
+    }
+
+    /// Returns the definition when the first token is a known command name followed by whitespace.
+    public static func usageHint(_ text: String) -> CommandDefinition? {
+        guard let scan = try? tokenize(body(text), incomplete: true), let first = scan.tokens.first, !scan.active || scan.tokens.count > 1 else { return nil }
+        return registry.first { $0.id.rawValue == first }
     }
 
     private static func body(_ text: String) -> String {

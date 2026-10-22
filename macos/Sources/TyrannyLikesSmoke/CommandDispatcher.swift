@@ -170,6 +170,8 @@ struct CommandDispatcher {
             var settings = player.theme.settings
             try settings.apply(command)
             player.theme.update(settings)
+        case .history:
+            throw CommandLanguageError("Use :history in the command palette.")
         case .help:
             let definitions = CommandLanguage.registry.filter { arguments.isEmpty || $0.id.rawValue == arguments[0] }
             player.message = definitions.map { "\($0.usage) — \($0.summary)" }.joined(separator: "\n")
