@@ -16,6 +16,12 @@ struct CommandDispatcher {
         return CommandLanguage.completions(text, playlistNames: player.savedPlaylists.rows.map(\.name))
     }
 
+    func suggestions(_ text: String) -> [CommandSuggestion] {
+        player.savedPlaylists.sync()
+        player.savedPlaylists.loadAll()
+        return CommandLanguage.suggestions(text, playlistNames: player.savedPlaylists.rows.map(\.name))
+    }
+
     func execute(_ text: String) async throws {
         let command = try CommandLanguage.parse(text)
         let arguments = command.arguments
@@ -171,7 +177,7 @@ struct CommandDispatcher {
             try settings.apply(command)
             player.theme.update(settings)
         case .history:
-            throw CommandLanguageError("Use :history in the command palette.")
+            navigation.openCommandPalette(.history)
         case .help:
             let definitions = CommandLanguage.registry.filter { arguments.isEmpty || $0.id.rawValue == arguments[0] }
             player.message = definitions.map { "\($0.usage) — \($0.summary)" }.joined(separator: "\n")

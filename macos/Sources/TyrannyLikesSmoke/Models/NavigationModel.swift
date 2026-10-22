@@ -25,7 +25,9 @@ final class NavigationModel {
     private(set) var settingsRequest: UInt64 = 0
     /// Installed by the library window with its own TrackLists; no second selection store.
     @ObservationIgnored var commandSubmission: (@MainActor (String) async throws -> Void)?
-    @ObservationIgnored var commandCompletion: (@MainActor (String) -> [String])?
+    @ObservationIgnored var commandSuggestions: (@MainActor (String) -> [CommandSuggestion])?
+    /// The `:` command palette. It suggests and submits through this model.
+    let palette: CommandPaletteModel
     /// Incremented by ⌘F; the filter field takes focus when it changes.
     private(set) var filterFocusRequest = 0
 
@@ -58,9 +60,15 @@ final class NavigationModel {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        palette = CommandPaletteModel(defaults: defaults)
         columnBrowserVisible = defaults.bool(forKey: "columnBrowserVisible")
         upNextDrawerVisible = defaults.bool(forKey: "upNextDrawerVisible")
         nowPlayingArtExpanded = defaults.bool(forKey: "nowPlayingArtExpanded")
+        palette.suggest = { [weak self] in self?.suggestCommand($0) ?? CommandLanguage.suggestions($0) }
+        palette.submit = { [weak self] text in
+            guard let self else { throw CommandLanguageError("Open the library window before submitting commands.") }
+            try await self.submitCommand(text)
+        }
     }
 
     func grouping(for destination: Destination) -> Grouping {
@@ -93,9 +101,15 @@ final class NavigationModel {
         try await commandSubmission(text)
     }
 
-    func completeCommand(_ text: String) -> [String] {
-        commandCompletion?(text) ?? CommandLanguage.completions(text)
+    func suggestCommand(_ text: String) -> [CommandSuggestion] {
+        commandSuggestions?(text) ?? CommandLanguage.suggestions(text)
     }
+
+    func completeCommand(_ text: String) -> [String] {
+        suggestCommand(text).map(\.line)
+    }
+
+    func openCommandPalette(_ mode: CommandPaletteModel.Mode = .commands) { palette.open(mode) }
 
     static func groupingKey(_ destination: Destination) -> String { "group.\(destination.key)" }
 }
