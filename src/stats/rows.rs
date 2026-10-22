@@ -176,8 +176,10 @@ mod tests {
 
     #[test]
     fn years_lists_years_with_counted_plays_newest_first() {
-        let path =
-            std::env::temp_dir().join(format!("tyranny-stats-{}.sqlite", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-stats-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let _store = Store::open(&path).unwrap();
         let _database = Database(path.clone());
         let connection = Connection::open(&path).unwrap();
@@ -217,8 +219,10 @@ mod tests {
 
     #[test]
     fn load_reads_plays_in_order_and_indexes_unique_library_keys() {
-        let path =
-            std::env::temp_dir().join(format!("tyranny-stats-{}.sqlite", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-stats-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let _store = Store::open(&path).unwrap();
         let _database = Database(path.clone());
         let connection = Connection::open(&path).unwrap();

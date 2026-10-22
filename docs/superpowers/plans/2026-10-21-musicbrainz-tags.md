@@ -4,9 +4,9 @@
 
 **Goal:** Look up one album on MusicBrainz, show every per-file tag change for review, write the accepted changes into the audio files safely, journal them for revert, and re-index the written files.
 
-**Architecture:** A new server module `src/tagging/` runs one worker thread (`tagging-0`), shaped like `src/lyrics/`. It reads album rows from the state DB, reads and writes tags with lofty, asks MusicBrainz (and optionally AcoustID) through rate-gated blocking HTTP clients, keeps proposals in memory, and journals every write in `state.tagging.sqlite`. Writes go to an APFS clone that is renamed over the original. The library gets a path-scoped `Reindex` that reuses the scan machinery. Protocol 13 adds four commands. The macOS client adds a review sheet, album menu items, a `:musicbrainz` command and a Settings section; TyrannyCore holds the pure parts.
+**Architecture:** A new server module `src/tagging/` runs one worker thread (`tagging-0`), shaped like `src/lyrics/`. It reads album rows from the state DB, reads and writes tags with lofty, asks MusicBrainz (and optionally AcoustID) through rate-gated blocking HTTP clients, keeps proposals in memory, and journals every write in `state.tagging.sqlite`. Writes go to an APFS clone that is renamed over the original. The library gets a path-scoped `Reindex` that reuses the scan machinery. Protocol 13 adds four commands. The macOS client adds a review sheet, album menu items, a `:musicbrainz` command and a Settings section; TyrannyLikesSmokeCore holds the pure parts.
 
-**Tech Stack:** Rust 2024 (lofty 0.25.4, rusty-chromaprint 0.3.0, reqwest blocking, rusqlite, serde, tokio), FFmpeg via ffmpeg-next (reading only), SwiftUI/AppKit + TyrannyCore (swift-testing).
+**Tech Stack:** Rust 2024 (lofty 0.25.4, rusty-chromaprint 0.3.0, reqwest blocking, rusqlite, serde, tokio), FFmpeg via ffmpeg-next (reading only), SwiftUI/AppKit + TyrannyLikesSmokeCore (swift-testing).
 
 **Spec:** `docs/superpowers/specs/2026-10-21-musicbrainz-tags-design.md` (binding; read it with this plan).
 
@@ -20,7 +20,7 @@
 
 1. **Current value of a field** = the value at the field's primary key in the primary tag. When that is absent, the first alias or other-tag copy (lofty tag order) is used. The journal "before" is the primary value only. The copies that will be removed are journalled separately.
 2. **ID3v2 recording ID** lives in `TXXX:MusicBrainz Track Id`, because FFmpeg reads it there. `UFID:http://musicbrainz.org` is treated as its alias, as the spec's alias example implies. lofty already maps `ItemKey::MusicBrainzRecordingId` to that UFID frame, so the alias is the field's `CopyKey::Field` copy, not a raw alias.
-3. **Read-only secondary tags.** lofty can only strip ID3v2 in FLAC, APE and Musepack whole. If such a tag holds a field the proposal changes, the file is not writable. Its reason reads "Has an old ID3 tag Tyranny can't edit".
+3. **Read-only secondary tags.** lofty can only strip ID3v2 in FLAC, APE and Musepack whole. If such a tag holds a field the proposal changes, the file is not writable. Its reason reads "Has an old ID3 tag tyranny likes smoke can't edit".
 4. **MOV** is MP4 to lofty. A file whose `ftyp` major brand is `qt  ` is not writable.
 5. **lofty's own normalisation of untouched items is accepted.** Examples: canonical key spelling such as `TOTALTRACKS` → `TRACKTOTAL`, and ID3v2.4 output. Their values must survive. ID3v2.3 files stay v2.3.
 6. **Candidate source precedence:** explicit `release_id`, then fingerprint (when requested), then the stored release ID, then search.
@@ -39,10 +39,10 @@
 - Dependencies, added to `Cargo.toml` exactly as written: `lofty = "0.25.4"` and `rusty-chromaprint = "0.3.0"`. `base64` and `serde_json` are already present. Add no other crates.
 - Protocol version goes 12 → 13 in Task 10, in the same commit as every hard-coded 12:
   - `src/protocol.rs:1` (the module comment "Version 12 local control protocol"), `src/protocol.rs:16`, and the `assert_eq!(VERSION, 12)` in `v9_list_commands_require_every_field`;
-  - `macos/Sources/TyrannyCore/WireModels.swift:6` (`tests/swift_constants.rs` checks it);
+  - `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift:6` (`tests/swift_constants.rs` checks it);
   - `scripts/playlist_gate.py:59,64`, `scripts/server_gate.py:26` and `scripts/smart_playlist_gate.py:63`;
   - `SPIKE.md:9,89`;
-  - the comment in `macos/Sources/TyrannyCore/StationCatalog.swift:4`, left as "(protocol v12)" because stations arrived in v12. `src/bin/tyrannyctl.rs:46` "(protocol 12)" is historical in the same way and also stays.
+  - the comment in `macos/Sources/TyrannyLikesSmokeCore/StationCatalog.swift:4`, left as "(protocol v12)" because stations arrived in v12. `src/bin/tyranny-likes-smoke-ctl.rs:46` "(protocol 12)" is historical in the same way and also stays.
   - Find them with `grep -rn "v12\|Version 12\|version=12\|VERSION: u32 = 12\|version: UInt32 = 12" src macos/Sources scripts SPIKE.md`.
 - Wire names (snake_case JSON):
   - commands: `musicbrainz_lookup`, `apply_tags`, `tag_edits`, `revert_tag_edit`;
@@ -59,17 +59,17 @@
   - At most 5 candidates.
 - HTTP:
   - `https_only`, redirects disabled, 6 s request timeout, 3 s connect timeout, 2 MiB response cap.
-  - User-Agent `Tyranny/<CARGO_PKG_VERSION> (https://github.com/kthwaite/tyranny)`.
+  - User-Agent `tyranny likes smoke/<CARGO_PKG_VERSION> (https://github.com/kthwaite/tyranny)`.
   - Origins `https://musicbrainz.org/` and `https://api.acoustid.org/`.
   - Request starts are spaced by at least 1 s for MusicBrainz and 334 ms for AcoustID.
   - A `503`, a `429`, or any `Retry-After` header stops the lookup. There are no retries.
 - Tests never touch the network. Providers are built in tests only by `for_test(origin, interval)`, which accepts only a loopback `http://` origin with path `/`.
 - Exact user-visible copy (the client shows server reasons verbatim):
   - "Asking MusicBrainz…" and "Look Up on MusicBrainz…";
-  - "Tyranny can't write tags to this format" and "can't write <Field Label> to this format";
+  - "tyranny likes smoke can't write tags to this format" and "can't write <Field Label> to this format";
   - "Also removes old copies of these fields from other tags";
   - "Already matches" and "No matching track on this release";
-  - "Has an old ID3 tag Tyranny can't edit";
+  - "Has an old ID3 tag tyranny likes smoke can't edit";
   - "MusicBrainz is busy, try again shortly" and "MusicBrainz has no matching release";
   - "lookup expired, look the album up again" and "changed since the lookup";
   - "Write Tags to N Files" (singular "Write Tags to 1 File") and "Identify by Audio Fingerprint";
@@ -127,7 +127,7 @@ Server (`src/tagging/`, declared `pub mod tagging;` in `src/lib.rs`; only `tags`
 
 Also touched: `src/cancel.rs` (new, shared `Cancellation`), `src/lyrics/mod.rs`, `src/protocol.rs`, `src/owner.rs`, `src/server.rs`, `src/library/{mod.rs,db.rs}`, `src/library_types.rs`, `src/scanner.rs`, `tests/ffmpeg_formats.rs`, `tests/server_transport.rs`, `tests/fixtures/musicbrainz/*.json`, `tests/fixtures/tag_roundtrip_values.json`.
 
-Client: `macos/Sources/TyrannyCore/Tagging.swift` + `macos/Tests/TyrannyCoreTests/TaggingTests.swift`; `macos/Sources/Tyranny/Models/TaggingModel.swift`; `macos/Sources/Tyranny/Views/TagLookupSheet.swift`; edits to `WireClient.swift`, `PlayerModel.swift`, `Shell/MainWindowView.swift`, `Shell/SettingsView.swift`, `Albums/AlbumGridItem.swift`, `Albums/AlbumGridView.swift`, `Lists/TrackTableInput.swift`, `Lists/VirtualTrackTable.swift`, `TyrannyCore/CommandLanguage.swift`, `CommandDispatcher.swift`.
+Client: `macos/Sources/TyrannyLikesSmokeCore/Tagging.swift` + `macos/Tests/TyrannyLikesSmokeCoreTests/TaggingTests.swift`; `macos/Sources/TyrannyLikesSmoke/Models/TaggingModel.swift`; `macos/Sources/TyrannyLikesSmoke/Views/TagLookupSheet.swift`; edits to `WireClient.swift`, `PlayerModel.swift`, `Shell/MainWindowView.swift`, `Shell/SettingsView.swift`, `Albums/AlbumGridItem.swift`, `Albums/AlbumGridView.swift`, `Lists/TrackTableInput.swift`, `Lists/VirtualTrackTable.swift`, `TyrannyLikesSmokeCore/CommandLanguage.swift`, `CommandDispatcher.swift`.
 
 ---
 
@@ -498,7 +498,7 @@ git commit -m "Journal tag edits for revert"
   Wherever this plan says `cancel.check(deadline)` for tagging code, it means `check_lookup`.
 - Produces, in `http.rs`:
   ```rust
-  pub(super) const USER_AGENT: &str = concat!("Tyranny/", env!("CARGO_PKG_VERSION"), " (https://github.com/kthwaite/tyranny)");
+  pub(super) const USER_AGENT: &str = concat!("tyranny likes smoke/", env!("CARGO_PKG_VERSION"), " (https://github.com/kthwaite/tyranny)");
   pub(super) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
   #[derive(Clone)] pub(super) struct StartGate { next: Arc<Mutex<Instant>>, interval: Duration }
   impl StartGate { pub(super) fn new(interval: Duration) -> Self;
@@ -861,10 +861,10 @@ git commit -m "Score releases and match files to release tracks"
      - No candidate gives `Lookup "MusicBrainz has no matching release"`.
   4. **Fetch and choose:** fetch every candidate through `ReleaseCache`, `score` each, and choose the best, or the explicit one.
   5. **Per file, in DB order:**
-     - `writable_format` is `None` → `writable: false`, reason "Tyranny can't write tags to this format".
-     - `read_tags` errors → reason `"Tyranny couldn't read this file's tags: {error}"`.
+     - `writable_format` is `None` → `writable: false`, reason "tyranny likes smoke can't write tags to this format".
+     - `read_tags` errors → reason `"tyranny likes smoke couldn't read this file's tags: {error}"`.
      - No `TrackRef` → `matched: false`, reason "No matching track on this release".
-     - A changed field with a `read_only` copy → `writable: false`, reason "Has an old ID3 tag Tyranny can't edit".
+     - A changed field with a `read_only` copy → `writable: false`, reason "Has an old ID3 tag tyranny likes smoke can't edit".
      - Changed fields in `unwritable_fields_in(&tags)` go to `unwritable_fields` and out of `changes`. This covers the per-format deny list and, for ID3v2.3 files, `ID3V23_UNWRITABLE`.
      - `removes_other_copies` is `!tags.copies_of(changed fields).is_empty()`.
      - The `stamp` is taken when the file is read.
@@ -897,7 +897,7 @@ MusicBrainz and AcoustID are `for_test(fixture.origin(), Duration::ZERO)` on rou
 - `current_values_come_from_the_file_not_the_database`: a file with no title tag. The DB title is the file stem, but `changes` has `Title` with `old: None`.
 - `unwritable_and_unmatched_files_say_why`:
   - Setup: three `tone.flac` copies tagged with release A's ID and track numbers 1–3, plus a `"tone.mka"` entry and a `"tone10.wav"` entry with no track number (10 s, so it matches no 250 ms release track).
-  - The `.mka` row has reason "Tyranny can't write tags to this format".
+  - The `.mka` row has reason "tyranny likes smoke can't write tags to this format".
   - The unmatched row has `matched: false` and reason "No matching track on this release".
 - `musicbrainz_busy_stops_the_lookup`: a 503 gives `Lookup "MusicBrainz is busy, try again shortly"`, with exactly one request.
 - `proposals_expire_after_15_minutes_and_evict_the_oldest`: `take(now + PROPOSAL_TTL + 1 s, id)` is `None`. After 9 inserts the first ID is gone.
@@ -1099,7 +1099,7 @@ git commit -m "Re-index named files without a root scan"
 - Modify: `src/owner.rs` (owner and controller fields, routing, the `unreachable!` list at `:1622-1637`, shutdown)
 - Modify: `src/tagging/mod.rs` (`TaggingWorkers::start(database, library)`; `Handle` reindexes after apply and revert)
 - Modify: `src/server.rs:463` (discovery match)
-- Modify: `tests/server_transport.rs`, `macos/Sources/TyrannyCore/WireModels.swift:6`, `scripts/playlist_gate.py`, `scripts/server_gate.py`, `scripts/smart_playlist_gate.py`, `SPIKE.md`
+- Modify: `tests/server_transport.rs`, `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift:6`, `scripts/playlist_gate.py`, `scripts/server_gate.py`, `scripts/smart_playlist_gate.py`, `SPIKE.md`
 
 **Interfaces:**
 - Produces, in `src/protocol.rs`:
@@ -1170,17 +1170,17 @@ Expected: PASS, including `tests/swift_constants.rs`.
 - [ ] **Step 5: Run all gates, then commit**
 
 ```bash
-git add src tests macos/Sources/TyrannyCore/WireModels.swift scripts SPIKE.md
+git add src tests macos/Sources/TyrannyLikesSmokeCore/WireModels.swift scripts SPIKE.md
 git commit -m "Serve tag lookup commands in protocol 13"
 ```
 
 ---
 
-### Task 11: TyrannyCore tag models and wire kinds
+### Task 11: TyrannyLikesSmokeCore tag models and wire kinds
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/Tagging.swift`, `macos/Tests/TyrannyCoreTests/TaggingTests.swift`
-- Modify: `macos/Sources/Tyranny/WireClient.swift` (`resultKind` at `:347` and `ResultHeader` at `:483`)
+- Create: `macos/Sources/TyrannyLikesSmokeCore/Tagging.swift`, `macos/Tests/TyrannyLikesSmokeCoreTests/TaggingTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/WireClient.swift` (`resultKind` at `:347` and `ResultHeader` at `:483`)
 
 **Interfaces:**
 - Produces, in `Tagging.swift` (all `public`, `Codable, Sendable, Equatable`; property names in snake_case as on the wire, matching `WireModels.swift` style):
@@ -1274,8 +1274,8 @@ Expected: PASS.
 - [ ] **Step 5: Run all gates, then commit**
 
 ```bash
-git add macos/Sources/TyrannyCore/Tagging.swift macos/Tests/TyrannyCoreTests/TaggingTests.swift macos/Sources/Tyranny/WireClient.swift
-git commit -m "Decode tag lookup replies in TyrannyCore"
+git add macos/Sources/TyrannyLikesSmokeCore/Tagging.swift macos/Tests/TyrannyLikesSmokeCoreTests/TaggingTests.swift macos/Sources/TyrannyLikesSmoke/WireClient.swift
+git commit -m "Decode tag lookup replies in TyrannyLikesSmokeCore"
 ```
 
 ---
@@ -1283,9 +1283,9 @@ git commit -m "Decode tag lookup replies in TyrannyCore"
 ### Task 12: Tagging model and the review sheet
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Models/TaggingModel.swift`, `macos/Sources/Tyranny/Views/TagLookupSheet.swift`
-- Modify: `macos/Sources/Tyranny/PlayerModel.swift` (`let tagging = TaggingModel()`, `tagging.attach(self)` beside `:110-115`, `var serverInstance: String? { connected ? wire.instanceID : nil }`)
-- Modify: `macos/Sources/Tyranny/Shell/MainWindowView.swift` (a `.sheet(item:)` next to the Up Next prompt at `:83`)
+- Create: `macos/Sources/TyrannyLikesSmoke/Models/TaggingModel.swift`, `macos/Sources/TyrannyLikesSmoke/Views/TagLookupSheet.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/PlayerModel.swift` (`let tagging = TaggingModel()`, `tagging.attach(self)` beside `:110-115`, `var serverInstance: String? { connected ? wire.instanceID : nil }`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift` (a `.sheet(item:)` next to the Up Next prompt at `:83`)
 
 **Interfaces:**
 - Consumes: everything in Task 11; `PlayerModel.{endpoint, tokenPath, serverInstance, snapshot, connected}`.
@@ -1332,7 +1332,7 @@ git commit -m "Decode tag lookup replies in TyrannyCore"
 
 - [ ] **Step 1: Implement `TaggingModel`, `TagLookupSheet`, and the `PlayerModel` and `MainWindowView` wiring**
 
-The logic under test lives in TyrannyCore (Task 11). The app target has no test target, and the spec marks the native sheet smoke as not testable here.
+The logic under test lives in TyrannyLikesSmokeCore (Task 11). The app target has no test target, and the spec marks the native sheet smoke as not testable here.
 
 - [ ] **Step 2: Build with warnings as errors**
 
@@ -1344,7 +1344,7 @@ Expected: success.
 `client_gate.py --model-only` must stay green: the sheet is never presented without a target.
 
 ```bash
-git add macos/Sources/Tyranny
+git add macos/Sources/tyranny likes smoke
 git commit -m "Add the tag lookup review sheet"
 ```
 
@@ -1353,11 +1353,11 @@ git commit -m "Add the tag lookup review sheet"
 ### Task 13: Album menu entry points and `:musicbrainz`
 
 **Files:**
-- Modify: `macos/Sources/TyrannyCore/CommandLanguage.swift` (`CommandID.musicbrainz`, registry)
-- Modify: `macos/Tests/TyrannyCoreTests/CommandLanguageTests.swift`
-- Modify: `macos/Sources/Tyranny/CommandDispatcher.swift`
-- Modify: `macos/Sources/Tyranny/Albums/AlbumGridItem.swift`, `macos/Sources/Tyranny/Albums/AlbumGridView.swift:393-397`
-- Modify: `macos/Sources/Tyranny/Lists/TrackTableInput.swift`, `macos/Sources/Tyranny/Lists/VirtualTrackTable.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/CommandLanguage.swift` (`CommandID.musicbrainz`, registry)
+- Modify: `macos/Tests/TyrannyLikesSmokeCoreTests/CommandLanguageTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/CommandDispatcher.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Albums/AlbumGridItem.swift`, `macos/Sources/TyrannyLikesSmoke/Albums/AlbumGridView.swift:393-397`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Lists/TrackTableInput.swift`, `macos/Sources/TyrannyLikesSmoke/Lists/VirtualTrackTable.swift`
 
 **Interfaces:**
 - Consumes: `TaggingModel.begin(albumID:title:)`.
@@ -1402,9 +1402,9 @@ git commit -m "Open tag lookup from album menus and :musicbrainz"
 ### Task 14: Settings: AcoustID key and recent tag edits
 
 **Files:**
-- Modify: `macos/Sources/TyrannyCore/Tagging.swift` (`AcoustIDKey`), `macos/Tests/TyrannyCoreTests/TaggingTests.swift`
-- Modify: `macos/Sources/Tyranny/Shell/SettingsView.swift` (`MusicFoldersPane`; grow the frame from height 430 to 640, wrapping the content in a `ScrollView` if it overflows)
-- Modify: `macos/Sources/Tyranny/Models/TaggingModel.swift` (read the key through `AcoustIDKey`)
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/Tagging.swift` (`AcoustIDKey`), `macos/Tests/TyrannyLikesSmokeCoreTests/TaggingTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/SettingsView.swift` (`MusicFoldersPane`; grow the frame from height 430 to 640, wrapping the content in a `ScrollView` if it overflows)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/TaggingModel.swift` (read the key through `AcoustIDKey`)
 
 **Interfaces:**
 - Produces:
@@ -1459,6 +1459,6 @@ git commit -m "Add the AcoustID key and recent tag edits to Settings"
 | Revert, double revert, `tag_edits` latest 50 | 3, 8 |
 | `Reindex` reusing the finish path, queued during a scan, track IDs kept | 9, 10 |
 | Protocol 13, four commands, `ErrorCode::Lookup`, discovery cancellation | 7, 10 |
-| Client entry points, review sheet, Settings key and edits, TyrannyCore pure parts | 11–14 |
+| Client entry points, review sheet, Settings key and edits, TyrannyLikesSmokeCore pure parts | 11–14 |
 | Verification list (unit, round-trip, safety, re-index, Swift, gates) | 1, 2, 4–11, every task's gates |
 | Not testable here: live musicbrainz.org lookup, native sheet smoke | the final report says so; one live lookup by hand only if the network allows |

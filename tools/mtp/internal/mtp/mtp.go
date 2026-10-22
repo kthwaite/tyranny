@@ -102,7 +102,7 @@ func (d *Device) Close() error {
 		req.Code = OC_CloseSession
 		// RunTransaction runs close, so can't use CloseSession().
 
-		// Tyranny never resets USB as a side effect of a failed close.
+		// tyranny likes smoke never resets USB as a side effect of a failed close.
 		if err := d.runTransaction(&req, &rep, nil, nil, 0, EmptyProgressFunc); err != nil && d.USBDebug {
 			log.Printf("USB: CloseSession, err: %v", err)
 		}

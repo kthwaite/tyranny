@@ -43,7 +43,7 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
     let application: i64 = connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     ensure!(
         application == APPLICATION_ID || (application == 0 && version == 0),
-        "not a tyranny database"
+        "not a tyranny likes smoke database"
     );
     if version == 0 && target > 0 {
         let transaction = connection.transaction()?;
@@ -1026,8 +1026,10 @@ mod tests {
 
     #[test]
     fn failed_edit_rolls_back_queue_and_revision() -> Result<()> {
-        let path =
-            std::env::temp_dir().join(format!("tyranny-store-{}.sqlite", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-store-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let result = (|| -> Result<()> {
             let mut store = Store::open(&path)?;
             store.edit(
@@ -1109,7 +1111,10 @@ mod tests {
     }
 
     fn temp_path() -> PathBuf {
-        std::env::temp_dir().join(format!("tyranny-store-{}.sqlite", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-store-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ))
     }
     fn user_version(path: &Path) -> i64 {
         let connection = Connection::open(path).unwrap();

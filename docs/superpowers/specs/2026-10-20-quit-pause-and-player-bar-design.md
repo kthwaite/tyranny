@@ -43,7 +43,7 @@ Two UX fixes the user asked for after using the redesigned client.
 
 `SPIKE.md` (phase gates) records "explicit Quit leaves daemon audio running" and gates on
 "quit/relaunch without interrupting server playback". `ManagedServer.swift:4` says "The app never
-owns playback", and `TyrannyAppDelegate.applicationWillTerminate` says "The daemon owns audio and
+owns playback", and `TyrannyLikesSmokeAppDelegate.applicationWillTerminate` says "The daemon owns audio and
 outlives this controller." This design deliberately reverses the *audio* half of that decision:
 the daemon still outlives the client, but the client pauses it on quit. Update those comments,
 `SPIKE.md`'s description, and the gates that assert the old behaviour (see Verification).
@@ -71,12 +71,12 @@ launches of one harness run share that suite.
 
 ### Mechanism
 
-- `TyrannyAppDelegate.applicationShouldTerminate(_:)` returns `.terminateLater` when connected
+- `TyrannyLikesSmokeAppDelegate.applicationShouldTerminate(_:)` returns `.terminateLater` when connected
   and playing; it awaits `TransportModel.pause()`'s reply via `WireClient.request("pause")`
   (wrap in a 1 s timeout), writes the note on success, then calls
   `NSApp.reply(toApplicationShouldTerminate: true)`. Otherwise returns `.terminateNow`.
   `applicationWillTerminate` keeps calling `model?.shutdown()`.
-- The resume decision lives in a small, unit-testable TyrannyCore type (e.g. `QuitSuspension`)
+- The resume decision lives in a small, unit-testable TyrannyLikesSmokeCore type (e.g. `QuitSuspension`)
   with pure functions: `noteForQuit(state) -> Note?` and `shouldResume(note, state, socketPath) ->
   Bool`. `PlayerModel` applies it on the first snapshot after a launch-time connect (not on later
   reconnects within the same run).
@@ -166,7 +166,7 @@ summarised here).
 
 ## Verification
 
-- TyrannyCore unit tests for `QuitSuspension` (note on playing; none on paused/stopped/unknown;
+- TyrannyLikesSmokeCore unit tests for `QuitSuspension` (note on playing; none on paused/stopped/unknown;
   resume only when paused on the same entry and socket path; note cleared after decision).
 - Rust test that `NowPlaying.album_artist_id`/`compilation` are filled for indexed entries and
   `None` otherwise.

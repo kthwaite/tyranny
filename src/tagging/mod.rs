@@ -274,7 +274,7 @@ impl Handle {
             {
                 let paths = written.clone();
                 if let Err(error) = library.request(LibraryCommand::Reindex { paths }).await {
-                    eprintln!("tyranny: re-index after tag write failed: {error}");
+                    eprintln!("tyranny likes smoke: re-index after tag write failed: {error}");
                 }
             }
             // The requester may be gone; its outcome then goes nowhere.
@@ -294,7 +294,9 @@ impl Handle {
                 return;
             }
             if tokio::time::timeout_at(deadline, idle).await.is_err() {
-                eprintln!("tyranny: shutdown stopped waiting for a re-index after a tag write");
+                eprintln!(
+                    "tyranny likes smoke: shutdown stopped waiting for a re-index after a tag write"
+                );
                 return;
             }
         }

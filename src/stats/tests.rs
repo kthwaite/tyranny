@@ -7,8 +7,10 @@ use std::path::PathBuf;
 struct Database(PathBuf);
 impl Database {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("tyranny-stats-{}.sqlite", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-stats-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let _store = Store::open(&path).unwrap();
         Self(path)
     }

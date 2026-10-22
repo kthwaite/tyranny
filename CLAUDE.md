@@ -1,4 +1,4 @@
-# Tyranny
+# tyranny likes smoke
 
 ## Branches
 
@@ -16,5 +16,5 @@
   - `WireProtocol.version`, which `tests/swift_constants.rs` checks;
   - the `assert_eq!(VERSION, …)` test in `protocol.rs`;
   - the version defaults in `scripts/*_gate.py`;
-  - version tags in `tyrannyctl` help and in doc comments.
+  - version tags in `tyranny-likes-smoke-ctl` help and in doc comments.
   Grep for the old number.

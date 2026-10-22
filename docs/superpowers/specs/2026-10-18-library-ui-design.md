@@ -1,7 +1,7 @@
 # Library window redesign: source list, continuous lists, grouping, album grid
 
 Status: approved · 2026-10-18
-Mockups: [Tyranny Window Studies](https://claude.ai/artifact/EyUunVuJrXVq31C1JkWZ29) (private artifact; approved by the user as the target)
+Mockups: [tyranny likes smoke Window Studies](https://claude.ai/artifact/EyUunVuJrXVq31C1JkWZ29) (private artifact; approved by the user as the target)
 
 ## 1. Intent
 

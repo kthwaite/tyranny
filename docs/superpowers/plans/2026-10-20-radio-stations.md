@@ -4,9 +4,9 @@
 
 **Goal:** A "Radio" source in the sidebar. It lists saved internet-radio stations. You can add, edit and remove stations by URL, import `.pls`/`.m3u` station files, and play a station. The transport shows the station name under the ICY title.
 
-**Architecture:** Stations are a small catalog that the server persists in SQLite (schema 7), with one catalog revision, like saved playlists. `ControlState.stations_revision` tells clients when to refetch. Playing a station reuses the existing stream path: the client sends `append_stream` with the station's URL and name, then `play`. Station files are parsed on the client in TyrannyCore, so import also works against a remote server. The server only accepts a batch of `{name, url}`.
+**Architecture:** Stations are a small catalog that the server persists in SQLite (schema 7), with one catalog revision, like saved playlists. `ControlState.stations_revision` tells clients when to refetch. Playing a station reuses the existing stream path: the client sends `append_stream` with the station's URL and name, then `play`. Station files are parsed on the client in TyrannyLikesSmokeCore, so import also works against a remote server. The server only accepts a batch of `{name, url}`.
 
-**Tech Stack:** Rust (rusqlite, serde, tokio server), SwiftUI + TyrannyCore (Swift package), XCTest/Swift Testing as used in `macos/Tests`.
+**Tech Stack:** Rust (rusqlite, serde, tokio server), SwiftUI + TyrannyLikesSmokeCore (Swift package), XCTest/Swift Testing as used in `macos/Tests`.
 
 **Spec:** None. The user skipped design questions (2026-10-20). The task is TSK-brave-pigeon-3nn2c. The decisions below were made by Claude and are listed so a reviewer can reject them:
 - Scope: the task's checklist items 1–3. The radio-browser.info directory lookup (item 4, "optional") is out of scope.
@@ -20,8 +20,8 @@ Background reading for every task: `SPIKE.md` (status line `:9`, stream notes `:
 ## Global Constraints
 
 - Protocol version goes 10 → 11 (`src/protocol.rs` `VERSION`). Versioning is exact-match. Every hard-coded `v10`/`version=10` must move to 11 in the same task, including:
-  - `macos/Sources/Tyranny/WireClient.swift`, `StatusBar.swift:77` and `NativeShellSmoke.swift`;
-  - `src/bin/tyrannyctl.rs`;
+  - `macos/Sources/TyrannyLikesSmoke/WireClient.swift`, `StatusBar.swift:77` and `NativeShellSmoke.swift`;
+  - `src/bin/tyranny-likes-smoke-ctl.rs`;
   - `scripts/{playlist,smart_playlist,server,library,scale}_gate.py`;
   - `SPIKE.md:9`.
   - Find them with `grep -rn "v10\|version=10\|VERSION: u32 = 10\|== 10" src macos scripts SPIKE.md`.
@@ -103,7 +103,7 @@ Background reading for every task: `SPIKE.md` (status line `:9`, stream notes `:
   - set `VERSION = 11` and update the version test at `:904`.
 - Modify: `src/owner.rs` (dispatch, `stations_revision` field loaded at startup and published in `ControlState`, handlers mirroring `playlist_applied` at `:972`)
 - Modify: `src/server.rs:526` (sequence `StationsApplied` like `PlaylistApplied`)
-- Modify: `src/bin/tyrannyctl.rs`, `scripts/*_gate.py`, `SPIKE.md`, and the Swift files listed in Global Constraints (version 11 only, plus decoding `stations_revision` in the hand-written `ControlState` decoder in `macos/Sources/TyrannyCore/WireModels.swift:61/109/118`)
+- Modify: `src/bin/tyranny-likes-smoke-ctl.rs`, `scripts/*_gate.py`, `SPIKE.md`, and the Swift files listed in Global Constraints (version 11 only, plus decoding `stations_revision` in the hand-written `ControlState` decoder in `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift:61/109/118`)
 - Create: `tests/support/stations.rs`, mounted from `tests/server_transport.rs` like `saved_playlists`
 
 **Interfaces:**
@@ -135,13 +135,13 @@ Background reading for every task: `SPIKE.md` (status line `:9`, stream notes `:
 **Files:**
 - Modify: `src/protocol.rs` (`NowPlaying.station: Option<String>`)
 - Modify: `src/owner.rs` `describe()` (`:702`): for a stream entry, set `station = Some(stream.title)`; for others, `None`.
-- Modify: `macos/Sources/TyrannyCore/WireModels.swift` (`NowPlaying.station: String?`, optional in decoding, added to `init`)
-- Modify: `macos/Sources/Tyranny/Models/TransportModel.swift` (`artistAlbum`), `SystemMediaControls.swift:100`
-- Test: `tests/support/http_streams.rs` (extend the existing test), `macos/Tests/TyrannyCoreTests/WireModelTests.swift`, `NowPlayingArtTests.swift` or a new `TransportSubtitleTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift` (`NowPlaying.station: String?`, optional in decoding, added to `init`)
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/TransportModel.swift` (`artistAlbum`), `SystemMediaControls.swift:100`
+- Test: `tests/support/http_streams.rs` (extend the existing test), `macos/Tests/TyrannyLikesSmokeCoreTests/WireModelTests.swift`, `NowPlayingArtTests.swift` or a new `TransportSubtitleTests.swift`
 
 **Interfaces:**
 - Produces: `NowPlaying.station` (Rust `Option<String>`, Swift `String?`).
-- TransportModel rule: if `station` is non-nil and differs from `title`, `artistAlbum` is the station name. Otherwise it keeps the existing artist — album text. Put the rule in a pure TyrannyCore function, `public func transportSubtitle(title: String, artist: String, album: String, station: String?) -> String`, so it can be unit-tested. `SystemMediaControls` uses `station` as `MPMediaItemPropertyArtist` when present.
+- TransportModel rule: if `station` is non-nil and differs from `title`, `artistAlbum` is the station name. Otherwise it keeps the existing artist — album text. Put the rule in a pure TyrannyLikesSmokeCore function, `public func transportSubtitle(title: String, artist: String, album: String, station: String?) -> String`, so it can be unit-tested. `SystemMediaControls` uses `station` as `MPMediaItemPropertyArtist` when present.
 
 - [ ] **Step 1: Write failing tests:**
   - In `live_streams_recover_publish_icy_persist_and_keep_controls_responsive`, assert `now_playing.station == Some(<station title>)` once an ICY title arrives.
@@ -151,12 +151,12 @@ Background reading for every task: `SPIKE.md` (status line `:9`, stream notes `:
 - [ ] **Step 4: Run** the gates. Expected: PASS.
 - [ ] **Step 5: Commit** "Show the station name under a stream's title".
 
-### Task 4: Station wire models and station-file parser (TyrannyCore)
+### Task 4: Station wire models and station-file parser (TyrannyLikesSmokeCore)
 
 **Files:**
-- Modify: `macos/Sources/TyrannyCore/WireModels.swift` (`Station`, `StationsPage`, `StationsApplied`)
-- Create: `macos/Sources/TyrannyCore/StationFile.swift`
-- Test: `macos/Tests/TyrannyCoreTests/StationFileTests.swift`, `WireModelTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift` (`Station`, `StationsPage`, `StationsApplied`)
+- Create: `macos/Sources/TyrannyLikesSmokeCore/StationFile.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/StationFileTests.swift`, `WireModelTests.swift`
 
 **Interfaces:**
 - Produces:
@@ -193,19 +193,19 @@ Background reading for every task: `SPIKE.md` (status line `:9`, stream notes `:
 - [ ] **Step 2: Run** `swift test --package-path macos --scratch-path target/swift-client --filter StationFile`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the gates. Expected: PASS.
-- [ ] **Step 5: Commit** "Parse pls and m3u station files in TyrannyCore".
+- [ ] **Step 5: Commit** "Parse pls and m3u station files in TyrannyLikesSmokeCore".
 
 ### Task 5: Radio source — model, view, sheets, import, play
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Models/StationsModel.swift`
-- Create: `macos/Sources/Tyranny/Views/RadioView.swift` (station table plus `StationSheet` for add/edit)
+- Create: `macos/Sources/TyrannyLikesSmoke/Models/StationsModel.swift`
+- Create: `macos/Sources/TyrannyLikesSmoke/Views/RadioView.swift` (station table plus `StationSheet` for add/edit)
 - Modify: `Shell/Destination.swift` (`case radio`; key `"radio"`, title `"Radio"`, systemImage `"dot.radiowaves.left.and.right"`; added to `Destination.playing` after `.history`; extend every switch)
 - Modify: `Shell/MainWindowView.swift:164-181` (`.radio` → `RadioView`)
 - Modify: `WireClient.swift` `resultKind(for:)` (`:351-364`) and reply kinds (`:495-497`) for the four commands
-- Modify: `TyrannyApp.swift` / wherever `PlaylistsModel` is created and synced, so `StationsModel` is created and fed snapshots the same way
-- Modify: `TyrannyCore/CommandLanguage.swift:118` (add `radio` to `go` choices), `CommandDispatcher.swift:31`
-- Test: `macos/Tests/TyrannyCoreTests/StationsModelTests.swift` (model logic behind a request seam, following the pattern of `PlaylistRemovalTests`/`CommandTransportTests`), `CommandLanguageTests.swift`
+- Modify: `TyrannyLikesSmokeApp.swift` / wherever `PlaylistsModel` is created and synced, so `StationsModel` is created and fed snapshots the same way
+- Modify: `TyrannyLikesSmokeCore/CommandLanguage.swift:118` (add `radio` to `go` choices), `CommandDispatcher.swift:31`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/StationsModelTests.swift` (model logic behind a request seam, following the pattern of `PlaylistRemovalTests`/`CommandTransportTests`), `CommandLanguageTests.swift`
 
 **Interfaces:**
 - Consumes:

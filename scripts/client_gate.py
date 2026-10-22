@@ -25,8 +25,8 @@ from server_gate import UnixSocket, fixture, run_directory
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", default="target/Tyranny.app/Contents/MacOS/Tyranny")
-    parser.add_argument("--server", default="target/debug/tyranny-server")
+    parser.add_argument("--app", default="target/tyranny likes smoke.app/Contents/MacOS/tyranny likes smoke")
+    parser.add_argument("--server", default="target/debug/tyranny-likes-smoke-server")
     parser.add_argument("--coreaudio", action="store_true")
     parser.add_argument("--work-dir", default="target/client-gate")
     parser.add_argument("--model-only", action="store_true",
@@ -50,7 +50,7 @@ def main():
     if args.model_only and args.commands_only:
         parser.error("--model-only and --commands-only are mutually exclusive")
     if args.app.endswith(".app") or args.app.endswith(".app/"):
-        args.app = str(Path(args.app) / "Contents" / "MacOS" / "Tyranny")
+        args.app = str(Path(args.app) / "Contents" / "MacOS" / "tyranny likes smoke")
     work = Path(args.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
     run = run_directory(work)

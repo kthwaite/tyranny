@@ -448,7 +448,7 @@ fn unwritable_and_unmatched_files_say_why() {
     assert!(!mka.writable, "{mka:?}");
     assert_eq!(
         mka.reason.as_deref(),
-        Some("Tyranny can't write tags to this format")
+        Some("tyranny likes smoke can't write tags to this format")
     );
     assert!(mka.changes.is_empty());
     let wav = row("tone10.wav");
@@ -482,7 +482,7 @@ fn a_file_replaced_by_a_symlink_is_refused_at_lookup() {
     assert!(row.matched && !row.writable, "{row:?}");
     assert_eq!(
         row.reason.as_deref(),
-        Some("Tyranny couldn't read this file's tags: not a regular file")
+        Some("tyranny likes smoke couldn't read this file's tags: not a regular file")
     );
     assert!(proposal.tracks[1..].iter().all(|t| t.writable));
 }
@@ -511,7 +511,7 @@ fn a_changed_field_in_a_read_only_tag_makes_the_file_unwritable() {
     );
     assert_eq!(
         row.reason.as_deref(),
-        Some("Has an old ID3 tag Tyranny can't edit")
+        Some("Has an old ID3 tag tyranny likes smoke can't edit")
     );
     assert!(proposal.tracks[1..].iter().all(|t| t.writable));
 }

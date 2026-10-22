@@ -1,6 +1,6 @@
 # Artwork provider feasibility — extra-stream
 
-Task: TSK-extra-stream-f7xrq. Assessed 2026-10-20 for Tyranny's Rust server / SwiftUI local-library player. These are engineering constraints from published primary sources, not legal clearance. API accessibility and possession of credentials do not grant artwork rights.
+Task: TSK-extra-stream-f7xrq. Assessed 2026-10-20 for tyranny likes smoke's Rust server / SwiftUI local-library player. These are engineering constraints from published primary sources, not legal clearance. API accessibility and possession of credentials do not grant artwork rights.
 
 ## Approved scope
 
@@ -13,7 +13,7 @@ Worktree: `../tyranny-extra-stream`, branch `feature/extra-stream-artwork`, crea
 - `src/artwork/mod.rs`: two bounded workers, independent of playback; embedded then folder discovery; remote lookup currently requires a MusicBrainz release UUID and only calls Cover Art Archive. Positive remote results currently have no expiry.
 - `src/artwork/provider.rs`: fixed origin, bounded response bodies, end-to-end deadline, serialized request starts, manually checked redirects. Preserve these protections when adding providers; API-returned URLs are untrusted.
 - `src/artwork/cache.rs`: disposable SQLite image cache. Cache policy must become provider-specific; a successful fetch is not permission for permanent storage.
-- `macos/Sources/Tyranny/ArtworkStore.swift`: separate thumbnail/display connections and an in-memory image cache. Deezer's restriction is not documented as disk-only; bypass reusable image caching, not merely SQLite. Retain only the image needed for current display, pending scope approval.
+- `macos/Sources/TyrannyLikesSmoke/ArtworkStore.swift`: separate thumbnail/display connections and an in-memory image cache. Deezer's restriction is not documented as disk-only; bypass reusable image caching, not merely SQLite. Retain only the image needed for current display, pending scope approval.
 - `ArtworkView.swift`: source currently appears in a tooltip. That does not satisfy Discogs' directly adjacent linked attribution requirement. Images also reach Now Playing/notification surfaces; provider provenance and permitted use need to survive every consumer, or restricted artwork must not reach those surfaces.
 - Proposed invariants, not implemented: embedded/folder precedence remains fixed; user order affects only remote fallback; bounded exact album/album-artist matching rather than first search hit; provider-local failure must not block later providers; credentials never enter logs, snapshots or CDN requests; source URL and freshness accompany downloaded artwork.
 

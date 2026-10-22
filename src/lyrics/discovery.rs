@@ -157,7 +157,7 @@ pub(super) fn has_timestamps(text: &str) -> bool {
         false
     })
 }
-// Keep this grammar aligned with TyrannyCore.LyricsTimeline.timestamp.
+// Keep this grammar aligned with TyrannyLikesSmokeCore.LyricsTimeline.timestamp.
 fn timestamp(tag: &str) -> Option<f64> {
     fn integer(value: &str) -> Option<f64> {
         if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {

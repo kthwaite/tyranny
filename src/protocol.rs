@@ -1,4 +1,4 @@
-//! Version 23 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 24 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
@@ -14,7 +14,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 23;
+pub const VERSION: u32 = 24;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -532,7 +532,7 @@ pub struct TagEditSummary {
     pub reverted: bool,
 }
 
-/// A tag field that a MusicBrainz lookup can propose and Tyranny can write.
+/// A tag field that a MusicBrainz lookup can propose and tyranny likes smoke can write.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TagField {
@@ -1636,7 +1636,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 23);
+        assert_eq!(VERSION, 24);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",

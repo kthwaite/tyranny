@@ -1,4 +1,4 @@
-Tyranny MTP helper native dependencies
+tyranny likes smoke MTP helper native dependencies
 
 The internal/mtp Go transport is copied from github.com/ganeshrvel/go-mtpfs,
 commit 1c3302b3c476f69e787a0339122a804dd518a007, the revision used by
@@ -27,7 +27,7 @@ The build_mtp.sh script records the pinned source checksum and compiler flags.
 To replace libusb, build a compatible libusb-1.0.0.dylib from that source,
 replace Contents/Frameworks/libusb-1.0.0.dylib, set its install ID to
 @loader_path/libusb-1.0.0.dylib using install_name_tool, and ad-hoc codesign
-that library and the modified app. Tyranny imposes no prohibition on such
+that library and the modified app. tyranny likes smoke imposes no prohibition on such
 replacement for debugging modifications to the LGPL library.
 
 Go standard library and runtime: BSD-3-Clause, bundled as go-LICENSE.

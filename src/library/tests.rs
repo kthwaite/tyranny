@@ -11,7 +11,10 @@ use std::{
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("tyranny-library-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-library-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir(&path).unwrap();
         Self(path.canonicalize().unwrap())
     }

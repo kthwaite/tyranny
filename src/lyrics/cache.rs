@@ -110,8 +110,10 @@ mod tests {
     use super::*;
     #[test]
     fn private_persistent_bounded_and_expiring() {
-        let dir =
-            std::env::temp_dir().join(format!("tyranny-lyrics-cache-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-lyrics-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir(&dir).unwrap();
         let path = dir.join("cache.sqlite");
         let mut cache = Cache::open(&path).unwrap();

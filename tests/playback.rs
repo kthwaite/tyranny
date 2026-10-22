@@ -7,7 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tyranny::{
+use tyranny_likes_smoke::{
     decoder::{Decoder, GainMode},
     output::OutputConfig,
     play_order::{RepeatMode, RepeatScope, UniformShuffle},
@@ -19,7 +19,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tyranny-playback-{}-{}",
+            "tyranny-likes-smoke-playback-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -787,7 +787,7 @@ fn a_selection_counts_a_pass_that_crossed_its_threshold_since_the_last_pump() {
 mod coreaudio_hardware {
     use super::*;
     use std::process::Command;
-    use tyranny::{
+    use tyranny_likes_smoke::{
         BLOCK_FRAMES,
         output::{Output, TrackToken},
     };

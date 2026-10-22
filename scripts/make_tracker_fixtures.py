@@ -16,7 +16,7 @@ https://github.com/OpenMPT/openmpt/blob/master/soundlib/XMTools.h
 https://github.com/OpenMPT/openmpt/blob/master/soundlib/ITTools.h
 https://github.com/OpenMPT/openmpt/blob/master/soundlib/S3MTools.h
 
-Without --libopenmpt (or TYRANNY_LIBOPENMPT), new/changed fixtures have null
+Without --libopenmpt (or TYRANNY_LIKES_SMOKE_LIBOPENMPT), new/changed fixtures have null
 reference frame counts, never invented counts. Finalize with the pinned library;
 the independent C API render measures actual frames without FFmpeg CLI programs.
 Existing references survive regeneration only when the fixture SHA-256 is
@@ -255,7 +255,7 @@ def add_fixtures(root, manifest, libopenmpt=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--libopenmpt", type=Path, default=os.environ.get("TYRANNY_LIBOPENMPT"),
+    parser.add_argument("--libopenmpt", type=Path, default=os.environ.get("TYRANNY_LIKES_SMOKE_LIBOPENMPT"),
                         help="pinned libopenmpt shared library used to finalize reference frame counts")
     args = parser.parse_args()
     manifest_path = ROOT / "manifest.json"

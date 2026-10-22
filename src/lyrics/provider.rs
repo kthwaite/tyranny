@@ -21,7 +21,7 @@ const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(6);
 const ORIGIN: &str = "https://lrclib.net/";
 const USER_AGENT: &str = concat!(
-    "Tyranny/",
+    "tyranny-likes-smoke/",
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/kthwaite/tyranny)"
 );

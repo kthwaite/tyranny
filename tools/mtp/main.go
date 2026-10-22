@@ -1,4 +1,4 @@
-// tyranny-mtp is a single-request Sony Walkman MTP process. USB diagnostics are
+// tyranny-likes-smoke-mtp is a single-request Sony Walkman MTP process. USB diagnostics are
 // isolated from its JSON channel, including output from the native dependencies.
 package main
 
@@ -15,7 +15,7 @@ import (
 	"syscall"
 
 	"github.com/ganeshrvel/usb"
-	"tyranny-mtp/internal/mtp"
+	"tyranny-likes-smoke-mtp/internal/mtp"
 )
 
 type Request struct {
@@ -133,6 +133,7 @@ func stateDirectory() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Preserve the installed state path so existing upload journals and locks remain shared.
 	dir := filepath.Join(home, "Library", "Application Support", "tyranny", "mtp")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
@@ -174,7 +175,7 @@ func run(req Request, response *Response) error {
 	}
 	defer lock.Close()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("another Tyranny MTP operation is busy")
+		return errors.New("another tyranny likes smoke MTP operation is busy")
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	context := usb.NewContext()

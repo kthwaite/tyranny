@@ -9,7 +9,7 @@ history into a Stats page and a yearly Wrapped slideshow.
 them into `play_history` row writes through a retrying queue. Stats queries run on their own
 read-only connection on a worker thread. They load play rows and aggregate them in pure Rust
 functions, so tests need no clock or time zone. The Swift client adds a Stats destination and
-a full-window Wrapped overlay, with the period and slide logic in `TyrannyCore` so it can be
+a full-window Wrapped overlay, with the period and slide logic in `TyrannyLikesSmokeCore` so it can be
 tested.
 
 **Tech Stack:** Rust 2024, rusqlite (bundled), serde, tokio; Swift 6.2, SwiftUI, Swift Charts
@@ -456,7 +456,7 @@ Rules not already pinned by the spec table:
   - `Controller::request` routes the three commands to it before the owner, as it does for
     `Command::Lyrics`;
   - shutdown stops the workers.
-- Modify: `src/bin/tyrannyctl.rs` help, if it lists commands.
+- Modify: `src/bin/tyranny-likes-smoke-ctl.rs` help, if it lists commands.
 - Test: `tests/server_transport.rs`
 
 **Interfaces:**
@@ -485,10 +485,10 @@ Rules not already pinned by the spec table:
 ### Task 9: Swift wire models and period logic
 
 **Files:**
-- Modify: `macos/Sources/TyrannyCore/WireModels.swift`: add `ControlState.stats_revision`, in the
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift`: add `ControlState.stats_revision`, in the
   init, the `CodingKeys` and the decoder, following `history_revision`.
-- Create: `macos/Sources/TyrannyCore/Stats.swift`
-- Test: `macos/Tests/TyrannyCoreTests/StatsTests.swift`; extend `WireModelTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/Stats.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/StatsTests.swift`; extend `WireModelTests.swift`
 
 **Interfaces:**
 - Consumes: the wire shapes from Tasks 5–8. Property names are snake_case, as in the existing wire models.
@@ -524,14 +524,14 @@ Rules not already pinned by the spec table:
 ### Task 10: Stats page
 
 **Files:**
-- Modify: `macos/Sources/Tyranny/Shell/Destination.swift`:
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/Destination.swift`:
   - add `case stats`, with key `"stats"`, title `"Stats"`, symbol `"chart.bar"`;
   - `playing = [.upNext, .history, .stats, .radio]`;
   - add it to every exhaustive switch (`defaultGrouping` → `.none`).
-- Modify: `macos/Sources/Tyranny/Shell/MainWindowView.swift` (~line 181): add `case .stats` → `StatsView`.
-- Modify: `macos/Sources/Tyranny/Models/ListModel.swift` (~line 519), if its switch needs the new case.
-- Create: `macos/Sources/Tyranny/Views/StatsView.swift`, containing `StatsModel` (`@MainActor @Observable`, structured like `HistoryModel`) and the view.
-- Create: `macos/Sources/Tyranny/NativeStatsSmoke.swift`, following `NativeHistorySmoke.swift`. Register it where the other smokes are registered.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift` (~line 181): add `case .stats` → `StatsView`.
+- Modify: `macos/Sources/TyrannyLikesSmoke/Models/ListModel.swift` (~line 519), if its switch needs the new case.
+- Create: `macos/Sources/TyrannyLikesSmoke/Views/StatsView.swift`, containing `StatsModel` (`@MainActor @Observable`, structured like `HistoryModel`) and the view.
+- Create: `macos/Sources/TyrannyLikesSmoke/NativeStatsSmoke.swift`, following `NativeHistorySmoke.swift`. Register it where the other smokes are registered.
 
 **Interfaces:**
 - Consumes: Task 9.
@@ -567,8 +567,8 @@ Behaviour:
 ### Task 11: Wrapped deck logic
 
 **Files:**
-- Create: `macos/Sources/TyrannyCore/Wrapped.swift`
-- Test: `macos/Tests/TyrannyCoreTests/WrappedTests.swift`
+- Create: `macos/Sources/TyrannyLikesSmokeCore/Wrapped.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/WrappedTests.swift`
 
 **Interfaces:**
 - Consumes: Task 9's `WrappedReport` types.
@@ -607,10 +607,10 @@ Behaviour:
 ### Task 12: Wrapped slideshow, call to action and menu
 
 **Files:**
-- Create: `macos/Sources/Tyranny/Views/WrappedView.swift`
-- Modify: `macos/Sources/Tyranny/Shell/MainWindowView.swift` (overlay at the window root, above
-  the sidebar and the player bar), `macos/Sources/Tyranny/TyrannyApp.swift` (the Go menu ~line 178),
-  `macos/Sources/Tyranny/Views/StatsView.swift` (the call to action and banner)
+- Create: `macos/Sources/TyrannyLikesSmoke/Views/WrappedView.swift`
+- Modify: `macos/Sources/TyrannyLikesSmoke/Shell/MainWindowView.swift` (overlay at the window root, above
+  the sidebar and the player bar), `macos/Sources/TyrannyLikesSmoke/TyrannyLikesSmokeApp.swift` (the Go menu ~line 178),
+  `macos/Sources/TyrannyLikesSmoke/Views/StatsView.swift` (the call to action and banner)
 - Extend: `NativeStatsSmoke.swift`
 
 **Interfaces:**
@@ -647,7 +647,7 @@ Behaviour (spec "Client: Wrapped slideshow"):
 **Files:**
 - Modify: `src/protocol.rs` (`VERSION` and its `assert_eq!` test), `WireProtocol.version` in the
   Swift sources (find it via `tests/swift_constants.rs`), the version defaults in
-  `scripts/*_gate.py`, and the version tags in `tyrannyctl` help and in doc comments.
+  `scripts/*_gate.py`, and the version tags in `tyranny-likes-smoke-ctl` help and in doc comments.
 
 - [ ] **Step 1:** Run `git switch dev && git log --oneline -1`
   and read `VERSION` in `src/protocol.rs` on `dev`. Call it D.

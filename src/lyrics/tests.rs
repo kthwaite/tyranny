@@ -15,7 +15,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new(extension: &str, embedded: Option<&str>) -> Self {
-        let root = std::env::temp_dir().join(format!("tyranny-lyrics-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-lyrics-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir(&root).unwrap();
         let database = root.join("state.sqlite");
         drop(Store::open(&database).unwrap());

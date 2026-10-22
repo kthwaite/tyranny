@@ -1,10 +1,10 @@
 <h1 align="center">
-  <img src="macos/Resources/AppIcon.svg" alt="Tyranny app icon" width="128" height="128"><br>
-  Tyranny
+  <img src="macos/Resources/AppIcon.svg" alt="tyranny likes smoke app icon" width="128" height="128"><br>
+  tyranny likes smoke
 </h1>
 
-Tyranny is an mpd-style media player with a Rust server and a SwiftUI frontend. With an
-interface based loosely on classic iTunes, Tyranny borrows features from a variety of
+tyranny likes smoke is an mpd-style media player with a Rust server and a SwiftUI frontend. With an
+interface based loosely on classic iTunes, tyranny likes smoke borrows features from a variety of
 music players to form a piece of highly-personalised software that satisfies my own
 peculiar desires.
 
@@ -53,13 +53,19 @@ To assemble and launch the development app:
 
 ```sh
 scripts/build_macos.sh
-open target/Tyranny.app
+open "target/tyranny likes smoke.app"
 ```
 
-Stop any existing Tyranny app and daemon before rebuilding that app bundle. The
+Stop any existing tyranny likes smoke app and daemon before rebuilding that app bundle. The
 development bundle combines a debug Swift client with a release Rust server and
 bundled native libraries. On launch, the app can bootstrap its local server;
 choose your music folder to import your library.
+
+The rename preserves the existing library, preferences, credentials, and background
+service identity. Compatibility identifiers still use `tyranny`: the application
+support directory, bundle/LaunchAgent IDs, and Walkman `Music/Tyranny` directory and
+upload journals. Existing repository URLs and historical verification artifacts
+also retain their original names.
 
 ### Development commands
 
@@ -73,7 +79,7 @@ choose your music folder to import your library.
 | `just test-server`   | Run Rust unit and integration tests; hardware tests are opt-in. |
 | `just test-client`   | Run the Swift client test suite.                                |
 | `just build-release` | Build both components with release optimizations.               |
-| `just dmg`           | Package a self-contained release app in `target/Tyranny.dmg`.   |
+| `just dmg`           | Package a self-contained release app in `target/tyranny likes smoke.dmg`.   |
 
 Component builds do **not** replace the app bundle. Rust artifacts go into
 `target/portable-rust`; Swift artifacts go into `target/swift-client`.
@@ -93,7 +99,7 @@ downloaded copies.
 - **Local protocol:** versioned, length-prefixed JSON over a private Unix-domain
   socket. Client and server builds must use matching protocol versions; there is
   no TCP listener or bearer token.
-- **Command-line tools:** `tyrannyctl` controls the server; `audio-probe` supports
+- **Command-line tools:** `tyranny-likes-smoke-ctl` controls the server; `audio-probe` supports
   audio-engine diagnostics.
 - **USB helper:** a bundled native MTP process manages the Walkman independently
   of the playback server.

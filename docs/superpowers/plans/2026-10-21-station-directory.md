@@ -4,9 +4,9 @@
 
 **Goal:** Search radio-browser.info from the Radio source, then play or save the stations the user picks.
 
-**Architecture:** The server does the lookup, like lyrics and artwork. A `directory` worker picks a radio-browser mirror by DNS, runs one search at a time with reqwest, and filters the results. Two new commands carry it: `search_directory` and `count_directory_click`. TyrannyCore gets a `StationDirectory` that searches and saves through the existing `StationCatalog`. The app gets a Find Stations sheet in the Radio view.
+**Architecture:** The server does the lookup, like lyrics and artwork. A `directory` worker picks a radio-browser mirror by DNS, runs one search at a time with reqwest, and filters the results. Two new commands carry it: `search_directory` and `count_directory_click`. TyrannyLikesSmokeCore gets a `StationDirectory` that searches and saves through the existing `StationCatalog`. The app gets a Find Stations sheet in the Radio view.
 
-**Tech Stack:** Rust (reqwest blocking + rustls, `libc::getnameinfo`, serde), SwiftUI + TyrannyCore (Swift Testing).
+**Tech Stack:** Rust (reqwest blocking + rustls, `libc::getnameinfo`, serde), SwiftUI + TyrannyLikesSmokeCore (Swift Testing).
 
 **Spec:** vault task TSK-frail-pollen-xyhm0 and the radio-browser API rules below. Decisions not in the task are rulings, listed at the end.
 
@@ -14,7 +14,7 @@
 
 - radio-browser rules (api.radio-browser.info, de1.api.radio-browser.info):
   - Find mirrors by a DNS lookup of `all.api.radio-browser.info`, then a reverse lookup of each address. Randomize the list and use the first entry. On failure, use the next.
-  - Send a descriptive User-Agent: `Tyranny/<CARGO_PKG_VERSION> (https://github.com/kthwaite/tyranny)`.
+  - Send a descriptive User-Agent: `tyranny likes smoke/<CARGO_PKG_VERSION> (https://github.com/kthwaite/tyranny)`.
   - Call `GET /json/url/{stationuuid}` when the user plays a station. The API counts one click per IP, station and day.
   - Do not use `/json/servers` (the API says to use it only without DNS).
 - Use HTTPS only and no redirects, like `src/lyrics/provider.rs`. Connect timeout 3 s, request timeout 5 s.
@@ -28,7 +28,7 @@
   - Drop a later station that repeats an earlier station's URL.
 - Response size cap: 512 KiB for a search and 64 KiB for a click. A bigger response is an error.
 - Do not bump the protocol on the branch. `VERSION` stays 12 until the merge into `dev`, where the controller sets it to the next free number.
-- The Swift app target has no tests. All logic goes in TyrannyCore.
+- The Swift app target has no tests. All logic goes in TyrannyLikesSmokeCore.
 
 ## Review Focus
 
@@ -108,7 +108,7 @@
   - `src/directory/mod.rs`: `DirectoryWorkers::start()`, `handle()`, `stop()`, `shutdown()`, and `Handle::search(query) -> Reply` and `Handle::count_click(uuid) -> Reply`. Copy the `LyricsWorkers` shape, with 1 worker and a queue capacity of 4.
   - `src/owner.rs`: route both commands to the worker, next to `Command::Lyrics`. Start and stop the worker with lyrics. Add both commands to the `unreachable!` arm.
   - `src/server.rs`: add `Command::SearchDirectory { .. }` to the `discovery` `matches!`.
-  - `src/bin/tyrannyctl.rs`: add help lines for the two commands, tagged "protocol 12 (bumped at merge)". The controller fixes the tag at merge.
+  - `src/bin/tyranny-likes-smoke-ctl.rs`: add help lines for the two commands, tagged "protocol 12 (bumped at merge)". The controller fixes the tag at merge.
 - Test: `src/protocol.rs` tests, `tests/server_transport.rs`.
 
 **Interfaces:**
@@ -131,12 +131,12 @@
 - [ ] **Step 4:** Run the full gates: `cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `cargo test` (all targets). All pass.
 - [ ] **Step 5:** Commit.
 
-### Task 3: TyrannyCore StationDirectory (Swift)
+### Task 3: TyrannyLikesSmokeCore StationDirectory (Swift)
 
 **Files:**
-- Modify: `macos/Sources/TyrannyCore/WireModels.swift`. Add `public struct DirectoryStation: Codable, Sendable, Equatable, Identifiable` (`id` = `uuid`), with the fields from Task 2's wire form, and `DirectoryResults { stations }`.
-- Create: `macos/Sources/TyrannyCore/StationDirectory.swift`
-- Test: `macos/Tests/TyrannyCoreTests/StationDirectoryTests.swift`
+- Modify: `macos/Sources/TyrannyLikesSmokeCore/WireModels.swift`. Add `public struct DirectoryStation: Codable, Sendable, Equatable, Identifiable` (`id` = `uuid`), with the fields from Task 2's wire form, and `DirectoryResults { stations }`.
+- Create: `macos/Sources/TyrannyLikesSmokeCore/StationDirectory.swift`
+- Test: `macos/Tests/TyrannyLikesSmokeCoreTests/StationDirectoryTests.swift`
 
 **Interfaces:**
 - Consumes: `StationCatalog.Send`, `StationCatalog.AddStream`, and `StationCatalog.add(name:url:) async -> Bool`. A failure is in `catalog.error`.
@@ -174,10 +174,10 @@
 
 **Files:**
 - Modify:
-  - `macos/Sources/Tyranny/Models/StationsModel.swift`: own a `StationDirectory` built next to the catalog, and reset it with the catalog.
-  - `macos/Sources/Tyranny/Views/RadioView.swift`: a "Find Stations…" button next to "Add Station…", in both places. It opens `DirectorySheet`.
-  - `macos/Sources/Tyranny/WireClient.swift` `resultKind`: `search_directory` maps to `directory_results`, and `count_directory_click` maps to `directory_click_counted`. Add both to the non-snapshot result list.
-- Create: `macos/Sources/Tyranny/Views/DirectorySheet.swift`
+  - `macos/Sources/TyrannyLikesSmoke/Models/StationsModel.swift`: own a `StationDirectory` built next to the catalog, and reset it with the catalog.
+  - `macos/Sources/TyrannyLikesSmoke/Views/RadioView.swift`: a "Find Stations…" button next to "Add Station…", in both places. It opens `DirectorySheet`.
+  - `macos/Sources/TyrannyLikesSmoke/WireClient.swift` `resultKind`: `search_directory` maps to `directory_results`, and `count_directory_click` maps to `directory_click_counted`. Add both to the non-snapshot result list.
+- Create: `macos/Sources/TyrannyLikesSmoke/Views/DirectorySheet.swift`
 
 **Sheet contents:**
 - A search field (placeholder "Search radio-browser.info"). It searches on Return only, not on each keystroke.
@@ -196,14 +196,14 @@
 - Bump the protocol to the next free version in these places:
   - `src/protocol.rs` `VERSION`;
   - `WireProtocol.version`;
-  - the tyrannyctl tag;
+  - the tyranny-likes-smoke-ctl tag;
   - the scripts' version defaults;
   - the `StationCatalog` doc comment.
 - Run the full gates. Update the vault task. Merge into `dev`.
 
 ## Rulings
 
-- **The lookup runs on the server.** Lyrics and artwork already work this way: reqwest, a worker thread and loopback fixtures. tyrannyctl gets it for free. Cost if wrong: the server makes outbound requests that a client-side design would avoid.
+- **The lookup runs on the server.** Lyrics and artwork already work this way: reqwest, a worker thread and loopback fixtures. tyranny-likes-smoke-ctl gets it for free. Cost if wrong: the server makes outbound requests that a client-side design would avoid.
 - **Mirrors come from DNS plus `getnameinfo`.** This avoids SRV lookup, which would need a new DNS crate. Cost if wrong: a reverse lookup failure means no mirrors, so search shows an error.
 - **"Click" means play or save from the results.** Saved stations do not store the uuid, so later plays from Radio are not counted. Cost if wrong: under-counted clicks. Adding a uuid column later is a schema change.
 - **A new `ErrorCode::Unavailable`.** Lyrics instead uses an ok-with-status reply. A search has no partial result, so an error fits better. Cost if wrong: one more error code.

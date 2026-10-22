@@ -439,8 +439,10 @@ mod tests {
     impl Database {
         /// Track 3 is indexed; nothing has been played.
         fn open() -> (Self, Store) {
-            let path = std::env::temp_dir()
-                .join(format!("tyranny-history-{}.sqlite", uuid::Uuid::new_v4()));
+            let path = std::env::temp_dir().join(format!(
+                "tyranny-likes-smoke-history-{}.sqlite",
+                uuid::Uuid::new_v4()
+            ));
             let store = Store::open(&path).unwrap();
             Connection::open(&path)
                 .unwrap()

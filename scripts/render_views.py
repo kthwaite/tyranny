@@ -19,8 +19,8 @@ from client_gate import songs_fixture
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", default="target/Tyranny.app/Contents/MacOS/Tyranny")
-    parser.add_argument("--server", default="target/debug/tyranny-server")
+    parser.add_argument("--app", default="target/tyranny likes smoke.app/Contents/MacOS/tyranny likes smoke")
+    parser.add_argument("--server", default="target/debug/tyranny-likes-smoke-server")
     parser.add_argument("--work-dir", default="target/render-views")
     parser.add_argument("--out", default="spike-results/library-redesign-ui")
     args = parser.parse_args()

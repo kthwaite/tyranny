@@ -24,7 +24,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("tyranny-artwork-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-artwork-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(root.join("music")).unwrap();
         let database = root.join("state.sqlite");
         Store::open(&database).unwrap();

@@ -28,7 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CANT_WRITE_FORMAT: &str = "Tyranny can't write tags to this format";
+const CANT_WRITE_FORMAT: &str = "tyranny likes smoke can't write tags to this format";
 const NO_MATCHING_TRACK: &str = "No matching track on this release";
 const NO_RELEASE: &str = "MusicBrainz has no matching release";
 const NO_FINGERPRINT_MATCH: &str = "AcoustID has no match for these files";
@@ -777,7 +777,7 @@ fn file_name(path: &Path) -> String {
 }
 
 fn unreadable(error: &dyn std::fmt::Display) -> String {
-    format!("Tyranny couldn't read this file's tags: {error}")
+    format!("tyranny likes smoke couldn't read this file's tags: {error}")
 }
 
 fn file_result(
@@ -797,7 +797,7 @@ fn file_result(
 /// The files are written already; a journal that can't record it is logged.
 fn logged(edit_id: u64, result: anyhow::Result<()>) {
     if let Err(error) = result {
-        eprintln!("tyranny: tag journal, edit {edit_id}: {error:#}");
+        eprintln!("tyranny likes smoke: tag journal, edit {edit_id}: {error:#}");
     }
 }
 

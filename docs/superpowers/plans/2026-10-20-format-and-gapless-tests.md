@@ -15,13 +15,13 @@
 - Tests never encode at test time; they pass when linked against the release FFmpeg (built with `--disable-encoders`).
 - No wall-clock assertions and no real audio device: `OutputConfig::Capture { path, clocked: false }`.
 - Fixtures total ≤ 3 MB, checked in under `tests/fixtures/`.
-- Engine rate `tyranny::SAMPLE_RATE` = 48000. Int16 → f32 is `value as f32 / 32768.0` (as `tests/playback.rs` asserts).
+- Engine rate `tyranny_likes_smoke::SAMPLE_RATE` = 48000. Int16 → f32 is `value as f32 / 32768.0` (as `tests/playback.rs` asserts).
 - Gapless track lengths: 48 kHz `[24011, 26003, 25013, 24989]`; 44.1 kHz `[22063, 23887, 22979, 22961]`.
 - "No local encoder" extensions: `amr, awb, ape, dff, dsf, mpc, shn, spx, tak`. (Amended
   2026-10-20, TSK-aware-yarn: all but tak now have fixtures. The manifest's `no_local_encoder`
   list became `formats.exceptions`, entries `{"extension", "reason"}`; see the spec.)
 - No change to trimming, the resampler, or `scripts/build_ffmpeg.py` and other release packaging scripts.
-- Never stage or modify the user's uncommitted work: `.gitignore`, `SPIKE.md`, `SPIKE_RESULTS.md`, `macos/Info.plist`, `macos/Sources/Tyranny/ManagedServer.swift`, `scripts/build_macos.sh`, `scripts/macos_dependencies.py`, `scripts/test_macos_dependencies.py`, `scripts/build_ffmpeg.py`, `scripts/build_release_server.sh`, `scripts/build_dmg.sh`, `scripts/build_icon.sh`, `icons/`, `justfile`, `macos/Resources/`. Stage by explicit path only.
+- Never stage or modify the user's uncommitted work: `.gitignore`, `SPIKE.md`, `SPIKE_RESULTS.md`, `macos/Info.plist`, `macos/Sources/TyrannyLikesSmoke/ManagedServer.swift`, `scripts/build_macos.sh`, `scripts/macos_dependencies.py`, `scripts/test_macos_dependencies.py`, `scripts/build_ffmpeg.py`, `scripts/build_release_server.sh`, `scripts/build_dmg.sh`, `scripts/build_icon.sh`, `icons/`, `justfile`, `macos/Resources/`. Stage by explicit path only.
 - Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## Review Focus
@@ -85,7 +85,7 @@ git commit -m "Generate format and gapless test fixtures"
 
 **Interfaces:**
 - Consumes: Task 1's `tests/fixtures/manifest.json` (`formats.files[].file`, `formats.files[].extension`, `formats.no_local_encoder`).
-- Produces: `pub const AUDIO_EXTENSIONS: &[&str]` in `tyranny::library_types`, same 36 entries and order as today's private `EXTENSIONS`.
+- Produces: `pub const AUDIO_EXTENSIONS: &[&str]` in `tyranny_likes_smoke::library_types`, same 36 entries and order as today's private `EXTENSIONS`.
 
 - [ ] **Step 1: Write the failing tests** in `tests/ffmpeg_formats.rs` (doc comment at the top: what it guards, and the release-prefix command from the spec). Fixture root: `Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")`.
   - `scanner_extensions_are_all_covered`: `AUDIO_EXTENSIONS` as a set == fixture extensions ∪ `no_local_encoder`, and the two are disjoint. On failure, print the missing and extra extensions.

@@ -13,15 +13,15 @@ trap 'exit 143' TERM
 
 # Assemble a fresh bundle without touching the development app or running helper.
 mkdir "$STAGING/contents"
-APP="$STAGING/contents/Tyranny.app"
+APP="$STAGING/contents/tyranny likes smoke.app"
 "$ROOT/scripts/build_macos.sh" release "$APP"
 /usr/bin/codesign --verify --deep --strict "$APP"
 ln -s /Applications "$STAGING/contents/Applications"
 
 # Publish only a complete, verified image; preserve the previous DMG on failure.
-/usr/bin/hdiutil create -volname Tyranny -srcfolder "$STAGING/contents" \
-    -format UDZO -fs HFS+ "$STAGING/Tyranny.dmg"
-/usr/bin/hdiutil verify "$STAGING/Tyranny.dmg"
-mv -f "$STAGING/Tyranny.dmg" "$ROOT/target/Tyranny.dmg"
-printf '%s\n' "$ROOT/target/Tyranny.dmg" \
+/usr/bin/hdiutil create -volname "tyranny likes smoke" -srcfolder "$STAGING/contents" \
+    -format UDZO -fs HFS+ "$STAGING/tyranny likes smoke.dmg"
+/usr/bin/hdiutil verify "$STAGING/tyranny likes smoke.dmg"
+mv -f "$STAGING/tyranny likes smoke.dmg" "$ROOT/target/tyranny likes smoke.dmg"
+printf '%s\n' "$ROOT/target/tyranny likes smoke.dmg" \
     "Self-contained native libraries; ad-hoc signed, not notarized."

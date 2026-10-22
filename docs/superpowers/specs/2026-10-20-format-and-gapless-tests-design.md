@@ -135,7 +135,7 @@ the spike showed their gapless data is wrong in the file, so they would test the
 
 For each fixture in `tests/fixtures/formats/`:
 
-1. Index the directory through `tyranny::library::Library` (the same scanner + metadata probe the
+1. Index the directory through `tyranny_likes_smoke::library::Library` (the same scanner + metadata probe the
    server uses). The scan completes with `failures == 0`, and every fixture is a visible track.
 2. Open it with `Decoder::open(path, GainMode::Off)` and read until EOF. No error, and the frame
    count equals the ffmpeg CLI's count at the engine rate, recorded per fixture as `frames` in
@@ -148,14 +148,14 @@ For each fixture in `tests/fixtures/formats/`:
    the two are disjoint, and every exception has a reason. To make this checkable, move the scanner's
    private `EXTENSIONS` list (`src/scanner.rs:376`) to a public constant that the scanner keeps
    using (location and name are the builder's call, for example
-   `tyranny::library_types::AUDIO_EXTENSIONS`).
+   `tyranny_likes_smoke::library_types::AUDIO_EXTENSIONS`).
 
 Failures name the file and the ffmpeg error, so a release-prefix run points straight at the
 missing decoder or demuxer.
 
 ### Gapless
 
-Engine rate is 48 kHz (`tyranny::SAMPLE_RATE`). For each set:
+Engine rate is 48 kHz (`tyranny_likes_smoke::SAMPLE_RATE`). For each set:
 
 - **Per-track length:** decode each track alone with `Decoder` (`GainMode::Off`) to EOF.
   - 48k sets except `mp3notag48`: length equals the source length exactly.

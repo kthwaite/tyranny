@@ -65,7 +65,7 @@ A new module `src/tagging/`, shaped like `src/lyrics/` and `src/artwork/`:
 `reqwest::blocking` clients in the same style as `src/lyrics/provider.rs`:
 
 - `https_only`, redirects disabled, 6 s request timeout, 3 s connect timeout, 2 MiB response cap.
-- User-Agent `Tyranny/<version> (https://github.com/kthwaite/tyranny)` (the lyrics UA).
+- User-Agent `tyranny-likes-smoke/<version> (https://github.com/kthwaite/tyranny)` (the lyrics UA).
 - MusicBrainz origin `https://musicbrainz.org/ws/2/`, `fmt=json`. A start-spacing gate gives at
   most 1 request per second, process-wide. A `503` or `Retry-After` stops the lookup with a
   "MusicBrainz is busy, try again shortly" error. No retries.
@@ -160,7 +160,7 @@ For each file:
    - remove that field from the file's other tags (ID3v1 or APEv2 on MP3, ID3 in WAV).
      lofty can't edit an ID3 tag inside FLAC, APE or Musepack, only strip it whole. A file
      whose such tag holds a field the proposal changes is not writable: "Has an old ID3 tag
-     Tyranny can't edit" (amended 2026-10-21, plan preflight).
+     tyranny likes smoke can't edit" (amended 2026-10-21, plan preflight).
 
    Other fields keep their values. lofty may normalise how untouched items are spelled (for
    example `TOTALTRACKS` → `TRACKTOTAL`, ID3v2.4 frame forms), which is accepted (amended
@@ -185,7 +185,7 @@ lofty 0.25 writes AAC (ADTS), AIFF, APE, FLAC, MP3/MP2, MP4 (`m4a`, `m4b`, `mp4`
 is MP4), Musepack, Opus, Ogg Vorbis, Speex, WAV and WavPack. A file is writable only if lofty
 detects one of these types from its content. CAF, WMA, Matroska/WebM, MOV, DSF/DFF, TTA, TAK,
 Shorten, AC3, DTS, AMR, AU, RealAudio and Ogg FLAC are not writable. They appear in the review,
-disabled, as "Tyranny can't write tags to this format".
+disabled, as "tyranny likes smoke can't write tags to this format".
 
 The fixture round-trip test (Verification) decides the final list. The deny list is per format
 and field (Claude). If a field fails its round-trip in one format, that field is left out for that
@@ -251,7 +251,7 @@ mirrored in Swift.
 - **Settings → Library:** an "AcoustID API key" field, with the text "Get a key at
   acoustid.org/new-application" shown as selectable text. Below it, "Recent Tag Edits": up to
   50 rows (date, release, file count), each with a Revert button.
-- **TyrannyCore holds the pure parts, with tests:** wire models for the four replies, the row
+- **TyrannyLikesSmokeCore holds the pure parts, with tests:** wire models for the four replies, the row
   selection state and the apply request it builds, the candidate label, and the Settings
   edit row text.
 
@@ -284,7 +284,7 @@ mirrored in Swift.
   - a double revert is refused.
 - **Re-index test:** after apply, `Reindex` updates the track's metadata and bumps the revision,
   and the track ID is unchanged.
-- **Swift:** TyrannyCore tests for the models and selection; debug and release builds with
+- **Swift:** TyrannyLikesSmokeCore tests for the models and selection; debug and release builds with
   `-warnings-as-errors`; `swift test`; `client_gate.py --model-only`.
 - **Standard gates:** `cargo fmt --check`, clippy `-D warnings`, `cargo test`, and the format tests
   against the release FFmpeg prefix.

@@ -2,7 +2,7 @@
 //! capture owner. No direct command dispatch.
 use super::*;
 use serde_json::{Value, json};
-use tyranny::protocol::Station;
+use tyranny_likes_smoke::protocol::Station;
 
 async fn ok(client: &mut PlaybackClient, command: Value) -> Response {
     match client.request(command).await {

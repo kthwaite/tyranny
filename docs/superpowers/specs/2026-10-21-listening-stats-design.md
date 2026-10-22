@@ -36,7 +36,7 @@ despotify. So tracking quality matters: nothing older backfills it.
 - No "heard a lot, never saved" panel.
 - No splitting of multi-artist credits ("A feat. B" stays one artist name).
 - No sharing, export or image rendering of Wrapped slides.
-- No stats in tyrannyctl beyond sending the raw protocol commands.
+- No stats in tyranny-likes-smoke-ctl beyond sending the raw protocol commands.
 - No changes to the History view's look. It keeps showing counted plays only.
 
 ## Anti-goals
@@ -345,7 +345,7 @@ Slide order. A slide whose data point is absent is left out.
 
 TDD throughout, using the existing layout: inline `mod tests` and sibling `*_tests.rs` under
 `src/store/`, integration tests in `tests/`, Swift tests in
-`macos/Tests/TyrannyCoreTests/`, and a native smoke for the new views.
+`macos/Tests/TyrannyLikesSmokeCoreTests/`, and a native smoke for the new views.
 
 At minimum:
 
@@ -374,4 +374,4 @@ At minimum:
 - How `history_revision` stays monotonic across restarts.
 - Indexes beyond `played_at`, from query plans.
 - Gradient palette and animation timing details within the description above.
-- Whether `tyrannyctl` help lists the new commands. It should, if it lists the others.
+- Whether `tyranny-likes-smoke-ctl` help lists the new commands. It should, if it lists the others.

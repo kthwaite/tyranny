@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 use tokio::{io::AsyncWriteExt, net::UnixStream, sync::oneshot, task::JoinHandle, time::timeout};
-use tyranny::{
+use tyranny_likes_smoke::{
     output::OutputConfig,
     protocol::{ControlState, ErrorCode, Message, Reply, Response, Transport},
     server::{Server, ServerConfig},
@@ -135,7 +135,7 @@ async fn hello(socket: &mut Socket, instance: &str) -> ControlState {
             instance_id,
             snapshot,
         } => {
-            assert_eq!(protocol_version, tyranny::protocol::VERSION);
+            assert_eq!(protocol_version, tyranny_likes_smoke::protocol::VERSION);
             assert_eq!(instance_id, instance);
             snapshot
         }
@@ -316,7 +316,7 @@ async fn two_controllers_receive_ordered_state_and_reconnect_to_current_authorit
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn equalizer_is_durable_coherent_and_authoritative_after_reconnect() {
-    use tyranny::equalizer::EqualizerSettings;
+    use tyranny_likes_smoke::equalizer::EqualizerSettings;
 
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
@@ -354,7 +354,7 @@ async fn equalizer_is_durable_coherent_and_authoritative_after_reconnect() {
                 |row| row.get(0),
             )
             .unwrap();
-        let saved: tyranny::protocol::Settings = serde_json::from_str(&saved).unwrap();
+        let saved: tyranny_likes_smoke::protocol::Settings = serde_json::from_str(&saved).unwrap();
         assert_eq!(saved, applied.settings);
         loop {
             match receive(&mut second).await {
@@ -423,7 +423,8 @@ async fn equalizer_preset_wire_lifecycle_survives_restart() {
     let mut socket = running.connect().await;
     let initial = hello(&mut socket, &running.instance_id).await;
     let mut sequence = initial.sequence;
-    let curve = tyranny::equalizer::EqualizerSettings::from_graphic(true, -6.0, [3.0; 10]);
+    let curve =
+        tyranny_likes_smoke::equalizer::EqualizerSettings::from_graphic(true, -6.0, [3.0; 10]);
     for (id, command) in [
         (
             1,
@@ -1248,7 +1249,10 @@ async fn artwork_keeps_pipelined_commands_ordered_and_queue_state_unchanged() {
                             result: Response::Artwork { artwork },
                         },
                     ) => {
-                        assert_eq!(artwork.status, tyranny::protocol::ArtworkStatus::Missing);
+                        assert_eq!(
+                            artwork.status,
+                            tyranny_likes_smoke::protocol::ArtworkStatus::Missing
+                        );
                         assert!(artwork.data.is_none());
                     }
                     (
@@ -1362,7 +1366,7 @@ async fn search_directory_rejects_empty_query() {
                 assert!(matches!(
                     reply,
                     Reply::Error {
-                        code: tyranny::protocol::ErrorCode::InvalidCommand,
+                        code: tyranny_likes_smoke::protocol::ErrorCode::InvalidCommand,
                         ..
                     }
                 ));

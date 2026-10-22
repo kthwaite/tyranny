@@ -15,7 +15,7 @@ from server_gate import UnixSocket, run_directory
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--server', default='target/release/tyranny-server')
+    parser.add_argument('--server', default='target/release/tyranny-likes-smoke-server')
     parser.add_argument('--app', help='Native debug app executable; requires AX and screen capture permissions')
     parser.add_argument('--ui-driver', default='target/native-ui-driver')
     parser.add_argument('--work-dir', default='target/smart-playlist-gate')

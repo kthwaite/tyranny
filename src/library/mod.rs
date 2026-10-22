@@ -352,10 +352,12 @@ impl Coordinator {
                 let queued = self.pending_reindex.len();
                 if self.active.is_some() {
                     eprintln!(
-                        "tyranny: shutdown dropped an unfinished re-index and {queued} queued file(s)"
+                        "tyranny likes smoke: shutdown dropped an unfinished re-index and {queued} queued file(s)"
                     );
                 } else {
-                    eprintln!("tyranny: shutdown dropped {queued} file(s) queued for re-index");
+                    eprintln!(
+                        "tyranny likes smoke: shutdown dropped {queued} file(s) queued for re-index"
+                    );
                 }
                 return Ok(());
             }
@@ -378,7 +380,7 @@ impl Coordinator {
             Some(root_id) => {
                 if let Err(error) = self.rescan(root_id) {
                     eprintln!(
-                        "tyranny: upgrade rescan of root {root_id} failed to start: {error:#}"
+                        "tyranny likes smoke: upgrade rescan of root {root_id} failed to start: {error:#}"
                     );
                 }
             }
@@ -397,7 +399,7 @@ impl Coordinator {
     /// paths it took.
     fn reindex_step(&mut self) {
         if let Err(error) = self.start_reindex() {
-            eprintln!("tyranny: re-index failed: {error:#}");
+            eprintln!("tyranny likes smoke: re-index failed: {error:#}");
         }
     }
     fn start_reindex(&mut self) -> Result<()> {
@@ -689,7 +691,9 @@ impl Coordinator {
                         active.status.last_error = Some(db::bounded_error(format!("{failure:#}")));
                         self.persist(&active.status)?;
                     }
-                    ScanScope::Paths => eprintln!("tyranny: re-index failed: {failure:#}"),
+                    ScanScope::Paths => {
+                        eprintln!("tyranny likes smoke: re-index failed: {failure:#}")
+                    }
                 }
                 self.cleanup_pending = true;
                 self.publish(true)?;
@@ -750,7 +754,7 @@ fn advance(connection: &mut Connection, active: &mut Active) -> Result<ScanStep>
             } else if enumeration.failures > 0 {
                 // For example a file deleted between the tag write and the Reindex.
                 eprintln!(
-                    "tyranny: re-index skipped {} file(s); last failure: {}",
+                    "tyranny likes smoke: re-index skipped {} file(s); last failure: {}",
                     enumeration.failures,
                     active.status.last_error.as_deref().unwrap_or("unknown")
                 );

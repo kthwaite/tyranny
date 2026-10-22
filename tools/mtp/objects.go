@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"tyranny-mtp/internal/mtp"
+	"tyranny-likes-smoke-mtp/internal/mtp"
 )
 
 func (s *session) storages() error {

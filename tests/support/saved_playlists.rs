@@ -2,7 +2,7 @@
 //! clocked capture owner. No direct command dispatch or private engine wiring.
 use super::*;
 use serde_json::{Value, json};
-use tyranny::{
+use tyranny_likes_smoke::{
     library_types::{Page, ScanPhase, Track},
     protocol::{Playlist, PlaylistEntry, QueueItem},
 };
@@ -847,7 +847,10 @@ async fn smart_rules_snapshots_and_library_changes_are_isolated_from_the_queue()
     )
     .await
     .unwrap();
-    assert_eq!(smart.kind, tyranny::protocol::PlaylistKind::Smart);
+    assert_eq!(
+        smart.kind,
+        tyranny_likes_smoke::protocol::PlaylistKind::Smart
+    );
     assert_eq!(smart.entry_count, None);
     let (library, live) = entries(&mut client, smart.id).await;
     assert_eq!(live.total, 1);
@@ -865,7 +868,10 @@ async fn smart_rules_snapshots_and_library_changes_are_isolated_from_the_queue()
     let filtered = ok(&mut client, json!({"command":"playlist_entries","playlist_id":smart.id,"revision":1,"library_revision":library,"offset":0,"limit":1,"query":"title:Beta"})).await;
     assert!(matches!(filtered, Response::PlaylistEntries { page, .. } if page.total == 0));
     let frozen = change(&mut client, json!({"command":"snapshot_smart_playlist","playlist_id":smart.id,"playlist_revision":1,"library_revision":library,"expected_revision":2,"name":"Frozen"})).await.unwrap();
-    assert_eq!(frozen.kind, tyranny::protocol::PlaylistKind::Regular);
+    assert_eq!(
+        frozen.kind,
+        tyranny_likes_smoke::protocol::PlaylistKind::Regular
+    );
     assert_eq!(frozen.entry_count, Some(1));
     assert_eq!(frozen.query, None);
     match ok(&mut client, json!({"command":"saved_playlists","revision":null,"offset":0,"limit":1,"query":"","kind":"regular"})).await {
@@ -919,7 +925,10 @@ async fn smart_rules_snapshots_and_library_changes_are_isolated_from_the_queue()
     assert_eq!(queue(&mut client).await, queued);
     let renamed = change(&mut client, json!({"command":"rename_playlist","playlist_id":restored.id,"expected_revision":restored.revision,"name":"Renamed live"})).await.unwrap();
     assert_eq!(renamed.query, edited.query);
-    assert_eq!(renamed.kind, tyranny::protocol::PlaylistKind::Smart);
+    assert_eq!(
+        renamed.kind,
+        tyranny_likes_smoke::protocol::PlaylistKind::Smart
+    );
     change(&mut client, json!({"command":"delete_playlist","playlist_id":renamed.id,"expected_revision":renamed.revision})).await;
     assert_eq!(entries(&mut client, frozen.id).await.1.total, 1);
     assert_eq!(queue(&mut client).await, queued);

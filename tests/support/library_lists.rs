@@ -1,10 +1,10 @@
-//! v23 list queries through a real private Unix client and native indexing.
+//! v24 list queries through a real private Unix client and native indexing.
 use super::{
     saved_playlists::{add, create, index, ok, queue, rescan},
     *,
 };
 use serde_json::{Value, json};
-use tyranny::{
+use tyranny_likes_smoke::{
     library_types::Page,
     listing::Grouping,
     play_order::RepeatMode,
@@ -378,7 +378,9 @@ async fn now_playing_reports_format_and_applied_gain() {
     let root = ok(&mut client, json!({"command":"add_root","path":music})).await;
     assert!(matches!(root, Response::RootAdded { .. }));
     client
-        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .until(|state| {
+            state.library.scan.phase == tyranny_likes_smoke::library_types::ScanPhase::Complete
+        })
         .await;
     let Response::LibraryTracks { page } = ok(
         &mut client,
@@ -488,7 +490,7 @@ async fn list_track_ids(client: &mut PlaybackClient, list: Value) -> (u64, Vec<u
     }
 }
 /// The whole queue, read in pages.
-async fn whole_queue(client: &mut PlaybackClient) -> Vec<tyranny::protocol::QueueItem> {
+async fn whole_queue(client: &mut PlaybackClient) -> Vec<tyranny_likes_smoke::protocol::QueueItem> {
     let mut items = Vec::new();
     loop {
         let Response::QueuePage { total, entries, .. } = ok(
@@ -541,7 +543,9 @@ async fn run_enqueue_of_600_rows_plays_from_clicked_row() {
     let mut client = PlaybackClient::connect(&running).await;
     ok(&mut client, json!({"command":"add_root","path":music})).await;
     client
-        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .until(|state| {
+            state.library.scan.phase == tyranny_likes_smoke::library_types::ScanPhase::Complete
+        })
         .await;
     for path in &outside {
         client.append(path).await;
@@ -669,7 +673,7 @@ async fn keep_mode_inserts_run_before_existing_upcoming() {
     let first = applied_entry(ok(&mut client, command).await);
     assert_eq!(first, 4);
     assert_eq!(client.state.current_id, Some(4));
-    let order = |items: &[tyranny::protocol::QueueItem]| {
+    let order = |items: &[tyranny_likes_smoke::protocol::QueueItem]| {
         items
             .iter()
             .map(|item| (item.id, item.title.clone()))
@@ -763,7 +767,9 @@ async fn playlist_add_selection_adds_all_matching_rows_atomically() {
     let mut client = PlaybackClient::connect(&running).await;
     ok(&mut client, json!({"command":"add_root","path":music})).await;
     client
-        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .until(|state| {
+            state.library.scan.phase == tyranny_likes_smoke::library_types::ScanPhase::Complete
+        })
         .await;
     let (revision, rows) = list_track_ids(&mut client, songs()).await;
     assert_eq!(rows.len(), 700);
@@ -878,7 +884,7 @@ async fn append_long(scratch: &Scratch, client: &mut PlaybackClient, names: &[&s
         client.append(&path).await;
     }
 }
-fn ids_and_played(items: &[tyranny::protocol::QueueItem]) -> Vec<(u64, bool)> {
+fn ids_and_played(items: &[tyranny_likes_smoke::protocol::QueueItem]) -> Vec<(u64, bool)> {
     items.iter().map(|item| (item.id, item.played)).collect()
 }
 
@@ -991,7 +997,10 @@ async fn save_upcoming_creates_regular_playlist() {
     };
     assert_eq!(client.state.playlists_revision, catalog + 1);
     assert_eq!(saved.name, "Up Next");
-    assert_eq!(saved.kind, tyranny::protocol::PlaylistKind::Regular);
+    assert_eq!(
+        saved.kind,
+        tyranny_likes_smoke::protocol::PlaylistKind::Regular
+    );
     assert_eq!(saved.entry_count, Some(2));
     assert_eq!(
         playlist_rows(&mut client, saved.id)
@@ -1250,7 +1259,9 @@ async fn repeat_all_wrap_starts_a_fresh_pass_over_the_run() {
     }
     ok(&mut client, json!({"command":"add_root","path":music})).await;
     client
-        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .until(|state| {
+            state.library.scan.phase == tyranny_likes_smoke::library_types::ScanPhase::Complete
+        })
         .await;
     let (library, rows) = list_track_ids(&mut client, songs()).await;
     ok(&mut client, json!({"command":"set_repeat","mode":"all"})).await;
@@ -1377,7 +1388,9 @@ async fn index_frames(
     }
     ok(client, json!({"command":"add_root","path":music})).await;
     client
-        .until(|state| state.library.scan.phase == tyranny::library_types::ScanPhase::Complete)
+        .until(|state| {
+            state.library.scan.phase == tyranny_likes_smoke::library_types::ScanPhase::Complete
+        })
         .await;
     list_track_ids(client, songs()).await
 }

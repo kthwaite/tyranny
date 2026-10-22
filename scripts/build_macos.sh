@@ -7,8 +7,8 @@ if [ "$#" -gt 2 ]; then
 fi
 CONFIGURATION=${1:-debug}
 case "$CONFIGURATION" in
-    debug) DEFAULT_APP="$ROOT/target/Tyranny.app" ;;
-    release) DEFAULT_APP="$ROOT/target/release/Tyranny.app" ;;
+    debug) DEFAULT_APP="$ROOT/target/tyranny likes smoke.app" ;;
+    release) DEFAULT_APP="$ROOT/target/release/tyranny likes smoke.app" ;;
     *) printf '%s\n' "Usage: $0 [debug|release] [app-path]" >&2; exit 2 ;;
 esac
 APP=${2:-$DEFAULT_APP}
@@ -20,23 +20,23 @@ for tool in cargo swift python3 go pkg-config; do
 done
 # Both Swift configurations use the same pinned native decoder support.
 FFMPEG_PREFIX=$("$ROOT/scripts/build_release_server.sh")
-SERVER="$ROOT/target/portable-rust/release/tyranny-server"
+SERVER="$ROOT/target/portable-rust/release/tyranny-likes-smoke-server"
 MTP_PREFIX=$("$ROOT/scripts/build_mtp.sh")
 swift build --package-path "$ROOT/macos" --scratch-path "$ROOT/target/swift-client" --configuration "$CONFIGURATION"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$ROOT/target/swift-client/$CONFIGURATION/Tyranny" "$APP/Contents/MacOS/Tyranny"
-cp "$SERVER" "$APP/Contents/MacOS/tyranny-server"
-cp "$ROOT/target/mtp/tyranny-mtp" "$APP/Contents/MacOS/tyranny-mtp"
+cp "$ROOT/target/swift-client/$CONFIGURATION/tyranny likes smoke" "$APP/Contents/MacOS/tyranny likes smoke"
+cp "$SERVER" "$APP/Contents/MacOS/tyranny-likes-smoke-server"
+cp "$ROOT/target/mtp/tyranny-likes-smoke-mtp" "$APP/Contents/MacOS/tyranny-likes-smoke-mtp"
 cp "$ROOT/macos/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/macos/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$ROOT/macos/Resources/DeezerLogo.png" "$APP/Contents/Resources/DeezerLogo.png"
 python3 "$ROOT/scripts/macos_dependencies.py" --bundle "$APP" --prefix "$FFMPEG_PREFIX" --mtp-prefix "$MTP_PREFIX"
-/usr/bin/ditto "$FFMPEG_PREFIX/share/tyranny-ffmpeg" "$APP/Contents/Resources/FFmpeg"
-/usr/bin/ditto "$MTP_PREFIX/share/tyranny-mtp" "$APP/Contents/Resources/MTP"
+/usr/bin/ditto "$FFMPEG_PREFIX/share/tyranny-likes-smoke-ffmpeg" "$APP/Contents/Resources/FFmpeg"
+/usr/bin/ditto "$MTP_PREFIX/share/tyranny-likes-smoke-mtp" "$APP/Contents/Resources/MTP"
 cp "$ROOT/macos/Resources/Credits.rtf" "$APP/Contents/Resources/Credits.rtf"
 rm -f "$APP/Contents/Resources/development-dependencies.json"
 # Signing is last: the helper and inventory are sealed into the app signature.
-/usr/bin/codesign --force --sign - "$APP/Contents/MacOS/tyranny-server"
-/usr/bin/codesign --force --sign - "$APP/Contents/MacOS/tyranny-mtp"
+/usr/bin/codesign --force --sign - "$APP/Contents/MacOS/tyranny-likes-smoke-server"
+/usr/bin/codesign --force --sign - "$APP/Contents/MacOS/tyranny-likes-smoke-mtp"
 /usr/bin/codesign --force --sign - "$APP"
 printf '%s\n' "$APP"

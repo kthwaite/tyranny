@@ -33,7 +33,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tyranny::{
+use tyranny_likes_smoke::{
     Frame,
     decoder::{Decoder, GainMode},
     output::OutputConfig,
@@ -65,7 +65,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tyranny-gapless-{}-{}",
+            "tyranny-likes-smoke-gapless-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

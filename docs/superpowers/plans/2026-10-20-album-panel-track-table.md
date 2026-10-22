@@ -33,8 +33,8 @@ Worktree: `../tyranny-album-tracks`, branch `album-track-table`. Gates:
 
 ## Task 1 — core: panel selections and row counts (TDD)
 
-File: `macos/Sources/TyrannyCore/AlbumGrid.swift`; tests in
-`macos/Tests/TyrannyCoreTests/AlbumGridTests.swift`.
+File: `macos/Sources/TyrannyLikesSmokeCore/AlbumGrid.swift`; tests in
+`macos/Tests/TyrannyLikesSmokeCoreTests/AlbumGridTests.swift`.
 
 1. Failing tests, then `AlbumPanel.selection(albumID:revision:positions:asRun:rowID:trackID:) throws -> TrackSelection`:
    - empty `positions` → `AlbumPlayback.selection(albumID:libraryRevision:)` (whole album, server picks start);
@@ -46,7 +46,7 @@ File: `macos/Sources/TyrannyCore/AlbumGrid.swift`; tests in
 
 ## Task 2 — app: the table, the model actions, the buttons
 
-Files: new `macos/Sources/Tyranny/Albums/AlbumTrackTable.swift`; edit `AlbumExpansionView.swift`,
+Files: new `macos/Sources/TyrannyLikesSmoke/Albums/AlbumTrackTable.swift`; edit `AlbumExpansionView.swift`,
 `AlbumGridModel.swift`, `Models/ActivationModel.swift`.
 
 1. `AlbumExpansion`: `selectedRowIDs: Set<UInt64>`, `selectedPositions: IndexSet` (from `tracks`),

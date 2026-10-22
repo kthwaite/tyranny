@@ -123,11 +123,11 @@ would never be refreshed. So a prefetched reply is used only when the prefetch's
 `history_revision`. Any mismatch means a normal fetch.
 
 The pure parts (slot state, one-shot claim, request equality, the freshness rule) live in
-TyrannyCore with unit tests.
+TyrannyLikesSmokeCore with unit tests.
 
 ## Cheaper cells
 
-In `TrackCellView` (`macos/Sources/Tyranny/Lists/VirtualTrackTable.swift` ≈575):
+In `TrackCellView` (`macos/Sources/TyrannyLikesSmoke/Lists/VirtualTrackTable.swift` ≈575):
 
 - One shared `NSImage` for the playing indicator (a `static let`), with its symbol configuration
   applied once. `init` no longer calls `NSImage(systemSymbolName:)`.
@@ -155,7 +155,7 @@ current data, so skip `reloadVisible()` for that pass. Every other path keeps it
 
 ## Verification
 
-- TyrannyCore unit tests for the claim: first claim only; equal fields claim; any field difference
+- TyrannyLikesSmokeCore unit tests for the claim: first claim only; equal fields claim; any field difference
   falls back; an in-flight prefetch is awaited up to its deadline; an empty or failed slot falls
   back; structural (not byte) equality.
 - Swift debug and release builds with `-warnings-as-errors`; `swift test`;

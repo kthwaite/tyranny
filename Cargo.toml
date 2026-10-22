@@ -1,5 +1,5 @@
 [package]
-name = "tyranny"
+name = "tyranny-likes-smoke"
 version = "0.1.0"
 edition = "2024"
 default-run = "audio-probe"
