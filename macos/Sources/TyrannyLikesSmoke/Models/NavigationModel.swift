@@ -3,7 +3,7 @@ import Observation
 import TyrannyLikesSmokeCore
 
 enum SettingsTab: String, Hashable {
-    case connection, library, playback, appearance, artwork
+    case connection, library, playback, appearance, artwork, keys
 }
 
 /// Window navigation state: the source-list destination, the filter text,
@@ -23,6 +23,8 @@ final class NavigationModel {
     var filterError: String?
     var settingsTab: SettingsTab = .connection
     private(set) var settingsRequest: UInt64 = 0
+    /// Installed by the library window, which owns `openWindow`.
+    @ObservationIgnored var openEqualizer: (@MainActor () -> Void)?
     /// Installed by the library window with its own TrackLists; no second selection store.
     @ObservationIgnored var commandSubmission: (@MainActor (String) async throws -> Void)?
     @ObservationIgnored var commandSuggestions: (@MainActor (String) -> [CommandSuggestion])?

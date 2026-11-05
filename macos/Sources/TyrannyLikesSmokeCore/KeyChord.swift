@@ -70,6 +70,9 @@ public struct KeyChord: Hashable, Sendable {
 
     public var isNamedKey: Bool { key.count > 1 }
 
+    /// A menu item can carry the chord only with ⌘. Without it the menu would take the key from text fields.
+    public var hasMenuShortcut: Bool { modifiers.contains(.command) }
+
     /// `ctrl+opt+shift+cmd+key`.
     public var canonical: String {
         let names = Self.modifierNames.filter { modifiers.contains($0.modifier) }.map(\.name)

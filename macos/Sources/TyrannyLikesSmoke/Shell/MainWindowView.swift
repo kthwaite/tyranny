@@ -163,7 +163,7 @@ struct MainWindowView: View {
                     .strokeBorder(colours.error, lineWidth: filterError == nil ? 0 : 1.5)
                     .allowsHitTesting(false)
             }
-            .help(filterError ?? "Filter title, artist, album or liked:true / liked:false with phrases, AND (&), OR (|), NOT (!), parentheses and field lists. ⌘F")
+            .help(filterError ?? navigation.keymap.help("Filter title, artist, album or liked:true / liked:false with phrases, AND (&), OR (|), NOT (!), parentheses and field lists.", for: "focus-filter"))
             .accessibilityIdentifier("library-filter")
             .popover(isPresented: Binding(
                 get: { filterError != nil && dismissedFilterError != filterError },

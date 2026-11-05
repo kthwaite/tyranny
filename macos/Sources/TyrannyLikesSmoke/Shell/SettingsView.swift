@@ -23,6 +23,9 @@ struct SettingsView: View {
             ArtworkSettingsPane(settings: model.artwork.settings)
                 .tabItem { Label("Artwork", systemImage: "photo") }
                 .tag(SettingsTab.artwork)
+            Text("Keys")
+                .tabItem { Label("Keys", systemImage: "keyboard") }
+                .tag(SettingsTab.keys)
         }
         .frame(width: 600)
         .accessibilityIdentifier("settings")

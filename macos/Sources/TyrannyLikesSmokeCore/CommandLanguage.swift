@@ -6,7 +6,7 @@ public enum CommandID: String, CaseIterable, Sendable {
     case shuffle, gain, resume, go, filter
     case focusFilter = "focus-filter"
     case revealPlaying = "reveal-playing"
-    case browser, drawer, artwork, settings, connect, disconnect, server
+    case browser, drawer, artwork, lyrics, equalizer, settings, connect, disconnect, server
     case chooseFolder = "choose-folder"
     case rescan
     case retryImport = "retry-import"
@@ -133,7 +133,9 @@ public enum CommandLanguage {
         .init(.browser, "Show, hide or toggle the browser.", [.init("on|off|toggle", .choices(toggleValues))]),
         .init(.drawer, "Show, hide or toggle Up Next.", [.init("on|off|toggle", .choices(toggleValues))]),
         .init(.artwork, "Expand, collapse or toggle Now Playing artwork.", [.init("on|off|toggle", .choices(toggleValues))]),
-        .init(.settings, "Open a settings pane.", [.init("pane", .choices(["connection", "library", "playback", "appearance", "artwork"]))]),
+        .init(.lyrics, "Show, hide or toggle lyrics.", [.init("on|off|toggle", .choices(toggleValues))]),
+        .init(.equalizer, "Open the Equalizer."),
+        .init(.settings, "Open a settings pane.", [.init("pane", .choices(["connection", "library", "playback", "appearance", "artwork", "keys"]))]),
         .init(.connect, "Connect to the server."),
         .init(.disconnect, "Disconnect from the server."),
         .init(.server, "Control the local server.", [.init("start|restart|stop", .choices(["start", "restart", "stop"]))]),

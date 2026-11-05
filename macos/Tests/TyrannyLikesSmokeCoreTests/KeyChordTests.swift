@@ -50,4 +50,9 @@ import Testing
         #expect(KeyChord("cmd+left")?.isNamedKey == true)
         #expect(KeyChord("n")?.isNamedKey == false)
     }
+
+    @Test func menuShortcutNeedsCommand() {
+        for text in ["cmd+l", "ctrl+cmd+l"] { #expect(KeyChord(text)?.hasMenuShortcut == true, "\(text)") }
+        for text in ["n", "opt+x", "ctrl+a", "shift+f5"] { #expect(KeyChord(text)?.hasMenuShortcut == false, "\(text)") }
+    }
 }

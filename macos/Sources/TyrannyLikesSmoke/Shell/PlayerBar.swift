@@ -57,7 +57,7 @@ struct PlayerBar: View {
                         .buttonStyle(.plain)
                         .font(.system(size: 13, weight: .semibold))
                         .disabled(nowPlaying?.track_id == nil)
-                        .help("Show the playing track (⌘L)")
+                        .help(navigation.keymap.help("Show the playing track", for: "reveal-playing"))
                         .accessibilityIdentifier("now-playing-title")
                         if let warning = transport.metadataError {
                             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10))
@@ -226,8 +226,8 @@ struct PlayerBar: View {
             .toggleStyle(.button)
             .buttonStyle(.borderless)
             .labelStyle(.iconOnly)
-            .help("Show or hide lyrics (⌥⌘L)")
-            .keyboardShortcut("l", modifiers: [.option, .command])
+            .help(navigation.keymap.help("Show or hide lyrics", for: "lyrics toggle"))
+            .keyboardShortcut(navigation.keymap.chord(forCommand: "lyrics toggle")?.menuShortcut)
             .accessibilityValue(model.lyrics.isVisible ? "shown" : "hidden")
             .accessibilityIdentifier("lyrics-toggle")
             Toggle(isOn: $navigation.upNextDrawerVisible) {
@@ -237,7 +237,7 @@ struct PlayerBar: View {
             .toggleStyle(.button)
             .buttonStyle(.borderless)
             .labelStyle(.iconOnly)
-            .help("Show or hide the Up Next drawer (⌥⌘U)")
+            .help(navigation.keymap.help("Show or hide the Up Next drawer", for: "drawer toggle"))
             .accessibilityValue(navigation.upNextDrawerVisible ? "shown" : "hidden")
             .accessibilityIdentifier("up-next-drawer-toggle")
             HStack(spacing: 4) {

@@ -161,7 +161,7 @@ struct TrackListView: View {
                     Label("Browser", systemImage: "rectangle.split.3x1")
                 }
                 .toggleStyle(.button)
-                .help(navigation.columnBrowserVisible ? "Hide Column Browser (⌘B)" : "Show Column Browser (⌘B)")
+                .help(navigation.keymap.help(navigation.columnBrowserVisible ? "Hide Column Browser" : "Show Column Browser", for: "browser toggle"))
                 .accessibilityIdentifier("browser-toggle")
             }
             Menu {

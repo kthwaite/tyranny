@@ -12,11 +12,8 @@ import Testing
     private func chord(_ text: String) -> KeyChord { KeyChord(text)! }
 
     @Test func defaultChordsAndCommandsParse() {
-        // `equalizer` and `lyrics toggle` parse once the commands exist (Task 3).
-        let notYet: Set<String> = ["equalizer", "lyrics toggle"]
         for entry in Keymap.defaults {
             #expect(KeyChord(entry.chord) != nil, "chord \(entry.chord)")
-            if notYet.contains(entry.command) { continue }
             #expect((try? CommandLanguage.parse(entry.command)) != nil, "command \(entry.command)")
         }
     }
