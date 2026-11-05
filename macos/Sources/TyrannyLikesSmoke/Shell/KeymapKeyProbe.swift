@@ -48,17 +48,7 @@ struct KeymapKeyProbe: NSViewRepresentable {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         private func runsCommand(_ event: NSEvent) -> Bool {
-            let flags = event.modifierFlags
-            var modifiers: KeyChord.Modifiers = []
-            if flags.contains(.control) { modifiers.insert(.control) }
-            if flags.contains(.option) { modifiers.insert(.option) }
-            if flags.contains(.shift) { modifiers.insert(.shift) }
-            if flags.contains(.command) { modifiers.insert(.command) }
-            guard let chord = KeyChord.event(
-                characters: event.charactersIgnoringModifiers, keyCode: event.keyCode,
-                modifiers: modifiers, capsLock: flags.contains(.capsLock)),
-                let command = keymap?.command(for: chord)
-            else { return false }
+            guard let chord = event.keyChord, let command = keymap?.command(for: chord) else { return false }
             guard KeyDispatch.shouldRun(
                 chord,
                 isMainWindow: event.window === window,
@@ -69,5 +59,19 @@ struct KeymapKeyProbe: NSViewRepresentable {
             run?(command)
             return true
         }
+    }
+}
+
+extension NSEvent {
+    /// The chord this key press makes, or nil for a key the keymap cannot name.
+    var keyChord: KeyChord? {
+        var modifiers: KeyChord.Modifiers = []
+        if modifierFlags.contains(.control) { modifiers.insert(.control) }
+        if modifierFlags.contains(.option) { modifiers.insert(.option) }
+        if modifierFlags.contains(.shift) { modifiers.insert(.shift) }
+        if modifierFlags.contains(.command) { modifiers.insert(.command) }
+        return KeyChord.event(
+            characters: charactersIgnoringModifiers, keyCode: keyCode,
+            modifiers: modifiers, capsLock: modifierFlags.contains(.capsLock))
     }
 }

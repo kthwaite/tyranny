@@ -79,9 +79,12 @@ public struct KeyChord: Hashable, Sendable {
         return (names + [key]).joined(separator: "+")
     }
 
-    /// Menu-style text: `⌥⌘E`, `⌘→`, `n`. A letter is upper-case when a modifier is present.
+    /// Menu-style text: `⌥⌘E`, `⇧⌘N`, `⌘→`, `n`. A letter is upper-case when a modifier is present.
+    /// An upper-case letter with another modifier shows ⇧, which the chord itself does not carry.
     public var display: String {
-        let symbols = Self.modifierNames.filter { modifiers.contains($0.modifier) }.map(\.symbol).joined()
+        var shown = modifiers
+        if !modifiers.isEmpty, key.count == 1, key.lowercased() != key, key.uppercased() == key { shown.insert(.shift) }
+        let symbols = Self.modifierNames.filter { shown.contains($0.modifier) }.map(\.symbol).joined()
         let keyText: String
         if let named = Self.namedKeys.first(where: { $0.name == key }) {
             keyText = named.symbol

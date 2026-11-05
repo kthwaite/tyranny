@@ -20,6 +20,8 @@ import Testing
         #expect(KeyChord("cmd+right")?.display == "⌘→")
         #expect(KeyChord("n")?.display == "n")
         #expect(KeyChord("N")?.display == "N")
+        #expect(KeyChord("cmd+N")?.display == "⇧⌘N")
+        #expect(KeyChord("cmd+n")?.display == "⌘N")
     }
 
     @Test func eventLetterCase() {
