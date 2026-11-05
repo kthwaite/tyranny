@@ -31,14 +31,14 @@ public enum Keymap {
         ("cmd+9", "go radio"),
     ]
 
-    private static let reservedCommandKeys: Set<String> = ["q", "w", "h", "m", ",", "a", "c", "v", "x", "z"]
+    private static let reservedCommandKeys: Set<String> = ["q", "w", "h", "m", ",", "a", "c", "v", "x", "z", "Z"]
     private static let tableKeys: Set<String> = [
         "space", "return", "escape", "tab", "delete", "forwarddelete", "left", "right", "up", "down",
     ]
 
     /// Why a chord cannot be bound, or nil when it can.
     public static func reservedReason(_ chord: KeyChord) -> String? {
-        if chord.modifiers == [.command], reservedCommandKeys.contains(chord.key.lowercased()) {
+        if chord.modifiers == [.command], reservedCommandKeys.contains(chord.key) {
             return "\(chord.display) is a system or editing shortcut."
         }
         if chord.modifiers.subtracting(.shift).isEmpty, tableKeys.contains(chord.key) {
@@ -89,10 +89,18 @@ public final class KeymapStore {
     }
 
     /// Binds the chord to the command, replacing what it ran. An empty command does nothing.
+    /// Binding a default's own command drops the change, so the row is not custom.
     public func bind(_ chord: KeyChord, to command: String) {
         let command = CommandHistory.normalised(command)
         guard !command.isEmpty else { return }
-        changes[chord.canonical] = command
+        let isDefaultCommand = Keymap.defaults.contains {
+            KeyChord($0.chord) == chord && CommandHistory.normalised($0.command) == command
+        }
+        if isDefaultCommand {
+            changes.removeValue(forKey: chord.canonical)
+        } else {
+            changes[chord.canonical] = command
+        }
         commit()
     }
 

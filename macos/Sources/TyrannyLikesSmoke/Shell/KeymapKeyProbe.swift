@@ -54,11 +54,20 @@ struct KeymapKeyProbe: NSViewRepresentable {
                 isMainWindow: event.window === window,
                 hasSheet: window?.attachedSheet != nil,
                 overlayOpen: overlayOpen?() ?? false,
-                isEditingText: window?.firstResponder is NSText)
+                isEditingText: window?.isEditingText ?? false)
             else { return false }
             run?(command)
             return true
         }
+    }
+}
+
+extension NSWindow {
+    /// True while the first responder is text the user can type in. Selectable text, such as the
+    /// lyrics, does not count.
+    var isEditingText: Bool {
+        guard let text = firstResponder as? NSText else { return false }
+        return text.isEditable || text.isFieldEditor
     }
 }
 

@@ -26,13 +26,19 @@ public final class KeymapEditor {
         command = editing?.command ?? ""
     }
 
+    /// The command the chord already runs, when saving would replace it. Known before a command is typed.
+    public var conflictingCommand: String? {
+        guard let chord, Keymap.reservedReason(chord) == nil, chord != original?.chord else { return nil }
+        return store.command(for: chord)
+    }
+
     public var verdict: Verdict {
         guard let chord else { return .incomplete }
         if let reason = Keymap.reservedReason(chord) { return .reserved(reason) }
         let text = CommandHistory.normalised(command)
         guard !text.isEmpty else { return .incomplete }
         do { _ = try CommandLanguage.parse(text) } catch { return .invalidCommand(error.localizedDescription) }
-        if chord != original?.chord, let existing = store.command(for: chord) { return .conflict(command: existing) }
+        if let existing = conflictingCommand { return .conflict(command: existing) }
         return .ready
     }
 
@@ -44,7 +50,7 @@ public final class KeymapEditor {
     }
 
     public var saveTitle: String {
-        if case .conflict = verdict { "Replace" } else { "Save" }
+        conflictingCommand != nil ? "Replace" : "Save"
     }
 
     /// Removes the edited row's old chord when the chord changed, then binds.

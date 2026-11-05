@@ -13,7 +13,30 @@ public enum KeyDispatch {
     ) -> Bool {
         guard isMainWindow, !hasSheet, !overlayOpen else { return false }
         guard isEditingText else { return true }
-        return chord.modifiers.contains(.command) && !editingKeys.contains(chord.key)
+        return chord.modifiers.contains(.command) && !fieldKeepsKey(chord)
+    }
+
+    /// Whether a text field being edited keeps `chord`: a ⌘ chord on a cursor or delete key.
+    public static func fieldKeepsKey(_ chord: KeyChord) -> Bool {
+        chord.modifiers.contains(.command) && editingKeys.contains(chord.key)
+    }
+}
+
+/// Decides what an armed key recorder does with a key press.
+public enum KeyRecording {
+    public enum Action: Equatable {
+        /// Take the key as the chord.
+        case record
+        /// Stop recording and swallow Escape.
+        case cancel
+        /// Stop recording and pass the key on to its target.
+        case abandon
+    }
+
+    /// A key in another window, or in text being edited, is not meant for the recorder.
+    public static func action(isRecorderWindow: Bool, isEditingText: Bool, isEscape: Bool) -> Action {
+        if !isRecorderWindow || isEditingText { return .abandon }
+        return isEscape ? .cancel : .record
     }
 }
 
@@ -41,6 +64,8 @@ public enum KeyDispatch {
             let command = pending.removeFirst()
             do {
                 try await run(command)
+            } catch is CancellationError {
+                // The user cancelled, for example a folder chooser. Nothing to report.
             } catch {
                 report(error.localizedDescription)
             }

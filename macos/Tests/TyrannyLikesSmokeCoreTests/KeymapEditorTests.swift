@@ -94,4 +94,27 @@ import Testing
         editor.save()
         #expect(store.command(for: chord("cmd+j")) == "seek +1m")
     }
+
+    @Test func boundChordShowsItsCommandBeforeACommandIsTyped() {
+        let (defaults, cleanup) = isolatedDefaults(); defer { cleanup() }
+        let editor = KeymapEditor(store: KeymapStore(defaults: defaults))
+        editor.chord = chord("cmd+l")
+        #expect(editor.conflictingCommand == "reveal-playing")
+        #expect(editor.saveTitle == "Replace")
+        #expect(!editor.canSave)
+        #expect(editor.verdict == .incomplete)
+    }
+
+    @Test func freeReservedAndOwnChordsHaveNoConflictingCommand() {
+        let (defaults, cleanup) = isolatedDefaults(); defer { cleanup() }
+        let store = KeymapStore(defaults: defaults)
+        let editor = KeymapEditor(store: store)
+        #expect(editor.conflictingCommand == nil)
+        editor.chord = chord("cmd+j")
+        #expect(editor.conflictingCommand == nil)
+        editor.chord = chord("cmd+q")
+        #expect(editor.conflictingCommand == nil)
+        let row = store.bindings.first { $0.chord == chord("cmd+b") }!
+        #expect(KeymapEditor(store: store, editing: row).conflictingCommand == nil)
+    }
 }

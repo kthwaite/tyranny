@@ -21,14 +21,12 @@ final class TyrannyLikesSmokeAppDelegate: NSObject, NSApplicationDelegate {
         installTextFieldKeyGuard()
     }
 
-    /// Menu key equivalents beat text fields. ⌘← and ⌘→ (Previous and Next) must still move the
-    /// cursor while a field editor has focus, so the editor gets those keys first. Space and
-    /// Return are not menu shortcuts: only the focused track table sees them.
+    /// Menu key equivalents beat text fields. A ⌘ cursor or delete key, such as ⌘← or ⌘⌫, must
+    /// still edit the field while a field editor has focus, so the editor gets those keys first.
+    /// Space and Return are not menu shortcuts: only the focused track table sees them.
     private func installTextFieldKeyGuard() {
         keyGuard = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                .subtracting([.numericPad, .function, .capsLock])
-            guard flags == .command, event.keyCode == 123 || event.keyCode == 124,
+            guard let chord = event.keyChord, KeyDispatch.fieldKeepsKey(chord),
                   let editor = (event.window ?? NSApp.keyWindow)?.firstResponder as? NSTextView,
                   editor.isFieldEditor || editor.isEditable else { return event }
             editor.keyDown(with: event)

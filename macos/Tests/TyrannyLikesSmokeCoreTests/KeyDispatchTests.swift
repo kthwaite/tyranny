@@ -12,6 +12,15 @@ import Testing
             isEditingText: isEditingText)
     }
 
+    /// Yields until `condition` holds. Gives up after 10000 yields, so a regression fails instead of hanging.
+    private func settle(_ what: String, until condition: () -> Bool) async {
+        for _ in 0..<10_000 {
+            if condition() { return }
+            await Task.yield()
+        }
+        Issue.record("gave up waiting for \(what)")
+    }
+
     @Test func plainChordsRunInTheMainWindow() {
         #expect(run("cmd+l"))
         #expect(run("n"))
@@ -63,10 +72,10 @@ import Testing
         queue.enqueue("b")
         queue.enqueue("c")
         for expected in 1...3 {
-            while gates.count < expected { await Task.yield() }
+            await settle("gate \(expected)") { gates.count >= expected }
             #expect(gates.count == expected)
             gates[expected - 1].resume()
-            while log.count < expected * 2 { await Task.yield() }
+            await settle("log \(expected * 2)") { log.count >= expected * 2 }
         }
         #expect(log == ["start a", "end a", "start b", "end b", "start c", "end c"])
     }
@@ -83,8 +92,44 @@ import Testing
             report: { reports.append($0) })
         queue.enqueue("bad")
         queue.enqueue("good")
-        while ran.count < 2 || reports.isEmpty { await Task.yield() }
+        await settle("both commands and the report") { ran.count >= 2 && !reports.isEmpty }
         #expect(ran == ["bad", "good"])
         #expect(reports == ["boom"])
+    }
+
+    @Test func queueIgnoresACancelledCommandAndRunsTheNext() async {
+        var ran: [String] = []
+        var reports: [String] = []
+        let queue = KeyCommandQueue(
+            run: { command in
+                ran.append(command)
+                if command == "cancelled" { throw CancellationError() }
+            },
+            report: { reports.append($0) })
+        queue.enqueue("cancelled")
+        queue.enqueue("next")
+        await settle("both commands") { ran.count >= 2 }
+        await Task.yield()
+        #expect(ran == ["cancelled", "next"])
+        #expect(reports.isEmpty)
+    }
+
+    @Test func fieldKeepsCommandCursorAndDeleteChords() {
+        for text in ["cmd+right", "shift+cmd+right", "opt+cmd+left", "cmd+down", "cmd+delete", "cmd+forwarddelete"] {
+            #expect(KeyDispatch.fieldKeepsKey(KeyChord(text)!), "\(text)")
+        }
+        for text in ["cmd+f", "right", "opt+left"] {
+            #expect(!KeyDispatch.fieldKeepsKey(KeyChord(text)!), "\(text)")
+        }
+    }
+
+    @Test func recordingActionByWindowTextAndEscape() {
+        typealias Recording = KeyRecording
+        #expect(Recording.action(isRecorderWindow: true, isEditingText: false, isEscape: false) == .record)
+        #expect(Recording.action(isRecorderWindow: true, isEditingText: false, isEscape: true) == .cancel)
+        #expect(Recording.action(isRecorderWindow: false, isEditingText: false, isEscape: false) == .abandon)
+        #expect(Recording.action(isRecorderWindow: false, isEditingText: false, isEscape: true) == .abandon)
+        #expect(Recording.action(isRecorderWindow: true, isEditingText: true, isEscape: false) == .abandon)
+        #expect(Recording.action(isRecorderWindow: true, isEditingText: true, isEscape: true) == .abandon)
     }
 }

@@ -87,17 +87,20 @@ private struct KeymapEditorSheet: View {
 
     private var message: String? {
         switch editor.verdict {
-        case .incomplete, .ready: nil
         case .invalidCommand(let text), .reserved(let text): text
-        case .conflict(let command): "\(editor.chord?.display ?? "This key") already runs “\(command)”. Saving replaces it."
+        case .incomplete, .ready, .conflict:
+            editor.conflictingCommand.map {
+                "\(editor.chord?.display ?? "This key") already runs “\($0)”. Saving replaces it."
+            }
         }
     }
 }
 
 /// A button that records the next key press as a chord.
 ///
-/// While recording, a local monitor consumes every key, ⌘ chords included, so no menu item or
-/// bound command fires. Escape cancels recording.
+/// While recording, a local monitor consumes every key in the recorder's window, ⌘ chords
+/// included, so no menu item or bound command fires. Escape cancels recording. A key in another
+/// window, or in a text field being edited, stops recording and goes on to its target.
 private struct KeyRecorder: NSViewRepresentable {
     @Binding var chord: KeyChord?
 
@@ -134,14 +137,27 @@ private struct KeyRecorder: NSViewRepresentable {
         }
 
         private func start() {
+            // A focused Command field gives up focus, so its keys no longer count as text editing.
+            button?.window?.makeFirstResponder(nil)
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self else { return event }
-                let cancelled = event.keyCode == 53 && event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
-                if cancelled {
+                let isEscape = event.keyCode == 53
+                    && event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
+                switch KeyRecording.action(
+                    isRecorderWindow: event.window === button?.window,
+                    isEditingText: button?.window?.isEditingText ?? false,
+                    isEscape: isEscape)
+                {
+                case .abandon:
                     stop()
-                } else if let recorded = event.keyChord {
-                    chord?.wrappedValue = recorded
+                    return event
+                case .cancel:
                     stop()
+                case .record:
+                    if let recorded = event.keyChord {
+                        chord?.wrappedValue = recorded
+                        stop()
+                    }
                 }
                 return nil
             }

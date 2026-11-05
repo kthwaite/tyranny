@@ -277,7 +277,7 @@ struct CommandPaletteKeyProbe: NSViewRepresentable {
                 hasCommandModifiers: !event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
                 isPaletteWindow: event.window === window,
                 hasSheet: window?.attachedSheet != nil,
-                isEditingText: window?.firstResponder is NSText)
+                isEditingText: window?.isEditingText ?? false)
             return trigger && open?() == true
         }
     }

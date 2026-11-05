@@ -28,7 +28,8 @@ import Testing
                      "space", "return", "escape", "tab", "delete", "forwarddelete", "left", "shift+down", ":"] {
             #expect(Keymap.reservedReason(chord(text)) != nil, "\(text)")
         }
-        for text in ["cmd+left", "opt+space", "n", "/", "cmd+l"] {
+        for text in ["cmd+left", "opt+space", "n", "/", "cmd+l",
+                     "cmd+C", "cmd+Q", "cmd+W", "cmd+H", "cmd+M", "cmd+A", "cmd+V", "cmd+X"] {
             #expect(Keymap.reservedReason(chord(text)) == nil, "\(text)")
         }
     }
@@ -114,5 +115,24 @@ import Testing
         let store = KeymapStore(defaults: defaults)
         store.bind(chord("ctrl+j"), to: ":seek +1m")
         #expect(store.command(for: chord("ctrl+j")) == "seek +1m")
+    }
+
+    @Test func bindingADefaultsOwnCommandRemovesTheChange() {
+        let (defaults, cleanup) = isolatedDefaults(); defer { cleanup() }
+        let store = KeymapStore(defaults: defaults)
+        store.bind(chord("cmd+l"), to: "go albums")
+        store.bind(chord("cmd+l"), to: ":reveal-playing")
+        #expect(store.bindings.first { $0.chord == chord("cmd+l") }?.isCustom == false)
+        #expect(defaults.object(forKey: KeymapStore.defaultsKey) == nil)
+    }
+
+    @Test func addingBackARemovedDefaultIsNotCustom() {
+        let (defaults, cleanup) = isolatedDefaults(); defer { cleanup() }
+        let store = KeymapStore(defaults: defaults)
+        store.remove(chord("cmd+l"))
+        store.bind(chord("cmd+l"), to: "reveal-playing")
+        #expect(store.bindings.first { $0.chord == chord("cmd+l") }?.isCustom == false)
+        let stored = defaults.dictionary(forKey: KeymapStore.defaultsKey) as? [String: String] ?? [:]
+        #expect(stored[chord("cmd+l").canonical] == nil)
     }
 }
