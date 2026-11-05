@@ -48,9 +48,11 @@ narrowing the list the way the filter does.
    through `NavigationModel.submitCommand`. Commands from keys run one at a time, in order, so a held
    `volume +5` adds up. A failure goes to `player.message`. Key commands do not join command history.
 6. **When a key runs.** Only when the main window is key, no sheet is up, the Wrapped slideshow is
-   closed and the palette is closed. While text is being edited (`firstResponder is NSText`):
+   closed and the palette is closed. While text is being edited (the first responder is an editable
+   text view or a field editor, so selectable text such as the lyrics does not count):
    - a chord with no ⌘ stays with the field;
-   - ⌘ with an arrow, Delete or Forward Delete stays with the field;
+   - ⌘ with an arrow, Delete or Forward Delete stays with the field, even when a menu item has that
+     chord;
    - any other ⌘ chord runs, as menu shortcuts do today (⌘F inside the filter).
 7. **Menus follow the keymap.** Filter, the Column Browser and Up Next items, Next, Previous, Show
    Playing Track, Equalizer, the Go items and the lyrics toggle show the chord bound to their command,
@@ -74,6 +76,17 @@ narrowing the list the way the filter does.
    is flagged in its row, and pressing its key puts the parser's error in the status bar.
 10. **New commands.** `equalizer` opens the Equalizer window. `lyrics <on|off|toggle>` sets the lyrics
     panel. The `settings` command gains `keys`.
+
+11. **Accepted behaviour changes.** Keys in the main window now run through `CommandDispatcher`, so
+    the default chords match the old shortcuts but differ from them in these cases:
+    - ⌘F on Up Next, History and Radio says "This view does not have a filter." and does not focus.
+      The Filter menu item still focuses the toolbar field there.
+    - ⌘L on Albums and similar views shows a status error instead of nothing, and works on Up Next.
+      The menu item and the player-bar title keep their old path.
+    - ⌘→ or ⌘← with no entry to move to, or while the model is busy, shows a status message. The
+      menu item is disabled in the same case.
+    - A local command such as ⌘1 waits behind a server command already running from a key, up to
+      that command's deadline, because key commands run one at a time.
 
 ### Non-goals
 
