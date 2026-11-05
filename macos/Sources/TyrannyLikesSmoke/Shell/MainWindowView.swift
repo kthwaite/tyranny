@@ -12,6 +12,7 @@ struct MainWindowView: View {
     @FocusState private var filterFocused: Bool
     @State private var dismissedFilterError: String?
     @State private var lists = TrackLists()
+    @State private var keyCommands: KeyCommandQueue?
     /// Whether the sidebar is on screen, from the split view's own sidebar item. The split view can
     /// collapse the sidebar without a visibility binding hearing of it (restored state, a drag,
     /// a narrow window), so expanded art follows this instead.
@@ -92,6 +93,10 @@ struct MainWindowView: View {
             navigation.openCommandPalette()
             return true
         })
+        .background(KeymapKeyProbe(
+            keymap: navigation.keymap,
+            overlayOpen: { navigation.wrappedYear != nil || navigation.palette.isOpen },
+            run: { keyCommands?.enqueue($0) }))
         .toolbar { toolbar }
         .toolbar(navigation.wrappedYear == nil ? .automatic : .hidden, for: .windowToolbar)
         .toolbarBackground(navigation.wrappedYear == nil ? .automatic : .hidden, for: .windowToolbar)
@@ -100,6 +105,7 @@ struct MainWindowView: View {
             navigation.commandSubmission = { try await dispatcher.execute($0) }
             navigation.commandSuggestions = { dispatcher.suggestions($0) }
             navigation.palette.report = { model.message = $0 }
+            keyCommands = KeyCommandQueue(run: { try await navigation.submitCommand($0) }, report: { model.message = $0 })
         }
         .onDisappear {
             navigation.commandSubmission = nil

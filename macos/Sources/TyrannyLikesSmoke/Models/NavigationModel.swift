@@ -28,6 +28,8 @@ final class NavigationModel {
     @ObservationIgnored var commandSuggestions: (@MainActor (String) -> [CommandSuggestion])?
     /// The `:` command palette. It suggests and submits through this model.
     let palette: CommandPaletteModel
+    /// The key bindings. Pressing a bound key in the main window runs its command.
+    let keymap: KeymapStore
     /// Incremented by ⌘F; the filter field takes focus when it changes.
     private(set) var filterFocusRequest = 0
 
@@ -61,6 +63,7 @@ final class NavigationModel {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         palette = CommandPaletteModel(defaults: defaults)
+        keymap = KeymapStore(defaults: defaults)
         columnBrowserVisible = defaults.bool(forKey: "columnBrowserVisible")
         upNextDrawerVisible = defaults.bool(forKey: "upNextDrawerVisible")
         nowPlayingArtExpanded = defaults.bool(forKey: "nowPlayingArtExpanded")
