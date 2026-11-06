@@ -504,9 +504,10 @@ fn file_type_after_id3v2(file: &mut File, header: &[u8]) -> Result<Option<FileTy
     file.seek(SeekFrom::Start(10))?;
     let mut tag = Vec::new();
     file.by_ref().take(size).read_to_end(&mut tag)?;
-    // A frame sync can start on the tag's last byte.
-    let mut byte = [0; 1];
-    let next = (file.read(&mut byte)? == 1).then_some(byte[0]);
+    // An MPEG header can start on the tag's last bytes.
+    let mut next = Vec::with_capacity(2);
+    file.by_ref().take(2).read_to_end(&mut next)?;
+    let after_tag = file.seek(SeekFrom::End(0))? - (10 + tag.len() as u64);
     file.seek(SeekFrom::Start(10 + tag.len() as u64))?;
     let mut after = [0; 3];
     let footer = flags & 0x10 != 0 && major >= 3;
@@ -519,8 +520,8 @@ fn file_type_after_id3v2(file: &mut File, header: &[u8]) -> Result<Option<FileTy
     // lofty adds an extended header's size to the bytes it replaces, but the
     // tag size holds it already. It would replace that many bytes of audio.
     if (flags & 0x40 != 0 && major >= 3)
-        || !(tag_holds_no_audio(&tag, next, major, false)
-            || (major == 4 && tag_holds_no_audio(&tag, next, major, true)))
+        || !(tag_holds_no_audio(&tag, &next, after_tag, major, false)
+            || (major == 4 && tag_holds_no_audio(&tag, &next, after_tag, major, true)))
     {
         return Ok(None);
     }
@@ -557,33 +558,65 @@ fn file_type_after_id3v2(file: &mut File, header: &[u8]) -> Result<Option<FileTy
 
 /// Walks the tag's frames. A tag whose size field is too large holds the start
 /// of the audio after its last frame, and saving would lose those bytes. A frame
-/// that runs past the end means the size field is too small, which loses nothing.
-/// `next` is the byte after the tag. `plain_sizes`: iTunes writes big-endian frame
-/// sizes in ID3v2.4.
-fn tag_holds_no_audio(tag: &[u8], next: Option<u8>, major: u8, plain_sizes: bool) -> bool {
+/// that runs past the tag, but not past the file, means the size field is too
+/// small, which loses nothing.
+///
+/// `next` holds the bytes after the tag, and `after_tag` counts them all.
+/// `plain_sizes`: iTunes writes big-endian frame sizes in ID3v2.4. Such a walk
+/// counts only when its frames fit and a size byte above 0x7F proves them plain.
+/// Without that proof, a true size read as plain can fit by chance: a 128-byte
+/// frame reads as 256, and fits a tag 128 bytes too large.
+fn tag_holds_no_audio(
+    tag: &[u8],
+    next: &[u8],
+    after_tag: u64,
+    major: u8,
+    plain_sizes: bool,
+) -> bool {
     let (id_length, header_length) = if major == 2 { (3, 6) } else { (4, 10) };
     let mut rest = tag;
+    let mut proved_plain = false;
     while rest.len() >= header_length
         && rest[..id_length]
             .iter()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+            .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
     {
         let size_bytes = &rest[id_length..if major == 2 { 6 } else { 8 }];
+        proved_plain |= size_bytes.iter().any(|byte| *byte > 0x7f);
         let bits = if major == 4 && !plain_sizes { 7 } else { 8 };
         let size = size_bytes
             .iter()
             .fold(0usize, |size, byte| size << bits | usize::from(*byte));
-        if size > rest.len() - header_length {
-            return true;
+        let inside = rest.len() - header_length;
+        if size <= inside {
+            rest = &rest[header_length + size..];
+        } else if (size - inside) as u64 <= after_tag {
+            return !plain_sizes;
+        } else {
+            break;
         }
-        rest = &rest[header_length + size..];
     }
-    let is_sync = |first: u8, second: u8| first == 0xff && second & 0xe0 == 0xe0;
-    let crosses_the_end = match (rest.last(), next) {
-        (Some(last), Some(next)) => is_sync(*last, next),
-        _ => false,
+    if plain_sizes && !proved_plain {
+        return false;
+    }
+    let bytes = [rest, next].concat();
+    !(0..rest.len()).any(|at| bytes.get(at..at + 3).is_some_and(is_frame_header))
+}
+
+/// Whether these three bytes start an MPEG or ADTS frame. Padding of 0xFF and
+/// the markers of a JPEG picture do not.
+fn is_frame_header(bytes: &[u8]) -> bool {
+    let [first, second, third] = *bytes else {
+        return false;
     };
-    !crosses_the_end && !rest.windows(2).any(|pair| is_sync(pair[0], pair[1]))
+    if first != 0xff || second & 0xe0 != 0xe0 {
+        return false;
+    }
+    let (version, layer) = ((second >> 3) & 3, (second >> 1) & 3);
+    if layer == 0 {
+        return second & 0xf0 == 0xf0 && (third >> 2) & 0xf <= 12;
+    }
+    version != 1 && third >> 4 != 0xf && (third >> 2) & 3 != 3
 }
 
 /// Opens the file once and reads it with `read_tags_file`.
@@ -2145,6 +2178,142 @@ mod tests {
     #[test]
     fn an_id3v23_footer_flag_is_refused() {
         assert_id3_end_inside_the_audio_is_refused(3, 0x10, 12);
+    }
+
+    fn id3_size_bytes(major: u8, size: usize) -> [u8; 4] {
+        if major == 4 {
+            std::array::from_fn(|i| ((size >> (7 * (3 - i))) & 0x7f) as u8)
+        } else {
+            (size as u32).to_be_bytes()
+        }
+    }
+
+    /// An ID3v2 tag of the given raw frames and padding. Its size field is too
+    /// large by `excess`.
+    fn id3_tag_of(
+        major: u8,
+        frames: &[(&[u8; 4], &[u8])],
+        padding: &[u8],
+        excess: usize,
+    ) -> Vec<u8> {
+        let mut content = Vec::new();
+        for (id, body) in frames {
+            content.extend_from_slice(*id);
+            content.extend_from_slice(&id3_size_bytes(major, body.len()));
+            content.extend_from_slice(&[0, 0]);
+            content.extend_from_slice(body);
+        }
+        content.extend_from_slice(padding);
+        let size = content.len() + excess;
+        let mut out = b"ID3".to_vec();
+        out.extend_from_slice(&[major, 0, 0]);
+        out.extend((0..4).rev().map(|i| ((size >> (7 * i)) & 0x7f) as u8));
+        out.extend_from_slice(&content);
+        out
+    }
+
+    #[test]
+    fn every_size_excess_is_refused_for_frames_above_and_below_128_bytes() {
+        let scratch = Scratch::new();
+        for fixture in ["tone.mp3", "tone.aac"] {
+            let audio = audio_of(fixture, &scratch);
+            let path = scratch.copy(fixture);
+            for major in [3, 4] {
+                for length in [1, 2, 127, 128, 129, 255, 256, 300, 16_384] {
+                    let mut body = vec![0];
+                    body.extend(std::iter::repeat_n(b'x', length - 1));
+                    for padding in [0, 20] {
+                        let zeros = vec![0; padding];
+                        let frames: [(&[u8; 4], &[u8]); 1] = [(b"TCOM", &body)];
+                        for excess in (1..=40).chain([64, 100, 127, 128, 400]) {
+                            let tag = id3_tag_of(major, &frames, &zeros, excess);
+                            let bytes = [tag, audio.clone()].concat();
+                            fs::write(&path, &bytes).unwrap();
+                            let case = format!("{fixture} v2.{major} frame {length} +{excess}");
+                            let edit = edit_tags(&path, &setting(&[(TagField::Title, "New")]));
+                            let after = fs::read(&path).unwrap();
+                            assert!(after.ends_with(&audio), "{case}: audio lost");
+                            assert!(edit.is_err(), "{case}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// iTunes writes big-endian frame sizes in ID3v2.4. The picture's bytes hold
+    /// what looks like an MPEG header, so only the plain sizes explain them.
+    #[test]
+    fn plain_frame_sizes_in_id3v24_stay_writable() {
+        let scratch = Scratch::new();
+        let audio = audio_of("tone.mp3", &scratch);
+        let path = scratch.copy("tone.mp3");
+        let mut picture = b"\0image/jpeg\0\x03\0".to_vec();
+        for _ in 0..24 {
+            picture.extend_from_slice(b"\xff\xfb\x90\x00abcd");
+        }
+        assert!(picture.len() > 127 && picture.len() < 256);
+        let mut tag = b"ID3\x04\0\0".to_vec();
+        let size = 10 + picture.len();
+        tag.extend((0..4).rev().map(|i| ((size >> (7 * i)) & 0x7f) as u8));
+        tag.extend_from_slice(b"APIC");
+        tag.extend_from_slice(&(picture.len() as u32).to_be_bytes());
+        tag.extend_from_slice(&[0, 0]);
+        tag.extend_from_slice(&picture);
+        fs::write(&path, [tag, audio.clone()].concat()).unwrap();
+        edit_tags(&path, &setting(&[(TagField::Title, "New")])).unwrap();
+        assert!(fs::read(&path).unwrap().ends_with(&audio));
+    }
+
+    /// Text junk before the audio looks like a frame whose size runs past the
+    /// tag, and past the file too. That is not a size field that is too small.
+    #[test]
+    fn junk_that_looks_like_a_frame_does_not_hide_audio_in_the_tag() {
+        let scratch = Scratch::new();
+        let audio = audio_of("tone.mp3", &scratch);
+        let path = scratch.copy("tone.mp3");
+        for junk in [&b"AAAAAAAAAAAAAAAA"[..], b"hello world, junk"] {
+            let tag = id3_tag(4, 0, 0, junk.len() as i32 + 20);
+            let bytes = [tag, junk.to_vec(), audio.clone()].concat();
+            fs::write(&path, &bytes).unwrap();
+            let edit = edit_tags(&path, &setting(&[(TagField::Title, "New")]));
+            assert!(fs::read(&path).unwrap().ends_with(&audio), "audio lost");
+            assert!(edit.is_err());
+        }
+    }
+
+    #[test]
+    fn other_frame_ids_and_ff_padding_stay_writable() {
+        let scratch = Scratch::new();
+        let audio = audio_of("tone.mp3", &scratch);
+        let path = scratch.copy("tone.mp3");
+        let mut picture = b"\0image/jpeg\0\x03\0".to_vec();
+        picture.extend_from_slice(b"\xff\xd8\xff\xfb\x90\x00abcd\xff\xd9");
+        let text = b"\0Old".as_slice();
+        let cases: [(&str, Vec<u8>); 4] = [
+            (
+                "lowercase ID",
+                id3_tag_of(4, &[(b"abcd", text), (b"APIC", &picture)], &[], 0),
+            ),
+            (
+                "spaced ID",
+                id3_tag_of(4, &[(b"AB C", text), (b"APIC", &picture)], &[], 0),
+            ),
+            (
+                "0xFF padding",
+                id3_tag_of(4, &[(b"TIT2", text)], &[0xff; 32], 0),
+            ),
+            (
+                "v2.3 0xFF padding",
+                id3_tag_of(3, &[(b"TIT2", text)], &[0xff; 32], 0),
+            ),
+        ];
+        for (name, tag) in cases {
+            fs::write(&path, [tag, audio.clone()].concat()).unwrap();
+            edit_tags(&path, &setting(&[(TagField::Title, "New")]))
+                .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(fs::read(&path).unwrap().ends_with(&audio), "{name}");
+        }
     }
 
     #[test]
