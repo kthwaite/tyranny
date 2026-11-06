@@ -2509,6 +2509,68 @@ mod batch_tests {
         );
         Ok(())
     }
+    /// Output reaches entry 3 between the preparation and the commit of a
+    /// reorder anchored on entry 2, with or without an older selection.
+    fn cut_while_output_moved_on(selected: bool) -> Result<()> {
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-batch-{}",
+            uuid::Uuid::new_v4()
+        )));
+        fs::create_dir(&scratch.0)?;
+        let paths = [9_600, 9_600, 48_000, 500, 700, 900]
+            .iter()
+            .enumerate()
+            .map(|(index, frames)| source(&scratch.0, &format!("{index}.wav"), *frames, 1000))
+            .collect();
+        let mut player = Player::new(
+            paths,
+            OutputConfig::Capture {
+                path: scratch.0.join("capture.f32"),
+                clocked: true,
+            },
+            GainMode::Off,
+        )?;
+        if selected {
+            let prepared = player.prepare_selection(1, 0, GainMode::Off)?;
+            player.commit_selection(prepared);
+        }
+        player.play();
+        player.pause();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while player.snapshot().output.buffered_frames < 60_000 {
+            assert!(Instant::now() < deadline, "transition did not prebuffer");
+            player.pump()?;
+        }
+        player.play();
+        while player.snapshot().current_id != Some(2) {
+            assert!(Instant::now() < deadline, "output did not reach entry 2");
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        let prepared = player.prepare_shuffle_upcoming(&mut First, 1)?.unwrap();
+        while player.snapshot().current_id != Some(3) {
+            assert!(Instant::now() < deadline, "output did not reach entry 3");
+            thread::sleep(Duration::from_millis(1));
+        }
+        player.commit_reorder(prepared);
+        assert_eq!(player.queue_ids(), [1, 2, 4, 5, 6, 3]);
+        // The anchor stays current until output starts what follows it.
+        assert_eq!(player.snapshot().current_id, Some(2));
+        // So an edit in that moment decides from the anchor too.
+        player.set_repeat(RepeatMode::Off);
+        player.set_shuffle(None);
+        finish(&mut player, deadline)?;
+        assert_eq!(player.started_entries(), &[1, 2, 3, 4, 5, 6, 3]);
+        Ok(())
+    }
+    #[test]
+    fn the_anchor_stays_current_after_a_cut_with_an_older_selection() -> Result<()> {
+        cut_while_output_moved_on(true)
+    }
+    #[test]
+    fn the_anchor_stays_current_after_a_cut_without_a_selection() -> Result<()> {
+        cut_while_output_moved_on(false)
+    }
     #[test]
     fn replace_upcoming_stays_anchored_when_output_reaches_a_removed_entry() -> Result<()> {
         let scratch = Scratch(std::env::temp_dir().join(format!(
