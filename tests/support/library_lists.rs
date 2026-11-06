@@ -1356,6 +1356,28 @@ async fn next_at_the_end_of_a_repeat_all_run_starts_a_fresh_pass() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn play_after_the_queue_ended_follows_the_new_repeat_mode() {
+    use tyranny_likes_smoke::protocol::Transport;
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let path = scratch.path("Short.wav");
+    tagged_wav(&path, 4_800, b"Short");
+    client.append(&path).await;
+    ok(&mut client, json!({"command":"play","entry_id":1})).await;
+    client
+        .until(|state| state.transport == Transport::Ended)
+        .await;
+    ok(&mut client, json!({"command":"set_repeat","mode":"one"})).await;
+    ok(&mut client, json!({"command":"play","entry_id":null})).await;
+    // Long enough for many 0.1 s passes.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    ok(&mut client, json!({"command":"snapshot"})).await;
+    assert_ne!(client.state.transport, Transport::Ended);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn next_and_previous_under_repeat_one_move_to_other_entries() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;
