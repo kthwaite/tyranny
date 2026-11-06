@@ -213,7 +213,9 @@ impl Biquad {
     fn process(&mut self, frame: &mut [f64; 2]) {
         for (channel, sample) in frame.iter_mut().enumerate() {
             let input = *sample;
-            let output = self.b0 * input + self.z1[channel];
+            // Also flush the output: with its histories flushed, a section still
+            // scales its input, which can reach the subnormal range in a cascade.
+            let output = flush_tiny(self.b0 * input + self.z1[channel]);
             self.z1[channel] = flush_tiny(self.b1 * input - self.a1 * output + self.z2[channel]);
             self.z2[channel] = flush_tiny(self.b2 * input - self.a2 * output);
             *sample = output;
@@ -1081,6 +1083,48 @@ mod tests {
             }
             // Do not mistake a muted/clipped implementation for a stable one.
             assert!(maximum > 1.0e10, "{kind:?}: {maximum}");
+        }
+    }
+
+    #[test]
+    fn cascaded_tails_decay_without_denormals() {
+        // A later section can scale an input just above the flush level down
+        // into the f32 subnormal range after its own history has flushed.
+        let band = |kind| EqualizerBand {
+            kind,
+            gain_db: 6.0,
+            ..EqualizerBand::default()
+        };
+        for bands in [
+            vec![band(FilterKind::LowShelf), band(FilterKind::HighShelf)],
+            vec![
+                EqualizerBand {
+                    frequency_hz: 20.0,
+                    ..band(FilterKind::LowPass)
+                },
+                EqualizerBand {
+                    frequency_hz: 20000.0,
+                    ..band(FilterKind::HighPass)
+                },
+            ],
+        ] {
+            let mut equalizer = configured(&EqualizerSettings {
+                enabled: true,
+                preamp_db: 0.0,
+                bands,
+            });
+            equalizer.process(&mut [[0.25, -0.25]]);
+            let mut silence = [[0.0; 2]; 4096];
+            for _ in 0..16 {
+                silence.fill([0.0; 2]);
+                equalizer.process(&mut silence);
+                for sample in silence.iter().flatten() {
+                    assert!(
+                        *sample == 0.0 || sample.is_normal(),
+                        "subnormal tail sample {sample:e}"
+                    );
+                }
+            }
         }
     }
 
