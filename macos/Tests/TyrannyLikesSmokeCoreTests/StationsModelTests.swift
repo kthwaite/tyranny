@@ -135,6 +135,26 @@ private let drone = Station(id: 3, name: "drone zone", url: "https://ice1.somafm
         #expect(catalog.stations == [drone, groove, kexp])
     }
 
+    /// The server sorts by bytes: `ORDER BY sort_key,id`. Swift's `==` calls the two spellings of é equal.
+    @Test func appliedRowsSortByBytesAsTheServerDoes() async throws {
+        let server = FakeStationServer()
+        let catalog = server.catalog()
+        server.replies = [page(1, [])]
+        await catalog.sync(try state(stations: 1))
+        let rows = [
+            Station(id: 1, name: "\u{C9}", url: "https://a.example/1"),
+            Station(id: 2, name: "e\u{301}", url: "https://a.example/2"),
+            Station(id: 3, name: "z", url: "https://a.example/3"),
+            Station(id: 4, name: "Same", url: "https://a.example/4"),
+            Station(id: 5, name: "same", url: "https://a.example/5"),
+        ]
+        for (index, row) in rows.enumerated() {
+            server.replies = [applied(UInt64(index + 2), [row])]
+            #expect(await catalog.add(name: row.name, url: row.url))
+        }
+        #expect(catalog.stations.map(\.id) == [2, 4, 5, 3, 1])
+    }
+
     @Test func updateAndRemoveApplyTheReply() async throws {
         let server = FakeStationServer()
         let catalog = server.catalog()
