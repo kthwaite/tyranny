@@ -1867,6 +1867,41 @@ fn database(scratch: &Scratch) -> Connection {
     Connection::open(scratch.path("library.sqlite")).unwrap()
 }
 
+/// The store, tagging and stats connections share this database. Their write
+/// transactions can outlast a short wait, and that must not end the library worker.
+#[tokio::test]
+async fn a_writer_on_another_connection_does_not_stop_the_library_worker() {
+    let scratch = Scratch::new();
+    scratch.library().shutdown().unwrap();
+    let hold = |connection: Connection| {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            connection.execute_batch("COMMIT").unwrap();
+        })
+    };
+    // Held while the worker starts: its first pass discards old work.
+    let writer = database(&scratch);
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let writer = hold(writer);
+    let library = scratch.library();
+    writer.join().unwrap();
+    let root = scratch.path("music");
+    for index in 0..300 {
+        wav(&root.join(format!("{index:03}.wav")));
+    }
+    // Held during the scan.
+    let root_id = add(&library, &root).await;
+    let writer = database(&scratch);
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let writer = hold(writer);
+    let scan = finished(&library).await;
+    writer.join().unwrap();
+    assert_eq!(scan.phase, ScanPhase::Complete, "{scan:?}");
+    assert_eq!(rescan(&library, root_id).await.unchanged, 300);
+    assert_eq!(tracks(&library).await.total, 300);
+    library.shutdown().unwrap();
+}
+
 #[tokio::test]
 async fn rescan_reextracts_assets_with_old_metadata_version() {
     let scratch = Scratch::new();
