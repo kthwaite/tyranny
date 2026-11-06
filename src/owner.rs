@@ -1089,14 +1089,16 @@ impl Actor {
         }
         // Another entry replaces the current pass and ends its play. A seek or
         // re-selecting the current entry continues both.
-        if !seek && self.player.snapshot().current_id != Some(entry_id) {
+        let moves = self.player.snapshot().current_id != Some(entry_id);
+        if !seek && moves {
             self.player.end_play(EndReason::Skipped);
         }
         self.player.commit_selection(prepared);
         if let Some(removal) = marked {
             self.commit_trim(entry_id, removal);
         }
-        if back {
+        // Previous restarting the current entry does not move in history.
+        if back && moves {
             self.player.retreat_to(entry_id);
         }
         if playing {
