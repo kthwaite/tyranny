@@ -2107,6 +2107,46 @@ mod tests {
         }
     }
 
+    /// An ID3v2 end that falls inside the audio: saving the tag would drop the
+    /// audio bytes the header claims. The file must be refused and stay as it is.
+    fn assert_id3_end_inside_the_audio_is_refused(version: u8, flags: u8, size: u8) {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.mp3");
+        let plain = fs::read(&path).unwrap();
+        let audio_at = if plain.starts_with(b"ID3") {
+            10 + plain[6..10]
+                .iter()
+                .fold(0usize, |n, b| n << 7 | *b as usize)
+        } else {
+            0
+        };
+        let audio = &plain[audio_at..];
+        let mut bytes = vec![b'I', b'D', b'3', version, 0, flags, 0, 0, 0, size];
+        if version == 4 {
+            bytes.extend_from_slice(b"TIT2\0\0\0\x02\0\0\x03x");
+        } else {
+            bytes.extend_from_slice(b"TIT2\0\0\0\x02\0\0\0x");
+        }
+        bytes.extend_from_slice(audio);
+        fs::write(&path, &bytes).unwrap();
+        let edit = edit_tags(&path, &setting(&[(TagField::Title, "New")]));
+        let after = fs::read(&path).unwrap();
+        assert!(after.ends_with(audio), "audio lost");
+        assert!(after == bytes, "file changed");
+        assert!(edit.is_err());
+    }
+
+    #[test]
+    fn an_id3v24_size_4_too_large_is_refused() {
+        assert_id3_end_inside_the_audio_is_refused(4, 0, 16);
+    }
+
+    /// The footer flag claims 10 bytes more than the tag has.
+    #[test]
+    fn an_id3v23_footer_flag_is_refused() {
+        assert_id3_end_inside_the_audio_is_refused(3, 0x10, 12);
+    }
+
     #[test]
     fn read_only_id3_in_flac_is_flagged() {
         let scratch = Scratch::new();
