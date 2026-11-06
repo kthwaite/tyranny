@@ -494,6 +494,126 @@ struct ListWindowCacheTests {
         #expect(cache.row(at: 0)?.label == "1@1", "visible rows stay until the throttled refetch")
     }
 
+    /// The request was in flight when the change came, so it says nothing of the list after the
+    /// change. Its failure must not cost the window its refresh.
+    @Test func visibleRequestThatFailsAfterAChangeIsSentAgain() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        fake.fail(offset: 0)
+        fake.complete(offset: 200)
+        await until("window 0 is sent again") { fake.requests(offset: 0).count == 2 }
+        await drain()
+        fake.completeAll()
+        await until("window 0") { cache.loadedRow(at: 0) != nil }
+        #expect(cache.loadedRow(at: 0)?.label == "1@2")
+
+        // Window 1's reply was sent before the change, so a trailing pass refreshes it too.
+        clock.advance(to: .milliseconds(500))
+        await until("window 1 refetched") { fake.pendingCount == 1 }
+        fake.completeAll()
+        await until("settled") { cache.isSettled }
+        #expect(cache.loadedRow(at: 200)?.label == "201@2")
+    }
+
+    /// Two quick playlist edits: the pass for the first fails, as its playlist revision is gone,
+    /// and the failure lands after the second edit. The trailing pass still refreshes the windows.
+    @Test func passThatFailsAfterAChangeIsRepeatedByTheTrailingPass() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("first pass") { fake.pendingCount == 2 }
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        fake.fail(offset: 0)
+        fake.fail(offset: 200)
+        await until("first pass committed") { cache.refreshes == 1 }
+        #expect(cache.loadedRow(at: 0)?.label == "1@1", "a failed window keeps its rows")
+
+        clock.advance(to: .milliseconds(500))
+        await until("trailing pass") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("second pass committed") { cache.refreshes == 2 }
+        #expect(cache.loadedRow(at: 0)?.label == "1@3")
+        #expect(cache.loadedRow(at: 200)?.label == "201@3")
+    }
+
+    // What the old code did well, and the fix must keep.
+
+    @Test func windowThatFailsAfterTheLatestChangeIsNotRetried() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        fake.fail(offset: 0)
+        fake.complete(offset: 200)
+        await until("one more try") { fake.requests(offset: 0).count == 2 }
+        await drain()
+        fake.fail(offset: 0)
+        clock.advance(to: .milliseconds(500))
+        await until("window 1 refetched") { fake.pendingCount == 1 }
+        fake.completeAll()
+        await until("settled") { cache.isSettled }
+        let logged = fake.log.count
+        clock.advance(to: .milliseconds(5000))
+        await drain()
+        #expect(cache.row(at: 0) == nil)
+        await drain()
+        #expect(fake.log.count == logged, "a retry loop")
+    }
+
+    @Test func failureBeforeAChangeStillWaitsForTheChange() async {
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.fail(offset: 0)
+        fake.complete(offset: 200)
+        await until("window 1") { cache.loadedRow(at: 200) != nil }
+        await drain()
+        #expect(cache.row(at: 0) == nil)
+        await drain()
+        #expect(fake.pendingCount == 0, "a failed window is not retried on a read")
+        cache.serverRevisionChanged(9, anchor: nil)
+        await until("retried on the change") { fake.requests(offset: 0).count == 2 }
+    }
+
+    @Test func offScreenRequestThatFailsAfterAChangeIsNotChasedUntilItIsRead() async {
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+        #expect(cache.row(at: 2000) == nil)
+        await until("off-screen request") { fake.pendingCount == 1 }
+        cache.serverRevisionChanged(9, anchor: nil)
+        await until("pass") { fake.pendingCount == 3 }
+        fake.fail(offset: 2000)
+        fake.completeAll()
+        await until("pass committed") { cache.refreshes == 1 }
+        await drain()
+        #expect(fake.requests(offset: 2000).count == 1, "nobody looks at it, so nothing asks for it again")
+        #expect(cache.row(at: 2000) == nil)
+        await until("a read asks again") { fake.requests(offset: 2000).count == 2 }
+    }
+
     @Test func storedWindowIsNotEvictedBeforeItIsRead() async {
         let fake = FakeList(count: 5000, autoComplete: true)
         let cache = ListWindowCache(fetch: fake.fetch)

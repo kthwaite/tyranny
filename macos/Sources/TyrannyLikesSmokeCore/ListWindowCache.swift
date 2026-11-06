@@ -90,7 +90,8 @@ public enum WindowFetchError: Error {
     @ObservationIgnored private var windows: [Int: Window] = [:]
     @ObservationIgnored private var inFlight: [Int: Flight] = [:]
     /// Windows whose last request failed. Not retried until they newly become visible, the server
-    /// revision changes, or the cache is discarded or reset.
+    /// revision changes, or the cache is discarded or reset. A request sent before the latest change
+    /// is not counted: its failure says nothing of the list now, and the window still needs its refresh.
     @ObservationIgnored private var failed: Set<Int> = []
     /// Windows covering the last visible range ± 1 window. They are never evicted.
     @ObservationIgnored private var wanted: Set<Int> = []
@@ -269,7 +270,8 @@ public enum WindowFetchError: Error {
             held.pending.remove(index)
             switch result {
             case .success(let page): held.replies[index] = (page, flight.change)
-            case .failure: held.failures.insert(index)
+            case .failure:
+                if flight.change == changes { held.failures.insert(index) }
             }
             pass = held
             if held.pending.isEmpty { commit(held) }
@@ -281,7 +283,8 @@ public enum WindowFetchError: Error {
         case .failure(WindowFetchError.stale) where flight.pinned:
             restartAfterStale(index)
         case .failure:
-            failed.insert(index)
+            if flight.change == changes { failed.insert(index) }
+            pumpRefresh()
             settleIfReady()
         }
     }
