@@ -3,7 +3,7 @@ import Observation
 import TyrannyLikesSmokeCore
 
 enum SettingsTab: String, Hashable {
-    case connection, library, playback, appearance, artwork
+    case connection, library, playback, appearance, artwork, keys
 }
 
 /// Window navigation state: the source-list destination, the filter text,
@@ -23,11 +23,15 @@ final class NavigationModel {
     var filterError: String?
     var settingsTab: SettingsTab = .connection
     private(set) var settingsRequest: UInt64 = 0
+    /// Installed by the library window, which owns `openWindow`.
+    @ObservationIgnored var openEqualizer: (@MainActor () -> Void)?
     /// Installed by the library window with its own TrackLists; no second selection store.
     @ObservationIgnored var commandSubmission: (@MainActor (String) async throws -> Void)?
     @ObservationIgnored var commandSuggestions: (@MainActor (String) -> [CommandSuggestion])?
     /// The `:` command palette. It suggests and submits through this model.
     let palette: CommandPaletteModel
+    /// The key bindings. Pressing a bound key in the main window runs its command.
+    let keymap: KeymapStore
     /// Incremented by ⌘F; the filter field takes focus when it changes.
     private(set) var filterFocusRequest = 0
 
@@ -61,6 +65,7 @@ final class NavigationModel {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         palette = CommandPaletteModel(defaults: defaults)
+        keymap = KeymapStore(defaults: defaults)
         columnBrowserVisible = defaults.bool(forKey: "columnBrowserVisible")
         upNextDrawerVisible = defaults.bool(forKey: "upNextDrawerVisible")
         nowPlayingArtExpanded = defaults.bool(forKey: "nowPlayingArtExpanded")

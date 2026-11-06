@@ -1,7 +1,7 @@
 import SwiftUI
 import TyrannyLikesSmokeCore
 
-/// The Settings window (⌘,): Connection, Library, Playback, Appearance and Artwork.
+/// The Settings window (⌘,): Connection, Library, Playback, Appearance, Artwork and Keys.
 struct SettingsView: View {
     let model: PlayerModel
     @Bindable var navigation: NavigationModel
@@ -23,6 +23,10 @@ struct SettingsView: View {
             ArtworkSettingsPane(settings: model.artwork.settings)
                 .tabItem { Label("Artwork", systemImage: "photo") }
                 .tag(SettingsTab.artwork)
+            KeysSettingsPane(keymap: navigation.keymap)
+                .accessibilityIdentifier("settings-keys")
+                .tabItem { Label("Keys", systemImage: "keyboard") }
+                .tag(SettingsTab.keys)
         }
         .frame(width: 600)
         .accessibilityIdentifier("settings")

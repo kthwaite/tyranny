@@ -15,6 +15,7 @@ import Testing
             ("artwork toggle", .artwork, ["toggle"]), ("settings playback", .settings, ["playback"]),
             ("colour accent #3366ff", .colour, ["accent", "#3366ff"]), ("colours reset", .colours, ["reset"]), ("tint off", .tint, ["off"]),
             ("settings appearance", .settings, ["appearance"]), ("settings artwork", .settings, ["artwork"]),
+            ("settings keys", .settings, ["keys"]), ("equalizer", .equalizer, []), ("lyrics toggle", .lyrics, ["toggle"]),
             ("connect", .connect, []), ("disconnect", .disconnect, []),
             ("server restart", .server, ["restart"]), ("choose-folder", .chooseFolder, []),
             ("rescan 18446744073709551615", .rescan, ["18446744073709551615"]),
@@ -95,6 +96,7 @@ import Testing
         "colour accent", "colour accent red", "colour accent #12345", "colour accent #1234567",
         "colour accent #GGGGGG", "colour background #000000", "colour Accent system", "colours",
         "colours clear", "tint toggle", "tint yes", "settings appearances",
+        "lyrics sideways", "lyrics", "equalizer now",
     ])
     func rejectsInvalidInput(text: String) {
         #expect(throws: CommandLanguageError.self) { try CommandLanguage.parse(text) }

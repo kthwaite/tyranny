@@ -21,14 +21,12 @@ final class TyrannyLikesSmokeAppDelegate: NSObject, NSApplicationDelegate {
         installTextFieldKeyGuard()
     }
 
-    /// Menu key equivalents beat text fields. ⌘← and ⌘→ (Previous and Next) must still move the
-    /// cursor while a field editor has focus, so the editor gets those keys first. Space and
-    /// Return are not menu shortcuts: only the focused track table sees them.
+    /// Menu key equivalents beat text fields. A ⌘ cursor or delete key, such as ⌘← or ⌘⌫, must
+    /// still edit the field while a field editor has focus, so the editor gets those keys first.
+    /// Space and Return are not menu shortcuts: only the focused track table sees them.
     private func installTextFieldKeyGuard() {
         keyGuard = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                .subtracting([.numericPad, .function, .capsLock])
-            guard flags == .command, event.keyCode == 123 || event.keyCode == 124,
+            guard let chord = event.keyChord, KeyDispatch.fieldKeepsKey(chord),
                   let editor = (event.window ?? NSApp.keyWindow)?.firstResponder as? NSTextView,
                   editor.isFieldEditor || editor.isEditable else { return event }
             editor.keyDown(with: event)
@@ -145,7 +143,7 @@ struct TyrannyLikesSmokeApp: App {
             // ⌘F focuses the toolbar filter; the window has no text find.
             CommandGroup(replacing: .textEditing) {
                 Button("Filter") { navigation.focusFilter() }
-                    .keyboardShortcut("f")
+                    .keyboardShortcut(navigation.keymap.chord(forCommand: "focus-filter")?.menuShortcut)
                 // No key equivalent: menu keys beat text fields, and `:` must type into them.
                 // The main window's key probe opens the palette on `:` instead.
                 Button("Command…") {
@@ -158,29 +156,29 @@ struct TyrannyLikesSmokeApp: App {
                 Button(navigation.columnBrowserVisible ? "Hide Column Browser" : "Show Column Browser") {
                     navigation.columnBrowserVisible.toggle()
                 }
-                .keyboardShortcut("b")
+                .keyboardShortcut(navigation.keymap.chord(forCommand: "browser toggle")?.menuShortcut)
                 Button(navigation.upNextDrawerVisible ? "Hide Up Next Drawer" : "Show Up Next Drawer") {
                     navigation.upNextDrawerVisible.toggle()
                 }
-                .keyboardShortcut("u", modifiers: [.command, .option])
+                .keyboardShortcut(navigation.keymap.chord(forCommand: "drawer toggle")?.menuShortcut)
             }
             // Space plays and pauses inside the track tables, where typing is not at stake.
             CommandMenu("Playback") {
                 Button("Play/Pause") { model.transport.playPause() }
                     .disabled(!model.transport.canPlayPause)
                 Button("Next") { model.transport.next() }
-                    .keyboardShortcut(.rightArrow, modifiers: .command)
+                    .keyboardShortcut(navigation.keymap.chord(forCommand: "next")?.menuShortcut)
                     .disabled(!model.transport.canNext)
                 Button("Previous") { model.transport.previous() }
-                    .keyboardShortcut(.leftArrow, modifiers: .command)
+                    .keyboardShortcut(navigation.keymap.chord(forCommand: "previous")?.menuShortcut)
                     .disabled(!model.transport.canPrevious)
                 Divider()
                 Button("Show Playing Track") { navigation.revealPlaying() }
-                    .keyboardShortcut("l")
+                    .keyboardShortcut(navigation.keymap.chord(forCommand: "reveal-playing")?.menuShortcut)
                     .disabled(model.transport.nowPlaying?.track_id == nil)
                 Divider()
                 Button("Equalizer…") { openWindow(id: "equalizer") }
-                    .keyboardShortcut("e", modifiers: [.command, .option])
+                    .keyboardShortcut(navigation.keymap.chord(forCommand: "equalizer")?.menuShortcut)
             }
             CommandMenu("Go") {
                 ForEach(Array((Destination.library + Destination.playing).enumerated()), id: \.offset) { index, destination in
@@ -188,7 +186,7 @@ struct TyrannyLikesSmokeApp: App {
                         model.endImport()
                         navigation.destination = destination
                     }
-                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                        .keyboardShortcut(navigation.keymap.chord(forCommand: "go \(destination.key)")?.menuShortcut)
                 }
                 Divider()
                 WrappedMenu(years: model.stats.wrappedYears) { navigation.wrappedYear = $0 }
@@ -215,6 +213,8 @@ private struct MainWindow: View {
 
     var body: some View {
         MainWindowView(model: model, navigation: navigation)
+            .onAppear { navigation.openEqualizer = { [openWindow] in openWindow(id: "equalizer") } }
+            .onDisappear { navigation.openEqualizer = nil }
             .task {
                 appDelegate.reopenWindow = { [openWindow] in openWindow(id: "main") }
                 guard !started else { return }

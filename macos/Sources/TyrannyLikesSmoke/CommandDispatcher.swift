@@ -63,6 +63,13 @@ struct CommandDispatcher {
             navigation.upNextDrawerVisible = flag(arguments[0], current: navigation.upNextDrawerVisible)
         case .artwork:
             navigation.nowPlayingArtExpanded = flag(arguments[0], current: navigation.nowPlayingArtExpanded)
+        case .lyrics:
+            player.lyrics.setVisible(flag(arguments[0], current: player.lyrics.isVisible))
+        case .equalizer:
+            guard let openEqualizer = navigation.openEqualizer else {
+                throw CommandLanguageError("Open the library window before opening the Equalizer.")
+            }
+            openEqualizer()
         case .settings:
             guard let tab = SettingsTab(rawValue: arguments[0]) else { throw CommandLanguageError("Unknown Settings tab.") }
             navigation.showSettings(tab)

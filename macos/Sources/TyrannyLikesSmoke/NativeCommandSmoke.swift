@@ -162,6 +162,14 @@ enum NativeCommandSmoke {
         await navigation.palette.submitText()
         try check(navigation.palette.error != nil && navigation.palette.isOpen, "Palette accepted an invalid command")
         cases.append("palette-submits-records-history-and-keeps-errors-open")
+        try await commands.execute("settings keys")
+        try check(navigation.settingsTab == .keys, "settings keys did not open the tab")
+        let lyricsWasVisible = player.lyrics.isVisible
+        try await commands.execute("lyrics toggle")
+        try check(player.lyrics.isVisible != lyricsWasVisible, "lyrics toggle did not change visibility")
+        try await commands.execute("lyrics toggle")
+        try check(player.lyrics.isVisible == lyricsWasVisible, "lyrics toggle twice did not restore visibility")
+        cases.append("keys-settings-tab-and-lyrics-toggle-round-trip")
         try await commands.execute("disconnect")
         do {
             try await commands.execute("play")
