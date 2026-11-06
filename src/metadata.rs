@@ -496,7 +496,7 @@ impl Tags {
     }
 }
 
-fn key_is(key: &str, normalized: &str) -> bool {
+pub(crate) fn key_is(key: &str, normalized: &str) -> bool {
     key.bytes()
         .filter(|byte| !matches!(byte, b' ' | b'_' | b'-'))
         .map(|byte| byte.to_ascii_lowercase())

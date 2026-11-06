@@ -255,22 +255,51 @@ const ALIASES: &[(TagKind, TagField, &str)] = &[
     (TagKind::Id3v2, TagField::DiscTotal, "TXXX:DISCTOTAL"),
     (TagKind::Id3v2, TagField::DiscTotal, "TXXX:TOTALDISCS"),
     (TagKind::Id3v2, TagField::OriginalDate, "TXXX:ORIGINALYEAR"),
+];
+
+/// The names the library reads as each field, without case, spaces, `_` or `-`.
+/// FFmpeg passes on an MP4 freeform atom by its name alone, whatever its mean,
+/// so any such atom lofty does not map is a copy.
+const LIBRARY_KEYS: &[(&str, TagField)] = &[
+    ("title", TagField::Title),
+    ("artist", TagField::Artist),
+    ("album", TagField::Album),
+    ("albumartist", TagField::AlbumArtist),
+    ("track", TagField::TrackNumber),
+    ("tracknumber", TagField::TrackNumber),
+    ("tracktotal", TagField::TrackTotal),
+    ("totaltracks", TagField::TrackTotal),
+    ("disc", TagField::DiscNumber),
+    ("discnumber", TagField::DiscNumber),
+    ("disk", TagField::DiscNumber),
+    ("disctotal", TagField::DiscTotal),
+    ("totaldiscs", TagField::DiscTotal),
+    ("date", TagField::Date),
+    ("year", TagField::Date),
+    ("originaldate", TagField::OriginalDate),
+    ("originalyear", TagField::OriginalDate),
+    ("musicbrainztrackid", TagField::MusicbrainzRecordingId),
+    ("musicbrainzrecordingid", TagField::MusicbrainzRecordingId),
+    ("musicbrainzreleasetrackid", TagField::MusicbrainzTrackId),
+    ("musicbrainzalbumid", TagField::MusicbrainzReleaseId),
+    ("musicbrainzreleaseid", TagField::MusicbrainzReleaseId),
     (
-        TagKind::Mp4Ilst,
-        TagField::MusicbrainzReleaseId,
-        "----:com.apple.iTunes:MusicBrainz Release Id",
+        "musicbrainzreleasegroupid",
+        TagField::MusicbrainzReleaseGroupId,
     ),
+    ("musicbrainzartistid", TagField::MusicbrainzArtistId),
     (
-        TagKind::Mp4Ilst,
-        TagField::MusicbrainzRecordingId,
-        "----:com.apple.iTunes:MusicBrainz Recording Id",
-    ),
-    (
-        TagKind::Mp4Ilst,
-        TagField::OriginalDate,
-        "----:com.apple.iTunes:ORIGINALYEAR",
+        "musicbrainzalbumartistid",
+        TagField::MusicbrainzAlbumArtistId,
     ),
 ];
+
+fn freeform_field(name: &str) -> Option<TagField> {
+    LIBRARY_KEYS
+        .iter()
+        .find(|(key, _)| crate::metadata::key_is(name, key))
+        .map(|(_, field)| *field)
+}
 
 /// The primary key is a raw key, not the field's ItemKey; the ItemKey value is
 /// then a copy, unless it is the field's `second_home`.
@@ -884,10 +913,17 @@ impl Body {
             Body::Ilst(tag) => {
                 let (rest, items) = tag.clone().split_tag();
                 add_items(&items, &mut add);
-                for field in TagField::ALL {
-                    for key in raw_keys(TagKind::Mp4Ilst, field) {
-                        for value in freeform_texts(&rest, key) {
-                            add(field, CopyKey::Raw(key.to_owned()), &value);
+                for atom in &*rest {
+                    let AtomIdent::Freeform { mean, name } = atom.ident() else {
+                        continue;
+                    };
+                    let Some(field) = freeform_field(name) else {
+                        continue;
+                    };
+                    for data in atom.data() {
+                        if let AtomData::UTF8(text) | AtomData::UTF16(text) = data {
+                            let key = format!("----:{mean}:{name}");
+                            add(field, CopyKey::Raw(key), text);
                         }
                     }
                 }
@@ -1176,18 +1212,27 @@ fn edit_ilst(tag: &mut Ilst, remove: &BTreeSet<TagField>, push: &[Push]) -> Resu
     let (rest, mut items) = std::mem::take(tag).split_tag();
     let mut atoms = Ilst::from(rest);
     let mut changed = remove_items(&mut items, remove);
-    for field in remove {
-        for key in raw_keys(TagKind::Mp4Ilst, *field) {
-            let ident = freeform(key);
-            let old: Vec<Atom<'static>> = atoms.remove(&ident).collect();
-            for atom in old {
-                let (text, other): (Vec<AtomData>, Vec<AtomData>) = atom
-                    .into_data()
-                    .partition(|data| matches!(data, AtomData::UTF8(_) | AtomData::UTF16(_)));
-                changed |= !text.is_empty();
-                if let Some(atom) = Atom::from_collection(ident.clone(), other) {
-                    atoms.insert(atom);
-                }
+    let keys: Vec<String> = (&atoms)
+        .into_iter()
+        .filter_map(|atom| match atom.ident() {
+            AtomIdent::Freeform { mean, name }
+                if freeform_field(name).is_some_and(|field| remove.contains(&field)) =>
+            {
+                Some(format!("----:{mean}:{name}"))
+            }
+            _ => None,
+        })
+        .collect();
+    for key in keys {
+        let ident = freeform(&key);
+        let old: Vec<Atom<'static>> = atoms.remove(&ident).collect();
+        for atom in old {
+            let (text, other): (Vec<AtomData>, Vec<AtomData>) = atom
+                .into_data()
+                .partition(|data| matches!(data, AtomData::UTF8(_) | AtomData::UTF16(_)));
+            changed |= !text.is_empty();
+            if let Some(atom) = Atom::from_collection(ident.clone(), other) {
+                atoms.insert(atom);
             }
         }
     }
@@ -1206,17 +1251,6 @@ fn edit_ilst(tag: &mut Ilst, remove: &BTreeSet<TagField>, push: &[Push]) -> Resu
     }
     *tag = rest.merge_tag(items);
     Ok(changed)
-}
-
-fn freeform_texts(tag: &Ilst, key: &str) -> Vec<String> {
-    tag.get(&freeform(key))
-        .into_iter()
-        .flat_map(Atom::data)
-        .filter_map(|data| match data {
-            AtomData::UTF8(text) | AtomData::UTF16(text) => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Edits key by key; every other comment stays as it is.
@@ -1415,8 +1449,8 @@ fn txxx(key: &str) -> &str {
     key.strip_prefix("TXXX:").unwrap_or(key)
 }
 
-/// `----:<mean>:<name>` as an MP4 freeform identifier. Every MP4 raw key in the
-/// tables has this form.
+/// `----:<mean>:<name>` as an MP4 freeform identifier. Every MP4 raw key has
+/// this form.
 fn freeform(key: &str) -> AtomIdent<'static> {
     let rest = key.strip_prefix("----:").unwrap_or(key);
     let (mean, name) = rest.split_once(':').unwrap_or(("", rest));
@@ -2307,6 +2341,104 @@ mod tests {
         assert_eq!(chunks.name, None);
         assert_eq!(chunks.comments, Some(comments));
         assert_eq!(chunks.annotations, None);
+    }
+
+    fn mp4_with_freeform(path: &Path, atoms: &[(&str, &str, &str)]) {
+        let mut ilst = Ilst::new();
+        for (mean, name, value) in atoms {
+            ilst.insert(Atom::new(
+                AtomIdent::Freeform {
+                    mean: (*mean).to_owned().into(),
+                    name: (*name).to_owned().into(),
+                },
+                AtomData::UTF8((*value).to_owned()),
+            ));
+        }
+        ilst.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// FFmpeg passes a freeform atom on by its name alone. The library ignores
+    /// case, spaces, `_` and `-`, and an explicit total beats the one in `trkn`.
+    #[test]
+    fn mp4_freeform_totals_are_copies_under_any_mean_and_spelling() {
+        let scratch = Scratch::new();
+        for mean in ["com.apple.iTunes", "org.example"] {
+            for (track, disc) in [
+                ("TRACKTOTAL", "DISCTOTAL"),
+                ("TOTALTRACKS", "TOTALDISCS"),
+                ("tracktotal", "disctotal"),
+                ("TrackTotal", "DiscTotal"),
+                ("total_tracks", "Total Discs"),
+                ("TRACK-TOTAL", "DISC_TOTAL"),
+            ] {
+                let path = scratch.copy("tone.m4a");
+                mp4_with_freeform(&path, &[(mean, track, "7"), (mean, disc, "8")]);
+                assert_eq!(probe(&path).track_total, Some(7), "{mean} {track}");
+                assert_eq!(probe(&path).disc_total, Some(8), "{mean} {disc}");
+                let before = read_tags(&path).unwrap();
+                assert_eq!(before.current(TagField::TrackTotal), Some("7"), "{track}");
+
+                let edit = setting(&[
+                    (TagField::TrackNumber, "1"),
+                    (TagField::TrackTotal, "3"),
+                    (TagField::DiscNumber, "1"),
+                    (TagField::DiscTotal, "4"),
+                ]);
+                let removed = edit_tags(&path, &edit).unwrap();
+                assert_eq!(probe(&path).track_total, Some(3), "{mean} {track}");
+                assert_eq!(probe(&path).disc_total, Some(4), "{mean} {disc}");
+
+                let revert = TagEdit {
+                    set: edit.set.keys().map(|field| (*field, None)).collect(),
+                    restore: removed,
+                };
+                edit_tags(&path, &revert).unwrap();
+                assert_eq!(read_tags(&path).unwrap().copies, before.copies);
+                assert_eq!(probe(&path).track_total, Some(7), "{mean} {track}");
+            }
+        }
+    }
+
+    #[test]
+    fn mp4_freeform_atoms_the_library_reads_are_copies_of_their_field() {
+        let scratch = Scratch::new();
+        for (name, field, old, new) in [
+            (
+                "MusicBrainz Album Id",
+                TagField::MusicbrainzReleaseId,
+                "old",
+                "new",
+            ),
+            (
+                "MUSICBRAINZ_ALBUMID",
+                TagField::MusicbrainzReleaseId,
+                "old",
+                "new",
+            ),
+            (
+                "musicbrainz_trackid",
+                TagField::MusicbrainzRecordingId,
+                "old",
+                "new",
+            ),
+            ("TITLE", TagField::Title, "old", "new"),
+            ("album_artist", TagField::AlbumArtist, "old", "new"),
+        ] {
+            let path = scratch.copy("tone.m4a");
+            mp4_with_freeform(&path, &[("org.example", name, old)]);
+            let copy = TagCopy {
+                tag: TagKind::Mp4Ilst,
+                field,
+                key: CopyKey::Raw(format!("----:org.example:{name}")),
+                value: old.to_owned(),
+                read_only: false,
+            };
+            assert!(read_tags(&path).unwrap().copies.contains(&copy), "{name}");
+            let removed = edit_tags(&path, &setting(&[(field, new)])).unwrap();
+            assert!(removed.contains(&copy), "{name}: {removed:?}");
+            let after = read_tags(&path).unwrap();
+            assert!(after.copies.is_empty(), "{name}: {:?}", after.copies);
+        }
     }
 
     #[test]
