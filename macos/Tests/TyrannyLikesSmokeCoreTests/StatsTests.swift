@@ -57,6 +57,28 @@ import Testing
         #expect(all.stepped(-1, calendar: cal) == all)
     }
 
+    /// America/Nuuk, 27 March 2027: at 23:00 on Saturday the clock jumps to 00:00 on Sunday. A step
+    /// from 23:30 lands in the jump. It must not leave the date it asked for.
+    @Test func stepsKeepTheirDatesAcrossAnEveningClockJump() {
+        let nuuk = Calendar.statsCalendar(timeZone: TimeZone(identifier: "America/Nuuk")!)
+        let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+        let friday2330 = at(1_806_111_000), sunday2330 = at(1_806_280_200)
+        let saturdayStart = at(1_806_112_800), nextMonday = at(1_806_282_000)
+        let friday = StatsPeriod(kind: .day, anchor: friday2330)
+        #expect(friday.label(calendar: nuuk) == "Fri 26 Mar 2027")
+        #expect(friday.stepped(1, calendar: nuuk).label(calendar: nuuk) == "Sat 27 Mar 2027")
+        #expect(friday.stepped(1, calendar: nuuk).anchorString(calendar: nuuk) == "2027-03-27")
+        #expect(StatsPeriod(kind: .day, anchor: sunday2330).stepped(-1, calendar: nuuk).label(calendar: nuuk) == "Sat 27 Mar 2027")
+        #expect(friday.canStepForward(now: saturdayStart, calendar: nuuk))
+        #expect(!friday.canStepForward(now: saturdayStart.addingTimeInterval(-1), calendar: nuuk))
+        let week = StatsPeriod(kind: .week, anchor: friday2330)
+        #expect(week.canStepForward(now: nextMonday, calendar: nuuk))
+        #expect(!week.canStepForward(now: nextMonday.addingTimeInterval(-1), calendar: nuuk))
+        // `dateInterval` gives nil for the week after the jump at this time of day.
+        let weekAfter = StatsPeriod(kind: .week, anchor: at(1_806_710_400))
+        #expect(weekAfter.label(calendar: nuuk) == "29 Mar \u{2013} 4 Apr 2027")
+    }
+
     @Test func cannotStepPastTheCurrentPeriod() {
         let cal = Self.calendar
         let now = Self.at(2026, 10, 21)

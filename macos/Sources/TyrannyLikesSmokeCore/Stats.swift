@@ -198,8 +198,14 @@ public struct StatsPeriod: Equatable, Sendable {
         }
     }
 
+    /// Noon on the anchor's date. Calendar arithmetic keeps the time of day, and a clock jump in the
+    /// evening moves that time to the next day or makes `dateInterval` fail. A date's noon is safe.
+    private func noon(calendar: Calendar) -> Date {
+        calendar.date(bySettingHour: 12, minute: 0, second: 0, of: anchor) ?? anchor
+    }
+
     public func stepped(_ delta: Int, calendar: Calendar) -> StatsPeriod {
-        guard let component, let date = calendar.date(byAdding: component, value: delta, to: anchor) else {
+        guard let component, let date = calendar.date(byAdding: component, value: delta, to: noon(calendar: calendar)) else {
             return self
         }
         return StatsPeriod(kind: kind, anchor: date)
@@ -238,7 +244,7 @@ public struct StatsPeriod: Equatable, Sendable {
             let weekday = Self.weekdays[calendar.component(.weekday, from: anchor) - 1]
             return "\(weekday) \(Self.dayMonthYear(anchor, calendar: calendar))"
         case .week:
-            guard let week = calendar.dateInterval(of: .weekOfYear, for: anchor),
+            guard let week = calendar.dateInterval(of: .weekOfYear, for: noon(calendar: calendar)),
                   let last = calendar.date(byAdding: .day, value: 6, to: week.start)
             else { return Self.dayMonthYear(anchor, calendar: calendar) }
             let first = calendar.dateComponents([.year, .month, .day], from: week.start)
