@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -541,6 +541,9 @@ impl Parsed {
             format_of(file_type) == Some(format),
             "lofty read {file_type:?}, not {format:?}"
         );
+        if file_type.tag_support(TagType::Id3v1) != TagSupport::Unsupported {
+            refuse_false_id3v1(file)?;
+        }
         file.rewind()?;
         let mut concrete = Concrete::read(&mut BufReader::new(&mut *file), file_type)?;
         let mut slots = Vec::new();
@@ -688,6 +691,27 @@ impl Parsed {
         }
         Ok(())
     }
+}
+
+/// lofty takes the last 128 bytes for an ID3v1 tag when they start with "TAG".
+/// The header of an APE tag of exactly 131 bytes holds "APETAGEX" there. lofty
+/// then does not see the APE tag, and saving writes over it. An APE footer ends
+/// the file, so no ID3v1 tag can be there.
+fn refuse_false_id3v1(file: &mut File) -> Result<()> {
+    const ID3V1_SIZE: u64 = 128;
+    const APE_FOOTER_SIZE: u64 = 32;
+    if file.seek(SeekFrom::End(0))? < ID3V1_SIZE {
+        return Ok(());
+    }
+    let mut tail = [0; ID3V1_SIZE as usize];
+    file.seek(SeekFrom::End(-(ID3V1_SIZE as i64)))?;
+    file.read_exact(&mut tail)?;
+    let footer = &tail[(ID3V1_SIZE - APE_FOOTER_SIZE) as usize..];
+    ensure!(
+        !(tail.starts_with(b"TAG") && footer.starts_with(b"APETAGEX")),
+        "lofty would take this file's APE tag for an ID3v1 tag"
+    );
+    Ok(())
 }
 
 /// The tags of a file, from lofty's concrete file type, which keeps every item.
@@ -1621,6 +1645,72 @@ mod tests {
         let comments = flac.vorbis_comments().unwrap();
         assert_eq!(comments.get("MUSICBRAINZ_RELEASEID"), None);
         assert_eq!(comments.get("MUSICBRAINZ_ALBUMID"), Some(new.as_str()));
+    }
+
+    /// 32 + 32 + 67 bytes: the "TAG" of the header's "APETAGEX" is 128 bytes
+    /// from the end.
+    fn ape_tag_of_131_bytes(path: &Path) {
+        let mut ape = ApeTag::new();
+        let value = "v".repeat(67 - 8 - 1 - "ASIN".len());
+        ape.insert(ApeItem::new("ASIN".to_owned(), ItemValue::Text(value)).unwrap());
+        ape.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn an_ape_tag_of_131_bytes_is_not_taken_for_id3v1() {
+        let scratch = Scratch::new();
+        for fixture in ["tone.mp3", "tone.ape", "tone.wv"] {
+            let path = scratch.copy(fixture);
+            ape_tag_of_131_bytes(&path);
+            let before = fs::read(&path).unwrap();
+            assert_eq!(
+                &before[before.len() - 131..before.len() - 123],
+                b"APETAGEX",
+                "{fixture}"
+            );
+            let read = read_tags(&path);
+            assert!(read.is_err(), "{fixture}: {:?}", read.map(|t| t.copies));
+            let edit = edit_tags(&path, &setting(&[(TagField::Title, "New")]));
+            assert!(edit.is_err(), "{fixture}");
+            assert_eq!(fs::read(&path).unwrap(), before, "{fixture}");
+        }
+    }
+
+    #[test]
+    fn an_edit_that_would_leave_an_ape_tag_of_131_bytes_is_refused() {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.mp3");
+        let mut ape = ApeTag::new();
+        ape.insert(ApeItem::new("ASIN".to_owned(), ItemValue::Text("v".repeat(54))).unwrap());
+        ape.insert(ApeItem::new("Title".to_owned(), ItemValue::Text("Old".to_owned())).unwrap());
+        ape.save_to_path(&path, WriteOptions::default()).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(read_tags(&path).is_ok());
+        // Removing the title's copy shrinks the APE tag to 131 bytes. The clone
+        // does not read back, so the original stays.
+        let edit = setting(&[(TagField::Title, "New")]);
+        let stamp = crate::tagging::safe_write::stamp(&path).unwrap();
+        assert!(crate::tagging::safe_write::write_safely(&path, stamp, &edit).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    /// lofty reads no ID3v1 tag in these formats, so such a tail does no harm.
+    #[test]
+    fn a_trailing_ape_tag_of_131_bytes_stays_where_there_is_no_id3v1() {
+        let scratch = Scratch::new();
+        let seeded = scratch.copy("tone.mp3");
+        ape_tag_of_131_bytes(&seeded);
+        let bytes = fs::read(&seeded).unwrap();
+        let tail = bytes[bytes.len() - 131..].to_vec();
+        for fixture in ["tone.flac", "tone.wav", "tone.aiff"] {
+            let path = scratch.copy(fixture);
+            let plain = fs::read(&path).unwrap();
+            fs::write(&path, [plain, tail.clone()].concat()).unwrap();
+            assert!(read_tags(&path).is_ok(), "{fixture}");
+            edit_tags(&path, &setting(&[(TagField::Title, "New")])).unwrap();
+            assert_eq!(read_tags(&path).unwrap().primary[&TagField::Title], "New");
+            assert!(fs::read(&path).unwrap().ends_with(&tail), "{fixture}");
+        }
     }
 
     #[test]
