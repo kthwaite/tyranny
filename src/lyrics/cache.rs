@@ -35,8 +35,11 @@ impl Cache {
         connection.busy_timeout(Duration::from_millis(100))?;
         let application: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // Version 0 with our application ID: a first open died between the two pragmas
+        // at the end of this function. It holds no other schema, so it can go on.
         ensure!(
-            (application == 0 && version == 0) || (application == APPLICATION_ID && version == 1),
+            (application == 0 && version == 0)
+                || (application == APPLICATION_ID && matches!(version, 0 | 1)),
             "unsupported private lyrics cache"
         );
         connection.execute_batch("PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=DELETE; PRAGMA synchronous=NORMAL; PRAGMA max_page_count=4608;
@@ -108,6 +111,39 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A death between the two pragmas of the first open leaves this state. It must
+    /// not turn the cache off for good. Other pairs are still refused.
+    #[test]
+    fn an_interrupted_first_open_can_be_opened() {
+        let dir = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-lyrics-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&dir).unwrap();
+        for (name, application, version, opens) in [
+            ("interrupted", APPLICATION_ID, 0, true),
+            ("no-application", 0, 1, false),
+            ("foreign-no-version", 0x1234_5678, 0, false),
+            ("newer", APPLICATION_ID, 2, false),
+        ] {
+            let path = dir.join(name);
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .pragma_update(None, "application_id", application)
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            drop(connection);
+            assert_eq!(Cache::open(&path).is_ok(), opens, "{name}");
+        }
+        let mut cache = Cache::open(&dir.join("interrupted")).unwrap();
+        cache.put("key", &"lyrics", None);
+        assert_eq!(cache.get::<String>("key").as_deref(), Some("lyrics"));
+        drop(cache);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn private_persistent_bounded_and_expiring() {
         let dir = std::env::temp_dir().join(format!(

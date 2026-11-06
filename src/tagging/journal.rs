@@ -79,8 +79,11 @@ impl Journal {
         connection.busy_timeout(Duration::from_millis(100))?;
         let application: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // Version 0 with our application ID: a first open died between the two pragmas
+        // at the end of this function. It holds no other schema, so it can go on.
         ensure!(
-            (application == 0 && version == 0) || (application == APPLICATION_ID && version == 1),
+            (application == 0 && version == 0)
+                || (application == APPLICATION_ID && matches!(version, 0 | 1)),
             "unsupported private tag journal"
         );
         connection.execute_batch(
@@ -442,6 +445,48 @@ mod tests {
             .query_row("PRAGMA application_id", [], |r| r.get(0))
             .unwrap();
         assert_eq!(application, 0x7479_7467);
+    }
+
+    /// A death between the two pragmas of the first open leaves this state. It holds
+    /// no edits and no other version, so it must not refuse every later edit.
+    #[test]
+    fn an_interrupted_first_open_can_be_opened() {
+        let dir = temp_dir();
+        let path = dir.join("state.tagging.sqlite");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        drop(connection);
+        let mut journal = Journal::open(&path).unwrap();
+        let id = journal.begin("r", "T", &[file(1)]).unwrap();
+        assert_eq!(journal.load(id).unwrap().unwrap().files.len(), 1);
+        let version: i64 = journal
+            .connection
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn other_application_and_version_pairs_are_still_refused() {
+        let dir = temp_dir();
+        for (name, application, version) in [
+            ("no-application", 0, 1),
+            ("foreign-no-version", 0x1234_5678, 0),
+            ("newer", APPLICATION_ID, 2),
+        ] {
+            let path = dir.join(name);
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .pragma_update(None, "application_id", application)
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            drop(connection);
+            assert!(Journal::open(&path).is_err(), "{name}");
+        }
     }
 
     #[test]
