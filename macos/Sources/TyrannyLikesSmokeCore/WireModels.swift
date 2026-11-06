@@ -922,6 +922,28 @@ public struct ListGroupsResponse: Codable, Sendable, Equatable {
     }
 }
 
+public struct ListMatch: Codable, Sendable, Equatable {
+    public let position: Int
+    public let row_id: UInt64
+
+    public init(position: Int, row_id: UInt64) {
+        self.position = position
+        self.row_id = row_id
+    }
+}
+
+public struct ListMatchResponse: Codable, Sendable, Equatable {
+    public let revision: UInt64
+    public let match: ListMatch?
+    public let wrapped: Bool
+
+    public init(revision: UInt64, match: ListMatch?, wrapped: Bool) {
+        self.revision = revision
+        self.match = match
+        self.wrapped = wrapped
+    }
+}
+
 public struct HistoryResponse: Codable, Sendable, Equatable {
     public let revision: UInt64
     public let total: UInt64

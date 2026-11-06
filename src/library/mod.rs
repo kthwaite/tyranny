@@ -490,7 +490,8 @@ impl Coordinator {
             | LibraryCommand::ListArtists { .. }
             | LibraryCommand::ListGenres(_)
             | LibraryCommand::AlbumSummaries { .. }
-            | LibraryCommand::ListGroups { .. }) => {
+            | LibraryCommand::ListGroups { .. }
+            | LibraryCommand::FindInList { .. }) => {
                 lists::execute(&mut self.connection, command, crate::listing::unix_now())
             }
             command => query::execute(&mut self.connection, command),

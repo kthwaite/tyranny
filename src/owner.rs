@@ -393,6 +393,19 @@ impl Controller {
                 offset,
                 limit,
             },
+            Command::FindInList {
+                list,
+                revision,
+                term,
+                from,
+                backward,
+            } => LibraryCommand::FindInList {
+                list,
+                revision,
+                term,
+                from,
+                backward,
+            },
             Command::ListAlbums {
                 list,
                 sort,
@@ -1918,7 +1931,8 @@ impl Actor {
             | Command::ListArtists { .. }
             | Command::ListGenres { .. }
             | Command::AlbumSummaries { .. }
-            | Command::ListGroups { .. } => {
+            | Command::ListGroups { .. }
+            | Command::FindInList { .. } => {
                 unreachable!(
                     "library, artwork, lyrics, stats, directory and tagging commands are routed to their own workers"
                 )
