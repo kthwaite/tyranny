@@ -223,9 +223,7 @@ fn an_entry_without_pcm_is_not_a_play() -> anyhow::Result<()> {
     // Output never started entry 1: only entry 2 opens, counts and finishes.
     let [
         PlayEvent::Opened {
-            play,
-            entry_id: 2,
-            ..
+            play, entry_id: 2, ..
         },
         PlayEvent::Counted { play: counted },
         PlayEvent::Closed {
