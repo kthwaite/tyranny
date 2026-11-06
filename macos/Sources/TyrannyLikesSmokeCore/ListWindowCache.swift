@@ -325,9 +325,9 @@ public enum WindowFetchError: Error {
             store(reply.page, index: index, change: reply.change)
         }
         failed.formUnion(done.failures)
-        dropOutdatedOffScreen()
         generation &+= 1
         if totalChanged { updateWanted() }
+        dropOutdatedOffScreen()
         evict(keeping: Set(done.replies.keys))
         if anchorRequested {
             anchorPosition = pendingAnchor.flatMap { position(of: $0) }
