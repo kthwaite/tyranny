@@ -44,9 +44,11 @@ fn required<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+// Commands without fields are empty struct variants: serde ignores `deny_unknown_fields`
+// on internally tagged unit variants.
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
-    Snapshot,
+    Snapshot {},
     Artwork {
         album_id: Option<u64>,
         entry_id: Option<u64>,
@@ -66,7 +68,7 @@ pub enum Command {
     Wrapped {
         year: i32,
     },
-    StatsYears,
+    StatsYears {},
     /// Looks an album up on MusicBrainz into a stored proposal. Nothing is written.
     MusicbrainzLookup {
         album_id: u64,
@@ -84,7 +86,7 @@ pub enum Command {
         #[serde(default)]
         omit_fields: Vec<TagField>,
     },
-    TagEdits,
+    TagEdits {},
     RevertTagEdit {
         edit_id: u64,
     },
@@ -143,11 +145,11 @@ pub enum Command {
     Play {
         entry_id: Option<u64>,
     },
-    Pause,
-    TogglePlayPause,
-    Next,
-    Previous,
-    Stop,
+    Pause {},
+    TogglePlayPause {},
+    Next {},
+    Previous {},
+    Stop {},
     Seek {
         entry_id: u64,
         position_frames: u64,
@@ -334,7 +336,7 @@ pub enum Command {
         playlist_id: u64,
         expected_revision: u64,
     },
-    Stations,
+    Stations {},
     AddStations {
         expected_revision: u64,
         stations: Vec<StationInput>,
@@ -1370,7 +1372,7 @@ mod tests {
         let decode = |value: serde_json::Value| serde_json::from_value::<Request>(value).unwrap();
         assert!(matches!(
             decode(serde_json::json!({"id":1,"command":"stations"})).command,
-            Command::Stations
+            Command::Stations {}
         ));
         assert!(matches!(
             decode(serde_json::json!({"id":1,"command":"add_stations","expected_revision":0,
@@ -1506,7 +1508,7 @@ mod tests {
             decode(serde_json::json!({"id":1,"command":"tag_edits"}))
                 .unwrap()
                 .command,
-            Command::TagEdits
+            Command::TagEdits {}
         ));
         let revert = serde_json::json!({"id":1,"command":"revert_tag_edit","edit_id":9});
         assert!(matches!(
@@ -1623,6 +1625,34 @@ mod tests {
             serde_json::from_value::<Response>(counted).unwrap(),
             Response::DirectoryClickCounted
         ));
+    }
+
+    /// `Command` denies unknown fields. Serde ignores that on internally tagged unit variants,
+    /// as `listing.rs` records for `ListSource`.
+    #[test]
+    fn commands_without_fields_refuse_unknown_fields() {
+        for name in [
+            "snapshot",
+            "stats_years",
+            "tag_edits",
+            "pause",
+            "toggle_play_pause",
+            "next",
+            "previous",
+            "stop",
+            "stations",
+        ] {
+            let bare = serde_json::json!({"id":1,"command":name});
+            let request = serde_json::from_value::<Request>(bare.clone())
+                .unwrap_or_else(|error| panic!("rejected {name}: {error}"));
+            assert_eq!(serde_json::to_value(&request).unwrap(), bare);
+            let mut extra = bare;
+            extra["path"] = serde_json::json!("/private/source");
+            assert!(
+                serde_json::from_value::<Request>(extra).is_err(),
+                "{name} accepted an unknown field"
+            );
+        }
     }
 
     #[test]
@@ -2012,7 +2042,7 @@ mod tests {
             serde_json::from_value::<Request>(serde_json::json!({"id":3,"command":"stats_years"}))
                 .unwrap()
                 .command,
-            Command::StatsYears
+            Command::StatsYears {}
         ));
         assert_eq!(
             serde_json::to_value(Response::StatsYears {

@@ -236,13 +236,14 @@ impl Controller {
                     .await;
                 return Ok(Message::Reply { id, reply });
             }
-            command @ (Command::Stats { .. } | Command::Wrapped { .. } | Command::StatsYears) => {
+            command
+            @ (Command::Stats { .. } | Command::Wrapped { .. } | Command::StatsYears {}) => {
                 let mut reply = self
                     .stats
                     .request(match command {
                         Command::Stats { period } => StatsRequest::Stats(period),
                         Command::Wrapped { year } => StatsRequest::Wrapped(year),
-                        Command::StatsYears => StatsRequest::Years,
+                        Command::StatsYears {} => StatsRequest::Years,
                         _ => unreachable!("matched stats commands above"),
                     })
                     .await;
@@ -279,7 +280,7 @@ impl Controller {
                 });
                 return self.tagging_request(id, request).await;
             }
-            Command::TagEdits => return self.tagging_request(id, TagRequest::Edits).await,
+            Command::TagEdits {} => return self.tagging_request(id, TagRequest::Edits).await,
             Command::RevertTagEdit { edit_id } => {
                 return self
                     .tagging_request(id, TagRequest::Revert { edit_id })
@@ -501,7 +502,7 @@ impl Controller {
         match self
             .playback_request(Request {
                 id,
-                command: Command::Snapshot,
+                command: Command::Snapshot {},
             })
             .await?
         {
@@ -1652,7 +1653,7 @@ impl Actor {
 
     fn command(&mut self, command: Command) -> CommandResult<Response> {
         match command {
-            Command::Snapshot => {
+            Command::Snapshot {} => {
                 self.publish();
                 Ok(Response::Snapshot {
                     snapshot: Box::new(self.last.clone()),
@@ -1820,7 +1821,7 @@ impl Actor {
                 expected_revision,
                 PlaylistEdit::Rename { name },
             ),
-            Command::Stations => {
+            Command::Stations {} => {
                 let (revision, stations) = self.store.stations().map_err(Failure::persistence)?;
                 Ok(Response::Stations { revision, stations })
             }
@@ -1912,10 +1913,10 @@ impl Actor {
             | Command::Lyrics { .. }
             | Command::Stats { .. }
             | Command::Wrapped { .. }
-            | Command::StatsYears
+            | Command::StatsYears {}
             | Command::MusicbrainzLookup { .. }
             | Command::ApplyTags { .. }
-            | Command::TagEdits
+            | Command::TagEdits {}
             | Command::RevertTagEdit { .. }
             | Command::SearchDirectory { .. }
             | Command::CountDirectoryClick { .. }
@@ -2035,25 +2036,25 @@ impl Actor {
                     .map_err(Failure::playlist)?;
                 self.playlist_applied(change)
             }
-            Command::TogglePlayPause => {
+            Command::TogglePlayPause {} => {
                 let active = matches!(
                     self.state().transport,
                     Transport::Playing | Transport::Buffering
                 );
                 self.command(if active {
-                    Command::Pause
+                    Command::Pause {}
                 } else {
                     Command::Play { entry_id: None }
                 })
             }
-            Command::Next | Command::Previous => {
+            Command::Next {} | Command::Previous {} => {
                 let state = self.player.snapshot();
                 let (destination, jump) = match command {
-                    Command::Next => self
+                    Command::Next {} => self
                         .player
                         .next_jump()
                         .map(|(id, fresh)| (id, Jump::Forward { fresh })),
-                    Command::Previous => state.previous_id.map(|id| (id, Jump::Back)),
+                    Command::Previous {} => state.previous_id.map(|id| (id, Jump::Back)),
                     _ => unreachable!(),
                 }
                 .ok_or_else(|| Failure::invalid("no available queue occurrence"))?;
@@ -2091,7 +2092,7 @@ impl Actor {
                 self.player.play();
                 self.published(None)
             }
-            Command::Pause => {
+            Command::Pause {} => {
                 let mut checkpoint = self.checkpoint();
                 checkpoint.playing = false;
                 self.store
@@ -2100,7 +2101,7 @@ impl Actor {
                 self.player.pause();
                 self.published(None)
             }
-            Command::Stop => {
+            Command::Stop {} => {
                 self.store
                     .checkpoint(Checkpoint::default(), &self.settings)
                     .map_err(Failure::persistence)?;

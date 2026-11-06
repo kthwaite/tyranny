@@ -720,7 +720,7 @@ async fn delayed_provider_does_not_block_main_controls_or_mutate_playback() {
         Duration::from_millis(500),
         control.request(WireRequest {
             id: 2,
-            command: Command::Pause,
+            command: Command::Pause {},
         }),
     )
     .await
