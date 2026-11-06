@@ -504,6 +504,10 @@ fn file_type_after_id3v2(file: &mut File, header: &[u8]) -> Result<Option<FileTy
     file.seek(SeekFrom::Start(10))?;
     let mut tag = Vec::new();
     file.by_ref().take(size).read_to_end(&mut tag)?;
+    // A frame sync can start on the tag's last byte.
+    let mut byte = [0; 1];
+    let next = (file.read(&mut byte)? == 1).then_some(byte[0]);
+    file.seek(SeekFrom::Start(10 + tag.len() as u64))?;
     let mut after = [0; 3];
     let footer = flags & 0x10 != 0 && major >= 3;
     if footer {
@@ -515,8 +519,8 @@ fn file_type_after_id3v2(file: &mut File, header: &[u8]) -> Result<Option<FileTy
     // lofty adds an extended header's size to the bytes it replaces, but the
     // tag size holds it already. It would replace that many bytes of audio.
     if (flags & 0x40 != 0 && major >= 3)
-        || !(tag_holds_no_audio(&tag, major, false)
-            || (major == 4 && tag_holds_no_audio(&tag, major, true)))
+        || !(tag_holds_no_audio(&tag, next, major, false)
+            || (major == 4 && tag_holds_no_audio(&tag, next, major, true)))
     {
         return Ok(None);
     }
@@ -554,8 +558,9 @@ fn file_type_after_id3v2(file: &mut File, header: &[u8]) -> Result<Option<FileTy
 /// Walks the tag's frames. A tag whose size field is too large holds the start
 /// of the audio after its last frame, and saving would lose those bytes. A frame
 /// that runs past the end means the size field is too small, which loses nothing.
-/// `plain_sizes`: iTunes writes big-endian frame sizes in ID3v2.4.
-fn tag_holds_no_audio(tag: &[u8], major: u8, plain_sizes: bool) -> bool {
+/// `next` is the byte after the tag. `plain_sizes`: iTunes writes big-endian frame
+/// sizes in ID3v2.4.
+fn tag_holds_no_audio(tag: &[u8], next: Option<u8>, major: u8, plain_sizes: bool) -> bool {
     let (id_length, header_length) = if major == 2 { (3, 6) } else { (4, 10) };
     let mut rest = tag;
     while rest.len() >= header_length
@@ -573,9 +578,12 @@ fn tag_holds_no_audio(tag: &[u8], major: u8, plain_sizes: bool) -> bool {
         }
         rest = &rest[header_length + size..];
     }
-    !rest
-        .windows(2)
-        .any(|pair| pair[0] == 0xff && pair[1] & 0xe0 == 0xe0)
+    let is_sync = |first: u8, second: u8| first == 0xff && second & 0xe0 == 0xe0;
+    let crosses_the_end = match (rest.last(), next) {
+        (Some(last), Some(next)) => is_sync(*last, next),
+        _ => false,
+    };
+    !crosses_the_end && !rest.windows(2).any(|pair| is_sync(pair[0], pair[1]))
 }
 
 /// Opens the file once and reads it with `read_tags_file`.
@@ -2078,6 +2086,7 @@ mod tests {
         for fixture in ["tone.mp3", "tone.aac"] {
             let audio = audio_of(fixture, &scratch);
             for (name, tag) in [
+                ("1 too large", id3_tag(4, 0, 0, 1)),
                 ("4 too large", id3_tag(4, 0, 0, 4)),
                 ("4 too large after padding", id3_tag(4, 0, 20, 4)),
                 ("100 too large", id3_tag(4, 0, 0, 100)),
