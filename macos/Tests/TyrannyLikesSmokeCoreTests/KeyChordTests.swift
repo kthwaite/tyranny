@@ -48,6 +48,29 @@ import Testing
         #expect(KeyChord.event(characters: nil, keyCode: 200, modifiers: [.command], capsLock: false) == nil)
     }
 
+    /// A combining mark is a key on Thai, Arabic and Hindi layouts. In text it joins the `+` before it.
+    @Test func aCombiningMarkKeyReadsBackWithItsModifiers() throws {
+        let mark = "\u{E35}"
+        let chord = try #require(KeyChord.event(characters: mark, keyCode: 11, modifiers: [.option, .command], capsLock: false))
+        #expect(chord.key == mark)
+        #expect(chord.canonical == "opt+cmd+\(mark)")
+        #expect(KeyChord(chord.canonical) == chord)
+        #expect(KeyChord(mark)?.key == mark)
+    }
+
+    @Test func plusKeysReadAsBefore() {
+        #expect(KeyChord("+")?.key == "+")
+        #expect(KeyChord("cmd++")?.canonical == "cmd++")
+        #expect(KeyChord("++")?.canonical == "+")
+        #expect(KeyChord("+a")?.canonical == "a")
+        #expect(KeyChord("+\u{301}")?.key == "+\u{301}")
+        #expect(KeyChord("cmd+") == nil)
+        #expect(KeyChord("hyper+\u{E35}") == nil)
+        #expect(KeyChord("a+\u{301}") == nil)
+        #expect(KeyChord("shift+\u{E35}") == nil)
+        #expect(KeyChord("cmd+e\u{301}")?.key == "e\u{301}")
+    }
+
     @Test func isNamedKey() {
         #expect(KeyChord("cmd+left")?.isNamedKey == true)
         #expect(KeyChord("n")?.isNamedKey == false)

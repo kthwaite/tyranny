@@ -11,6 +11,16 @@ import Testing
 
     private func chord(_ text: String) -> KeyChord { KeyChord(text)! }
 
+    @Test func aChordOnACombiningMarkKeyStaysBound() {
+        let (defaults, cleanup) = isolatedDefaults()
+        defer { cleanup() }
+        let store = KeymapStore(defaults: defaults)
+        let chord = KeyChord.event(characters: "\u{E35}", keyCode: 11, modifiers: [.command], capsLock: false)!
+        store.bind(chord, to: "next")
+        #expect(store.command(for: chord) == "next")
+        #expect(KeymapStore(defaults: defaults).command(for: chord) == "next")
+    }
+
     @Test func defaultChordsAndCommandsParse() {
         for entry in Keymap.defaults {
             #expect(KeyChord(entry.chord) != nil, "chord \(entry.chord)")
