@@ -421,6 +421,14 @@ impl Player {
             self.listen(rendered);
             return;
         };
+        self.note_started(latest, rendered);
+        self.count(&output, latest);
+        self.passes.drain(..latest);
+    }
+
+    /// Notes the passes up to `latest` that output started by `rendered`,
+    /// oldest first, and opens their plays.
+    fn note_started(&mut self, latest: usize, rendered: u64) {
         for index in 0..=latest {
             let pass = &mut self.passes[index];
             if pass.heard || !pass.token.consumed_by(rendered) {
@@ -434,18 +442,16 @@ impl Player {
                 play.heard = true;
             }
             self.start_play(index);
+            self.heard(id, fresh);
             if restored {
                 self.retitle(index);
             }
-            self.heard(id, fresh);
         }
-        self.count(&output, latest);
-        self.passes.drain(..latest);
     }
 
-    /// Counts what output played since the last `hear`. Passes are about to
-    /// be dropped, and a pass that reached its threshold or ended in the
-    /// meantime must not be lost.
+    /// Notes and counts what output played since the last `hear`. Passes are
+    /// about to be dropped, and a pass that output started, reached its
+    /// threshold or ended in the meantime must not be lost.
     pub(crate) fn count_heard(&mut self) {
         let output = self.output.snapshot();
         match self
@@ -453,7 +459,10 @@ impl Player {
             .iter()
             .rposition(|pass| pass.token.consumed_by(output.rendered_frames))
         {
-            Some(latest) => self.count(&output, latest),
+            Some(latest) => {
+                self.note_started(latest, output.rendered_frames);
+                self.count(&output, latest);
+            }
             None => self.listen(output.rendered_frames),
         }
     }

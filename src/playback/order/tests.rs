@@ -268,6 +268,79 @@ fn scratch(name: &str) -> anyhow::Result<PathBuf> {
     Ok(directory)
 }
 
+/// A player whose output started entries 1 and 2, with no pump since. All its
+/// PCM is prepared before output starts: the sources are under the prebuffer.
+fn crossed_without_a_pump(directory: &std::path::Path) -> anyhow::Result<Player> {
+    let mut sources = Vec::new();
+    for (index, frames) in [2_400, 9_600, 2_400].into_iter().enumerate() {
+        let source = directory.join(format!("{index}.wav"));
+        fs::rename(silence(directory, frames)?, &source)?;
+        sources.push(source);
+    }
+    let mut player = clocked(directory, sources)?;
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while player.snapshot().output.paused {
+        anyhow::ensure!(Instant::now() < deadline, "output did not start");
+        player.pump()?;
+    }
+    while player.snapshot().current_id != Some(2) {
+        anyhow::ensure!(Instant::now() < deadline, "output did not cross");
+        thread::sleep(Duration::from_millis(1));
+    }
+    Ok(player)
+}
+
+/// Each pass output started is reported and opens a play, oldest first.
+fn assert_reported(player: &mut Player) {
+    let advances = player.take_advances();
+    assert_eq!(advances[..2], [(1, Vec::new()), (2, Vec::new())]);
+    let entries: Vec<u64> = player
+        .take_play_events()
+        .iter()
+        .filter_map(|event| match event {
+            PlayEvent::Opened { entry_id, .. } => Some(*entry_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entries[..2], [1, 2]);
+}
+
+#[test]
+fn a_selection_reports_the_passes_output_started_since_the_last_pump() -> anyhow::Result<()> {
+    let directory = scratch("select-started")?;
+    let mut player = crossed_without_a_pump(&directory)?;
+    let prepared = player.prepare_selection(1, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    assert_reported(&mut player);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+#[test]
+fn a_stop_reports_the_passes_output_started_since_the_last_pump() -> anyhow::Result<()> {
+    let directory = scratch("stop-started")?;
+    let mut player = crossed_without_a_pump(&directory)?;
+    player.stop();
+    assert_reported(&mut player);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+#[test]
+fn removing_an_entry_reports_the_passes_output_started_since_the_last_pump() -> anyhow::Result<()> {
+    let directory = scratch("remove-started")?;
+    let mut player = crossed_without_a_pump(&directory)?;
+    player.remove(1, 1)?;
+    player.pump()?;
+    assert_reported(&mut player);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
 #[test]
 fn a_track_heard_to_its_end_opens_counts_and_finishes() -> anyhow::Result<()> {
     let directory = scratch("finish")?;
