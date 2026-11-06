@@ -554,6 +554,212 @@ struct ListWindowCacheTests {
         #expect(fake.log.count == logged, "peeking requested a window")
     }
 
+    /// Two changes in one cooldown, at the same page revision, as play counts move a Plays sort.
+    /// The second makes window 0 outdated. The user scrolls away before the trailing pass, and back after it.
+    @Test func windowOutdatedOffScreenIsNotServedWhenItComesBack() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+
+        fake.swapWithoutRevision(0, 1)
+        cache.serverRevisionChanged(10, anchor: nil)
+        await until("first pass") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("first pass committed") { cache.refreshes == 1 }
+
+        fake.swapWithoutRevision(0, 1)
+        cache.serverRevisionChanged(11, anchor: nil)
+        await drain()
+        #expect(fake.pendingCount == 0, "the cooldown holds the trailing pass")
+
+        cache.visible(2000..<2050)
+        await until("far requests") { fake.pendingCount == 3 }
+        fake.completeAll()
+        await until("far windows") { cache.row(at: 2000) != nil && cache.isSettled }
+        clock.advance(to: .milliseconds(500))
+        await drain()
+
+        cache.visible(0..<50)
+        await drain()
+        fake.completeAll()
+        await until("top rows again") { cache.loadedRow(at: 0) != nil }
+        await drain()
+        #expect(cache.loadedRow(at: 0)?.id == 1, "a row from before the latest change")
+    }
+
+    /// A failed window keeps its old rows while it stays visible. It is retried when it newly
+    /// becomes visible, and until then no old row is served off screen.
+    @Test func failedWindowWithOldRowsIsRetriedWhenItNewlyBecomesVisible() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+
+        fake.insert(5, at: 0)
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("pass") { fake.pendingCount == 2 }
+        fake.complete(offset: 0)
+        fake.fail(offset: 200)
+        await until("pass committed") { cache.refreshes == 1 }
+        #expect(cache.revision == 2)
+        #expect(cache.loadedRow(at: 200)?.id == 201, "the failed window keeps its old rows")
+
+        cache.visible(2000..<2050)
+        await until("far requests") { fake.pendingCount == 3 }
+        fake.completeAll()
+        await until("far windows") { cache.row(at: 2000) != nil && cache.isSettled }
+        #expect(cache.isSettled)
+        #expect(cache.loadedRow(at: 200) == nil, "an old row off screen under the adopted revision")
+
+        cache.visible(0..<50)
+        await until("the failed window is requested again") { fake.pendingCount >= 1 }
+        fake.completeAll()
+        await until("current rows") { cache.loadedRow(at: 200) != nil }
+        #expect(cache.loadedRow(at: 200)?.id == 196)
+    }
+
+    /// A pass was sent before the latest change, and its windows left the visible range before
+    /// it committed. Its rows are outdated and nobody looks at them.
+    @Test func passReplyThatLandsOffScreenAfterANewChangeIsNotKept() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+
+        fake.swapWithoutRevision(0, 1)
+        cache.serverRevisionChanged(10, anchor: nil)
+        await until("pass") { fake.pendingCount == 2 }
+        // The pass is in flight. A second change comes, and the user scrolls away.
+        cache.serverRevisionChanged(11, anchor: nil)
+        cache.visible(2000..<2050)
+        await until("far requests") { fake.pendingCount == 5 }
+        fake.complete(offset: 0)
+        fake.complete(offset: 200)
+        await until("pass committed") { cache.refreshes == 1 }
+        #expect(cache.loadedRow(at: 0) == nil, "rows sent before the latest change, off screen")
+        #expect(cache.loadedRow(at: 200) == nil, "rows sent before the latest change, off screen")
+    }
+
+    /// The cache adopts a new total, and that moves the visible windows off a window at an older
+    /// revision. Nobody looks at it, so it goes.
+    @Test func totalChangeThatMovesVisibleWindowsDropsTheOlderWindow() async {
+        let fake = FakeList(count: 100)
+        let cache = ListWindowCache(fetch: fake.fetch)
+        // Past the end: the first reply clamps the visible windows to window 0.
+        cache.visible(5400..<5450)
+        await until("requests") { fake.pendingCount == 3 }
+        _ = cache.row(at: 0)
+        await until("window 0 request") { fake.pendingCount == 4 }
+        fake.complete(offset: 0)
+        await until("window 0") { cache.loadedWindowIndices == [0] }
+        #expect(cache.revision == 1)
+
+        // The list grows. The next reply moves the visible windows to window 1.
+        fake.insert(300, at: 0)
+        fake.completeAll()
+        await until("window 1 request") { cache.revision == 2 && fake.pendingCount == 1 }
+        fake.completeAll()
+        await until("settled") { cache.isSettled }
+        await drain()
+        #expect(cache.loadedRow(at: 0) == nil, "a row at an older revision")
+    }
+
+    // What the old code did well, and the fix must keep.
+
+    @Test func currentWindowsStayLoadedWhenTheyLeaveTheVisibleRange() async {
+        let fake = FakeList(count: 5000, autoComplete: true)
+        let cache = ListWindowCache(fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+        cache.visible(2000..<2050)
+        await until("far windows") { cache.loadedWindowIndices.count == 5 }
+        let logged = fake.log.count
+        let generation = cache.generation
+        cache.visible(0..<50)
+        cache.visible(0..<50)
+        await drain()
+        #expect(fake.log.count == logged, "a current window was refetched")
+        #expect(cache.generation == generation, "visible bumped the generation with nothing dropped")
+        #expect(cache.row(at: 0)?.id == 1)
+    }
+
+    @Test func directReadsKeepTheirWindowsThroughAChange() async {
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(fetch: fake.fetch)
+        _ = cache.row(at: 0)
+        _ = cache.row(at: 400)
+        await until("direct requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("direct windows") { cache.loadedWindowIndices == [0, 2] && cache.isSettled }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("pass") { fake.pendingCount == 2 }
+        #expect(cache.row(at: 0)?.label == "1@1", "without a visible range every loaded window is refreshed in place")
+        fake.completeAll()
+        await until("pass committed") { cache.refreshes == 1 }
+        #expect(cache.row(at: 0)?.label == "1@2")
+        #expect(cache.row(at: 400)?.label == "401@2")
+    }
+
+    @Test func scrollingBackDuringTheCooldownLoadsCurrentRowsWithoutWaiting() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("pass") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("pass committed") { cache.refreshes == 1 }
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        cache.visible(2000..<2050)
+        // The windows left while outdated, so they show placeholders when they come back. They
+        // load at once, not after the cooldown: only passes wait.
+        cache.visible(0..<50)
+        await until("top rows requested") { fake.log.filter { $0.offset == 0 }.count == 3 }
+        await drain()
+        fake.completeAll()
+        await until("current rows") { cache.loadedRow(at: 0)?.label == "1@3" }
+    }
+
+    /// A failed visible window keeps its rows, so a pass that fails shows no placeholder.
+    @Test func failedVisibleWindowStillKeepsItsRowsWhileItStaysVisible() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("pass") { fake.pendingCount == 2 }
+        fake.complete(offset: 0)
+        fake.fail(offset: 200)
+        await until("pass committed") { cache.refreshes == 1 }
+        cache.visible(10..<60)  // the same windows
+        await drain()
+        #expect(cache.loadedRow(at: 200)?.label == "201@1")
+        #expect(fake.pendingCount == 0, "no retry while it stays visible")
+    }
+
     @Test func refreshPassCommitCountsAtTheSameRevision() async {
         let clock = ManualClock()
         let fake = FakeList(count: 1000, autoComplete: true)
