@@ -76,6 +76,8 @@ public enum WindowFetchError: Error {
     /// A refresh pass. Replies are held here until every request of the pass is answered.
     private struct Pass {
         let id: UInt64
+        /// `changes` when the pass started.
+        let change: UInt64
         var pending: Set<Int>
         var replies: [Int: (page: WindowPage<Row>, change: UInt64)] = [:]
         var failures: Set<Int> = []
@@ -270,8 +272,7 @@ public enum WindowFetchError: Error {
             held.pending.remove(index)
             switch result {
             case .success(let page): held.replies[index] = (page, flight.change)
-            case .failure:
-                if flight.change == changes { held.failures.insert(index) }
+            case .failure: held.failures.insert(index)
             }
             pass = held
             if held.pending.isEmpty { commit(held) }
@@ -326,7 +327,7 @@ public enum WindowFetchError: Error {
             if let existing = windows[index], existing.revision > reply.page.revision { continue }
             store(reply.page, index: index, change: reply.change)
         }
-        failed.formUnion(done.failures)
+        if done.change == changes { failed.formUnion(done.failures) }
         generation &+= 1
         if totalChanged { updateWanted() }
         evict(keeping: Set(done.replies.keys))
@@ -411,7 +412,7 @@ public enum WindowFetchError: Error {
         let targets = refreshCandidates
         guard !targets.isEmpty else { return }
         nextPassID &+= 1
-        pass = Pass(id: nextPassID, pending: Set(targets))
+        pass = Pass(id: nextPassID, change: changes, pending: Set(targets))
         for index in targets { request(index, pass: nextPassID) }
         let epoch = cooldownEpoch
         let sleep = self.sleep

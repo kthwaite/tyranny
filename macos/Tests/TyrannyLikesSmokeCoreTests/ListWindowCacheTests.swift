@@ -550,6 +550,35 @@ struct ListWindowCacheTests {
         #expect(cache.loadedRow(at: 200)?.label == "201@3")
     }
 
+    /// One window of a pass fails, and then a change comes while the rest of the pass is in flight.
+    /// The failure came before the change, so the change retries the window.
+    @Test func failureHeldInAPassIsRetriedWhenAChangeComesBeforeItCommits() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 5000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until("top requests") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("top windows") { cache.loadedWindowIndices == [0, 1] && cache.isSettled }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        await until("pass") { fake.pendingCount == 2 }
+        fake.fail(offset: 200)
+        await drain()
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: nil)
+        fake.complete(offset: 0)
+        await until("pass committed") { cache.refreshes == 1 }
+
+        clock.advance(to: .milliseconds(500))
+        await until("trailing pass") { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until("second pass committed") { cache.refreshes == 2 }
+        #expect(cache.loadedRow(at: 0)?.label == "1@3")
+        #expect(cache.loadedRow(at: 200)?.label == "201@3")
+    }
+
     // What the old code did well, and the fix must keep.
 
     @Test func windowThatFailsAfterTheLatestChangeIsNotRetried() async {
