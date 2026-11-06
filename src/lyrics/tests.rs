@@ -200,6 +200,43 @@ fn embedded_uslt_and_lyrics_precede_provider_and_invalidate_on_file_change() {
         assert_eq!(updated.source, Some(LyricsSource::Embedded));
     }
 }
+/// A FLAC of `samples` frames at 48 kHz. Its duration is `samples / 48000`, in full float precision.
+fn tagged_samples(path: &Path, samples: u32) {
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi"])
+        .args(["-i", "anullsrc=r=48000:cl=stereo", "-af"])
+        .arg(format!("atrim=end_sample={samples}"))
+        .args(["-metadata", "title=Fixture Title"])
+        .args(["-metadata", "artist=Fixture Artist"])
+        .args(["-metadata", "album=Fixture Album"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+/// docs/lyrics-providers.md: "Successful online results remain available offline until
+/// eviction." The second request reads the local probe back from the cache as JSON. Its duration
+/// must still name the online result.
+#[test]
+fn online_result_survives_a_duration_that_needs_an_exact_float_parser() {
+    let fixture = Fixture::new("flac", None);
+    tagged_samples(&fixture.song, 54_053);
+    let (provider, server) = serve(fixture_response("200 OK", &record()));
+    let mut engine = fixture.engine(Ok(provider));
+    let first = lyrics(engine.request(request(), &Cancellation::new()));
+    assert_eq!(first.status, LyricsStatus::Ready);
+    assert!(server.join().unwrap().contains("duration=1.1261041666666667"));
+    drop(engine);
+    let mut offline = fixture.engine(Err("offline provider must not run".into()));
+    assert_eq!(
+        lyrics(offline.request(request(), &Cancellation::new())),
+        first
+    );
+}
 #[test]
 fn provider_results_persist_offline_without_confusing_missing_and_errors() {
     for (status, body, expected) in [
