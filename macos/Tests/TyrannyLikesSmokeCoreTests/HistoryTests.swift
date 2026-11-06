@@ -11,6 +11,16 @@ import Testing
     }()
     private static let now = at(2026, 10, 18, 15, 0)
 
+    /// America/Nuuk, 30 March 2024: at 23:00 on Saturday the clock jumps to 00:00 on Sunday.
+    /// A day before Sunday 23:36 is in the jump.
+    @Test func yesterdayHoldsAcrossAnEveningClockJump() {
+        let nuuk = Calendar.statsCalendar(timeZone: TimeZone(identifier: "America/Nuuk")!)
+        let now = Date(timeIntervalSince1970: 1_711_931_776)
+        #expect(DisplayFormat.playedAt(1_711_931_776, now: now, calendar: nuuk) == "Today, 23:36")
+        #expect(DisplayFormat.playedAt(1_711_845_376, now: now, calendar: nuuk) == "Yesterday, 22:36")
+        #expect(DisplayFormat.playedAt(1_711_762_576, now: now, calendar: nuuk) == "29 Mar 2024, 23:36")
+    }
+
     private static func at(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int) -> Date {
         calendar.date(from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute))!
     }

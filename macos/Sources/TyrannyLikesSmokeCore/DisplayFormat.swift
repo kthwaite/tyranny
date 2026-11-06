@@ -180,7 +180,9 @@ extension DisplayFormat {
         let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
         let time = String(format: "%02d:%02d", parts.hour ?? 0, parts.minute ?? 0)
         if calendar.isDate(date, inSameDayAs: now) { return "Today, \(time)" }
-        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+        // From noon: a day before an evening time can land in a clock jump, and so on `now`'s own date.
+        let noon = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: now) ?? now
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: noon),
            calendar.isDate(date, inSameDayAs: yesterday) {
             return "Yesterday, \(time)"
         }
