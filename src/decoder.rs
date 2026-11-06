@@ -76,18 +76,22 @@ impl GainMetadata {
     }
 
     fn selected_db(self, mode: GainMode) -> f64 {
+        // A zero, negative or nonfinite peak limits nothing. It counts as absent,
+        // as FFmpeg's unknown side-data peak does, so it cannot hide a fallback.
+        let usable = |peak: &f64| peak.is_finite() && *peak > 0.0;
         let (gain, peak) = match mode {
             GainMode::Off => return 0.0,
             GainMode::Track => (self.track_gain, self.track_peak),
-            GainMode::Album if self.album_gain.is_some() => {
-                (self.album_gain, self.album_peak.or(self.track_peak))
-            }
+            GainMode::Album if self.album_gain.is_some() => (
+                self.album_gain,
+                self.album_peak.filter(usable).or(self.track_peak),
+            ),
             // Album gain AND its peak fall back together. An unrelated album
             // peak cannot limit the track fallback when album gain is absent.
             GainMode::Album => (self.track_gain, self.track_peak),
         };
         let requested = gain.unwrap_or(0.0);
-        match peak.filter(|peak| peak.is_finite() && *peak > 0.0) {
+        match peak.filter(usable) {
             Some(peak) => requested.min(-20.0 * peak.log10()),
             None => requested,
         }
@@ -806,6 +810,37 @@ mod tests {
             ..tags
         };
         assert_eq!(album.selected_db(GainMode::Album), -20.0 * 8.0_f64.log10());
+    }
+
+    #[test]
+    fn unusable_album_peak_falls_back_like_an_absent_one() {
+        // FFmpeg side data with peak 0 is absent, so the track peak limits. A tag
+        // with the same value, or a negative or nonfinite one, must do the same.
+        for album_peak in [0.0, -0.5, f64::INFINITY, f64::NAN] {
+            let tags = GainMetadata {
+                album_gain: Some(12.0),
+                album_peak: Some(album_peak),
+                track_peak: Some(0.5),
+                ..GainMetadata::default()
+            };
+            let absent = GainMetadata {
+                album_peak: None,
+                ..tags
+            };
+            assert_eq!(
+                tags.selected_db(GainMode::Album),
+                absent.selected_db(GainMode::Album),
+                "album peak {album_peak}"
+            );
+        }
+        // No usable peak at all still requests the plain gain.
+        let tags = GainMetadata {
+            album_gain: Some(12.0),
+            album_peak: Some(0.0),
+            track_peak: Some(0.0),
+            ..GainMetadata::default()
+        };
+        assert_eq!(tags.selected_db(GainMode::Album), 12.0);
     }
 
     #[test]
