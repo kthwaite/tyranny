@@ -857,7 +857,10 @@ async fn compilation_groups_do_not_cross_folders_or_release_ids_but_shared_relea
 #[tokio::test]
 async fn an_inferred_compilation_does_not_rename_the_artist_of_its_album_artist_id() {
     let scratch = Scratch::new();
-    let ann = [("MUSICBRAINZ_ARTISTID", "ann-id"), ("MUSICBRAINZ_ALBUMARTISTID", "ann-id")];
+    let ann = [
+        ("MUSICBRAINZ_ARTISTID", "ann-id"),
+        ("MUSICBRAINZ_ALBUMARTISTID", "ann-id"),
+    ];
     flac(
         &scratch.path("music/collection/one.flac"),
         &[("artist", "Ann"), ("album", "Collection"), ann[0], ann[1]],
