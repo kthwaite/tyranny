@@ -462,7 +462,7 @@ impl Player {
     /// naturally: each counts, and its play finishes. The latest counts at its
     /// threshold, or once output drains after it with no failure: the queue
     /// ended there, and its play finishes. Radio plays count by listened time
-    /// instead.
+    /// instead. A pass without PCM never started, so it is not a play.
     fn count(&mut self, output: &OutputSnapshot, latest: usize) {
         let ended = self.finished && output.drained && self.failure.is_none();
         for index in 0..=latest {
@@ -472,7 +472,11 @@ impl Player {
                     .threshold
                     .is_some_and(|threshold| output.position_frames >= threshold);
             let counts = index < latest || reached || ended;
-            if pass.counted || !pass.token.is_valid() || !counts {
+            if pass.counted
+                || !pass.token.is_valid()
+                || !pass.token.consumed_by(output.rendered_frames)
+                || !counts
+            {
                 continue;
             }
             self.start_play(index);
