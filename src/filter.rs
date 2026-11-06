@@ -309,7 +309,11 @@ pub(crate) struct Filter {
 impl Filter {
     pub fn parse(input: &str, first_parameter: usize) -> Result<Self> {
         if input.len() > MAX_BYTES {
-            return Err(invalid(MAX_BYTES, "filter exceeds 1024 UTF-8 bytes"));
+            let mut position = MAX_BYTES;
+            while !input.is_char_boundary(position) {
+                position -= 1;
+            }
+            return Err(invalid(position, "filter exceeds 1024 UTF-8 bytes"));
         }
         let mut parser = Parser {
             tokens: tokenize(input)?,
