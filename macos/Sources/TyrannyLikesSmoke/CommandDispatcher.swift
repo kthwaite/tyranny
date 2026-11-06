@@ -201,9 +201,17 @@ struct CommandDispatcher {
     private func search(_ term: String, backward: Bool) async throws {
         guard let list = currentList else { throw CommandLanguageError("Search requires a track list.") }
         try requireConnection()
-        // Set before the request, so `n` repeats a search that found nothing.
+        // The server accepted the term on a match, a no-match and a stale list, so `n` repeats it.
+        // An invalid term never replaces the last search.
+        do {
+            try await list.search(term: term, backward: backward)
+        } catch let invalid as ListSearch.InvalidTerm {
+            throw invalid
+        } catch {
+            navigation.lastSearch = term
+            throw error
+        }
         navigation.lastSearch = term
-        try await list.search(term: term, backward: backward)
     }
 
     private var grid: AlbumGridModel { lists.albumGrid(player: player, navigation: navigation) }

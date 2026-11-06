@@ -64,7 +64,7 @@ struct CommandPaletteView: View {
         case .hint(let usage, let summary):
             Divider()
             VStack(alignment: .leading, spacing: 3) {
-                Text(usage).font(.system(.callout, design: .monospaced))
+                if !usage.isEmpty { Text(usage).font(.system(.callout, design: .monospaced)) }
                 Text(summary).font(.callout).foregroundStyle(.secondary)
             }
             .fixedSize(horizontal: false, vertical: true)

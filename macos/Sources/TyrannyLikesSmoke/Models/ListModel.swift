@@ -419,6 +419,7 @@ final class ListModel {
         let fields = try ListSearch.fields(
             list: description, revision: cache.revision, term: term,
             from: ListSearch.from(selection: selectedPositions, backward: backward), backward: backward)
+        let basis = selectionBasis
         let reply: ListMatchResponse
         do {
             reply = try await player.send("find_in_list", fields)
@@ -427,12 +428,14 @@ final class ListModel {
             case "stale_library_revision":
                 sync()
                 throw CommandLanguageError("The list changed. Search again.")
-            case "invalid_filter":
-                throw CommandLanguageError(failure.message)
+            case "invalid_filter", "invalid":
+                throw ListSearch.InvalidTerm(message: failure.message)
             default:
                 throw failure
             }
         }
+        // The filter or browser moved during the request: the position belongs to another list.
+        guard basis == selectionBasis else { throw CommandLanguageError("The list changed. Search again.") }
         guard let match = reply.match else { throw CommandLanguageError(ListSearch.noMatch(term)) }
         rows.select(IndexSet(integer: match.position), rowID: { $0 == match.position ? match.row_id : nil },
                     basis: selectionBasis)

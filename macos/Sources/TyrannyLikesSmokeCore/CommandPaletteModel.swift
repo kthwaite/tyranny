@@ -189,11 +189,7 @@ public final class CommandPaletteModel {
                 return
             }
         case .search:
-            if let definition = CommandLanguage.registry.first(where: { $0.id == .search }) {
-                dropdown = .hint(usage: definition.usage, summary: "Jump to a match. Uses filter syntax. n and N repeat.")
-            } else {
-                dropdown = .empty
-            }
+            dropdown = .hint(usage: "", summary: "Jump to a match. Uses filter syntax. n and N repeat.")
             highlighted = nil
             return
         case .history:

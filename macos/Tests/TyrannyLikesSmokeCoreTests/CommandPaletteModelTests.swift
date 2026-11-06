@@ -369,7 +369,7 @@ private func fixedRows(_ count: Int) -> [CommandSuggestion] {
         #expect(model.isOpen)
         #expect(model.mode == .search)
         #expect(model.text == "/")
-        guard case .hint = model.dropdown else { Issue.record("expected a hint, got \(model.dropdown)"); return }
+        #expect(model.dropdown == .hint(usage: "", summary: "Jump to a match. Uses filter syntax. n and N repeat."))
         #expect(model.highlighted == nil)
     }
 

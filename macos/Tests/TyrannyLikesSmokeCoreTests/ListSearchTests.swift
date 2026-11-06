@@ -38,4 +38,9 @@ import Testing
         #expect(ListSearch.wrappedMessage(backward: true) == "Search wrapped to the bottom.")
         #expect(ListSearch.noMatch("x") == "No match for “x”.")
     }
+
+    @Test func invalidTermShowsTheServerMessage() {
+        let error: Error = ListSearch.InvalidTerm(message: "Bad filter near “&”.")
+        #expect(error.localizedDescription == "Bad filter near “&”.")
+    }
 }
