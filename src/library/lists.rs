@@ -9,7 +9,7 @@ use crate::{
     protocol::MAX_PAGE_SIZE,
 };
 use anyhow::{Result, anyhow};
-use rusqlite::{Row, Transaction, params_from_iter, types::Value};
+use rusqlite::{OptionalExtension, Row, Transaction, params_from_iter, types::Value};
 use std::collections::HashMap;
 
 /// A `ListGroups` reply holds at most this many spans.
@@ -90,6 +90,20 @@ pub(super) fn execute(
         LibraryCommand::ListGroups { list, revision } => {
             if list.group == Grouping::None {
                 return Err(invalid("list groups require a grouped list"));
+            }
+            (*revision, None)
+        }
+        LibraryCommand::FindInList {
+            revision,
+            term,
+            from,
+            ..
+        } => {
+            if term.trim().is_empty() {
+                return Err(invalid("find requires a non-empty term"));
+            }
+            if from.is_some_and(|from| from >= i64::MAX as usize) {
+                return Err(invalid("find requires a representable position"));
             }
             (*revision, None)
         }
@@ -224,6 +238,21 @@ pub(super) fn execute(
                 groups,
             }
         }
+        LibraryCommand::FindInList {
+            list,
+            term,
+            from,
+            backward,
+            ..
+        } => {
+            let compiled = compile(&transaction, &list, cutoff, 1)?;
+            let (found, wrapped) = find_in_list(&transaction, compiled, &term, from, backward)?;
+            LibraryReply::ListMatch {
+                revision,
+                found,
+                wrapped,
+            }
+        }
         _ => unreachable!("non-list commands rejected above"),
     };
     transaction.commit()?;
@@ -299,6 +328,63 @@ fn list_tracks(
         },
         totals,
     ))
+}
+
+/// The first row in the direction after (or before, when `backward`) the zero-based position
+/// `from`, whose track matches `term`. With no hit and a `from`, searches again from the end the
+/// direction begins at: that hit is `wrapped`.
+fn find_in_list(
+    transaction: &Transaction<'_>,
+    CompiledList { sql, mut values }: CompiledList,
+    term: &str,
+    from: Option<usize>,
+    backward: bool,
+) -> Result<(Option<ListMatch>, bool)> {
+    // The term's parameters follow the list's.
+    let Filter {
+        sql: filter,
+        values: filter_values,
+    } = Filter::parse(term, values.len() + 1)?;
+    values.extend(filter_values);
+    let from_parameter = values.len() + 1;
+    let (operator, order) = if backward {
+        ("<", "DESC")
+    } else {
+        (">", "ASC")
+    };
+    let search = |bound: Option<usize>| -> rusqlite::Result<Option<ListMatch>> {
+        let mut values = values.clone();
+        let bound_sql = match bound {
+            // `position` is 1-based and `from` zero-based, so the bound is `from + 1`.
+            Some(from) => {
+                values.push(Value::Integer(from as i64 + 1));
+                format!("l.position{operator}?{from_parameter} AND")
+            }
+            None => String::new(),
+        };
+        transaction
+            .query_row(
+                &format!(
+                    "SELECT l.position-1,l.row_id FROM ({sql}) l
+                     CROSS JOIN library_tracks t ON t.id=l.track_id
+                     WHERE {bound_sql} ({filter}) ORDER BY l.position {order} LIMIT 1"
+                ),
+                params_from_iter(values.iter()),
+                |row| {
+                    Ok(ListMatch {
+                        position: row.get(0)?,
+                        row_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+    };
+    let found = search(from)?;
+    if found.is_some() || from.is_none() {
+        return Ok((found, false));
+    }
+    let wrapped = search(None)?;
+    Ok((wrapped, wrapped.is_some()))
 }
 
 /// Reads `TRACK_COLUMNS` starting at column `first`.

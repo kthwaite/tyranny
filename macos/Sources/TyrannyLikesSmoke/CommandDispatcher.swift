@@ -183,10 +183,43 @@ struct CommandDispatcher {
             player.theme.update(settings)
         case .history:
             navigation.openCommandPalette(.history)
+        case .search:
+            if let term = arguments.first {
+                try await search(term, backward: false)
+            } else {
+                guard currentList != nil else { throw CommandLanguageError(Self.searchNeedsList) }
+                navigation.openCommandPalette(.search)
+            }
+        case .searchNext, .searchPrevious:
+            guard let term = navigation.lastSearch else { throw CommandLanguageError("No previous search.") }
+            try await search(term, backward: command.id == .searchPrevious)
         case .help:
             let definitions = CommandLanguage.registry.filter { arguments.isEmpty || $0.id.rawValue == arguments[0] }
             player.message = definitions.map { "\($0.usage) — \($0.summary)" }.joined(separator: "\n")
         }
+    }
+
+    private static let searchNeedsList = "Search requires a track list."
+
+    private func search(_ term: String, backward: Bool) async throws {
+        guard let list = currentList else { throw CommandLanguageError(Self.searchNeedsList) }
+        try requireConnection()
+        // Esc after Return drops the reply. A key press of `n` has no palette to close.
+        let palette = navigation.palette
+        let token = palette.sessionToken
+        let fromPrompt = palette.isOpen
+        let isCancelled: @MainActor () -> Bool = { fromPrompt && palette.sessionToken != token }
+        // The server accepted the term on a match, a no-match and a stale list, so `n` repeats it.
+        // An invalid term never replaces the last search.
+        do {
+            try await list.search(term: term, backward: backward, isCancelled: isCancelled)
+        } catch let invalid as ListSearch.InvalidTerm {
+            throw invalid
+        } catch {
+            navigation.lastSearch = term
+            throw error
+        }
+        navigation.lastSearch = term
     }
 
     private var grid: AlbumGridModel { lists.albumGrid(player: player, navigation: navigation) }

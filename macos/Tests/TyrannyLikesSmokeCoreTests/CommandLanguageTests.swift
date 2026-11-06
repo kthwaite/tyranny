@@ -49,6 +49,8 @@ import Testing
             ("up-next-policy replace", .upNextPolicy, ["replace"]),
             ("prompt clear", .prompt, ["clear"]), ("help seek", .help, ["seek"]),
             ("history", .history, []),
+            ("search beatles", .search, ["beatles"]), ("search-next", .searchNext, []),
+            ("search-previous", .searchPrevious, []),
         ]
         for (text, id, arguments) in cases {
             let result = try CommandLanguage.parse(text)
@@ -56,11 +58,23 @@ import Testing
             #expect(result.arguments == arguments)
             // Every valid invocation must reject an extra argument, including optional schemas.
             #expect(throws: CommandLanguageError.self) { try CommandLanguage.parse(text + " unexpected") }
-            if !arguments.isEmpty {
+            // `search` is valid without its argument, as `help` is; its term is tested apart.
+            if !arguments.isEmpty && id != .search {
                 #expect(throws: CommandLanguageError.self) { try CommandLanguage.parse(id.rawValue + (id == .help ? " unknown-command" : "")) }
             }
         }
         #expect(Set(cases.map { $0.1 }) == Set(CommandID.allCases))
+    }
+
+    @Test func searchTakesAnOptionalTextTerm() throws {
+        #expect(try CommandLanguage.parse("search").arguments.isEmpty)
+        #expect(try CommandLanguage.parse(#"search "some term""#).arguments == ["some term"])
+        let definition = try #require(CommandLanguage.registry.first { $0.id == .search })
+        #expect(definition.arguments.count == 1)
+        #expect(definition.arguments[0].optional)
+        #expect(definition.arguments[0].kind == .text(allowEmpty: false))
+        #expect(CommandLanguage.registry.first { $0.id == .searchNext } != nil)
+        #expect(CommandLanguage.registry.first { $0.id == .searchPrevious } != nil)
     }
 
     @Test func optionalArgumentsAreNotInvented() throws {

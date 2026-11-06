@@ -23,6 +23,17 @@ import Testing
         #expect(Keymap.defaults.contains { $0.chord == "cmd+9" && $0.command == "go radio" })
     }
 
+    @Test func searchKeysAreBoundAndFreeOfTheEditor() {
+        let expected = [("/", "search"), ("n", "search-next"), ("N", "search-previous")]
+        for (text, command) in expected {
+            #expect(Keymap.defaults.contains { $0.chord == text && $0.command == command }, "\(text)")
+            #expect(Keymap.reservedReason(chord(text)) == nil, "\(text)")
+            #expect(!KeyDispatch.shouldRun(chord(text), isMainWindow: true, hasSheet: false, overlayOpen: false, isEditingText: true), "\(text)")
+            #expect(KeyDispatch.shouldRun(chord(text), isMainWindow: true, hasSheet: false, overlayOpen: false, isEditingText: false), "\(text)")
+            #expect(!chord(text).hasMenuShortcut, "\(text)")
+        }
+    }
+
     @Test func reservedChords() {
         for text in ["cmd+q", "cmd+w", "cmd+h", "cmd+m", "cmd+,", "cmd+a", "cmd+c", "cmd+v", "cmd+x", "cmd+z", "cmd+Z",
                      "space", "return", "escape", "tab", "delete", "forwarddelete", "left", "shift+down", ":"] {

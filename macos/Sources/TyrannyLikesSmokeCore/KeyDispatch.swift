@@ -52,7 +52,14 @@ public enum KeyRecording {
         self.report = report
     }
 
+    private static let repeatingSearches: Set<String> = [CommandID.searchNext.rawValue, CommandID.searchPrevious.rawValue]
+
     public func enqueue(_ command: String) {
+        // A held `n` would queue a search for every key repeat. One running and one waiting is enough.
+        if Self.repeatingSearches.contains(CommandHistory.normalised(command)), let last = pending.last,
+           CommandHistory.normalised(last) == CommandHistory.normalised(command) {
+            return
+        }
         pending.append(command)
         guard !isRunning else { return }
         isRunning = true

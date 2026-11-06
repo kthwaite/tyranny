@@ -2318,7 +2318,7 @@ mod lists_fixture {
     }
 
     #[expect(clippy::too_many_arguments, reason = "one fixture row per call")]
-    fn track(
+    pub(super) fn track(
         id: u64,
         album: u64,
         artist: u64,
@@ -3477,4 +3477,319 @@ async fn shutdown_finishes_a_queued_reindex() {
     let page = tracks(&reopened).await;
     assert_eq!(track_at(&page, &named).metadata.title, "New");
     reopened.shutdown().unwrap();
+}
+
+mod find_in_list {
+    use super::*;
+
+    /// Seven rows sorted by title, so row IDs run 1..=7 in position order. "zebra" matches the
+    /// rows at positions 1, 3 and 5.
+    const TITLES: [&str; 7] = ["a0", "a1 zebra", "a2", "a3 zebra", "a4", "a5 zebra", "a6"];
+
+    fn rows() -> Vec<Fixture> {
+        TITLES
+            .iter()
+            .enumerate()
+            .map(|(index, title)| {
+                let id = index as u64 + 1;
+                track(
+                    id,
+                    1,
+                    1,
+                    title,
+                    (1, id as u32),
+                    None,
+                    ("FLAC", Some(16), 44_100, None),
+                    (id as i64, Some(1000), None),
+                )
+            })
+            .collect()
+    }
+
+    fn by_title(source: ListSource) -> ListDescription {
+        ListDescription {
+            sort: vec![SortKey {
+                field: SortField::Title,
+                descending: false,
+            }],
+            ..list(source)
+        }
+    }
+
+    fn find_command(
+        list: &ListDescription,
+        term: &str,
+        from: Option<usize>,
+        backward: bool,
+    ) -> LibraryCommand {
+        LibraryCommand::FindInList {
+            list: list.clone(),
+            revision: Some(11),
+            term: term.into(),
+            from,
+            backward,
+        }
+    }
+
+    fn find(
+        connection: &mut Connection,
+        list: &ListDescription,
+        from: Option<usize>,
+        backward: bool,
+    ) -> (Option<ListMatch>, bool) {
+        match execute(connection, find_command(list, "zebra", from, backward)) {
+            LibraryReply::ListMatch {
+                revision: 11,
+                found,
+                wrapped,
+            } => (found, wrapped),
+            other => panic!("unexpected find reply: {other:?}"),
+        }
+    }
+
+    fn hit(position: usize, row_id: u64) -> Option<ListMatch> {
+        Some(ListMatch { position, row_id })
+    }
+
+    #[test]
+    fn find_forward_from_null_returns_first_match() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        assert_eq!(
+            find(&mut connection, &list, None, false),
+            (hit(1, 2), false)
+        );
+    }
+
+    #[test]
+    fn find_forward_is_strictly_after_from() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        assert_eq!(
+            find(&mut connection, &list, Some(0), false),
+            (hit(1, 2), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(1), false),
+            (hit(3, 4), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(2), false),
+            (hit(3, 4), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(4), false),
+            (hit(5, 6), false)
+        );
+    }
+
+    #[test]
+    fn find_backward_from_null_returns_last_match() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        assert_eq!(find(&mut connection, &list, None, true), (hit(5, 6), false));
+    }
+
+    #[test]
+    fn find_backward_is_strictly_before_from() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        assert_eq!(
+            find(&mut connection, &list, Some(6), true),
+            (hit(5, 6), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(5), true),
+            (hit(3, 4), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(4), true),
+            (hit(3, 4), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(3), true),
+            (hit(1, 2), false)
+        );
+    }
+
+    #[test]
+    fn find_wraps_and_says_so() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        assert_eq!(
+            find(&mut connection, &list, Some(5), false),
+            (hit(1, 2), true)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(6), false),
+            (hit(1, 2), true)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(1), true),
+            (hit(5, 6), true)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(0), true),
+            (hit(5, 6), true)
+        );
+        // A lone match with `from` at itself returns itself.
+        let lone = ListDescription {
+            query: "a3".into(),
+            ..list
+        };
+        let lone_find = |connection: &mut Connection, backward| match execute(
+            connection,
+            find_command(&lone, "zebra", Some(0), backward),
+        ) {
+            LibraryReply::ListMatch { found, wrapped, .. } => (found, wrapped),
+            other => panic!("unexpected find reply: {other:?}"),
+        };
+        assert_eq!(lone_find(&mut connection, false), (hit(0, 4), true));
+        assert_eq!(lone_find(&mut connection, true), (hit(0, 4), true));
+    }
+
+    #[test]
+    fn find_no_match_returns_none() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        for (from, backward) in [(None, false), (Some(3), false), (Some(3), true)] {
+            match execute(
+                &mut connection,
+                find_command(&list, "absent", from, backward),
+            ) {
+                LibraryReply::ListMatch {
+                    found: None,
+                    wrapped: false,
+                    ..
+                } => {}
+                other => panic!("unexpected find reply: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn find_respects_list_query() {
+        let mut connection = connection(&rows());
+        // "a3" and "a5" remain: the zebra rows at library positions 3 and 5, now 0 and 1.
+        let narrowed = ListDescription {
+            query: "a3 OR a5 OR a6".into(),
+            ..by_title(ListSource::Library)
+        };
+        assert_eq!(
+            find(&mut connection, &narrowed, None, false),
+            (hit(0, 4), false)
+        );
+        assert_eq!(
+            find(&mut connection, &narrowed, Some(0), false),
+            (hit(1, 6), false)
+        );
+        // Row 2 matches the term but is outside the list.
+        assert_eq!(
+            find(&mut connection, &narrowed, Some(1), true),
+            (hit(0, 4), false)
+        );
+        assert_eq!(
+            find(&mut connection, &narrowed, Some(0), true),
+            (hit(1, 6), true)
+        );
+    }
+
+    #[test]
+    fn find_position_matches_list_tracks_when_grouped() {
+        let mut connection = connection(&rows());
+        let list = ListDescription {
+            group: Grouping::Album,
+            ..by_title(ListSource::Library)
+        };
+        let mut from = None;
+        for expected in [1, 3, 5] {
+            let (found, _) = find(&mut connection, &list, from, false);
+            let found = found.unwrap();
+            let (page, _) = tracks_page(&mut connection, &list, found.position, 1);
+            assert_eq!(page.entries[0].row_id, found.row_id);
+            assert_eq!(found.position, expected);
+            from = Some(found.position);
+        }
+    }
+
+    #[test]
+    fn find_duplicate_playlist_entries_are_distinct() {
+        let mut connection = connection(&rows());
+        connection
+            .execute_batch(
+                "INSERT INTO playlists(id,name,search,revision,query) VALUES(1,'Mix','mix',3,NULL);
+                 INSERT INTO playlist_entries(id,playlist_id,track_id,ordinal) VALUES
+                   (10,1,1,0),(11,1,2,1),(12,1,2,2),(13,1,3,3);",
+            )
+            .unwrap();
+        let list = list(ListSource::Playlist { id: 1, revision: 3 });
+        assert_eq!(
+            find(&mut connection, &list, None, false),
+            (hit(1, 11), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(1), false),
+            (hit(2, 12), false)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(2), false),
+            (hit(1, 11), true)
+        );
+        assert_eq!(
+            find(&mut connection, &list, Some(2), true),
+            (hit(1, 11), false)
+        );
+    }
+
+    #[test]
+    fn find_rejects_empty_term() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        for term in ["", "   "] {
+            assert_eq!(
+                rejected(&mut connection, find_command(&list, term, None, false)),
+                LibraryErrorKind::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn find_rejects_bad_filter() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        let tracks_error = rejected(
+            &mut connection,
+            LibraryCommand::ListTracks {
+                list: ListDescription {
+                    query: "year:>".into(),
+                    ..list.clone()
+                },
+                revision: None,
+                offset: 0,
+                limit: 1,
+            },
+        );
+        assert_eq!(tracks_error, LibraryErrorKind::InvalidFilter);
+        assert_eq!(
+            rejected(&mut connection, find_command(&list, "year:>", None, false)),
+            tracks_error
+        );
+    }
+
+    #[test]
+    fn find_stale_revision_is_rejected() {
+        let mut connection = connection(&rows());
+        let list = by_title(ListSource::Library);
+        let mut command = find_command(&list, "zebra", None, false);
+        if let LibraryCommand::FindInList { revision, .. } = &mut command {
+            *revision = Some(10);
+        }
+        let error = lists::execute(&mut connection, command, NOW).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<StaleLibraryRevision>()
+                .map(|e| e.current),
+            Some(11)
+        );
+    }
 }

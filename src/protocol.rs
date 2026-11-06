@@ -1,8 +1,8 @@
-//! Version 24 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 25 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
-    Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListRow,
-    ListTotals, NamedCount, Page, Root, Track, TrackMetadata,
+    Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListMatch,
+    ListRow, ListTotals, NamedCount, Page, Root, Track, TrackMetadata,
 };
 use crate::listing::ListDescription;
 use crate::stats_types::{PeriodRequest, StatsReport, WrappedReport};
@@ -14,7 +14,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 24;
+pub const VERSION: u32 = 25;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -224,6 +224,15 @@ pub enum Command {
         revision: Option<u64>,
         offset: usize,
         limit: usize,
+    },
+    FindInList {
+        list: ListDescription,
+        #[serde(deserialize_with = "required")]
+        revision: Option<u64>,
+        term: String,
+        #[serde(deserialize_with = "required")]
+        from: Option<usize>,
+        backward: bool,
     },
     ListAlbums {
         list: ListDescription,
@@ -1058,6 +1067,12 @@ pub enum Response {
         page: Page<ListRow>,
         totals: Option<ListTotals>,
     },
+    ListMatch {
+        revision: u64,
+        #[serde(rename = "match")]
+        found: Option<ListMatch>,
+        wrapped: bool,
+    },
     ListAlbums {
         #[serde(flatten)]
         page: Page<AlbumSummary>,
@@ -1127,6 +1142,15 @@ impl From<LibraryReply> for Response {
             LibraryReply::Albums(page) => Self::LibraryAlbums { page },
             LibraryReply::Tracks(page) => Self::LibraryTracks { page },
             LibraryReply::ListTracks { page, totals } => Self::ListTracks { page, totals },
+            LibraryReply::ListMatch {
+                revision,
+                found,
+                wrapped,
+            } => Self::ListMatch {
+                revision,
+                found,
+                wrapped,
+            },
             LibraryReply::ListAlbums(page) => Self::ListAlbums { page },
             LibraryReply::ListArtists { page, compilations } => {
                 Self::ListArtists { page, compilations }
@@ -1636,7 +1660,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 24);
+        assert_eq!(VERSION, 25);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",
@@ -1655,6 +1679,8 @@ mod tests {
             serde_json::json!({"id":1,"command":"album_summaries","album_ids":[3,1],
                 "revision":null}),
             serde_json::json!({"id":1,"command":"list_groups","list":list,"revision":null}),
+            serde_json::json!({"id":1,"command":"find_in_list","list":list,"revision":3,
+                "term":"beatles","from":null,"backward":false}),
         ];
         for command in commands {
             let request = serde_json::from_value::<Request>(command.clone())
@@ -1683,6 +1709,13 @@ mod tests {
                     album_ids,
                     revision: None,
                 } => assert_eq!(album_ids, [3, 1]),
+                Command::FindInList {
+                    revision: Some(3),
+                    term,
+                    from: None,
+                    backward: false,
+                    ..
+                } => assert_eq!(term, "beatles"),
                 other => panic!("decoded {command} as {other:?}"),
             }
             for field in command.as_object().unwrap().keys() {
@@ -1726,6 +1759,27 @@ mod tests {
             serde_json::json!({"kind":"list_tracks","revision":2,"total":0,"offset":0,"entries":[],
                 "totals":{"tracks":0,"duration_ms":0,"size_bytes":0}})
         );
+        for (found, expected) in [
+            (
+                Some(ListMatch {
+                    position: 57,
+                    row_id: 812,
+                }),
+                serde_json::json!({"position":57,"row_id":812}),
+            ),
+            (None, serde_json::Value::Null),
+        ] {
+            let matched = Response::from(LibraryReply::ListMatch {
+                revision: 3,
+                found,
+                wrapped: false,
+            });
+            assert_eq!(
+                serde_json::to_value(&matched).unwrap(),
+                serde_json::json!({"kind":"list_match","revision":3,"match":expected,
+                    "wrapped":false})
+            );
+        }
         let groups = Response::from(LibraryReply::ListGroups {
             revision: 2,
             total: 3,

@@ -359,4 +359,136 @@ private func fixedRows(_ count: Int) -> [CommandSuggestion] {
         await model.submitText()
         #expect(model.error == "Open the library window before submitting commands.")
     }
+
+    // MARK: Search mode
+
+    @Test func searchOpensWithSlashAndAHint() {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        #expect(model.isOpen)
+        #expect(model.mode == .search)
+        #expect(model.text == "/")
+        #expect(model.dropdown == .hint(usage: "", summary: "Jump to a match. Uses filter syntax. n and N repeat."))
+        model.searchHint = { "Custom." }
+        model.open(.search)
+        #expect(model.dropdown == .hint(usage: "", summary: "Custom."))
+        #expect(model.highlighted == nil)
+    }
+
+    @Test func searchReturnSubmitsTheTermAndCloses() async {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        model.text = "/beatles"
+        await model.submitText()
+        #expect(calls.submitted == ["search beatles"])
+        #expect(!model.isOpen)
+    }
+
+    @Test func searchTermWithQuotesRoundTripsThroughParse() async throws {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        model.text = #"/a "b" c"#
+        await model.submitText()
+        let submitted = try #require(calls.submitted.first)
+        #expect(try CommandLanguage.parse(submitted) == ParsedCommand(id: .search, arguments: [#"a "b" c"#]))
+    }
+
+    @Test func searchTermIsTheTextWithOneSlashRemovedAndTrimmed() async {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        model.text = "  beatles "
+        await model.submitText()
+        #expect(calls.submitted == ["search beatles"])
+    }
+
+    @Test func searchFailureStaysInlineAndKeepsText() async {
+        defer { clear() }
+        let model = model(failure: "No match for “x”.")
+        model.open(.search)
+        model.text = "/x"
+        await model.submitText()
+        #expect(model.isOpen)
+        #expect(model.error == "No match for “x”.")
+        #expect(model.text == "/x")
+        #expect(!model.isRunning)
+    }
+
+    @Test func searchDoesNotJoinHistory() async {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        model.text = "/beatles"
+        await model.submitText()
+        #expect(model.history.entries.isEmpty)
+    }
+
+    @Test func emptySearchRepeatsTheLastSearch() async {
+        defer { clear() }
+        let model = model()
+        model.hasLastSearch = { true }
+        model.open(.search)
+        await model.submitText()
+        #expect(calls.submitted == ["search-next"])
+        #expect(!model.isOpen)
+        #expect(model.history.entries.isEmpty)
+    }
+
+    @Test func emptySearchWithNoLastSearchJustCloses() async {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        await model.submitText()
+        #expect(calls.submitted.isEmpty)
+        #expect(!model.isOpen)
+    }
+
+    @Test func searchTabDoesNothingAndEscapeCloses() {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        model.text = "/be"
+        model.acceptHighlighted()
+        #expect(model.text == "/be")
+        #expect(model.mode == .search)
+        model.close()
+        #expect(!model.isOpen)
+    }
+
+    @Test func searchCommandWithoutATermSwitchesToSearchMode() async {
+        defer { clear() }
+        let model = model()
+        model.open()
+        model.text = ":search"
+        await model.submitText()
+        #expect(calls.submitted.isEmpty)
+        #expect(model.isOpen)
+        #expect(model.mode == .search)
+        #expect(model.text == "/")
+    }
+
+    @Test func searchCommandWithATermSubmitsAndIsRecorded() async {
+        defer { clear() }
+        let model = model()
+        model.open()
+        model.text = ":search x"
+        await model.submitText()
+        #expect(calls.submitted == [":search x"])
+        #expect(model.history.entries == ["search x"])
+        #expect(!model.isOpen)
+    }
+
+    @Test func sessionTokenChangesOnOpenAndClose() {
+        defer { clear() }
+        let model = model()
+        let first = model.sessionToken
+        model.open(.search)
+        let opened = model.sessionToken
+        #expect(opened != first)
+        model.close()
+        #expect(model.sessionToken != opened)
+    }
 }

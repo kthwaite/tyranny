@@ -312,12 +312,28 @@ pub enum LibraryCommand {
         list: ListDescription,
         revision: Option<u64>,
     },
+    /// The next row of `list` whose track matches `term`, strictly after the zero-based
+    /// position `from` (strictly before it when `backward`). `None` starts at the end the
+    /// direction begins from.
+    FindInList {
+        list: ListDescription,
+        revision: Option<u64>,
+        term: String,
+        from: Option<usize>,
+        backward: bool,
+    },
     /// Re-probe exactly these indexed files once no scan is running. Internal
     /// to tagging; it never starts a root scan or changes scan status.
     /// A file is re-probed only if its size or mtime changed, which every tag write does.
     Reindex {
         paths: Vec<PathBuf>,
     },
+}
+/// A search hit: its zero-based position in the list and its `ListRow::row_id`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ListMatch {
+    pub position: usize,
+    pub row_id: u64,
 }
 #[derive(Debug)]
 pub enum LibraryReply {
@@ -352,6 +368,12 @@ pub enum LibraryReply {
         revision: u64,
         total: u64,
         groups: Vec<GroupSpan>,
+    },
+    ListMatch {
+        revision: u64,
+        found: Option<ListMatch>,
+        /// The match came from going around the end of the list.
+        wrapped: bool,
     },
     /// The number of distinct paths in the command; all of them are now queued.
     ReindexQueued {

@@ -109,6 +109,14 @@ private let row = #"""
     #expect(try JSONDecoder().decode(ListGroupsResponse.self, from: Data(groups.utf8)).groups[0].album_key == nil)
 }
 
+@Test func listMatchResponseDecodesFoundAndNull() throws {
+    let found = #"{"kind":"list_match","revision":3,"match":{"position":57,"row_id":812},"wrapped":true}"#
+    #expect(try JSONDecoder().decode(ListMatchResponse.self, from: Data(found.utf8))
+        == ListMatchResponse(revision: 3, match: ListMatch(position: 57, row_id: 812), wrapped: true))
+    let none = #"{"kind":"list_match","revision":3,"match":null,"wrapped":false}"#
+    #expect(try JSONDecoder().decode(ListMatchResponse.self, from: Data(none.utf8)).match == nil)
+}
+
 extension JSONValue {
     fileprivate func objectField(_ name: String) -> JSONValue? {
         if case .object(let fields) = self { return fields[name] }
