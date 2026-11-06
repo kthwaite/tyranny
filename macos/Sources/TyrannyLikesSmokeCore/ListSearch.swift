@@ -25,6 +25,16 @@ public enum ListSearch {
         backward ? "Search wrapped to the bottom." : "Search wrapped to the top."
     }
 
+    /// The prompt's hint. It names the chords bound to `search-next` and `search-previous`.
+    public static func hint(next: KeyChord?, previous: KeyChord?) -> String {
+        let base = "Jump to a match. Uses filter syntax."
+        switch (next, previous) {
+        case let (next?, previous?): return "\(base) \(next.display) and \(previous.display) repeat."
+        case let (chord?, nil), let (nil, chord?): return "\(base) \(chord.display) repeats."
+        case (nil, nil): return base
+        }
+    }
+
     public static func noMatch(_ term: String) -> String {
         "No match for “\(term)”."
     }

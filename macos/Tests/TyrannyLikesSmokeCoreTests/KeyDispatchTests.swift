@@ -80,6 +80,48 @@ import Testing
         #expect(log == ["start a", "end a", "start b", "end b", "start c", "end c"])
     }
 
+    /// Enqueues `commands` while the first one is held, then lets every run finish. Returns the runs.
+    private func runsHeldQueue(_ commands: [String]) async -> [String] {
+        var ran: [String] = []
+        var gates: [CheckedContinuation<Void, Never>] = []
+        let queue = KeyCommandQueue(
+            run: { command in
+                ran.append(command)
+                await withCheckedContinuation { gates.append($0) }
+            },
+            report: { _ in })
+        queue.enqueue(commands[0])
+        await settle("first gate") { gates.count >= 1 }
+        for command in commands.dropFirst() { queue.enqueue(command) }
+        var released = 0
+        while gates.count > released {
+            gates[released].resume()
+            released += 1
+            for _ in 0..<20 { await Task.yield() }
+        }
+        return ran
+    }
+
+    @Test func heldSearchKeyKeepsOneRunningAndOneWaiting() async {
+        let ran = await runsHeldQueue(Array(repeating: "search-next", count: 5))
+        #expect(ran == ["search-next", "search-next"])
+    }
+
+    @Test func searchKeysSeparatedByAnotherCommandAllRun() async {
+        let ran = await runsHeldQueue(["search-next", "volume +5", "search-next"])
+        #expect(ran == ["search-next", "volume +5", "search-next"])
+    }
+
+    @Test func otherCommandsAreNeverDropped() async {
+        let ran = await runsHeldQueue(Array(repeating: "volume +5", count: 5))
+        #expect(ran.count == 5)
+    }
+
+    @Test func heldSearchPreviousIsDroppedToo() async {
+        let ran = await runsHeldQueue(Array(repeating: ":search-previous", count: 4))
+        #expect(ran.count == 2)
+    }
+
     @Test func queueReportsAFailureAndRunsTheNextCommand() async {
         struct Failure: LocalizedError { var errorDescription: String? { "boom" } }
         var ran: [String] = []

@@ -56,12 +56,19 @@ public final class CommandPaletteModel {
     }
     /// Whether a search has run, so Return on an empty term can repeat it. Installed by the window.
     @ObservationIgnored public var hasLastSearch: @MainActor () -> Bool = { false }
+    /// The search prompt's hint. Installed by the window, which knows the keymap.
+    @ObservationIgnored public var searchHint: @MainActor () -> String = {
+        ListSearch.hint(next: KeyChord("n"), previous: KeyChord("N"))
+    }
     /// Shows a failure from a run whose session has ended.
     @ObservationIgnored public var report: @MainActor (String) -> Void = { _ in }
 
     @ObservationIgnored private let defaults: UserDefaults
     /// Bumps on `open` and `close`. A run that sees a different value belongs to an ended session.
     @ObservationIgnored private var session: UInt64 = 0
+
+    /// Changes on `open` and `close`. A run compares it to see whether its session has ended.
+    public var sessionToken: UInt64 { session }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -189,7 +196,7 @@ public final class CommandPaletteModel {
                 return
             }
         case .search:
-            dropdown = .hint(usage: "", summary: "Jump to a match. Uses filter syntax. n and N repeat.")
+            dropdown = .hint(usage: "", summary: searchHint())
             highlighted = nil
             return
         case .history:

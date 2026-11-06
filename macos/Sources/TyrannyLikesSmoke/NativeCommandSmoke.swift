@@ -178,11 +178,19 @@ enum NativeCommandSmoke {
         let totalBefore = found.totals?.tracks
         let filterBefore = navigation.filter
         guard let target = found.cache.loadedRow(at: 1)?.track.title else { throw CommandLanguageError("Row 1 is not loaded") }
+        let revisionBefore = found.cache.revision
+        let rowIDsBefore = (0..<3).map { found.cache.loadedRow(at: $0)?.row_id }
         try await commands.execute("search \"title:\(target)\"")
         try check(found.selectedPositions == IndexSet(integer: 1), "search did not select row 1: \(found.selectedPositions)")
         try check(found.totals?.tracks == totalBefore && navigation.filter == filterBefore,
                   "search changed the total or the filter")
         try check(navigation.lastSearch == "title:\(target)", "search did not record the term")
+        try check(found.revealRequest?.focus == true && found.revealRequest?.position == 1, "a match did not ask for focus")
+        // Settle as the neighbouring cases do, then confirm the rows were not refiltered.
+        found.cache.visible(0..<3)
+        try await wait("songs settled after search") { found.cache.loadedRow(at: 2) != nil && found.totals != nil }
+        try check(found.cache.revision == revisionBefore && (0..<3).map({ found.cache.loadedRow(at: $0)?.row_id }) == rowIDsBefore,
+                  "search changed the list's rows")
         // One matching row: n wraps back to it.
         try await commands.execute("search-next")
         try check(found.selectedPositions == IndexSet(integer: 1), "search-next did not wrap to the only match")
@@ -196,13 +204,29 @@ enum NativeCommandSmoke {
         }
         try await rejected("search zzzz-nothing", ListSearch.noMatch("zzzz-nothing"))
         try check(found.selectedPositions == IndexSet(integer: 1), "a no-match search moved the selection")
+        try check(navigation.lastSearch == "zzzz-nothing", "a no-match search was not kept as the last search")
         navigation.lastSearch = term
         // The server rejects the term, so the selection and the last search stay.
         try await rejected("search \"year:notanumber\"", "invalid filter at UTF-8 byte 5: expected a 4-digit year or an ascending range like 1970..1979")
         try check(found.selectedPositions == IndexSet(integer: 1) && navigation.lastSearch == term,
                   "an invalid term changed the selection or the last search")
+        // A broad term steps row by row and wraps off the last row.
+        try await commands.execute("selection-clear")
+        try await commands.execute("search title:Track")
+        try check(found.selectedPositions == IndexSet(integer: 0), "title:Track did not select row 0: \(found.selectedPositions)")
+        try await commands.execute("search-next")
+        try check(found.selectedPositions == IndexSet(integer: 1), "search-next did not step to row 1")
+        try await commands.execute("search-next")
+        try check(found.selectedPositions == IndexSet(integer: 2), "search-next did not step to row 2")
+        player.message = nil
+        try await commands.execute("search-next")
+        try check(found.selectedPositions == IndexSet(integer: 0), "search-next did not wrap to row 0")
+        try check(player.message == ListSearch.wrappedMessage(backward: false), "the wrap was not reported")
         try await commands.execute("go albums")
         try await rejected("search-next", "Search requires a track list.")
+        navigation.palette.close()
+        try await rejected("search", "Search requires a track list.")
+        try check(!navigation.palette.isOpen, "search opened the prompt outside a track list")
         try await commands.execute("go songs")
         try await commands.execute("selection-clear")
         cases.append("search-selects-without-filtering")

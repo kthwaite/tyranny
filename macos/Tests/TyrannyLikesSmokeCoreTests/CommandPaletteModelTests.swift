@@ -370,6 +370,9 @@ private func fixedRows(_ count: Int) -> [CommandSuggestion] {
         #expect(model.mode == .search)
         #expect(model.text == "/")
         #expect(model.dropdown == .hint(usage: "", summary: "Jump to a match. Uses filter syntax. n and N repeat."))
+        model.searchHint = { "Custom." }
+        model.open(.search)
+        #expect(model.dropdown == .hint(usage: "", summary: "Custom."))
         #expect(model.highlighted == nil)
     }
 
@@ -476,5 +479,16 @@ private func fixedRows(_ count: Int) -> [CommandSuggestion] {
         #expect(calls.submitted == [":search x"])
         #expect(model.history.entries == ["search x"])
         #expect(!model.isOpen)
+    }
+
+    @Test func sessionTokenChangesOnOpenAndClose() {
+        defer { clear() }
+        let model = model()
+        let first = model.sessionToken
+        model.open(.search)
+        let opened = model.sessionToken
+        #expect(opened != first)
+        model.close()
+        #expect(model.sessionToken != opened)
     }
 }

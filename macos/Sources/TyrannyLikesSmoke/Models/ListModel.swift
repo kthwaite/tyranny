@@ -66,6 +66,8 @@ final class ListModel {
     struct RevealRequest: Equatable {
         let token: UInt64
         let position: Int
+        /// The table takes keyboard focus after revealing. A search does; ⌘L does not.
+        let focus: Bool
     }
 
     /// Selected row IDs (spec 5.4).
@@ -408,13 +410,14 @@ final class ListModel {
             return
         }
         rows.select(IndexSet(integer: found.position), rowID: { cache.loadedRow(at: $0)?.row_id }, basis: selectionBasis)
-        revealRequest = RevealRequest(token: (revealRequest?.token ?? 0) &+ 1, position: found.position)
+        revealRequest = RevealRequest(token: (revealRequest?.token ?? 0) &+ 1, position: found.position, focus: false)
     }
 
     /// Selects the next row matching `term`, after the last selected row or before the first when
     /// `backward`. The server finds it, so a row outside the loaded windows is found too. The
     /// filter and the rows do not change. A failure leaves the selection alone.
-    func search(term: String, backward: Bool) async throws {
+    /// `isCancelled` is asked after the reply. When it is true, nothing is selected or shown.
+    func search(term: String, backward: Bool, isCancelled: @MainActor () -> Bool = { false }) async throws {
         guard let player else { throw CommandLanguageError("The list closed.") }
         let fields = try ListSearch.fields(
             list: description, revision: cache.revision, term: term,
@@ -425,10 +428,10 @@ final class ListModel {
             reply = try await player.send("find_in_list", fields)
         } catch let failure as ServerFailure {
             switch failure.code {
-            case "stale_library_revision":
+            case "stale_library_revision", "stale_playlist_revision":
                 sync()
                 throw CommandLanguageError("The list changed. Search again.")
-            case "invalid_filter", "invalid":
+            case "invalid_filter":
                 throw ListSearch.InvalidTerm(message: failure.message)
             default:
                 throw failure
@@ -436,10 +439,12 @@ final class ListModel {
         }
         // The filter or browser moved during the request: the position belongs to another list.
         guard basis == selectionBasis else { throw CommandLanguageError("The list changed. Search again.") }
+        // Esc after Return ended the prompt, so the user no longer wants this reply.
+        guard !isCancelled() else { return }
         guard let match = reply.match else { throw CommandLanguageError(ListSearch.noMatch(term)) }
         rows.select(IndexSet(integer: match.position), rowID: { $0 == match.position ? match.row_id : nil },
                     basis: selectionBasis)
-        revealRequest = RevealRequest(token: (revealRequest?.token ?? 0) &+ 1, position: match.position)
+        revealRequest = RevealRequest(token: (revealRequest?.token ?? 0) &+ 1, position: match.position, focus: true)
         if reply.wrapped { player.message = ListSearch.wrappedMessage(backward: backward) }
     }
 

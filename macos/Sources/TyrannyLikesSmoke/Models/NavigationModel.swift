@@ -71,6 +71,10 @@ final class NavigationModel {
         columnBrowserVisible = defaults.bool(forKey: "columnBrowserVisible")
         upNextDrawerVisible = defaults.bool(forKey: "upNextDrawerVisible")
         nowPlayingArtExpanded = defaults.bool(forKey: "nowPlayingArtExpanded")
+        palette.searchHint = { [weak self] in
+            ListSearch.hint(next: self?.keymap.chord(forCommand: CommandID.searchNext.rawValue),
+                            previous: self?.keymap.chord(forCommand: CommandID.searchPrevious.rawValue))
+        }
         palette.hasLastSearch = { [weak self] in self?.lastSearch != nil }
         palette.suggest = { [weak self] in self?.suggestCommand($0) ?? CommandLanguage.suggestions($0) }
         palette.submit = { [weak self] text in

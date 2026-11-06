@@ -43,4 +43,14 @@ import Testing
         let error: Error = ListSearch.InvalidTerm(message: "Bad filter near “&”.")
         #expect(error.localizedDescription == "Bad filter near “&”.")
     }
+
+    @Test func hintNamesTheBoundChords() {
+        let n = KeyChord("n"), upperN = KeyChord("N")
+        #expect(ListSearch.hint(next: n, previous: upperN) == "Jump to a match. Uses filter syntax. n and N repeat.")
+        #expect(ListSearch.hint(next: n, previous: nil) == "Jump to a match. Uses filter syntax. n repeats.")
+        #expect(ListSearch.hint(next: nil, previous: upperN) == "Jump to a match. Uses filter syntax. N repeats.")
+        #expect(ListSearch.hint(next: nil, previous: nil) == "Jump to a match. Uses filter syntax.")
+        let rebound = KeyChord("ctrl+j")!
+        #expect(ListSearch.hint(next: rebound, previous: n) == "Jump to a match. Uses filter syntax. \(rebound.display) and n repeat.")
+    }
 }

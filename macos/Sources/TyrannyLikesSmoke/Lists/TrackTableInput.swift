@@ -99,6 +99,7 @@ extension VirtualTrackTable.Coordinator {
               let display = layout.displayIndex(ofPosition: request.position) else { return }
         table.selectRowIndexes(IndexSet(integer: display), byExtendingSelection: false)
         table.scrollRowToVisible(display)
+        if request.focus { table.window?.makeFirstResponder(table) }
     }
 
     // MARK: Context menu
