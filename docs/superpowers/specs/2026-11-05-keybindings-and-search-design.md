@@ -110,14 +110,16 @@ narrowing the list the way the filter does.
    Part 1's rules and can be rebound.
 2. **Commands.** `search [term]`: with a term it searches, and without one it opens the prompt.
 3. **Prompt.** The command palette panel in a new `.search` mode. The input starts as `/`. There is no
-   dropdown of rows, only a hint: "Jump to a match. Uses filter syntax. n and N repeat." Return runs
+   dropdown of rows, only a hint: "Jump to a match. Uses filter syntax. n and N repeat." The last
+   sentence follows the keymap, and is dropped when neither command has a chord. Return runs
    the search. Esc or an outside click closes it and leaves the selection alone. Tab does nothing.
    Return with an empty term repeats the last search, or closes if there is none. Searches do not join
    command history. A no-match or invalid-term error shows inline and keeps the prompt open.
 4. **Terms use the filter syntax.** `/beatles`, `/artist:beatles`, `/year:1969 & !live` match exactly
    what the same text would match in the filter field.
-5. **Selection, not filtering.** A match selects that one row and scrolls to it. The list's rows and
-   the filter do not change.
+5. **Selection, not filtering.** A match selects that one row, scrolls to it and gives the table
+   focus, so Return plays it and the arrows move from it, wherever focus was before. The list's rows
+   and the filter do not change. Esc after Return closes the prompt and drops the reply.
 6. **Direction.** Forward means strictly after the last selected row. Backward means strictly before
    the first selected row. With no selection, forward starts at the top and backward at the bottom.
    `search` moves forward, like vi. `N` is always backward: there is no `?`, so "reverse of the last
@@ -131,11 +133,14 @@ narrowing the list the way the filter does.
    loads that window as it scrolls.
 10. **Scope.** Track lists: Songs, Recently Added, playlists, and the Artists and Genres detail lists.
     Other views give "Search requires a track list." The album grid, Up Next, History, Radio and
-    devices are not searched.
+    devices are not searched. `/` there gives the error at once, without opening the prompt.
 11. **Last term.** Held for the session and shared across views. Each search uses the current view's
     filter, browser selection, sort and grouping.
-12. **Stale lists.** The request pins the cache's revision. When the library moved, the list resyncs
-    and the error is "The list changed. Search again."
+12. **Stale lists.** The request pins the cache's revision. When the library or the playlist moved,
+    the list resyncs and the error is "The list changed. Search again." While a scan adds tracks, the
+    revision moves often, so this error can repeat until the scan ends.
+13. **Held keys.** A repeat of `n` or `N` is dropped while the same command is the last one waiting, so
+    a held key never runs on after release. Other commands still add up (Part 1, goal 5).
 
 ### Wire command
 
@@ -153,7 +158,7 @@ Added to `src/protocol.rs`, with `revision` required and nullable like `list_tra
 ```
 
 `match` is null when no row matches. `wrapped` is true when the match came from going around the end.
-`position` is zero-based, like `offset`. An empty or whitespace-only term is `invalid`. A bad term is
+`position` is zero-based, like `offset`. An empty or whitespace-only term is `invalid_command`. A bad term is
 `invalid_filter`, as in `list_tracks`. A moved revision is `stale_library_revision`.
 
 ### Non-goals
