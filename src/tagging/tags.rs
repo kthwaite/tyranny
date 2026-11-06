@@ -2087,6 +2087,22 @@ mod tests {
         }
     }
 
+    /// FFmpeg reads `TDRL` as `date` too, and the last frame wins. The date an
+    /// edit writes must win. lofty's merge order varies, so this repeats.
+    #[test]
+    fn a_date_edit_wins_over_a_stale_tdrl() {
+        for _ in 0..20 {
+            let scratch = Scratch::new();
+            let path = scratch.copy("tone.mp3");
+            let mut tag = Id3v2Tag::new();
+            tag.insert(pair_frame("TDRC", "1990-01-01".to_owned()));
+            tag.insert(pair_frame("TDRL", "1970-01-01".to_owned()));
+            tag.save_to_path(&path, WriteOptions::default()).unwrap();
+            edit_tags(&path, &setting(&[(TagField::Date, "2001-05-14")])).unwrap();
+            assert_eq!(probe(&path).year, Some(2001));
+        }
+    }
+
     #[test]
     fn untouched_items_and_pictures_survive() {
         let scratch = Scratch::new();
