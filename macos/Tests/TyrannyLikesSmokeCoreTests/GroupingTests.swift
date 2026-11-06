@@ -86,6 +86,33 @@ private let mixed = GroupLayout(grouping: .artistAlbum, total: 11,
         #expect(mixed.selection(proposed: IndexSet([21]), current: IndexSet([20]), keyboard: true) == IndexSet([20]))
     }
 
+    /// Command-click left a selected row below the one the arrow starts from. The arrow still goes
+    /// the way it was pressed.
+    @Test func arrowFromARowAboveAnotherSelectedRowStillMovesDown() {
+        // Down from 2, with 12 selected too: onto filler 3, on to the next block's first track.
+        #expect(mixed.selection(proposed: IndexSet([3]), current: IndexSet([2, 12]), keyboard: true) == IndexSet([10]))
+        // The same with shift. Before, this stayed put on every press.
+        #expect(mixed.selection(proposed: IndexSet([2, 3, 12]), current: IndexSet([2, 12]), keyboard: true)
+            == IndexSet([2, 10, 12]))
+    }
+
+    /// What the old code did well, and the fix must keep.
+    @Test func directionWithoutASelectedNeighbourFollowsTheSelectionsEnd() {
+        // A jump, as Page Down proposes: after the last selected row is forward.
+        #expect(mixed.selection(proposed: IndexSet([3]), current: IndexSet([1]), keyboard: true) == IndexSet([10]))
+        // Before the last selected row is backward.
+        #expect(mixed.selection(proposed: IndexSet([9]), current: IndexSet([12]), keyboard: true) == IndexSet([2]))
+        // No selection: forward.
+        #expect(mixed.selection(proposed: IndexSet([3]), current: IndexSet(), keyboard: true) == IndexSet([10]))
+        // A row between two selected neighbours: nothing tells, so the old rule decides.
+        #expect(mixed.selection(proposed: IndexSet([3]), current: IndexSet([2, 4]), keyboard: true) == IndexSet([2]))
+        // Several rows without tracks at once, next to the selection.
+        #expect(mixed.selection(proposed: IndexSet([2, 3, 4, 5]), current: IndexSet([2]), keyboard: true)
+            == IndexSet([2, 10]))
+        #expect(mixed.selection(proposed: IndexSet([7, 8, 9, 10]), current: IndexSet([10]), keyboard: true)
+            == IndexSet([2, 10]))
+    }
+
     @Test func shiftArrowExtendsAcrossFillersGapsAndHeaders() {
         // Down from the end of a block: past fillers and the gap into the next block.
         #expect(mixed.selection(proposed: IndexSet([1, 2, 3]), current: IndexSet([1, 2]), keyboard: true)

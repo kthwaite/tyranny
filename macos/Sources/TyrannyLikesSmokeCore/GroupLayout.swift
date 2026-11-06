@@ -251,7 +251,14 @@ public struct GroupLayout: Sendable {
         let added = proposed.subtracting(current)
         guard let first = added.first, let last = added.last,
               positions(ofDisplayIndexes: added).isEmpty else { return tracks }
-        let forward = first > (current.last ?? -1)
+        // An arrow steps from a selected row, so a selected neighbour tells the way it went. A
+        // row after another selected row is not enough: command-click may have left one below.
+        let forward: Bool
+        switch (current.contains(first - 1), current.contains(last + 1)) {
+        case (true, false): forward = true
+        case (false, true): forward = false
+        default: forward = first > (current.last ?? -1)
+        }
         guard let target = nearestTrack(from: forward ? last : first, forward: forward) else {
             return proposed.count == 1 ? displayIndexes(ofPositions: positions(ofDisplayIndexes: current)) : tracks
         }
