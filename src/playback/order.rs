@@ -387,14 +387,14 @@ impl Player {
 
     /// The pass being decoded is complete. More passes without PCM in a row
     /// than the queue has entries end the queue instead of looping. Output
-    /// never starts a pass without PCM, so a fresh pass it opens moves to the
-    /// next pass.
+    /// never starts a pass without PCM, so the next pass also gets the fresh pass
+    /// it opens. The silent pass keeps it for what follows the pass before.
     pub(super) fn end_pass(&mut self) {
         let carried = self
             .passes
-            .back_mut()
+            .back()
             .filter(|pass| pass.frames == 0)
-            .and_then(|pass| pass.fresh.take());
+            .and_then(|pass| pass.fresh.clone());
         let silent = self.passes.back().is_some_and(|pass| pass.frames == 0);
         self.silent = if silent { self.silent + 1 } else { 0 };
         self.follow_plan();

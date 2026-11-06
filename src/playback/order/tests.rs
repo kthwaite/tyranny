@@ -235,6 +235,35 @@ fn a_fresh_pass_survives_an_entry_without_pcm() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The silent pass still reports the fresh pass it opens. User Next onto its
+/// entry starts that fresh pass, even after the next pass took a copy.
+#[test]
+fn next_onto_a_silent_pass_keeps_its_fresh_pass() -> anyhow::Result<()> {
+    let directory = scratch("empty-fresh-next")?;
+    let empty_path = directory.join("empty.wav");
+    fs::rename(silence(&directory, 0)?, &empty_path)?;
+    let first = directory.join("first.wav");
+    fs::rename(silence(&directory, 48_000)?, &first)?;
+    let last = directory.join("last.wav");
+    fs::rename(silence(&directory, 48_000)?, &last)?;
+    let mut player = clocked(&directory, vec![empty_path, first, last])?;
+    player.set_repeat(RepeatMode::All);
+    let prepared = player.prepare_selection(3, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.play();
+    // Pump until the silent pass after entry 3 is prepared and 3 still plays.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while player.passes.len() < 2 || player.snapshot().current_id != Some(3) {
+        anyhow::ensure!(Instant::now() < deadline, "timed out");
+        player.pump()?;
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(player.next_jump(), Some((1, vec![1, 2, 3])));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
 /// A clocked capture player over `sources`.
 fn clocked(directory: &std::path::Path, sources: Vec<PathBuf>) -> anyhow::Result<Player> {
     Player::new(
