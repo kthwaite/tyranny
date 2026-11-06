@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -440,7 +440,9 @@ fn format_of(file_type: FileType) -> Option<WritableFormat> {
 /// lofty's `guess_file_type` searches up to 1 KiB of leading junk for an MPEG
 /// or ADTS frame sync, and so takes AC-3, AU, CAF, DTS, Matroska, Ogg FLAC,
 /// RealAudio and TTA files for MP3 or AAC. Only a type lofty determines from the
-/// file's first bytes, or from the bytes after a leading ID3v2 tag, counts.
+/// file's first bytes, or from the bytes after a leading ID3v2 tag, counts. MP3
+/// and AAC may have junk after the tag, so there the search stays, unless the
+/// bytes after the tag name another format.
 pub fn writable_format(path: &Path) -> Result<Option<WritableFormat>> {
     writable_format_file(&mut File::open(path)?)
 }
@@ -449,14 +451,12 @@ fn writable_format_file(file: &mut File) -> Result<Option<WritableFormat>> {
     file.rewind()?;
     let mut head = Vec::with_capacity(36);
     file.by_ref().take(36).read_to_end(&mut head)?;
-    file.rewind()?;
     let file_type = if head.starts_with(b"ID3") {
-        Probe::new(BufReader::new(&mut *file))
-            .guess_file_type()?
-            .file_type()
+        file_type_after_id3v2(file, &head)?
     } else {
         FileType::from_buffer(&head)
     };
+    file.rewind()?;
     let Some(format) = file_type.and_then(format_of) else {
         return Ok(None);
     };
@@ -465,6 +465,117 @@ fn writable_format_file(file: &mut File) -> Result<Option<WritableFormat>> {
         return Ok(None);
     }
     Ok(Some(format))
+}
+
+/// How the formats lofty does not know start. lofty may find a false frame sync
+/// in any of them.
+const OTHER_FORMATS: &[&[u8]] = &[
+    b"TTA1",
+    b"\x0b\x77",
+    b"\x7f\xfe\x80\x01",
+    b"\xfe\x7f\x01\x80",
+    b"\x1f\xff\xe8\x00",
+    b"\xff\x1f\x00\xe8",
+    b"caff",
+    b".snd",
+    b".ra\xfd",
+    b".RMF",
+    b"\x1a\x45\xdf\xa3",
+    b"\x30\x26\xb2\x75",
+    b"FRM8",
+    b"DSD ",
+    b"ajkg",
+    b"#!AMR",
+    b"tBaK",
+    b"OggS",
+    b"RIFF",
+    b"FORM",
+];
+
+/// The type of a file that starts with an ID3v2 tag. `None` when the tag's end
+/// is not safe to trust, or when another format follows the tag.
+fn file_type_after_id3v2(file: &mut File, header: &[u8]) -> Result<Option<FileType>> {
+    let [major, _, flags, a, b, c, d] = *header.get(3..10).unwrap_or_default() else {
+        return Ok(None);
+    };
+    let size = [a, b, c, d]
+        .into_iter()
+        .fold(0u64, |size, byte| size << 7 | u64::from(byte & 0x7f));
+    file.seek(SeekFrom::Start(10))?;
+    let mut tag = Vec::new();
+    file.by_ref().take(size).read_to_end(&mut tag)?;
+    let mut after = [0; 3];
+    let footer = flags & 0x10 != 0 && major >= 3;
+    if footer {
+        let read = file.read(&mut after)?;
+        if major != 4 || &after[..read] != b"3DI" {
+            return Ok(None);
+        }
+    }
+    // lofty adds an extended header's size to the bytes it replaces, but the
+    // tag size holds it already. It would replace that many bytes of audio.
+    if (flags & 0x40 != 0 && major >= 3)
+        || !(tag_holds_no_audio(&tag, major, false)
+            || (major == 4 && tag_holds_no_audio(&tag, major, true)))
+    {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(10 + size + if footer { 10 } else { 0 }))?;
+    const MAX_PADDING: usize = 1024;
+    let mut window = Vec::with_capacity(MAX_PADDING + 36);
+    file.by_ref()
+        .take((MAX_PADDING + 36) as u64)
+        .read_to_end(&mut window)?;
+    let start = window
+        .iter()
+        .take(MAX_PADDING)
+        .position(|byte| *byte != 0)
+        .unwrap_or(window.len());
+    // Without the padding, and whole: an MP4 starts with zeros of its own.
+    let names_another_format = |bytes: &[u8]| {
+        let next = &bytes[..bytes.len().min(36)];
+        let other = !matches!(
+            FileType::from_buffer(next),
+            None | Some(
+                FileType::Aac | FileType::Ape | FileType::Flac | FileType::Mpc | FileType::Mpeg
+            )
+        );
+        other || OTHER_FORMATS.iter().any(|magic| next.starts_with(magic))
+    };
+    if names_another_format(&window) || names_another_format(&window[start..]) {
+        return Ok(None);
+    }
+    file.rewind()?;
+    Ok(Probe::new(BufReader::new(&mut *file))
+        .guess_file_type()?
+        .file_type())
+}
+
+/// Walks the tag's frames. A tag whose size field is too large holds the start
+/// of the audio after its last frame, and saving would lose those bytes. A frame
+/// that runs past the end means the size field is too small, which loses nothing.
+/// `plain_sizes`: iTunes writes big-endian frame sizes in ID3v2.4.
+fn tag_holds_no_audio(tag: &[u8], major: u8, plain_sizes: bool) -> bool {
+    let (id_length, header_length) = if major == 2 { (3, 6) } else { (4, 10) };
+    let mut rest = tag;
+    while rest.len() >= header_length
+        && rest[..id_length]
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        let size_bytes = &rest[id_length..if major == 2 { 6 } else { 8 }];
+        let bits = if major == 4 && !plain_sizes { 7 } else { 8 };
+        let size = size_bytes
+            .iter()
+            .fold(0usize, |size, byte| size << bits | usize::from(*byte));
+        if size > rest.len() - header_length {
+            return true;
+        }
+        rest = &rest[header_length + size..];
+    }
+    !rest
+        .windows(2)
+        .any(|pair| pair[0] == 0xff && pair[1] & 0xe0 == 0xe0)
 }
 
 /// Opens the file once and reads it with `read_tags_file`.
@@ -1853,6 +1964,138 @@ mod tests {
         assert_eq!(pictures.len(), 1, "{pictures:?}");
         assert_eq!(pictures[0].pic_type(), PictureType::CoverFront);
         assert_eq!(pictures[0].data(), png().data());
+    }
+
+    /// An ID3v2 tag of one TIT2 frame and then `padding` zero bytes. `size_error`
+    /// is added to the size field. `flags` is the header's flag byte.
+    fn id3_tag(major: u8, flags: u8, padding: usize, size_error: i32) -> Vec<u8> {
+        let mut content = b"TIT2\0\0\0\x03\0\0\x03Ox".to_vec();
+        content.extend(std::iter::repeat_n(0, padding));
+        let size = (content.len() as i32 + size_error) as u32;
+        let mut out = b"ID3".to_vec();
+        out.extend_from_slice(&[major, 0, flags]);
+        out.extend((0..4).rev().map(|i| ((size >> (7 * i)) & 0x7f) as u8));
+        out.extend_from_slice(&content);
+        out
+    }
+
+    /// The fixture's bytes without its own leading ID3v2 tag.
+    fn audio_of(fixture: &str, scratch: &Scratch) -> Vec<u8> {
+        let plain = fs::read(scratch.copy(fixture)).unwrap();
+        if !plain.starts_with(b"ID3") {
+            return plain;
+        }
+        let size = plain[6..10]
+            .iter()
+            .fold(0usize, |n, b| n << 7 | *b as usize);
+        plain[10 + size..].to_vec()
+    }
+
+    #[test]
+    fn a_leading_id3_tag_makes_no_other_format_writable() {
+        let scratch = Scratch::new();
+        let formats = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/formats");
+        let mut checked = 0;
+        for entry in fs::read_dir(formats).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let kept = ["mp3", "mp2", "aac", "flac", "ape", "mpc"];
+            if kept.iter().any(|kept| name.ends_with(&format!(".{kept}"))) {
+                continue;
+            }
+            let path = scratch.copy(&name);
+            let mut bytes = id3_tag(4, 0, 0, 0);
+            bytes.extend_from_slice(&audio_of(&name, &scratch));
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(writable_format(&path).unwrap(), None, "{name}");
+            assert!(edit_tags(&path, &setting(&[(TagField::Title, "New")])).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
+            checked += 1;
+        }
+        assert!(checked >= 28, "{checked}");
+    }
+
+    #[test]
+    fn a_leading_id3_tag_keeps_a_writable_format() {
+        let scratch = Scratch::new();
+        for (fixture, format) in [
+            ("tone.mp3", WritableFormat::Mpeg),
+            ("tone.aac", WritableFormat::Aac),
+            ("tone.flac", WritableFormat::Flac),
+            ("tone.ape", WritableFormat::Ape),
+            ("tone.mpc", WritableFormat::Mpc),
+        ] {
+            let path = scratch.copy(fixture);
+            let mut bytes = id3_tag(4, 0, 0, 0);
+            bytes.extend_from_slice(&audio_of(fixture, &scratch));
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(writable_format(&path).unwrap(), Some(format), "{fixture}");
+            assert_eq!(read_tags(&path).unwrap().format, format, "{fixture}");
+        }
+    }
+
+    /// Bytes that lofty skips before the first frame. These files edit, and every
+    /// audio byte stays.
+    #[test]
+    fn junk_before_the_first_frame_keeps_a_file_writable() {
+        let scratch = Scratch::new();
+        for fixture in ["tone.mp3", "tone.aac"] {
+            let audio = audio_of(fixture, &scratch);
+            for (name, tag, junk) in [
+                ("zeros", id3_tag(4, 0, 0, 0), vec![0u8; 100]),
+                ("junk", id3_tag(4, 0, 0, 0), vec![0x41u8; 16]),
+                ("short junk", id3_tag(4, 0, 0, 0), b"\x01\x02\x03".to_vec()),
+                ("size too small", id3_tag(4, 0, 0, -4), Vec::new()),
+                ("v2.3 size too small", id3_tag(3, 0, 0, -4), Vec::new()),
+                (
+                    "real footer",
+                    id3_tag(4, 0x10, 0, 0),
+                    b"3DI\x04\0\x10\0\0\0\x0d".to_vec(),
+                ),
+            ] {
+                let path = scratch.copy(fixture);
+                let bytes = [tag, junk, audio.clone()].concat();
+                fs::write(&path, &bytes).unwrap();
+                assert!(
+                    writable_format(&path).unwrap().is_some(),
+                    "{fixture} {name}"
+                );
+                edit_tags(&path, &setting(&[(TagField::Title, "New")])).unwrap();
+                let after = fs::read(&path).unwrap();
+                assert!(after.ends_with(&audio), "{fixture} {name}: audio lost");
+                assert_eq!(read_tags(&path).unwrap().primary[&TagField::Title], "New");
+            }
+        }
+    }
+
+    /// lofty's end of the tag falls inside the audio, and saving drops what lies
+    /// before it. Such a file is refused.
+    #[test]
+    fn a_tag_end_inside_the_audio_is_refused_and_no_audio_is_lost() {
+        let scratch = Scratch::new();
+        // A 6-byte extended header, then the frame. The spec counts both in the size.
+        let mut extended = b"ID3\x04\0\x40\0\0\0\x13\0\0\0\x06\x01\0".to_vec();
+        extended.extend_from_slice(b"TIT2\0\0\0\x03\0\0\x03Ox");
+        for fixture in ["tone.mp3", "tone.aac"] {
+            let audio = audio_of(fixture, &scratch);
+            for (name, tag) in [
+                ("4 too large", id3_tag(4, 0, 0, 4)),
+                ("4 too large after padding", id3_tag(4, 0, 20, 4)),
+                ("100 too large", id3_tag(4, 0, 0, 100)),
+                ("v2.3 4 too large", id3_tag(3, 0, 0, 4)),
+                ("v2.3 flag 0x10", id3_tag(3, 0x10, 0, 0)),
+                ("v2.4 footer flag and no footer", id3_tag(4, 0x10, 0, 0)),
+                ("v2.4 extended header", extended.clone()),
+            ] {
+                let path = scratch.copy(fixture);
+                let bytes = [tag, audio.clone()].concat();
+                fs::write(&path, &bytes).unwrap();
+                let edit = edit_tags(&path, &setting(&[(TagField::Title, "New")]));
+                let after = fs::read(&path).unwrap();
+                assert!(after.ends_with(&audio), "{fixture} {name}: audio lost");
+                assert!(edit.is_err(), "{fixture} {name}");
+                assert!(after == bytes, "{fixture} {name}: file changed");
+            }
+        }
     }
 
     #[test]
