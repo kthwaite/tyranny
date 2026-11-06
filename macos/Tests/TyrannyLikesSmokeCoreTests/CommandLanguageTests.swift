@@ -183,6 +183,29 @@ import Testing
         #expect(CommandLanguage.completions("playlist-rename 'Road Trip' ", playlistNames: names).isEmpty)
     }
 
+    /// A mark joins the grapheme before it, which may be the space or quote in front of a name.
+    @Test func completionsKeepNamesWithMarksAtTheirEdges() throws {
+        let names = ["\u{301}9", "\u{301}a b", "\u{1F3FB}", "a b\u{600}", "\"\u{301}", "\\\u{301}", "'\u{301} x", "x\u{200D}"]
+        for name in names {
+            let line = try #require(CommandLanguage.completions("playlist-delete ", playlistNames: [name, "9"]).first { $0 != "playlist-delete 9" })
+            let arguments = try CommandLanguage.parse(line).arguments
+            #expect(arguments.count == 1, "\(line)")
+            #expect(arguments.first.map { Array($0.unicodeScalars) } == Array(name.unicodeScalars), "\(line)")
+        }
+    }
+
+    /// Text with whole graphemes reads as it always did.
+    @Test func wholeGraphemesReadAsBefore() throws {
+        #expect(try CommandLanguage.parse("filter e\u{301}x").arguments == ["e\u{301}x"])
+        #expect(try CommandLanguage.parse("filter 👨‍👩‍👧 ").arguments == ["👨‍👩‍👧"])
+        #expect(try CommandLanguage.parse("filter \"a\r\nb\"").arguments == ["a\r\nb"])
+        #expect(try CommandLanguage.parse("filter a\\\r\nb").arguments == ["a\r\nb"])
+        #expect(try CommandLanguage.parse("playlist-rename a\r\nb").id == .playlistRename)
+        #expect(try CommandLanguage.parse("playlist-rename a\r\nb").arguments == ["a", "b"])
+        #expect(CommandLanguage.quote("e\u{301}") == "e\u{301}")
+        #expect(CommandLanguage.quote("a\r\nb") == "\"a\r\nb\"")
+    }
+
     @Test func suggestionsCarryQuotedLinesAndBareValues() {
         let rows = CommandLanguage.suggestions(":playlist-play R", playlistNames: ["Road Trip"])
         #expect(rows == [CommandSuggestion(line: ":playlist-play \"Road Trip\"", value: "Road Trip", summary: nil, continues: false)])
