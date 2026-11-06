@@ -13,6 +13,8 @@ public final class CommandPaletteModel {
         case commands
         /// Picking a previous command. The dropdown shows history entries.
         case history
+        /// Typing a search term after `/`. The dropdown shows a hint.
+        case search
     }
 
     /// One dropdown row. Tab puts `line` in the input; the view shows `value` and `summary`.
@@ -52,6 +54,8 @@ public final class CommandPaletteModel {
     @ObservationIgnored public var submit: @MainActor (String) async throws -> Void = { _ in
         throw CommandLanguageError("Open the library window before submitting commands.")
     }
+    /// Whether a search has run, so Return on an empty term can repeat it. Installed by the window.
+    @ObservationIgnored public var hasLastSearch: @MainActor () -> Bool = { false }
     /// Shows a failure from a run whose session has ended.
     @ObservationIgnored public var report: @MainActor (String) -> Void = { _ in }
 
@@ -68,7 +72,11 @@ public final class CommandPaletteModel {
     public func open(_ mode: Mode = .commands) {
         session &+= 1
         self.mode = mode
-        text = mode == .commands ? ":" : ""
+        switch mode {
+        case .commands: text = ":"
+        case .history: text = ""
+        case .search: text = "/"
+        }
         isOpen = true
         isRunning = false
         error = nil
@@ -102,6 +110,8 @@ public final class CommandPaletteModel {
         case .history:
             mode = .commands
             text = row.line
+        case .search:
+            break
         }
     }
 
@@ -114,18 +124,42 @@ public final class CommandPaletteModel {
             acceptHighlighted()
         case .commands where CommandHistory.isHistoryCommand(text):
             open(.history)
+        case .commands where Self.isBareSearchCommand(text):
+            open(.search)
         case .commands:
-            await run(text)
+            await run(text, recording: true)
+        case .search:
+            let term = searchTerm
+            if !term.isEmpty {
+                await run("search " + CommandLanguage.quote(term), recording: false)
+            } else if hasLastSearch() {
+                await run("search-next", recording: false)
+            } else {
+                close()
+            }
         }
     }
 
-    private func run(_ text: String) async {
+    /// The input without its leading `/`, trimmed.
+    private var searchTerm: String {
+        (text.hasPrefix("/") ? String(text.dropFirst()) : text).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// True when the text parses to `search` with no term.
+    private static func isBareSearchCommand(_ text: String) -> Bool {
+        guard let command = try? CommandLanguage.parse(text) else { return false }
+        return command.id == .search && command.arguments.isEmpty
+    }
+
+    private func run(_ text: String, recording: Bool) async {
         let started = session
         isRunning = true
         do {
             try await submit(text)
-            history.record(text)
-            history.save(to: defaults)
+            if recording {
+                history.record(text)
+                history.save(to: defaults)
+            }
             if started == session { close() }
         } catch {
             let message = error.localizedDescription
@@ -154,6 +188,14 @@ public final class CommandPaletteModel {
                 highlighted = nil
                 return
             }
+        case .search:
+            if let definition = CommandLanguage.registry.first(where: { $0.id == .search }) {
+                dropdown = .hint(usage: definition.usage, summary: "Jump to a match. Uses filter syntax. n and N repeat.")
+            } else {
+                dropdown = .empty
+            }
+            highlighted = nil
+            return
         case .history:
             let prefix = CommandHistory.normalised(text)
             rows = history.entries.filter { $0.hasPrefix(prefix) }.map { Row(line: ":" + $0, value: $0, summary: nil, continues: false) }

@@ -411,6 +411,35 @@ final class ListModel {
         revealRequest = RevealRequest(token: (revealRequest?.token ?? 0) &+ 1, position: found.position)
     }
 
+    /// Selects the next row matching `term`, after the last selected row or before the first when
+    /// `backward`. The server finds it, so a row outside the loaded windows is found too. The
+    /// filter and the rows do not change. A failure leaves the selection alone.
+    func search(term: String, backward: Bool) async throws {
+        guard let player else { throw CommandLanguageError("The list closed.") }
+        let fields = try ListSearch.fields(
+            list: description, revision: cache.revision, term: term,
+            from: ListSearch.from(selection: selectedPositions, backward: backward), backward: backward)
+        let reply: ListMatchResponse
+        do {
+            reply = try await player.send("find_in_list", fields)
+        } catch let failure as ServerFailure {
+            switch failure.code {
+            case "stale_library_revision":
+                sync()
+                throw CommandLanguageError("The list changed. Search again.")
+            case "invalid_filter":
+                throw CommandLanguageError(failure.message)
+            default:
+                throw failure
+            }
+        }
+        guard let match = reply.match else { throw CommandLanguageError(ListSearch.noMatch(term)) }
+        rows.select(IndexSet(integer: match.position), rowID: { $0 == match.position ? match.row_id : nil },
+                    basis: selectionBasis)
+        revealRequest = RevealRequest(token: (revealRequest?.token ?? 0) &+ 1, position: match.position)
+        if reply.wrapped { player.message = ListSearch.wrappedMessage(backward: backward) }
+    }
+
     func requestPlaylistPicker() { playlistPickerRequests &+= 1 }
 
     /// The rows at `positions` as a selection for the server.

@@ -183,10 +183,27 @@ struct CommandDispatcher {
             player.theme.update(settings)
         case .history:
             navigation.openCommandPalette(.history)
+        case .search:
+            if let term = arguments.first {
+                try await search(term, backward: false)
+            } else {
+                navigation.openCommandPalette(.search)
+            }
+        case .searchNext, .searchPrevious:
+            guard let term = navigation.lastSearch else { throw CommandLanguageError("No previous search.") }
+            try await search(term, backward: command.id == .searchPrevious)
         case .help:
             let definitions = CommandLanguage.registry.filter { arguments.isEmpty || $0.id.rawValue == arguments[0] }
             player.message = definitions.map { "\($0.usage) — \($0.summary)" }.joined(separator: "\n")
         }
+    }
+
+    private func search(_ term: String, backward: Bool) async throws {
+        guard let list = currentList else { throw CommandLanguageError("Search requires a track list.") }
+        try requireConnection()
+        // Set before the request, so `n` repeats a search that found nothing.
+        navigation.lastSearch = term
+        try await list.search(term: term, backward: backward)
     }
 
     private var grid: AlbumGridModel { lists.albumGrid(player: player, navigation: navigation) }

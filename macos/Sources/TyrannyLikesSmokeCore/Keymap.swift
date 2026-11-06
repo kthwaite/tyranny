@@ -29,6 +29,9 @@ public enum Keymap {
         ("cmd+7", "go history"),
         ("cmd+8", "go stats"),
         ("cmd+9", "go radio"),
+        ("/", "search"),
+        ("n", "search-next"),
+        ("N", "search-previous"),
     ]
 
     private static let reservedCommandKeys: Set<String> = ["q", "w", "h", "m", ",", "a", "c", "v", "x", "z", "Z"]

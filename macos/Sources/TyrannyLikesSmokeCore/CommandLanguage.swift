@@ -46,6 +46,9 @@ public enum CommandID: String, CaseIterable, Sendable {
     case browserAlbum = "browser-album"
     case upNextPolicy = "up-next-policy"
     case prompt, help, history
+    case search
+    case searchNext = "search-next"
+    case searchPrevious = "search-previous"
     case colour, colours, tint
 }
 
@@ -182,6 +185,9 @@ public enum CommandLanguage {
         .init(.prompt, "Resolve the pending Up Next prompt.", [.init("keep|clear|cancel", .choices(["keep", "clear", "cancel"]))]),
         .init(.help, "Show command help.", [.init("command", .command, optional: true)]),
         .init(.history, "Pick a previous command."),
+        .init(.search, "Select the next row matching a filter term; without a term, open the search prompt.", [.init("text", .text(allowEmpty: false), optional: true)]),
+        .init(.searchNext, "Select the next match of the last search."),
+        .init(.searchPrevious, "Select the previous match of the last search."),
         .init(.colour, "Set a colour token, or return it to System.", [.init("token", .choices(ColourToken.allCases.map(\.rawValue))), .init("#rrggbb|system", .colour)]),
         .init(.colours, "Return every colour to System and turn the cover tint on.", [.init("reset", .choices(["reset"]))]),
         .init(.tint, "Turn the accent tint from cover art on or off.", [.init("on|off", .choices(["on", "off"]))]),
@@ -257,7 +263,7 @@ public enum CommandLanguage {
         return String(trimmed.hasPrefix(":") ? trimmed.dropFirst() : trimmed)
     }
 
-    private static func quote(_ token: String) -> String {
+    public static func quote(_ token: String) -> String {
         if !token.isEmpty && !token.contains(where: { $0.isWhitespace || $0 == "\"" || $0 == "'" || $0 == "\\" }) { return token }
         return "\"" + token.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }

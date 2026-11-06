@@ -28,6 +28,8 @@ final class NavigationModel {
     /// Installed by the library window with its own TrackLists; no second selection store.
     @ObservationIgnored var commandSubmission: (@MainActor (String) async throws -> Void)?
     @ObservationIgnored var commandSuggestions: (@MainActor (String) -> [CommandSuggestion])?
+    /// The term of the last search, shared across views. `n` and `N` repeat it.
+    var lastSearch: String?
     /// The `:` command palette. It suggests and submits through this model.
     let palette: CommandPaletteModel
     /// The key bindings. Pressing a bound key in the main window runs its command.
@@ -69,6 +71,7 @@ final class NavigationModel {
         columnBrowserVisible = defaults.bool(forKey: "columnBrowserVisible")
         upNextDrawerVisible = defaults.bool(forKey: "upNextDrawerVisible")
         nowPlayingArtExpanded = defaults.bool(forKey: "nowPlayingArtExpanded")
+        palette.hasLastSearch = { [weak self] in self?.lastSearch != nil }
         palette.suggest = { [weak self] in self?.suggestCommand($0) ?? CommandLanguage.suggestions($0) }
         palette.submit = { [weak self] text in
             guard let self else { throw CommandLanguageError("Open the library window before submitting commands.") }
