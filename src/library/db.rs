@@ -513,10 +513,16 @@ pub(super) fn album_for_release(
     metadata: &TrackMetadata,
     release_id: Option<&str>,
 ) -> Result<u64> {
+    // "Various Artists" stands in for an absent album artist tag on a compilation.
+    // The album artist ID may name a real artist, and that artist keeps its name.
+    let credited_by_compilation = metadata.compilation && metadata.album_artist_tag.is_none();
     let album_artist_id = artist(
         transaction,
         &metadata.album_artist,
-        metadata.musicbrainz_album_artist_id.as_deref(),
+        metadata
+            .musicbrainz_album_artist_id
+            .as_deref()
+            .filter(|_| !credited_by_compilation),
     )?;
     let release_id = release_id.filter(|value| filled(value));
     let identity = album_identity(path, metadata, release_id)?;
