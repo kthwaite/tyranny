@@ -503,7 +503,7 @@ pub(crate) fn key_is(key: &str, normalized: &str) -> bool {
         .eq(normalized.bytes())
 }
 
-fn positive_number(value: &str) -> Option<u32> {
+pub(crate) fn positive_number(value: &str) -> Option<u32> {
     value.trim().parse().ok().filter(|number| *number > 0)
 }
 
