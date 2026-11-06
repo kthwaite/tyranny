@@ -162,6 +162,50 @@ enum NativeCommandSmoke {
         await navigation.palette.submitText()
         try check(navigation.palette.error != nil && navigation.palette.isOpen, "Palette accepted an invalid command")
         cases.append("palette-submits-records-history-and-keeps-errors-open")
+
+        // Search selects a row without filtering. The fixture has 3 rows, all loaded, so a match
+        // outside the loaded windows is not exercised here; the Rust find_in_list tests cover it.
+        let lastSearchBefore = navigation.lastSearch
+        defer { navigation.lastSearch = lastSearchBefore }
+        try await commands.execute("go songs")
+        guard let found = lists.current(player: player, navigation: navigation) else {
+            throw CommandLanguageError("Songs has no list")
+        }
+        found.sync()
+        found.cache.visible(0..<3)
+        try await wait("songs reloaded for search") { found.cache.loadedRow(at: 2) != nil && found.totals != nil }
+        try await commands.execute("selection-clear")
+        let totalBefore = found.totals?.tracks
+        let filterBefore = navigation.filter
+        guard let target = found.cache.loadedRow(at: 1)?.track.title else { throw CommandLanguageError("Row 1 is not loaded") }
+        try await commands.execute("search \"title:\(target)\"")
+        try check(found.selectedPositions == IndexSet(integer: 1), "search did not select row 1: \(found.selectedPositions)")
+        try check(found.totals?.tracks == totalBefore && navigation.filter == filterBefore,
+                  "search changed the total or the filter")
+        try check(navigation.lastSearch == "title:\(target)", "search did not record the term")
+        // One matching row: n wraps back to it.
+        try await commands.execute("search-next")
+        try check(found.selectedPositions == IndexSet(integer: 1), "search-next did not wrap to the only match")
+        try check(player.message == ListSearch.wrappedMessage(backward: false), "search-next did not report the wrap")
+        let term = navigation.lastSearch
+        func rejected(_ command: String, _ expected: String?) async throws {
+            var message: String?
+            do { try await commands.execute(command) } catch { message = error.localizedDescription }
+            guard let message else { throw CommandLanguageError("\(command) was accepted") }
+            if let expected { try check(message == expected, message) }
+        }
+        try await rejected("search zzzz-nothing", ListSearch.noMatch("zzzz-nothing"))
+        try check(found.selectedPositions == IndexSet(integer: 1), "a no-match search moved the selection")
+        navigation.lastSearch = term
+        // The server rejects the term, so the selection and the last search stay.
+        try await rejected("search \"year:notanumber\"", "invalid filter at UTF-8 byte 5: expected a 4-digit year or an ascending range like 1970..1979")
+        try check(found.selectedPositions == IndexSet(integer: 1) && navigation.lastSearch == term,
+                  "an invalid term changed the selection or the last search")
+        try await commands.execute("go albums")
+        try await rejected("search-next", "Search requires a track list.")
+        try await commands.execute("go songs")
+        try await commands.execute("selection-clear")
+        cases.append("search-selects-without-filtering")
         try await commands.execute("settings keys")
         try check(navigation.settingsTab == .keys, "settings keys did not open the tab")
         let lyricsWasVisible = player.lyrics.isVisible
