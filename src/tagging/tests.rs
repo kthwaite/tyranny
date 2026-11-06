@@ -1364,6 +1364,63 @@ fn a_track_total_only_in_another_tag_is_proposed_and_reverted_whole() {
     assert_eq!(after.copies, before.copies);
 }
 
+/// ID3v2.3 keeps a date as `TYER` and `TDAT`, so "2001-05" would read back as
+/// "2001". The revert check would then call the file changed, for every field.
+#[test]
+fn a_month_date_is_not_written_to_id3v23_and_revert_still_works() {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile;
+    use lofty::mpeg::MpegFile;
+    use lofty::tag::TagExt;
+    let album = LibraryFixture::new(&[(
+        "tone.mp3",
+        &[
+            (TagField::MusicbrainzReleaseId, A),
+            (TagField::TrackNumber, "1"),
+            (TagField::Date, "1999"),
+        ],
+    )]);
+    let path = &album.files[0];
+    let mut reader = std::fs::File::open(path).unwrap();
+    let tag = MpegFile::read_from(&mut reader, ParseOptions::new())
+        .unwrap()
+        .remove_id3v2()
+        .unwrap();
+    tag.save_to_path(path, WriteOptions::default().use_id3v23(true))
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap()[..4], *b"ID3\x03");
+    let before = read_tags(path).unwrap();
+    assert_eq!(before.primary[&TagField::Date], "1999");
+
+    let server = HttpFixture::new(|_| {
+        let release = String::from_utf8(fixture("release-a.json")).unwrap();
+        json(200, release.replace("2001-05-14", "2001-05").into_bytes())
+    });
+    let mut engine = engine(&album, &server);
+    let proposal = engine
+        .lookup(&request(&album), &Cancellation::new(), deadline())
+        .unwrap();
+    let track = &proposal.tracks[0];
+    assert!(
+        track.unwritable_fields.contains(&TagField::Date),
+        "{track:?}"
+    );
+    assert!(
+        track.changes.iter().all(|c| c.field != TagField::Date),
+        "{track:?}"
+    );
+
+    let (applied, _) = engine
+        .apply(&apply_request(&proposal, &[]), &running())
+        .unwrap();
+    assert_eq!(outcomes(&applied), [WRITTEN]);
+    assert_eq!(read_tags(path).unwrap().primary[&TagField::Date], "1999");
+
+    let (reverted, _) = engine.revert(applied.edit_id.unwrap(), &running()).unwrap();
+    assert_eq!(outcomes(&reverted), [WRITTEN], "{reverted:?}");
+    assert_eq!(read_tags(path).unwrap().primary, before.primary);
+}
+
 #[test]
 fn revert_restores_what_the_write_removed() {
     let album = mp3_with_ape_track_pair();

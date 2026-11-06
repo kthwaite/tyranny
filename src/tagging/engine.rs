@@ -12,7 +12,10 @@ use super::{
     musicbrainz::{MusicBrainz, Release, SearchQuery, is_mbid},
     proposal::{Proposal, Proposals, ProposedFile, ReleaseCache},
     safe_write::{FileStamp, WriteError, stamp, write_safely},
-    tags::{FileTags, TagEdit, TagKind, read_tags, unwritable_fields_in, writable_format},
+    tags::{
+        FileTags, TagEdit, TagKind, read_tags, unwritable_fields_in, unwritable_value,
+        writable_format,
+    },
 };
 use crate::cancel::Cancellation;
 use crate::library_types::TrackMetadata;
@@ -728,9 +731,10 @@ fn propose_file(
     };
     let unwritable = unwritable_fields_in(&tags);
     let values = proposed(release, at);
-    let (blocked, mut writable): (Vec<_>, Vec<_>) = changes(&tags, &values)
-        .into_iter()
-        .partition(|change| unwritable.contains(&change.field));
+    let (blocked, mut writable): (Vec<_>, Vec<_>) =
+        changes(&tags, &values).into_iter().partition(|change| {
+            unwritable.contains(&change.field) || unwritable_value(&tags, change.field, &change.new)
+        });
     row.unwritable_fields = blocked.into_iter().map(|change| change.field).collect();
     let mut changed: BTreeSet<TagField> = writable.iter().map(|change| change.field).collect();
     // Writing one half of a number pair can drop the other half from another

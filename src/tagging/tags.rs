@@ -325,6 +325,12 @@ pub fn unwritable_fields_in(tags: &FileTags) -> Vec<TagField> {
     fields
 }
 
+/// ID3v2.3 keeps a date as `TYER` and `TDAT`, which holds a day and a month
+/// together. A month without a day reads back as the year alone.
+pub fn unwritable_value(tags: &FileTags, field: TagField, value: &str) -> bool {
+    tags.id3v23 && field == TagField::Date && value.len() == "YYYY-MM".len()
+}
+
 fn item_key(field: TagField) -> ItemKey {
     match field {
         TagField::Title => ItemKey::TrackTitle,
