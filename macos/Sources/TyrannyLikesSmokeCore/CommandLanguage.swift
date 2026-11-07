@@ -246,7 +246,8 @@ public enum CommandLanguage {
         }
         let prefix = tokens.removeLast()
         let stem = colon + tokens.map(quote).joined(separator: " ") + " "
-        // Unique by bytes, as the server names playlists: `String ==` joins canonically equal names.
+        // Unique by bytes. The server keeps playlist names apart whose lowercase forms
+        // differ in bytes, so canonically equal names can both exist; `String ==` joins them.
         var seen = Set<[UInt8]>()
         let unique = candidates.filter { seen.insert(Array($0.utf8)).inserted }
         let sorted = unique.sorted { $0 < $1 || (!($1 < $0) && $0.utf8.lexicographicallyPrecedes($1.utf8)) }

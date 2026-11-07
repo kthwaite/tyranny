@@ -213,9 +213,10 @@ import Testing
         #expect(CommandLanguage.registry.first { $0.id == .history }?.summary == "Pick a previous command.")
     }
 
-    /// The server names playlists by bytes. Names that are only canonically equal each get a row.
+    /// The server keeps playlist names apart by their lowercase bytes, so "\u{C5}" and "A\u{30A}"
+    /// can both exist. Names that are only canonically equal each get a row.
     @Test func playlistCompletionsKeepNamesThatDifferInBytes() {
-        let rows = CommandLanguage.suggestions("playlist-open ", playlistNames: ["\u{C5}", "A\u{30A}", "\u{212B}", "A\u{30A}"])
-        #expect(rows.map { $0.value.unicodeScalars.map(\.value) }.sorted { $0.lexicographicallyPrecedes($1) } == [[0x41, 0x30A], [0xC5], [0x212B]])
+        let rows = CommandLanguage.suggestions("playlist-open ", playlistNames: ["\u{C5}", "A\u{30A}", "A\u{30A}"])
+        #expect(rows.map { $0.value.unicodeScalars.map(\.value) }.sorted { $0.lexicographicallyPrecedes($1) } == [[0x41, 0x30A], [0xC5]])
     }
 }
