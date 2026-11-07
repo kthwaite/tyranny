@@ -74,4 +74,18 @@ import Testing
         #expect(throws: StationFileError.self) { try StationFile.parse("http://a.example/s", fileName: "a.txt") }
         #expect(throws: StationFileError.self) { try StationFile.parse("http://a.example/s", fileName: "noextension") }
     }
+
+    /// A mark after a delimiter joins its grapheme. The file is read by scalar.
+    @Test func delimitersBeforeAMarkStillCount() throws {
+        func names(_ text: String, _ fileName: String) throws -> [[UInt32]] {
+            try StationFile.parse(text, fileName: fileName).map { $0.name.unicodeScalars.map(\.value) }
+        }
+        let name: [UInt32] = [0x301, 0x4E]
+        #expect(try names("#EXTINF:-1,\u{301}N\nhttp://a.example/s", "a.m3u") == [name])
+        #expect(try names("#EXTINF:\u{301}-1,\u{301}N\nhttp://a.example/s", "a.m3u") == [name])
+        #expect(try names("#EXTINF:-1,\u{301}N\n#\u{200D}\nhttp://a.example/s", "a.m3u") == [name])
+        #expect(try names("File1=http://a.example/s\nTitle1=\u{301}N", "a.pls") == [name])
+        let urls = try StationFile.parse("http://\u{301}a.example/s\nhttp://b.example/s", fileName: "a.m3u").map(\.url)
+        #expect(urls.count == 2)
+    }
 }
