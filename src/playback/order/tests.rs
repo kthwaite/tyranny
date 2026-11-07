@@ -1022,3 +1022,39 @@ fn clearing_after_an_entry_heard_to_its_end_counts_its_play() -> anyhow::Result<
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+/// The same when a repeat change decides again what follows.
+#[test]
+fn a_repeat_change_after_an_entry_heard_to_its_end_counts_its_play() -> anyhow::Result<()> {
+    let directory = scratch("repeat-heard")?;
+    let (mut player, mut events) = crossed_into_entry_two(&directory)?;
+    player.set_repeat(RepeatMode::All);
+    player.pump()?;
+    events.extend(player.take_play_events());
+    assert_eq!(
+        first_play(&events),
+        (true, Some(EndReason::Finished)),
+        "{events:?}"
+    );
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// The same when a move gives the other entries fresh tokens.
+#[test]
+fn a_move_after_an_entry_heard_to_its_end_counts_its_play() -> anyhow::Result<()> {
+    let directory = scratch("move-heard")?;
+    let (mut player, mut events) = crossed_into_entry_two(&directory)?;
+    player.move_before(3, Some(1), 1)?;
+    player.pump()?;
+    events.extend(player.take_play_events());
+    assert_eq!(
+        first_play(&events),
+        (true, Some(EndReason::Finished)),
+        "{events:?}"
+    );
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}

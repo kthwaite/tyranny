@@ -1542,6 +1542,8 @@ impl Player {
     }
 
     fn rebuild_future(&mut self, current: Option<u64>) {
+        // Count what output heard first: a pass with an invalid token never counts.
+        self.count_heard();
         for entry in &mut self.queue {
             if Some(entry.id) != current {
                 entry.token.invalidate();
@@ -1553,6 +1555,8 @@ impl Player {
     }
 
     fn replace_future_tokens(&mut self, current: Option<u64>, tokens: Vec<Arc<TrackToken>>) {
+        // Count what output heard first: a pass with an invalid token never counts.
+        self.count_heard();
         for (entry, token) in self.queue.iter_mut().zip(tokens) {
             if Some(entry.id) != current {
                 entry.token.invalidate();
