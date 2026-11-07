@@ -151,6 +151,8 @@ fn every_format_fixture_decodes_to_eof() {
     // tone.spx is the exception: the CLI decodes its final Ogg Speex packet
     // whole, while `Decoder` cuts it to the duration the end granule gives, so
     // its reference is the packet durations' sum (the 0.25 s source exactly).
+    // tone-heaac.caf is another: the CLI applies its core-rate priming and
+    // remainder as output samples, so its reference is the CAF packet table.
     // Trackers use a direct libopenmpt reference at 48 kHz stereo, all subsongs.
     let mut failures = Vec::new();
     let mut buffer = vec![Frame::default(); 4096];
@@ -356,6 +358,55 @@ fn heaac_caf_seeks_land_on_the_requested_segment() {
             .unwrap_or_else(|error| panic!("seek to {target}: {error:#}"));
         let frames = read_exact(&mut decoder, 6_000);
         assert_eq!(step_segment(&frames), segment, "seek to {target}");
+    }
+}
+
+#[test]
+fn heaac_caf_trims_priming_and_remainder_at_the_output_rate() {
+    // The CAF packet table gives priming and remainder frames at the 24 kHz core
+    // rate; each is two output samples. A linear decode and a decode after a seek
+    // both hold the valid frames, plus the part of a remainder longer than one
+    // 1024-frame packet: side data can cut only the final packet. tone-heaac.caf
+    // has a remainder of 1104 (80 kept), heaac-steps.caf 1376 (352 kept).
+    for (name, valid, kept) in [
+        ("formats/tone-heaac.caf", 12_000, 160),
+        ("seek/heaac-steps.caf", STEP_SEGMENTS * STEP_FRAMES, 704),
+    ] {
+        let frames = valid + kept;
+        let path = fixture_root().join(name);
+        let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+        let header = linear.duration_frames();
+        let linear = decode_to_eof(&mut linear);
+        let mut sought = Decoder::open(&path, GainMode::Off).unwrap();
+        sought.seek(0).unwrap();
+        let sought = decode_to_eof(&mut sought);
+        assert_eq!(
+            (header, linear, sought),
+            (Some(valid as u64), frames, frames),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn heaac_caf_seeks_decode_what_a_linear_decode_holds_there() {
+    let path = fixture_root().join("seek/heaac-steps.caf");
+    let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+    let all = read_exact(&mut linear, STEP_SEGMENTS * STEP_FRAMES);
+    for target in [6_000, 30_000, 61_000, 100_000] {
+        let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        decoder.seek(target as u64).unwrap();
+        let frames = read_exact(&mut decoder, 4_800);
+        let worst = frames
+            .iter()
+            .zip(&all[target..])
+            .map(|(a, b)| (a[0] - b[0]).abs().max((a[1] - b[1]).abs()))
+            .fold(0.0f32, f32::max);
+        eprintln!("seek {target}: worst difference {worst}");
+        assert!(
+            worst < 0.01,
+            "seek {target}: worst sample difference {worst}"
+        );
     }
 }
 

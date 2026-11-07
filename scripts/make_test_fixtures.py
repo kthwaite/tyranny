@@ -217,6 +217,29 @@ def packet_frames(path):
     return total // den
 
 
+def caf_frames(path):
+    """Frames a CAF decodes to at the engine rate: the packet table's valid frames,
+    plus the part of the remainder before the final packet, which side data cannot
+    cut. Its counts are at the desc rate (the core rate for HE-AAC)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    pos, desc, pakt = 8, None, None
+    while pos + 12 <= len(data):
+        kind, size = data[pos:pos + 4], struct.unpack(">q", data[pos + 4:pos + 12])[0]
+        body = data[pos + 12:pos + 12 + size] if size >= 0 else data[pos + 12:]
+        if kind == b"desc":
+            desc = struct.unpack(">d4sIIIII", body[:32])
+        elif kind == b"pakt":
+            pakt = struct.unpack(">qqii", body[:24])
+        if size < 0:
+            break
+        pos += 12 + size
+    rate, frames_per_packet = desc[0], desc[4]
+    _, valid, _, remainder = pakt
+    scale = FORMAT_RATE / rate
+    return int((valid + max(0, remainder - frames_per_packet)) * scale)
+
+
 def probe(path):
     out = run(["ffprobe", "-v", "error", "-select_streams", "a:0",
                "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", path])
@@ -601,7 +624,7 @@ def main():
         # differs. HE-AAC in CAF reports packet durations at the SBR core rate.
         makers.append(("tone-heaac", "caf", None, FORMAT_SECONDS,
                        lambda dst: run([af, "-f", "caff", "-d", "aach", "-b", "64000", fsrc, dst]),
-                       lambda path: cli_frames(ff, path)))
+                       caf_frames))
         missing = []
         for stem, ext, codec, seconds, make, count_frames in makers:
             rel = "formats/%s.%s" % (stem, ext)
@@ -620,6 +643,8 @@ def main():
                      "seconds": seconds, "frames": frames}
             if count_frames is packet_frames:
                 entry["frames_from"] = "packet durations"
+            elif count_frames is caf_frames:
+                entry["frames_from"] = "CAF packet table"
             manifest["formats"]["files"].append(entry)
         if missing:
             die("cannot produce extensions: " + "; ".join(missing))

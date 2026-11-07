@@ -363,7 +363,8 @@
         "rate": 48000,
         "channels": 2,
         "seconds": 0.25,
-        "frames": 15216
+        "frames": 12160,
+        "frames_from": "CAF packet table"
       },
       {
         "extension": "mod",
