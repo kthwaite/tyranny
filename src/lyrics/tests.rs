@@ -203,7 +203,15 @@ fn embedded_uslt_and_lyrics_precede_provider_and_invalidate_on_file_change() {
 /// A FLAC of `samples` frames at 48 kHz. Its duration is `samples / 48000`, in full float precision.
 fn tagged_samples(path: &Path, samples: u32) {
     let output = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi"])
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+        ])
         .args(["-i", "anullsrc=r=48000:cl=stereo", "-af"])
         .arg(format!("atrim=end_sample={samples}"))
         .args(["-metadata", "title=Fixture Title"])
@@ -229,7 +237,12 @@ fn online_result_survives_a_duration_that_needs_an_exact_float_parser() {
     let mut engine = fixture.engine(Ok(provider));
     let first = lyrics(engine.request(request(), &Cancellation::new()));
     assert_eq!(first.status, LyricsStatus::Ready);
-    assert!(server.join().unwrap().contains("duration=1.1261041666666667"));
+    assert!(
+        server
+            .join()
+            .unwrap()
+            .contains("duration=1.1261041666666667")
+    );
     drop(engine);
     let mut offline = fixture.engine(Err("offline provider must not run".into()));
     assert_eq!(

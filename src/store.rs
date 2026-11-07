@@ -844,7 +844,10 @@ mod tests {
             },
             ..Settings::default()
         };
-        assert_eq!(decode_settings(&serde_json::to_string(&settings)?)?, settings);
+        assert_eq!(
+            decode_settings(&serde_json::to_string(&settings)?)?,
+            settings
+        );
         Ok(())
     }
 
