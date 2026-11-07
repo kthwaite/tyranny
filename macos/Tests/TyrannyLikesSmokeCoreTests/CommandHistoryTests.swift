@@ -9,6 +9,12 @@ import Testing
         #expect(history.entries == ["go albums", "seek +1m"])
     }
 
+    /// A mark after the colon joins its grapheme. The colon is still dropped.
+    @Test func normalisedDropsAColonBeforeAMark() {
+        #expect(CommandHistory.normalised(" :\u{903} ").unicodeScalars.elementsEqual("\u{903}".unicodeScalars))
+        #expect(CommandHistory.normalised(":\u{301}next").unicodeScalars.elementsEqual("\u{301}next".unicodeScalars))
+    }
+
     @Test func recordSkipsEmptyAndHistory() {
         var history = CommandHistory()
         history.record("  "); history.record(":"); history.record(":history"); history.record("history")

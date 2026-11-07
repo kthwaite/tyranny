@@ -405,6 +405,17 @@ private func fixedRows(_ count: Int) -> [CommandSuggestion] {
         #expect(calls.submitted == ["search beatles"])
     }
 
+    /// A mark after the slash joins its grapheme. The slash is still dropped.
+    @Test func searchTermDropsTheSlashBeforeAMark() async throws {
+        defer { clear() }
+        let model = model()
+        model.open(.search)
+        model.text = "/\u{301}x"
+        await model.submitText()
+        let submitted = try #require(calls.submitted.first)
+        #expect(submitted.unicodeScalars.elementsEqual(("search " + CommandLanguage.quote("\u{301}x")).unicodeScalars))
+    }
+
     @Test func searchFailureStaysInlineAndKeepsText() async {
         defer { clear() }
         let model = model(failure: "No match for “x”.")

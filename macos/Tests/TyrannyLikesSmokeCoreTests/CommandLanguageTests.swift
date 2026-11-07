@@ -212,4 +212,14 @@ import Testing
         #expect(try CommandLanguage.parse(":history") == ParsedCommand(id: .history, arguments: []))
         #expect(CommandLanguage.registry.first { $0.id == .history }?.summary == "Pick a previous command.")
     }
+
+    /// A mark after the leading space or colon joins that grapheme. The line is read by scalar.
+    @Test func leadingSpaceAndColonAreReadByScalar() throws {
+        #expect((try? CommandLanguage.parse(" \u{301}next")) == nil)
+        #expect((try? CommandLanguage.parse("\u{2003}\u{FE0F}: next")) == nil)
+        #expect(try CommandLanguage.parse(" :next") == ParsedCommand(id: .next, arguments: []))
+        #expect(CommandLanguage.suggestions(" \u{903}queue-c").isEmpty)
+        #expect(CommandLanguage.suggestions(" \u{301}:queue-c").isEmpty)
+        #expect(CommandLanguage.suggestions(" :queue-c").map(\.line) == [":queue-clear"])
+    }
 }

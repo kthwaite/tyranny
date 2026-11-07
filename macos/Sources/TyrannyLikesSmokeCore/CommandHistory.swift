@@ -24,7 +24,8 @@ public struct CommandHistory: Equatable, Sendable {
     /// Trims whitespace, drops one leading `:`, and trims again.
     public static func normalised(_ text: String) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if result.hasPrefix(":") { result.removeFirst() }
+        // By scalar: a mark after the colon joins its grapheme.
+        if result.unicodeScalars.first == ":" { result.unicodeScalars.removeFirst() }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
