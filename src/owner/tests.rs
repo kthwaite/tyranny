@@ -1339,7 +1339,7 @@ enum EndSource {
     /// A WAV whose header duration is its decoded length.
     Wav,
     /// A file in `tests/fixtures/formats`. Its decoded length is greater than
-    /// its header duration.
+    /// its header duration, or its header has no duration.
     Format(&'static str),
 }
 impl Fixture {
@@ -1388,11 +1388,11 @@ impl Fixture {
             EndSource::Wav => self.music("a.wav"),
             EndSource::Format(name) => self.music(name),
         };
-        // A fresh decoder knows only the header duration.
+        // A fresh decoder knows only the header duration. None or 0 is unknown.
         let header = crate::decoder::Decoder::open(&path, crate::decoder::GainMode::Off)
             .unwrap()
             .duration_frames()
-            .unwrap();
+            .unwrap_or(0);
         match source {
             EndSource::Wav => assert_eq!((state.position_frames, header), (4_800, 4_800)),
             EndSource::Format(_) => assert!(
