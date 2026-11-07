@@ -229,9 +229,12 @@ impl Decoder {
             "invalid audio time base"
         );
         let origin_ts = (stream.start_time() != ffi::AV_NOPTS_VALUE).then_some(stream.start_time());
+        // A zero container duration is unknown, not an empty source. Musepack SV8
+        // counts whole 73728-frame ticks, so a short file reads 0. RealMedia
+        // files can carry 0 in their PROP header.
         let duration = (stream.duration() >= 0)
             .then(|| rescale(stream.duration(), time_base, output_time_base()))
-            .filter(|duration| *duration >= 0)
+            .filter(|duration| *duration > 0)
             .map(|duration| duration as u64);
         let (display, mut metadata) = playback_metadata(&input, &stream, path);
         let parameters = stream.parameters();
