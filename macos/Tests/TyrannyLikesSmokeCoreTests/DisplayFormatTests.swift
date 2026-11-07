@@ -84,6 +84,12 @@ private func scan(_ phase: String, discovered: Int = 0, processed: Int = 0, tota
         #expect(DisplayFormat.abbreviatedPath("/Users/kitty", home: "/Users/kit") == "/Users/kitty")
     }
 
+    /// File URLs can give a path in NFD under an NFC home. The home still compares canonically.
+    @Test func abbreviatedPathReplacesAHomeInAnotherNormalForm() {
+        let got = DisplayFormat.abbreviatedPath("/Users/Zoe\u{308}/x", home: "/Users/Zo\u{EB}")
+        #expect(got.unicodeScalars.elementsEqual("~/x".unicodeScalars))
+    }
+
     @Test func abbreviatedPathReplacesHome() {
         #expect(DisplayFormat.abbreviatedPath("/Users/kit/Music", home: "/Users/kit") == "~/Music")
         #expect(DisplayFormat.abbreviatedPath("/Users/kit", home: "/Users/kit") == "~")
