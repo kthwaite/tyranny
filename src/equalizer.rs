@@ -213,8 +213,8 @@ impl Biquad {
     fn process(&mut self, frame: &mut [f64; 2]) {
         for (channel, sample) in frame.iter_mut().enumerate() {
             let input = *sample;
-            // Also flush the output: with its histories flushed, a section still
-            // scales its input, which can reach the subnormal range in a cascade.
+            // Also flush the output. Two normal terms can cancel to a subnormal
+            // sum, for example b0 * 2.5e-24 + z1 at -4.85e-24 in a second section.
             let output = flush_tiny(self.b0 * input + self.z1[channel]);
             self.z1[channel] = flush_tiny(self.b1 * input - self.a1 * output + self.z2[channel]);
             self.z2[channel] = flush_tiny(self.b2 * input - self.a2 * output);
@@ -1088,8 +1088,8 @@ mod tests {
 
     #[test]
     fn cascaded_tails_decay_without_denormals() {
-        // A later section can scale an input just above the flush level down
-        // into the f32 subnormal range after its own history has flushed.
+        // In a cascade, a later section's two terms can cancel to a value in the
+        // f32 subnormal range, though each term is normal.
         let band = |kind| EqualizerBand {
             kind,
             gain_db: 6.0,
