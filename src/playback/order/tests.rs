@@ -199,6 +199,43 @@ fn a_selection_never_inherits_a_planned_fresh_pass() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A seek in the moment after output starts a pass, before a pump, notes
+/// that pass. From `fix/pt-seek-started-pass`, whose fix this one replaces.
+#[test]
+fn a_seek_keeps_a_pass_output_just_started() -> anyhow::Result<()> {
+    let directory = scratch("seek-started")?;
+    let source = silence(&directory, 2_400)?;
+    let mut player = clocked(&directory, vec![source; 2])?;
+    player.set_repeat(RepeatMode::All);
+    player.play();
+    // Pump until both entries were heard, with PCM of the wrap prepared.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut advances = Vec::new();
+    while advances.len() < 2 || player.snapshot().output.buffered_frames < 2_400 {
+        anyhow::ensure!(Instant::now() < deadline, "timed out: {advances:?}");
+        player.pump()?;
+        advances.extend(player.take_advances());
+    }
+    assert_eq!(advances[..2], [(1, Vec::new()), (2, Vec::new())]);
+    // No pump while output starts the wrap's pass over entry 1.
+    while player.snapshot().current_id != Some(1) {
+        anyhow::ensure!(Instant::now() < deadline, "output did not wrap");
+        thread::sleep(Duration::from_millis(1));
+    }
+    player.seek(100)?;
+    while advances.len() < 3 {
+        anyhow::ensure!(Instant::now() < deadline, "timed out: {advances:?}");
+        player.pump()?;
+        advances.extend(player.take_advances());
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Output started the fresh pass: its context clears.
+    assert_eq!(advances[2], (1, vec![1, 2]));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
 /// A clocked capture player over `sources`.
 fn clocked(directory: &std::path::Path, sources: Vec<PathBuf>) -> anyhow::Result<Player> {
     Player::new(
