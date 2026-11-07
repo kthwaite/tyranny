@@ -297,6 +297,17 @@ fn decode_to_eof(decoder: &mut Decoder) -> usize {
 }
 
 #[test]
+fn caf_header_durations_count_frames_at_the_packet_table_rate() {
+    // The CAF packet table of HE-AAC counts 6000 frames at the 24 kHz core rate:
+    // 0.25 s, 12000 frames at 48 kHz. FFmpeg times the stream at the output rate.
+    for name in ["tone-heaac.caf", "tone.caf", "tone.m4a"] {
+        let path = fixture_root().join("formats").join(name);
+        let decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        assert_eq!(decoder.duration_frames(), Some(12_000), "{name}");
+    }
+}
+
+#[test]
 fn seeking_back_after_eof_decodes_like_a_fresh_seek() {
     // HE-AAC in CAF only matches a frame duration on its end-trimmed final frame.
     // That match must not carry over a seek and halve the frames decoded after it.

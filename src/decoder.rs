@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BLOCK_FRAMES, Frame, SAMPLE_RATE,
-    metadata::{PlaybackMetadata, playback_metadata},
+    metadata::{PlaybackMetadata, duration_time_base, playback_metadata},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,8 +229,9 @@ impl Decoder {
             "invalid audio time base"
         );
         let origin_ts = (stream.start_time() != ffi::AV_NOPTS_VALUE).then_some(stream.start_time());
+        let duration_time_base = duration_time_base(&input, &stream, path);
         let duration = (stream.duration() >= 0)
-            .then(|| rescale(stream.duration(), time_base, output_time_base()))
+            .then(|| rescale(stream.duration(), duration_time_base, output_time_base()))
             .filter(|duration| *duration >= 0)
             .map(|duration| duration as u64);
         let (display, mut metadata) = playback_metadata(&input, &stream, path);
