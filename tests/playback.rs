@@ -578,8 +578,12 @@ fn repeat_all_album_run_wraps_without_reaching_following_entries() {
     player.commit_selection(prepared);
     player.play();
     let deadline = Instant::now() + Duration::from_secs(5);
-    // The run wraps twice, and never reaches entry 1 or entry 4.
-    while player.started_entries().len() < 5 {
+    // The run wraps twice, and never reaches entry 1 or entry 4. A start event
+    // comes before output publishes its position: wait until the snapshot
+    // also shows the latest pass, which `set_repeat` then keeps current.
+    while player.started_entries().len() < 5
+        || player.snapshot().current_id != player.started_entries().last().copied()
+    {
         assert!(
             Instant::now() < deadline,
             "run did not wrap: {:?}",
