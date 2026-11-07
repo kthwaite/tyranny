@@ -316,14 +316,17 @@ impl Player {
     /// The queue as the play order sees it. An entry is played once heard in
     /// the current pass over its context, or once a pass of it is prepared.
     fn slots(&self) -> Vec<Slot> {
-        // Passes from an unheard fresh pass on make up the new pass.
+        // Passes from an unheard fresh pass on make up the new pass. Passes
+        // before the latest heard one ended, and are not prepared: a cut notes
+        // passes without dropping them.
         let fresh = self
             .passes
             .iter()
             .rposition(|pass| pass.fresh.is_some() && !pass.heard);
+        let current = self.passes.iter().rposition(|pass| pass.heard);
         let prepared: HashSet<u64> = self
             .passes
-            .range(fresh.unwrap_or(0)..)
+            .range(fresh.max(current).unwrap_or(0)..)
             .map(|pass| pass.id)
             .collect();
         self.queue
@@ -449,17 +452,10 @@ impl Player {
         }
     }
 
-    /// Notes and counts what output played since the last `hear`, as `hear`
-    /// does. Passes are about to be dropped, and a pass that output started,
-    /// reached its threshold or ended in the meantime must not be lost. The
-    /// passes before the latest one ended with the pass over their context
-    /// before it: they go, so what follows is decided in the latest one's.
+    /// Notes and counts what output played since the last `hear`. Passes are
+    /// about to be dropped, and a pass that output started, reached its
+    /// threshold or ended in the meantime must not be lost.
     pub(crate) fn count_heard(&mut self) {
-        self.hear();
-    }
-
-    /// `count_heard` that keeps every pass, for a caller that holds an index.
-    fn count_kept(&mut self) {
         let output = self.output.snapshot();
         match self
             .passes
@@ -579,7 +575,7 @@ impl Player {
             return;
         }
         // What output played so far belongs to the earlier play.
-        self.count_kept();
+        self.count_heard();
         if let Some(play) = self.passes[index].play.take() {
             self.close(play, EndReason::Finished);
             self.open_play_at(index, unix_now());
