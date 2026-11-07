@@ -77,6 +77,13 @@ private func scan(_ phase: String, discovered: Int = 0, processed: Int = 0, tota
         #expect(DisplayFormat.scanLabel(scan("idle"), root: nil) == nil)
     }
 
+    /// A mark after the slash joins its grapheme. The home prefix is still replaced.
+    @Test func abbreviatedPathReplacesHomeBeforeAMark() {
+        let got = DisplayFormat.abbreviatedPath("/Users/kit/\u{301}x", home: "/Users/kit")
+        #expect(got.unicodeScalars.elementsEqual("~/\u{301}x".unicodeScalars))
+        #expect(DisplayFormat.abbreviatedPath("/Users/kitty", home: "/Users/kit") == "/Users/kitty")
+    }
+
     @Test func abbreviatedPathReplacesHome() {
         #expect(DisplayFormat.abbreviatedPath("/Users/kit/Music", home: "/Users/kit") == "~/Music")
         #expect(DisplayFormat.abbreviatedPath("/Users/kit", home: "/Users/kit") == "~")

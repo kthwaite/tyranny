@@ -92,11 +92,13 @@ public enum DisplayFormat {
     }
 
     /// Replaces the home directory prefix with "~".
+    /// Matches by scalar, as a file path: a mark after `/` joins its grapheme.
     public static func abbreviatedPath(_ path: String, home: String) -> String {
         guard !home.isEmpty else { return path }
         if path == home { return "~" }
-        let prefix = home.hasSuffix("/") ? home : home + "/"
-        return path.hasPrefix(prefix) ? "~/" + path.dropFirst(prefix.count) : path
+        let prefix = (home.unicodeScalars.last == "/" ? home : home + "/").unicodeScalars
+        guard path.unicodeScalars.starts(with: prefix) else { return path }
+        return "~/" + String(Substring(path.unicodeScalars.dropFirst(prefix.count)))
     }
 
     /// A column browser's first row: "All (12 Genres)".
