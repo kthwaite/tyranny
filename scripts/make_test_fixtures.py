@@ -517,6 +517,34 @@ def external_makers(ff, tools, tmp, pcm):
     ]
 
 
+# HE-AAC in CAF, long enough that seek preroll does not reach back to the start.
+# Segment k of SEEK_SEGMENTS is a 440 Hz sine at amplitude SEEK_STEP * (k + 1), the
+# same on both channels, so the RMS of decoded audio names the segment it came from.
+SEEK_RATE = 48000
+SEEK_SEGMENTS = 10
+SEEK_SEGMENT_FRAMES = 12000
+SEEK_STEP = 0.05
+
+
+def seek_fixtures(af, fixtures, manifest):
+    rel = "seek/heaac-steps.caf"
+    dst = os.path.join(fixtures, rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    out = bytearray()
+    for n in range(SEEK_SEGMENTS * SEEK_SEGMENT_FRAMES):
+        x = SEEK_STEP * (n // SEEK_SEGMENT_FRAMES + 1) * math.sin(2 * math.pi * 440 * n / SEEK_RATE)
+        v = struct.pack("<h", max(-32768, min(32767, int(math.floor(x * 32768.0 + 0.5)))))
+        out += v + v
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "steps.wav")
+        write_wav(src, bytes(out), SEEK_RATE)
+        run([af, "-f", "caff", "-d", "aach", "-b", "64000", src, dst])
+    manifest["seek"] = {
+        "file": rel, "encoder": "afconvert -f caff -d aach -b 64000", "rate": SEEK_RATE,
+        "segments": SEEK_SEGMENTS, "segment_frames": SEEK_SEGMENT_FRAMES,
+        "description": "segment k is a 440 Hz sine at amplitude %.2f * (k + 1) on both channels" % SEEK_STEP}
+
+
 def stream_fixtures(ff, fixtures):
     """Four seconds of generated 440 Hz tone; no encoder is needed by tests."""
     directory = os.path.join(fixtures, "streams")
@@ -629,6 +657,7 @@ def main():
                 "lengths": LENGTHS[rate], "encoder": label})
 
     stream_fixtures(ff, fixtures)
+    seek_fixtures(af, fixtures, manifest)
     add_tracker_fixtures(fixtures, manifest, tracker_library)
 
     with open(os.path.join(fixtures, "manifest.json"), "w") as f:

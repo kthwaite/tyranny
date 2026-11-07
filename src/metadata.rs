@@ -110,7 +110,7 @@ pub(crate) fn probe_before(
     );
     let mut tags = Tags::default();
     tags.read(&input, &stream)?;
-    let time_base = duration_time_base(&input, &stream, path);
+    let time_base = stream_time_base(&input, &stream, path);
     let duration_ms = duration_ms(stream.duration(), time_base.0, time_base.1)
         .or_else(|| duration_ms(input.duration(), 1, ffmpeg::ffi::AV_TIME_BASE));
     let mut metadata = tags.finish(path)?;
@@ -192,11 +192,13 @@ pub(crate) fn playback_metadata(
     )
 }
 
-/// The time base of `stream.duration()`. A CAF packet table counts frames at
-/// the sample rate of the file's `desc` chunk. FFmpeg times a CAF stream at the
-/// codec's output rate instead, which is twice that rate for AAC with SBR
-/// (HE-AAC, HE-AACv2): their `desc` holds the core rate.
-pub(crate) fn duration_time_base(
+/// The time base of a stream's timestamps and duration. A CAF packet table
+/// counts frames at the sample rate of the file's `desc` chunk, and FFmpeg's CAF
+/// demuxer stamps packets in those units. But it sets the stream time base to
+/// the codec's output rate, which for AAC with SBR (HE-AAC, HE-AACv2) is twice
+/// the core rate in `desc`. Read in that time base, every timestamp, duration
+/// and seek target is half its real value.
+pub(crate) fn stream_time_base(
     input: &ffmpeg::format::context::Input,
     stream: &ffmpeg::format::stream::Stream,
     path: &Path,

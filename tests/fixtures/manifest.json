@@ -696,5 +696,13 @@
         "encoder": "afconvert -f m4af -d aac -b 192000"
       }
     ]
+  },
+  "seek": {
+    "file": "seek/heaac-steps.caf",
+    "encoder": "afconvert -f caff -d aach -b 64000",
+    "rate": 48000,
+    "segments": 10,
+    "segment_frames": 12000,
+    "description": "segment k is a 440 Hz sine at amplitude 0.05 * (k + 1) on both channels"
   }
 }

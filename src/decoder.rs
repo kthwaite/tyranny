@@ -4,9 +4,9 @@
 //! not enabled). Its returned sample count and adjusted timestamps already exclude
 //! that padding. Sample-exact frame durations additionally delimit container edits
 //! when one container tick is no longer than one sample, and only after a packet's
-//! duration has matched its decoded count (CAF gives HE-AAC durations at the SBR
-//! core rate, half of every frame, and so proves them only at its end-trimmed last
-//! frame; the proof resets on seek). This cuts a short final
+//! duration has matched its decoded count (the proof resets on seek). HE-AAC in
+//! CAF is timed at its core rate (`metadata::stream_time_base`), so its ticks are
+//! two samples long and never cut; its end trim is side data. This cuts a short final
 //! packet that has no end-trim side data. FFmpeg 9's mov demuxer sends that trim
 //! only for unfragmented files whose codec has a fixed frame size, so Opus in MP4
 //! and fragmented MP4 rely on the cut, as does Ogg Speex. Neither stream duration
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BLOCK_FRAMES, Frame, SAMPLE_RATE,
-    metadata::{PlaybackMetadata, duration_time_base, playback_metadata},
+    metadata::{PlaybackMetadata, playback_metadata, stream_time_base},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,15 +223,16 @@ impl Decoder {
             .best(ffmpeg::media::Type::Audio)
             .context("source has no audio stream")?;
         let stream_index = stream.index();
-        let time_base = stream.time_base();
+        // Timestamps, durations, seeks and libavcodec's packet time base all use
+        // this one time base (see `stream_time_base` for CAF).
+        let time_base = stream_time_base(&input, &stream, path);
         ensure!(
             time_base.0 > 0 && time_base.1 > 0,
             "invalid audio time base"
         );
         let origin_ts = (stream.start_time() != ffi::AV_NOPTS_VALUE).then_some(stream.start_time());
-        let duration_time_base = duration_time_base(&input, &stream, path);
         let duration = (stream.duration() >= 0)
-            .then(|| rescale(stream.duration(), duration_time_base, output_time_base()))
+            .then(|| rescale(stream.duration(), time_base, output_time_base()))
             .filter(|duration| *duration >= 0)
             .map(|duration| duration as u64);
         let (display, mut metadata) = playback_metadata(&input, &stream, path);
@@ -436,7 +437,7 @@ impl Decoder {
         self.seek_target = Some(target);
         self.alignment_skip = 0;
         // libavcodec rewrites an end-trimmed frame's duration to its kept count, so
-        // a stream can prove its durations only at its last frame (HE-AAC in CAF).
+        // a stream can prove its durations only at its last frame.
         // Prove them again after a seek.
         self.durations_count_samples = false;
         // Actually decode/discard preroll now so seek errors are not deferred
@@ -732,9 +733,9 @@ fn rescale(value: i64, from: Rational, to: Rational) -> i64 {
 
 /// The decoded samples a frame keeps. A sample-exact duration shorter than the
 /// decoded frame cuts it, but only once `proven`: an earlier packet's duration
-/// matched its decoded count, so durations count output samples. CAF reports
-/// HE-AAC durations at the SBR core rate under a full-rate time base, half the
-/// decoded frame on every packet; without the proof each frame would be halved.
+/// matched its decoded count, so durations count output samples. Durations that
+/// count SBR core-rate samples under a full-rate time base are half of every
+/// decoded frame; without the proof each frame would be halved.
 fn valid_samples(
     decoded: usize,
     duration: i64,
@@ -857,7 +858,7 @@ mod tests {
 
     #[test]
     fn core_rate_durations_never_halve_he_aac_frames() {
-        // CAF reports HE-AAC packet durations at the SBR core rate (1024 ticks)
+        // Packet durations at the SBR core rate (1024 ticks), as CAF gives them,
         // under a full-rate time base, while each frame decodes to 2048 samples.
         // No ordinary frame proves the durations, so nothing is cut.
         let mut proven = false;

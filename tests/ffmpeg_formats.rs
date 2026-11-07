@@ -307,10 +307,63 @@ fn caf_header_durations_count_frames_at_the_packet_table_rate() {
     }
 }
 
+/// `seek/heaac-steps.caf` (scripts/make_test_fixtures.py, `seek_fixtures`): ten
+/// segments of 12000 frames; segment k is a 440 Hz sine at amplitude 0.05 * (k + 1).
+const STEP_FRAMES: usize = 12_000;
+const STEP_SEGMENTS: usize = 10;
+
+/// The segment whose amplitude the RMS of `frames` matches.
+fn step_segment(frames: &[Frame]) -> usize {
+    let power = frames
+        .iter()
+        .map(|frame| f64::from(frame[0]).powi(2))
+        .sum::<f64>();
+    let amplitude = (power / frames.len() as f64).sqrt() * std::f64::consts::SQRT_2;
+    ((amplitude / 0.05).round() as usize).saturating_sub(1)
+}
+
+fn read_exact(decoder: &mut Decoder, count: usize) -> Vec<Frame> {
+    let mut frames = vec![Frame::default(); count];
+    let mut filled = 0;
+    while filled < count {
+        let read = decoder.read(&mut frames[filled..]).unwrap();
+        assert_ne!(read, 0, "EOF after {filled} of {count} frames");
+        filled += read;
+    }
+    frames
+}
+
+#[test]
+fn heaac_caf_seeks_land_on_the_requested_segment() {
+    // CAF counts HE-AAC packets at the 24 kHz core rate. Timed at the 48 kHz
+    // output rate, a seek lands at twice its target, and past half the file it
+    // fails as beyond EOF.
+    let path = fixture_root().join("seek/heaac-steps.caf");
+    let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+    for segment in 0..STEP_SEGMENTS {
+        let frames = read_exact(&mut linear, STEP_FRAMES);
+        assert_eq!(
+            step_segment(&frames[3_000..9_000]),
+            segment,
+            "linear segment"
+        );
+    }
+    for segment in [1, 3, 5, 6, 8, 9] {
+        let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        let target = segment * STEP_FRAMES + 3_000;
+        decoder
+            .seek(target as u64)
+            .unwrap_or_else(|error| panic!("seek to {target}: {error:#}"));
+        let frames = read_exact(&mut decoder, 6_000);
+        assert_eq!(step_segment(&frames), segment, "seek to {target}");
+    }
+}
+
 #[test]
 fn seeking_back_after_eof_decodes_like_a_fresh_seek() {
-    // HE-AAC in CAF only matches a frame duration on its end-trimmed final frame.
-    // That match must not carry over a seek and halve the frames decoded after it.
+    // HE-AAC in CAF, timed at the output rate, matched a frame duration only on its
+    // end-trimmed final frame. That match must not carry over a seek and halve the
+    // frames decoded after it. Timed at the core rate, its durations never cut.
     let path = fixture_root().join("formats/tone-heaac.caf");
     let mut fresh = Decoder::open(&path, GainMode::Off).unwrap();
     fresh.seek(0).unwrap();
