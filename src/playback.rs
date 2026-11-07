@@ -33,6 +33,8 @@ struct SourceDecoder {
     file: Option<Decoder>,
     stream: Option<StreamDecoder>,
     initial: Option<crate::metadata::PlaybackMetadata>,
+    /// Selected at or past its end: it reads no PCM.
+    ended: bool,
 }
 
 impl SourceDecoder {
@@ -51,17 +53,22 @@ impl SourceDecoder {
                         album: String::new(),
                         metadata_error: None,
                     }),
+                    ended: false,
                 })
             }
             None => Ok(Self {
                 file: Some(Decoder::open(&entry.path, mode)?),
                 stream: None,
                 initial: None,
+                ended: false,
             }),
         }
     }
 
     fn read(&mut self, destination: &mut [Frame]) -> Result<Option<(usize, bool)>> {
+        if self.ended {
+            return Ok(Some((0, false)));
+        }
         match &mut self.file {
             Some(decoder) => decoder.read(destination).map(|count| Some((count, false))),
             None => self
@@ -1640,11 +1647,15 @@ impl Player {
         })?;
         if frame != 0 {
             // An entry output has finished stays current at its end until output
-            // starts what follows it, so its checkpoint can hold its whole length.
-            if let Some(duration) = decoder.duration_frames() {
-                ensure!(frame <= duration, "seek target exceeds track duration");
+            // starts what follows it, so a checkpoint can hold its decoded length.
+            // That can pass the header duration, which is all a new decoder knows.
+            // A selection at or past the header duration reads nothing: seeking
+            // there can decode a tail that output never played. A zero header
+            // duration is unknown.
+            match decoder.duration_frames().filter(|duration| *duration > 0) {
+                Some(duration) if frame >= duration => decoder.ended = true,
+                _ => decoder.seek(frame)?,
             }
-            decoder.seek(frame)?;
         }
         let metadata = Self::source_metadata(&mut decoder, entry_id, mode);
         Ok(PreparedSelection {
@@ -1699,6 +1710,10 @@ impl Player {
             .context("no current entry to seek")?;
         ensure!(!self.is_stream(id), "live streams cannot seek");
         let prepared = self.prepare_selection(id, frame, self.mode)?;
+        ensure!(
+            !prepared.decoder.ended,
+            "seek target exceeds track duration"
+        );
         self.commit_selection(prepared);
         Ok(())
     }
