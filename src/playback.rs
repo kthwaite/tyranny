@@ -1639,8 +1639,10 @@ impl Player {
             format!("opening queue entry {}: {}", entry.id, entry.path.display())
         })?;
         if frame != 0 {
+            // An entry output has finished stays current at its end until output
+            // starts what follows it, so its checkpoint can hold its whole length.
             if let Some(duration) = decoder.duration_frames() {
-                ensure!(frame < duration, "seek target exceeds track duration");
+                ensure!(frame <= duration, "seek target exceeds track duration");
             }
             decoder.seek(frame)?;
         }

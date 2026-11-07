@@ -1333,6 +1333,88 @@ async fn a_restored_play_is_not_checkpointed_again_until_it_moves() {
     actor.library.shutdown().unwrap();
 }
 
+impl Fixture {
+    /// Plays the one queued entry to its end, pauses, and queues the library
+    /// after it. Output has not started the new entries, so the ended entry stays
+    /// current at its end. Returns the ended entry.
+    async fn ended_then_appended(&self) -> u64 {
+        let first = self.queue_library().await;
+        ok(
+            &self.control(),
+            Command::Play {
+                entry_id: Some(first),
+            },
+        )
+        .await;
+        self.until(|state| state.transport == Transport::Ended)
+            .await;
+        ok(&self.control(), Command::Pause).await;
+        let state = snapshot(&self.control()).await;
+        ok(&self.control(), enqueue(&state)).await;
+        let state = snapshot(&self.control()).await;
+        assert_eq!(
+            (state.current_id, state.position_frames, state.queue_length),
+            (Some(first), 4_800, 2)
+        );
+        first
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_restores_an_entry_checkpointed_at_its_end() {
+    let mut fixture = Fixture::new();
+    fixture.index_frames(&["a"], 4_800).await;
+    let first = fixture.ended_then_appended().await;
+    fixture.stop().await;
+    let saved: (Option<u64>, u64) = rusqlite::Connection::open(fixture.database())
+        .unwrap()
+        .query_row(
+            "SELECT current_id,position_frames FROM control",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(saved, (Some(first), 4_800));
+    fixture.start();
+    let state = snapshot(&fixture.control()).await;
+    assert_eq!(state.error, None);
+    assert_eq!(state.current_id, Some(first));
+    // Play goes on to the entry after the ended one, as it does without the restart.
+    ok(&fixture.control(), Command::Play { entry_id: None }).await;
+    fixture
+        .until(|state| state.current_id == Some(first + 1))
+        .await;
+    // The ended entry does not play again.
+    let plays = fixture.plays();
+    let ended: Vec<_> = plays.iter().filter(|play| play.entry_id == first).collect();
+    assert_eq!(ended.len(), 1, "{plays:?}");
+    assert_eq!(
+        ended[0].end_reason.as_deref(),
+        Some("finished"),
+        "{plays:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gain_change_keeps_an_entry_current_at_its_end() {
+    let fixture = Fixture::new();
+    fixture.index_frames(&["a"], 4_800).await;
+    let first = fixture.ended_then_appended().await;
+    let reply = ask(
+        &fixture.control(),
+        Command::SetGain {
+            mode: crate::decoder::GainMode::Track,
+        },
+    )
+    .await;
+    assert!(matches!(reply, Reply::Ok { .. }), "{reply:?}");
+    assert_eq!(snapshot(&fixture.control()).await.current_id, Some(first));
+    ok(&fixture.control(), Command::Play { entry_id: None }).await;
+    fixture
+        .until(|state| state.current_id == Some(first + 1))
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_closes_other_open_rows_as_stopped() {
     let mut fixture = Fixture::new();
