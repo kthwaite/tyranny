@@ -1108,11 +1108,7 @@ mod tests {
                 },
             ] {
                 let error = store.edit(edit, 4, 4).unwrap_err();
-                assert_eq!(
-                    error.to_string(),
-                    "occurrence order exhausted",
-                    "{error:#}"
-                );
+                assert_eq!(error.to_string(), "occurrence order exhausted", "{error:#}");
             }
             let loaded = store.load()?;
             assert_eq!((loaded.entries.len(), loaded.revision), (2, 3));
