@@ -16,7 +16,8 @@ public struct CommandHistory: Equatable, Sendable {
     public mutating func record(_ text: String) {
         let entry = Self.normalised(text)
         guard !entry.isEmpty, !Self.isHistoryCommand(entry) else { return }
-        entries.removeAll { $0 == entry }
+        // A repeat has the same bytes. Canonically equal text can name a different playlist.
+        entries.removeAll { $0.utf8.elementsEqual(entry.utf8) }
         entries.insert(entry, at: 0)
         if entries.count > Self.limit { entries.removeLast(entries.count - Self.limit) }
     }

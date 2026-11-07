@@ -9,6 +9,13 @@ import Testing
         #expect(history.entries == ["go albums", "seek +1m"])
     }
 
+    /// Commands that are only canonically equal name different playlists, so neither is a repeat.
+    @Test func recordKeepsCommandsThatDifferInBytes() {
+        var history = CommandHistory()
+        history.record("playlist-open \u{C5}"); history.record("playlist-open A\u{30A}"); history.record("playlist-open A\u{30A}")
+        #expect(history.entries.map { Array($0.utf8) } == [Array("playlist-open A\u{30A}".utf8), Array("playlist-open \u{C5}".utf8)])
+    }
+
     @Test func recordSkipsEmptyAndHistory() {
         var history = CommandHistory()
         history.record("  "); history.record(":"); history.record(":history"); history.record("history")
