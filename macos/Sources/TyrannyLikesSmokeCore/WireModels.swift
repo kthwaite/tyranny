@@ -157,6 +157,31 @@ public struct ControlState: Codable, Sendable, Equatable {
                 debugDescription: "Now Playing must identify the authoritative current occurrence.")
         }
     }
+
+    /// Writes every key, `null` for none, as the server does. The decoder requires every key.
+    public func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(sequence, forKey: .sequence)
+        try values.encode(queue_revision, forKey: .queue_revision)
+        try values.encode(playlists_revision, forKey: .playlists_revision)
+        try values.encode(stations_revision, forKey: .stations_revision)
+        try values.encode(queue_length, forKey: .queue_length)
+        try values.encode(current_id, forKey: .current_id)
+        try values.encode(can_next, forKey: .can_next)
+        try values.encode(can_previous, forKey: .can_previous)
+        try values.encode(now_playing, forKey: .now_playing)
+        try values.encode(position_frames, forKey: .position_frames)
+        try values.encode(sample_rate, forKey: .sample_rate)
+        try values.encode(transport, forKey: .transport)
+        try values.encode(settings, forKey: .settings)
+        try values.encode(error, forKey: .error)
+        try values.encode(underruns, forKey: .underruns)
+        try values.encode(library, forKey: .library)
+        try values.encode(history_revision, forKey: .history_revision)
+        try values.encode(stats_revision, forKey: .stats_revision)
+        try values.encode(current_index, forKey: .current_index)
+        try values.encode(upcoming_count, forKey: .upcoming_count)
+    }
 }
 
 public struct LibraryState: Codable, Sendable, Equatable {

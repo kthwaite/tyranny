@@ -212,3 +212,24 @@ private let nowPlayingBase = #""entry_id":1,"title":"T","artist":"A","album":"B"
     let input = try JSONEncoder().encode(StationInput(name: "", url: "http://a.example/s"))
     #expect(try json(String(decoding: input, as: UTF8.self)) == .object(["name": .string(""), "url": .string("http://a.example/s")]))
 }
+
+/// The server writes every key, `null` for none, and the decoder requires every key. Encoding
+/// writes the same keys, so an encoded state decodes again to the same state.
+@Test func controlStateEncodesNullsAndDecodesAgain() throws {
+    let text = """
+        {"sequence":1,"queue_revision":4,"playlists_revision":1,"stations_revision":2,"queue_length":0,
+         "current_id":null,"can_next":false,"can_previous":false,"now_playing":null,
+         "position_frames":0,"sample_rate":48000,"transport":"paused",
+         "settings":{"gain_mode":"off","resume_on_start":false,"volume":100,"repeat":"off","shuffle":false,
+                    "equalizer":{"enabled":false,"preamp_db":0,"bands":[]},"equalizer_presets":[]},
+         "error":null,"underruns":0,
+         "library":{"revision":1,"roots":0,"tracks":0,"duration_ms":0,"size_bytes":0,
+                    "scan":{"root_id":null,"phase":"idle","discovered":0,"processed":0,"total":null,"updated":0,"unchanged":0,"failures":0,"skipped":0,"last_error":null}},
+         "history_revision":0,"stats_revision":0,"current_index":null,"upcoming_count":0}
+        """
+    let state = try JSONDecoder().decode(ControlState.self, from: Data(text.utf8))
+    let data = try JSONEncoder().encode(state)
+    let fields = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(["current_id", "now_playing", "error", "current_index"].filter { !(fields[$0] is NSNull) } == [])
+    #expect(try JSONDecoder().decode(ControlState.self, from: data) == state)
+}
