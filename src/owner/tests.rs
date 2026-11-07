@@ -1262,7 +1262,7 @@ async fn a_zero_header_duration_counts_only_at_the_natural_end() {
         paused < MPC_FRAMES / 2,
         "output passed half the decoded length before the pause: {paused}"
     );
-    ok(&fixture.control(), Command::Stop).await;
+    ok(&fixture.control(), Command::Stop {}).await;
     let plays = fixture
         .until_plays(|plays| closed(plays, entry_id).is_some())
         .await;
