@@ -449,10 +449,17 @@ impl Player {
         }
     }
 
-    /// Notes and counts what output played since the last `hear`. Passes are
-    /// about to be dropped, and a pass that output started, reached its
-    /// threshold or ended in the meantime must not be lost.
+    /// Notes and counts what output played since the last `hear`, as `hear`
+    /// does. Passes are about to be dropped, and a pass that output started,
+    /// reached its threshold or ended in the meantime must not be lost. The
+    /// passes before the latest one ended with the pass over their context
+    /// before it: they go, so what follows is decided in the latest one's.
     pub(crate) fn count_heard(&mut self) {
+        self.hear();
+    }
+
+    /// `count_heard` that keeps every pass, for a caller that holds an index.
+    fn count_kept(&mut self) {
         let output = self.output.snapshot();
         match self
             .passes
@@ -572,7 +579,7 @@ impl Player {
             return;
         }
         // What output played so far belongs to the earlier play.
-        self.count_heard();
+        self.count_kept();
         if let Some(play) = self.passes[index].play.take() {
             self.close(play, EndReason::Finished);
             self.open_play_at(index, unix_now());

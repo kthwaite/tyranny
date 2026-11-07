@@ -378,6 +378,51 @@ fn removing_an_entry_reports_the_passes_output_started_since_the_last_pump() -> 
     Ok(())
 }
 
+/// An edit notes a wrap's pass that output started since the last pump. The
+/// passes before it ended with the old pass: what follows is decided in the new one.
+#[test]
+fn an_edit_that_notes_a_wrap_decides_in_the_fresh_pass() -> anyhow::Result<()> {
+    let directory = scratch("edit-noted-wrap")?;
+    let mut sources = Vec::new();
+    for index in 0..2 {
+        let source = directory.join(format!("{index}.wav"));
+        fs::rename(silence(&directory, 12_000)?, &source)?;
+        sources.push(source);
+    }
+    let mut player = clocked(&directory, sources)?;
+    player.set_repeat(RepeatMode::All);
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while player.snapshot().output.paused {
+        anyhow::ensure!(Instant::now() < deadline, "output did not start");
+        player.pump()?;
+    }
+    // Prepare the wrap's PCM while output plays entry 1.
+    for _ in 0..40 {
+        player.pump()?;
+    }
+    // No pump while output plays entry 2 and starts the wrap.
+    while player.snapshot().output.rendered_frames <= 24_000 {
+        anyhow::ensure!(Instant::now() < deadline, "output did not wrap");
+        thread::sleep(Duration::from_millis(1));
+    }
+    player.set_shuffle(Some(Box::new(Last)));
+    let mut advances = player.take_advances();
+    while advances.len() < 4 {
+        anyhow::ensure!(Instant::now() < deadline, "timed out: {advances:?}");
+        player.pump()?;
+        advances.extend(player.take_advances());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        advances[..4],
+        [(1, vec![]), (2, vec![]), (1, vec![1, 2]), (2, vec![])]
+    );
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
 #[test]
 fn a_track_heard_to_its_end_opens_counts_and_finishes() -> anyhow::Result<()> {
     let directory = scratch("finish")?;
