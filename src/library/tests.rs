@@ -1881,7 +1881,11 @@ fn the_byte_limit_error_position_is_on_a_character_boundary() {
         .unwrap_err(),
     );
     assert_eq!(error.kind, LibraryErrorKind::InvalidFilter);
-    assert!(error.message.contains("UTF-8 byte 1023:"), "{}", error.message);
+    assert!(
+        error.message.contains("UTF-8 byte 1023:"),
+        "{}",
+        error.message
+    );
     // A limit on a boundary stays at the limit.
     let error = classify(
         query::execute(
@@ -1893,7 +1897,11 @@ fn the_byte_limit_error_position_is_on_a_character_boundary() {
         )
         .unwrap_err(),
     );
-    assert!(error.message.contains("UTF-8 byte 1024:"), "{}", error.message);
+    assert!(
+        error.message.contains("UTF-8 byte 1024:"),
+        "{}",
+        error.message
+    );
 }
 
 fn database(scratch: &Scratch) -> Connection {
