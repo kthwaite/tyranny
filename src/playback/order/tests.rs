@@ -932,3 +932,93 @@ fn a_gain_change_keeps_the_radio_play() -> anyhow::Result<()> {
     drop(player);
     Ok(())
 }
+
+/// A player whose output heard entry 1 to its end and crossed into entry 2,
+/// with no pump since the crossing. Returns the events taken before it.
+fn crossed_into_entry_two(directory: &std::path::Path) -> anyhow::Result<(Player, Vec<PlayEvent>)> {
+    let mut sources = Vec::new();
+    for (index, frames) in [24_000, 96_000, 24_000].into_iter().enumerate() {
+        let source = directory.join(format!("{index}.wav"));
+        fs::rename(silence(directory, frames)?, &source)?;
+        sources.push(source);
+    }
+    let mut player = clocked(directory, sources)?;
+    player.play();
+    let mut events = Vec::new();
+    pump_until(&mut player, &mut events, |_, events| {
+        !opened(events).is_empty()
+    })?;
+    // Prepare entry 2's PCM while output plays entry 1.
+    for _ in 0..40 {
+        player.pump()?;
+    }
+    events.extend(player.take_play_events());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while player.snapshot().current_id != Some(2) {
+        anyhow::ensure!(Instant::now() < deadline, "output did not cross");
+        thread::sleep(Duration::from_millis(1));
+    }
+    Ok((player, events))
+}
+
+/// Entry 1's play: counted, and how it closed.
+fn first_play(events: &[PlayEvent]) -> (bool, Option<EndReason>) {
+    let play = opened(events)[0];
+    (counted(events).contains(&play), closed_as(events, play))
+}
+
+/// Output played entry 1 to its end before the remove. Its play counts
+/// before its pass is dropped (see `count_heard`).
+#[test]
+fn removing_an_entry_heard_to_its_end_counts_its_play() -> anyhow::Result<()> {
+    let directory = scratch("remove-heard")?;
+    let (mut player, mut events) = crossed_into_entry_two(&directory)?;
+    player.remove(1, 1)?;
+    player.pump()?;
+    events.extend(player.take_play_events());
+    assert_eq!(
+        first_play(&events),
+        (true, Some(EndReason::Finished)),
+        "{events:?}"
+    );
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// The same through a batch removal.
+#[test]
+fn a_batch_removal_of_an_entry_heard_to_its_end_counts_its_play() -> anyhow::Result<()> {
+    let directory = scratch("remove-batch-heard")?;
+    let (mut player, mut events) = crossed_into_entry_two(&directory)?;
+    let prepared = player.prepare_remove_batch(&[1], Some(2), 1)?;
+    player.commit_remove_batch(prepared);
+    player.pump()?;
+    events.extend(player.take_play_events());
+    assert_eq!(
+        first_play(&events),
+        (true, Some(EndReason::Finished)),
+        "{events:?}"
+    );
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// The same through clearing the queue.
+#[test]
+fn clearing_after_an_entry_heard_to_its_end_counts_its_play() -> anyhow::Result<()> {
+    let directory = scratch("clear-heard")?;
+    let (mut player, mut events) = crossed_into_entry_two(&directory)?;
+    player.clear(1)?;
+    player.pump()?;
+    events.extend(player.take_play_events());
+    assert_eq!(
+        first_play(&events),
+        (true, Some(EndReason::Finished)),
+        "{events:?}"
+    );
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
