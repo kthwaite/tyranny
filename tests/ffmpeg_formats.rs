@@ -297,6 +297,17 @@ fn decode_to_eof(decoder: &mut Decoder) -> usize {
 }
 
 #[test]
+fn matroska_header_durations_come_from_the_segment() {
+    // Matroska and WebM have no per-track duration. The library scan already
+    // reads the segment duration; the decoder reads the same one.
+    for (name, frames) in [("tone.mka", 12_000), ("tone.webm", 12_384)] {
+        let path = fixture_root().join("formats").join(name);
+        let decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        assert_eq!(decoder.duration_frames(), Some(frames), "{name}");
+    }
+}
+
+#[test]
 fn seeking_back_after_eof_decodes_like_a_fresh_seek() {
     // HE-AAC in CAF only matches a frame duration on its end-trimmed final frame.
     // That match must not carry over a seek and halve the frames decoded after it.

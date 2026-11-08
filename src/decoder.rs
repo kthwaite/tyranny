@@ -233,6 +233,20 @@ impl Decoder {
             .then(|| rescale(stream.duration(), time_base, output_time_base()))
             .filter(|duration| *duration >= 0)
             .map(|duration| duration as u64);
+        // Matroska and WebM give a duration only for the whole segment. The
+        // library scan falls back to it too.
+        let duration = duration.or_else(|| {
+            (input.duration() > 0)
+                .then(|| {
+                    rescale(
+                        input.duration(),
+                        Rational(1, ffi::AV_TIME_BASE),
+                        output_time_base(),
+                    )
+                })
+                .filter(|duration| *duration > 0)
+                .map(|duration| duration as u64)
+        });
         let (display, mut metadata) = playback_metadata(&input, &stream, path);
         let parameters = stream.parameters();
         // seek_preroll is not exposed by ffmpeg-next's Parameters wrapper.
