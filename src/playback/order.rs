@@ -648,11 +648,14 @@ impl Player {
             let index = self.queue.iter().position(|entry| {
                 entry.id == id && !entry.token.consumed_by(output.rendered_frames)
             })?;
-            let token = &self.queue[index].token;
-            let pass = self
-                .passes
-                .iter()
-                .position(|pass| Arc::ptr_eq(&pass.token, token));
+            // The selected pass is the first one output has not started. The
+            // entry's token can belong to a later pass over it already: the
+            // decoder may run ahead through a Repeat All wrap.
+            let pass = self.passes.iter().position(|pass| {
+                pass.id == id
+                    && pass.token.is_valid()
+                    && !pass.token.consumed_by(output.rendered_frames)
+            });
             Some((index, pass, position))
         })
     }
