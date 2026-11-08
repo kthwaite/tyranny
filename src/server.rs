@@ -20,7 +20,7 @@ use std::{
 };
 use tokio::{
     net::{UnixListener, UnixStream},
-    sync::watch,
+    sync::{broadcast, watch},
     task::JoinSet,
     time::timeout,
 };
@@ -313,7 +313,13 @@ async fn serve_connection(
                 if !send_message(&mut socket, &reply, &mut shutdown).await { return; }
             }
             event = subscription.events.recv() => {
-                let snapshot = match event { Ok(snapshot) => snapshot, Err(_) => return };
+                // States are whole snapshots: a backlog of them is safe to skip, and the
+                // newest ones still follow. A reader that cannot keep up hits IO_TIMEOUT.
+                let snapshot = match event {
+                    Ok(snapshot) => snapshot,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                };
                 // Replies may advance past queued events. Never send state backwards.
                 if snapshot.sequence > sequence {
                     sequence = snapshot.sequence;
@@ -412,4 +418,119 @@ async fn remove_stale_socket(path: &Path) -> Result<()> {
         "control socket changed during stale check"
     );
     fs::remove_file(path).context("remove stale control socket")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ControlState;
+    use futures_util::FutureExt;
+
+    async fn next(reader: &mut FrameReader, socket: &mut UnixStream) -> Option<Message> {
+        let frame = timeout(IO_TIMEOUT, reader.read(socket, MAX_RESPONSE_BYTES))
+            .await
+            .ok()?
+            .ok()??;
+        Some(serde_json::from_slice(frame).unwrap())
+    }
+
+    /// More states than the event channel holds publish while a client waits
+    /// for its reply. The client reads everything, so it must stay connected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_client_waiting_for_a_reply_survives_an_event_backlog() {
+        let directory =
+            std::env::temp_dir().join(format!("tyranny-server-lag-{}", Uuid::new_v4().simple()));
+        fs::create_dir(&directory).unwrap();
+        let owner = Owner::start(OwnerConfig {
+            database_path: directory.join("state.sqlite3"),
+            output: OutputConfig::Capture {
+                path: directory.join("capture.f32"),
+                clocked: true,
+            },
+        })
+        .unwrap();
+        let controller = owner.controller();
+        let (stop, stopped) = watch::channel(false);
+        // The backlog must be queued ahead of the request; a run where the
+        // connection forwarded too much of it first is retried.
+        let mut proven = false;
+        for attempt in 0..20 {
+            let (mut socket, server) = UnixStream::pair().unwrap();
+            let task = tokio::spawn(serve_connection(
+                server,
+                controller.clone(),
+                "lag".into(),
+                stopped.clone(),
+            ));
+            let mut reader = FrameReader::default();
+            let Some(Message::Hello { snapshot, .. }) = next(&mut reader, &mut socket).await else {
+                panic!("no hello");
+            };
+            let mut seen: ControlState = snapshot;
+            // 48 state changes, queued in the owner ahead of the request.
+            for k in 0..48_u64 {
+                let request = Request {
+                    id: 1_000 + k,
+                    command: Command::SetVolume {
+                        percent: 40 + (k % 2) as u8 + (attempt % 2) as u8 * 2,
+                    },
+                };
+                assert!(controller.request(request).now_or_never().is_none());
+            }
+            let json = serde_json::to_vec(&Request {
+                id: 1,
+                command: Command::Snapshot {},
+            })
+            .unwrap();
+            write_frame(&mut socket, &json, MAX_REQUEST_BYTES)
+                .await
+                .unwrap();
+            let reply_sequence = loop {
+                match next(&mut reader, &mut socket).await {
+                    Some(Message::State { snapshot }) => seen = snapshot,
+                    Some(Message::Reply {
+                        id: 1,
+                        reply:
+                            Reply::Ok {
+                                result: Response::Snapshot { snapshot },
+                            },
+                    }) => break snapshot.sequence,
+                    other => panic!("before the reply: {other:?}"),
+                }
+            };
+            if reply_sequence - seen.sequence <= 33 {
+                drop(socket);
+                let _ = task.await;
+                continue;
+            }
+            proven = true;
+            // The connection still answers.
+            let json = serde_json::to_vec(&Request {
+                id: 2,
+                command: Command::Snapshot {},
+            })
+            .unwrap();
+            let written = write_frame(&mut socket, &json, MAX_REQUEST_BYTES).await;
+            let answered = loop {
+                match next(&mut reader, &mut socket).await {
+                    Some(Message::State { .. }) => {}
+                    Some(Message::Reply { id: 2, .. }) => break true,
+                    _ => break false,
+                }
+            };
+            assert!(
+                written.is_ok() && answered,
+                "a reading client was disconnected after {} states queued during its request",
+                reply_sequence - seen.sequence
+            );
+            drop(socket);
+            let _ = task.await;
+            break;
+        }
+        assert!(proven, "the backlog never queued ahead of the request");
+        let _ = stop.send(true);
+        drop(controller);
+        owner.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(&directory);
+    }
 }
