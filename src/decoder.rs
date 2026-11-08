@@ -152,9 +152,10 @@ pub struct Decoder {
     seek_target: Option<i64>,
     alignment_skip: usize,
     /// Output frames in one container tick when a tick is longer than a codec
-    /// sample (Matroska and WebM: 1 ms, 48 frames), else 0. A decode after a
-    /// seek is placed by timestamps, so it can end up to this far from where a
-    /// linear decode ends.
+    /// sample but at most 1 ms (Matroska and WebM: 48 frames), else 0. A decode
+    /// after a seek is placed by timestamps, so with millisecond stamps it can
+    /// end up to this far from where a linear decode ends. Coarser ticks
+    /// (Musepack SV8: 1.536 s) place seeks exactly and get no tolerance.
     tick_frames: i64,
 }
 
@@ -253,14 +254,17 @@ impl Decoder {
                 | ffmpeg::decoder::Check::EXPLODE,
         );
         let codec = codec.audio().context("opening native audio decoder")?;
-        let tick_frames =
-            if i64::from(time_base.0) * i64::from(codec.rate()) > i64::from(time_base.1) {
-                // Rounded up; both terms are positive.
-                (i64::from(time_base.0) * i64::from(SAMPLE_RATE) + i64::from(time_base.1) - 1)
-                    / i64::from(time_base.1)
-            } else {
-                0
-            };
+        // One tick in output frames, rounded up; both terms are positive.
+        let tick = (i64::from(time_base.0) * i64::from(SAMPLE_RATE) + i64::from(time_base.1) - 1)
+            / i64::from(time_base.1);
+        let tick_exceeds_sample =
+            i64::from(time_base.0) * i64::from(codec.rate()) > i64::from(time_base.1);
+        let millisecond = i64::from(SAMPLE_RATE) / 1_000;
+        let tick_frames = if tick_exceeds_sample && tick <= millisecond {
+            tick
+        } else {
+            0
+        };
         let mut this = Self {
             input,
             codec,
