@@ -507,11 +507,13 @@ impl Player {
     /// Returns after at most one decoded/submitted block, so commands can be
     /// serialized between calls even when a paused output has filled its pool.
     pub fn pump(&mut self) -> Result<()> {
-        self.output.check_error()?;
+        // Passes output started before a fault are still heard and reported.
+        let output = self.output.check_error();
         while let Some(id) = self.output.take_started() {
             self.starts.push(id);
         }
         self.hear();
+        output?;
         if self.stopped {
             return Ok(());
         }

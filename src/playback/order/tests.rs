@@ -932,3 +932,101 @@ fn a_gain_change_keeps_the_radio_play() -> anyhow::Result<()> {
     drop(player);
     Ok(())
 }
+
+/// Passes output starts are reported by `take_advances` ("each pass output
+/// started since the last call"), so the owner marks them played. An output
+/// fault must not lose the passes output started before it: here output
+/// writes two whole passes, then its capture write fails, before any pump
+/// collects their starts.
+#[test]
+fn an_output_fault_still_reports_the_passes_output_started() -> anyhow::Result<()> {
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+    let directory = scratch("output-fault")?;
+    // Twelve one-block entries: more PCM than the FIFO holds, so output blocks.
+    let sources: Vec<PathBuf> = (1..=12)
+        .map(|id| -> anyhow::Result<PathBuf> {
+            let path = directory.join(format!("{id}.wav"));
+            let frames = crate::BLOCK_FRAMES as u32;
+            let mut bytes = b"RIFF".to_vec();
+            bytes.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            for field in [16_u32, 0x0002_0001, 48_000, 192_000, 0x0010_0004] {
+                bytes.extend_from_slice(&field.to_le_bytes());
+            }
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&(frames * 4).to_le_bytes());
+            for frame in 0..frames {
+                bytes.extend_from_slice(&((id * 100) as i16).to_le_bytes());
+                bytes.extend_from_slice(&(frame as i16).to_le_bytes());
+            }
+            fs::write(&path, bytes)?;
+            Ok(path)
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let fifo = directory.join("capture.fifo");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_bytes())?;
+    // SAFETY: `name` is a valid C string for the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let mut reader = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)?;
+    let mut player = Player::new(
+        sources,
+        OutputConfig::Capture {
+            path: fifo,
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while player.snapshot().output.paused {
+        assert!(Instant::now() < deadline, "output never started");
+        player.pump()?;
+    }
+    // No pump from here: output starts passes and nothing collects them.
+    // Read exactly two passes, then close the read end: the next write fails.
+    let mut pcm = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let two = 2 * crate::BLOCK_FRAMES * 8;
+    while pcm.len() < two {
+        assert!(
+            Instant::now() < deadline,
+            "output wrote {} bytes",
+            pcm.len()
+        );
+        let want = (two - pcm.len()).min(buffer.len());
+        match reader.read(&mut buffer[..want]) {
+            Ok(count) => pcm.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    drop(reader);
+    let read_ids: Vec<i32> = pcm
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|frame| {
+            (f32::from_le_bytes(frame[..4].try_into().unwrap()) * 32_768.0).round() as i32 / 100
+        })
+        .collect();
+    assert_eq!(read_ids.first(), Some(&1));
+    assert_eq!(read_ids.last(), Some(&2));
+    while player.pump().is_ok() {
+        assert!(Instant::now() < deadline, "the capture write never failed");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let ids: Vec<u64> = player
+        .take_advances()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(ids.starts_with(&[1, 2]), "advances {ids:?}");
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
