@@ -977,3 +977,54 @@ fn a_removal_that_joins_a_run_decides_next_again() -> anyhow::Result<()> {
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+/// The same join when the anchor is outside the run: passes the decoder
+/// already prepared after the anchor were decided in the split run, where 3
+/// is a context of one and replays. Removing 4 joins 2 and 3 again, so after
+/// 3 comes 2, not 3 again (reviewer's probe).
+#[test]
+fn a_removal_that_joins_a_run_after_the_anchor_decides_again() -> anyhow::Result<()> {
+    let directory = scratch("joined-run-ahead")?;
+    let source = silence(&directory, crate::BLOCK_FRAMES as u32)?;
+    let mut player = Player::new(
+        vec![source.clone()],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    // [1, 2, 4, 3, 5]: 2 and 3 are a run, 4 is inside it, 1 and 5 are loose.
+    let revision = player.snapshot().queue_revision;
+    player.append_run(vec![source.clone(); 2], revision, RepeatScope::Run)?;
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_insert(vec![source.clone()].into_iter(), Some(3), revision)?;
+    player.commit_insert(prepared);
+    let revision = player.snapshot().queue_revision;
+    player.append(source, revision)?;
+    assert_eq!(player.queue_ids(), [1, 2, 4, 3, 5]);
+    player.set_shuffle(Some(Box::new(Last)));
+    player.set_repeat(RepeatMode::All);
+    player.mark_played(1);
+    player.mark_played(2);
+    let prepared = player.prepare_selection(5, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(5);
+    // Paused: the decoder prepares ahead in the split run.
+    for _ in 0..20 {
+        player.pump()?;
+    }
+    let ids = |player: &Player| player.passes.iter().map(|pass| pass.id).collect::<Vec<_>>();
+    assert_eq!(ids(&player)[..3], [5, 3, 3]);
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_remove_batch(&[4], Some(5), revision)?;
+    player.commit_remove_batch(prepared);
+    for _ in 0..20 {
+        player.pump()?;
+    }
+    assert_eq!(player.queue_ids(), [1, 2, 3, 5]);
+    assert_eq!(ids(&player)[..3], [5, 3, 2], "passes {:?}", ids(&player));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}

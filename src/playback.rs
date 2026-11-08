@@ -1369,7 +1369,7 @@ impl Player {
             || removed_ids.iter().any(|id| self.ahead(*id))
             // Repeat All and shuffle decide what follows within the context.
             || ((self.repeat == RepeatMode::All || self.shuffled)
-                && self.removal_joins_context(anchor_index, &removed));
+                && self.removal_joins_run(&removed));
         let mut tokens = Vec::new();
         if rewrites {
             tokens.try_reserve_exact(self.queue.len() - removed_ids.len())?;

@@ -9,7 +9,7 @@ use crate::{
     SAMPLE_RATE,
     listing::unix_now,
     output::{OutputSnapshot, TrackToken},
-    play_order::{self, RepeatMode, ShuffleStrategy, Slot},
+    play_order::{self, RepeatMode, RepeatScope, RunInfo, ShuffleStrategy, Slot},
     store::{EndReason, count_threshold_frames, played_overflow},
 };
 use std::{
@@ -313,30 +313,36 @@ impl Player {
         self.queue.iter().position(|entry| entry.id == id)
     }
 
-    /// Whether removing `removed` brings entries into the context of the
-    /// entry at `anchor`, as removing an entry that split a run does. What
-    /// follows the anchor was decided in the old context.
-    pub(super) fn removal_joins_context(&self, anchor: Option<usize>, removed: &[bool]) -> bool {
-        let Some(anchor) = anchor else {
-            return false;
+    /// Whether removing `removed` joins a run: a removed entry sits between
+    /// two kept entries of one `Run` run, so they become one context again.
+    /// What follows an entry of that run was decided while it was split, in
+    /// the anchor's own plan or in passes the decoder prepared after it.
+    pub(super) fn removal_joins_run(&self, removed: &[bool]) -> bool {
+        let run_of = |index: usize| match self.queue[index].run {
+            Some(RunInfo {
+                run_id,
+                scope: RepeatScope::Run,
+            }) => Some(run_id),
+            _ => None,
         };
-        let slots = self.slots();
-        let before: HashSet<u64> = slots[play_order::context(&slots, anchor)]
-            .iter()
-            .map(|slot| slot.id)
-            .collect();
-        let kept: Vec<Slot> = slots
-            .iter()
-            .zip(removed)
-            .filter(|(_, gone)| !**gone)
-            .map(|(slot, _)| *slot)
-            .collect();
-        let Some(index) = kept.iter().position(|slot| slot.id == slots[anchor].id) else {
-            return false;
-        };
-        kept[play_order::context(&kept, index)]
-            .iter()
-            .any(|slot| !before.contains(&slot.id))
+        let mut last_kept: Option<usize> = None;
+        let mut gap = false;
+        for (index, gone) in removed.iter().enumerate() {
+            if *gone {
+                gap = true;
+                continue;
+            }
+            if gap
+                && let Some(previous) = last_kept
+                && run_of(index).is_some()
+                && run_of(index) == run_of(previous)
+            {
+                return true;
+            }
+            last_kept = Some(index);
+            gap = false;
+        }
+        false
     }
 
     /// The queue as the play order sees it. An entry is played once heard in
