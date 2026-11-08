@@ -313,6 +313,32 @@ impl Player {
         self.queue.iter().position(|entry| entry.id == id)
     }
 
+    /// Whether removing `removed` brings entries into the context of the
+    /// entry at `anchor`, as removing an entry that split a run does. What
+    /// follows the anchor was decided in the old context.
+    pub(super) fn removal_joins_context(&self, anchor: Option<usize>, removed: &[bool]) -> bool {
+        let Some(anchor) = anchor else {
+            return false;
+        };
+        let slots = self.slots();
+        let before: HashSet<u64> = slots[play_order::context(&slots, anchor)]
+            .iter()
+            .map(|slot| slot.id)
+            .collect();
+        let kept: Vec<Slot> = slots
+            .iter()
+            .zip(removed)
+            .filter(|(_, gone)| !**gone)
+            .map(|(slot, _)| *slot)
+            .collect();
+        let Some(index) = kept.iter().position(|slot| slot.id == slots[anchor].id) else {
+            return false;
+        };
+        kept[play_order::context(&kept, index)]
+            .iter()
+            .any(|slot| !before.contains(&slot.id))
+    }
+
     /// The queue as the play order sees it. An entry is played once heard in
     /// the current pass over its context, or once a pass of it is prepared.
     fn slots(&self) -> Vec<Slot> {

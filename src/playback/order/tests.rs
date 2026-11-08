@@ -932,3 +932,48 @@ fn a_gain_change_keeps_the_radio_play() -> anyhow::Result<()> {
     drop(player);
     Ok(())
 }
+
+/// Shuffle under Repeat All: a fresh pass picks from the context minus the
+/// current entry ("the whole context minus `i`", library-server plan, Task 11).
+/// An entry inserted inside a run splits it, so the current entry is a context
+/// of one and replays. Removing that entry joins the run again: what follows
+/// must be decided in the joined context, not kept from the split one.
+#[test]
+fn a_removal_that_joins_a_run_decides_next_again() -> anyhow::Result<()> {
+    let directory = scratch("joined-run")?;
+    let source = silence(&directory, crate::BLOCK_FRAMES as u32)?;
+    let mut player = Player::new(
+        vec![source.clone()],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    // Entry 1 is loose; 2 and 3 are a run; 4 goes inside the run.
+    let revision = player.snapshot().queue_revision;
+    player.append_run(vec![source.clone(); 2], revision, RepeatScope::Run)?;
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_insert(vec![source].into_iter(), Some(3), revision)?;
+    player.commit_insert(prepared);
+    assert_eq!(player.queue_ids(), [1, 2, 4, 3]);
+    player.set_shuffle(Some(Box::new(Last)));
+    player.set_repeat(RepeatMode::All);
+    player.mark_played(2);
+    let prepared = player.prepare_selection(3, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(3);
+    player.pump()?;
+    // 3 alone is its context: it replays.
+    assert_eq!(player.snapshot().next_id, Some(3));
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_remove_batch(&[4], Some(3), revision)?;
+    player.commit_remove_batch(prepared);
+    player.pump()?;
+    // The run is [2, 3] again, both played: the fresh pass starts with 2.
+    assert_eq!(player.queue_ids(), [1, 2, 3]);
+    assert_eq!(player.snapshot().next_id, Some(2));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
