@@ -151,6 +151,11 @@ pub struct Decoder {
     next_output: Option<i64>,
     seek_target: Option<i64>,
     alignment_skip: usize,
+    /// Output frames in one container tick when a tick is longer than a codec
+    /// sample (Matroska and WebM: 1 ms, 48 frames), else 0. A decode after a
+    /// seek is placed by timestamps, so it can end up to this far from where a
+    /// linear decode ends.
+    tick_frames: i64,
 }
 
 impl Decoder {
@@ -248,6 +253,14 @@ impl Decoder {
                 | ffmpeg::decoder::Check::EXPLODE,
         );
         let codec = codec.audio().context("opening native audio decoder")?;
+        let tick_frames =
+            if i64::from(time_base.0) * i64::from(codec.rate()) > i64::from(time_base.1) {
+                // Rounded up; both terms are positive.
+                (i64::from(time_base.0) * i64::from(SAMPLE_RATE) + i64::from(time_base.1) - 1)
+                    / i64::from(time_base.1)
+            } else {
+                0
+            };
         let mut this = Self {
             input,
             codec,
@@ -275,6 +288,7 @@ impl Decoder {
             next_output: Some(0),
             seek_target: None,
             alignment_skip: 0,
+            tick_frames,
         };
         // Prime one decoded frame, not the whole track. This also surfaces
         // malformed sources during preparation and gets codec/frame gain data
@@ -638,7 +652,12 @@ impl Decoder {
                 }
                 let end = self.next_output.unwrap_or(0);
                 if let Some(target) = self.seek_target {
-                    ensure!(target <= end, "seek target is beyond decoded EOF");
+                    // Within one coarse tick of the end, the target is the end
+                    // a linear decode reaches: the seek lands at EOF.
+                    ensure!(
+                        target <= end + self.tick_frames,
+                        "seek target is beyond decoded EOF"
+                    );
                 }
                 self.duration = Some(end.max(0) as u64);
                 self.drained = true;

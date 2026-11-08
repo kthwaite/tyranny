@@ -297,6 +297,23 @@ fn decode_to_eof(decoder: &mut Decoder) -> usize {
 }
 
 #[test]
+fn a_seek_to_the_decoded_end_of_opus_in_webm_lands_at_eof() {
+    // WebM times blocks in whole milliseconds. Opus pre-skip is 312 samples
+    // (6.5 ms), so every block after the first is stamped 0.5 ms (24 frames)
+    // late, and a decode after a seek ends 24 frames before a linear decode.
+    // The linear end is where output leaves an entry, so a restore seeks there.
+    let path = fixture_root().join("formats/tone.webm");
+    let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+    let end = decode_to_eof(&mut linear);
+    assert_eq!(end, 12_000);
+    let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+    decoder
+        .seek(end as u64)
+        .unwrap_or_else(|error| panic!("seek to {end}: {error:#}"));
+    assert_eq!(decode_to_eof(&mut decoder), 0);
+}
+
+#[test]
 fn seeking_back_after_eof_decodes_like_a_fresh_seek() {
     // HE-AAC in CAF only matches a frame duration on its end-trimmed final frame.
     // That match must not carry over a seek and halve the frames decoded after it.
