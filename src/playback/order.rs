@@ -313,8 +313,9 @@ impl Player {
         self.queue.iter().position(|entry| entry.id == id)
     }
 
-    /// Whether removing `removed` joins a run: a removed entry sits between
-    /// two kept entries of one `Run` run, so they become one context again.
+    /// Whether removing `removed` joins a run: a removed entry from outside a
+    /// `Run` run sits between two kept entries of it, so they become one
+    /// context again. Removing members of the run itself joins nothing.
     /// What follows an entry of that run was decided while it was split, in
     /// the anchor's own plan or in passes the decoder prepared after it.
     pub(super) fn removal_joins_run(&self, removed: &[bool]) -> bool {
@@ -329,7 +330,7 @@ impl Player {
         let mut gap = false;
         for (index, gone) in removed.iter().enumerate() {
             if *gone {
-                gap = true;
+                gap |= last_kept.is_none_or(|previous| run_of(index) != run_of(previous));
                 continue;
             }
             if gap

@@ -1028,3 +1028,48 @@ fn a_removal_that_joins_a_run_after_the_anchor_decides_again() -> anyhow::Result
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+/// Removing an inner member of an unbroken run joins nothing: the run stays
+/// one context, so the passes prepared after the anchor stand. (The owner's
+/// trim of played entries removes such members on many advances.)
+#[test]
+fn removing_an_inner_run_member_keeps_the_prepared_passes() -> anyhow::Result<()> {
+    let directory = scratch("inner-run-member")?;
+    let source = silence(&directory, crate::BLOCK_FRAMES as u32)?;
+    let mut player = Player::new(
+        vec![source.clone()],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    // Entry 1 is loose; 2..=6 are one run.
+    let revision = player.snapshot().queue_revision;
+    player.append_run(vec![source; 5], revision, RepeatScope::Run)?;
+    assert_eq!(player.queue_ids(), [1, 2, 3, 4, 5, 6]);
+    player.set_shuffle(Some(Box::new(Last)));
+    player.set_repeat(RepeatMode::All);
+    player.mark_played(2);
+    player.mark_played(3);
+    let prepared = player.prepare_selection(5, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(5);
+    // Paused: prepare one pass after 5 (the unplayed pick, 6).
+    while player.passes.len() < 2 {
+        player.pump()?;
+    }
+    let ids = |player: &Player| player.passes.iter().map(|pass| pass.id).collect::<Vec<_>>();
+    assert_eq!(ids(&player), [5, 6]);
+    let token = Arc::clone(&player.passes[1].token);
+    // 3 is played, before the anchor, and not ahead.
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_remove_batch(&[3], Some(5), revision)?;
+    player.commit_remove_batch(prepared);
+    assert_eq!(player.queue_ids(), [1, 2, 4, 5, 6]);
+    assert_eq!(ids(&player), [5, 6], "the prepared pass was dropped");
+    assert!(Arc::ptr_eq(&token, &player.passes[1].token));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
