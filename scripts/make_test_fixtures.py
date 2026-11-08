@@ -644,7 +644,7 @@ def main():
             if count_frames is packet_frames:
                 entry["frames_from"] = "packet durations"
             elif count_frames is caf_frames:
-                entry["frames_from"] = "CAF packet table"
+                entry["frames_from"] = "CAF packet table: valid frames plus the remainder side data cannot cut"
             manifest["formats"]["files"].append(entry)
         if missing:
             die("cannot produce extensions: " + "; ".join(missing))

@@ -364,7 +364,7 @@
         "channels": 2,
         "seconds": 0.25,
         "frames": 12160,
-        "frames_from": "CAF packet table"
+        "frames_from": "CAF packet table: valid frames plus the remainder side data cannot cut"
       },
       {
         "extension": "mod",
