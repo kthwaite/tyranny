@@ -192,8 +192,9 @@ pub(crate) fn playback_metadata(
     )
 }
 
+/// A zero duration is unknown, as `Decoder::duration_frames` treats it.
 fn duration_ms(duration: i64, numerator: i32, denominator: i32) -> Option<u64> {
-    if duration < 0 || numerator <= 0 || denominator <= 0 {
+    if duration <= 0 || numerator <= 0 || denominator <= 0 {
         return None;
     }
     u64::try_from(i128::from(duration) * i128::from(numerator) * 1_000 / i128::from(denominator))
@@ -700,6 +701,19 @@ mod tests {
         assert_eq!(duration_ms(ffmpeg::ffi::AV_NOPTS_VALUE, 1, 48_000), None);
         assert_eq!(duration_ms(96_000, 1, 48_000), Some(2_000));
         assert_eq!(duration_ms(i64::MAX, i32::MAX, 1), None);
+    }
+
+    #[test]
+    fn a_zero_container_duration_is_unknown() {
+        // Musepack SV8 counts whole 73728-frame ticks, so tone.mpc reads 0; the
+        // RealMedia PROP header of tone.ra says 0. Both decode 0.25 s of audio.
+        let formats = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/formats");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for name in ["tone.mpc", "tone.ra"] {
+            let metadata = probe(&formats.join(name), &cancelled).unwrap();
+            assert_eq!(metadata.duration_ms, None, "{name}");
+        }
+        assert_eq!(duration_ms(0, 1, 48_000), None);
     }
 
     #[test]

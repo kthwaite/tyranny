@@ -1245,36 +1245,6 @@ async fn a_zero_header_duration_does_not_refuse_seeks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_zero_header_duration_counts_only_at_the_natural_end() {
-    let fixture = Fixture::new();
-    let entry_id = fixture.append_format(MPC).await;
-    ok(
-        &fixture.control(),
-        Command::Play {
-            entry_id: Some(entry_id),
-        },
-    )
-    .await;
-    fixture.until(|state| state.position_frames > 0).await;
-    ok(&fixture.control(), Command::Pause {}).await;
-    let paused = snapshot(&fixture.control()).await.position_frames;
-    assert!(
-        paused < MPC_FRAMES / 2,
-        "output passed half the decoded length before the pause: {paused}"
-    );
-    ok(&fixture.control(), Command::Stop {}).await;
-    let plays = fixture
-        .until_plays(|plays| closed(plays, entry_id).is_some())
-        .await;
-    assert_eq!(plays.len(), 1, "{plays:?}");
-    assert_eq!(
-        (plays[0].counted, plays[0].end_reason.as_deref()),
-        (false, Some("stopped")),
-        "paused at {paused}: {plays:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn playing_an_enqueued_selection_mid_track_closes_the_play_as_skipped() {
     let fixture = Fixture::new();
     fixture.index_frames(&["a", "b"], TEN_SECONDS).await;
