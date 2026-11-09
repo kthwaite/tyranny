@@ -1413,3 +1413,46 @@ fn a_move_after_an_entry_heard_to_its_end_counts_its_play() -> anyhow::Result<()
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+/// Output has not started a selected pass yet, and the decoder runs ahead
+/// through a Repeat All wrap to a later pass over the same entry. The
+/// snapshot must still describe the selected pass: what follows it is the one
+/// unplayed entry, not what follows the later pass. Re-selecting the current
+/// entry keeps that plan, so the unplayed entry is not skipped.
+#[test]
+fn an_unstarted_selection_is_not_a_later_pass_over_its_entry() -> anyhow::Result<()> {
+    let directory = scratch("unstarted-selection")?;
+    let source = silence(&directory, crate::BLOCK_FRAMES as u32)?;
+    let mut player = Player::new(
+        vec![source; 4],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    player.set_shuffle(Some(Box::new(Last)));
+    player.set_repeat(RepeatMode::All);
+    // 2 and 4 were heard; selecting 1 marks it. Only 3 is unplayed.
+    player.mark_played(2);
+    player.mark_played(4);
+    let prepared = player.prepare_selection(1, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(1);
+    // Paused: output starts nothing while the decoder fills its pool.
+    for _ in 0..200 {
+        player.pump()?;
+    }
+    let later = player.passes.iter().skip(1).any(|pass| pass.id == 1);
+    assert!(later, "the decoder prepared a later pass over 1");
+    let state = player.snapshot();
+    assert_eq!((state.current_id, state.next_id), (Some(1), Some(3)));
+    let prepared = player.prepare_selection(1, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.pump()?;
+    let state = player.snapshot();
+    assert_eq!((state.current_id, state.next_id), (Some(1), Some(3)));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
