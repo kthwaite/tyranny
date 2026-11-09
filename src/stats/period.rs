@@ -94,10 +94,21 @@ pub(crate) fn local(zone: &dyn Zone, utc: i64) -> Local {
     }
 }
 
-/// UTC seconds of local midnight.
+/// UTC seconds of the first instant of local `date`. This is local midnight. When DST
+/// skips midnight it is the end of the jump. When DST repeats midnight it is the first one.
 pub(crate) fn start_of_day(zone: &dyn Zone, date: Date) -> i64 {
-    let l = date.to_days() * 86_400;
-    l - i64::from(zone.offset_secs(l - i64::from(zone.offset_secs(l))))
+    let midnight = date.to_days() * 86_400;
+    // No zone is a whole day from UTC, so the first instant is inside this range.
+    let (mut before, mut reached) = (midnight - 86_400, midnight + 86_400);
+    while reached - before > 1 {
+        let middle = before + (reached - before) / 2;
+        if middle + i64::from(zone.offset_secs(middle)) >= midnight {
+            reached = middle;
+        } else {
+            before = middle;
+        }
+    }
+    reached
 }
 
 /// UTC seconds, `[start, end)`.
@@ -305,6 +316,90 @@ mod tests {
         assert_eq!(october.end, utc_secs(2026, 11, 1, 0));
         assert_eq!(october.end - october.start, (31 * 24 + 1) * 3600);
         assert_eq!(buckets(&London, PeriodKind::Month, october).len(), 31);
+    }
+
+    /// America/Havana, March 2027: at 05:00Z on Sunday the 14th, 00:00 jumps to 01:00.
+    struct Havana;
+
+    impl Zone for Havana {
+        fn offset_secs(&self, utc: i64) -> i32 {
+            if utc >= utc_secs(2027, 3, 14, 5) {
+                -4 * 3600
+            } else {
+                -5 * 3600
+            }
+        }
+    }
+
+    #[test]
+    fn a_day_whose_midnight_is_skipped_starts_at_the_jump() {
+        let jump = utc_secs(2027, 3, 14, 5);
+        let sunday = d(2027, 3, 14);
+        assert_eq!(start_of_day(&Havana, sunday), jump);
+        assert_eq!(local(&Havana, jump).date, sunday);
+        // Saturday keeps its last hour. 23:30 on Saturday is not in Sunday.
+        let saturday = bounds(&Havana, PeriodKind::Day, d(2027, 3, 13), None, 0);
+        assert_eq!(saturday.end, jump);
+        assert_eq!(saturday.end - saturday.start, 24 * 3600);
+        assert_eq!(buckets(&Havana, PeriodKind::Day, saturday).len(), 24);
+        // Sunday has 23 hours, as any spring-forward day has.
+        let hours = bounds(&Havana, PeriodKind::Day, sunday, None, 0);
+        assert_eq!((hours.start, hours.end - hours.start), (jump, 23 * 3600));
+        assert_eq!(buckets(&Havana, PeriodKind::Day, hours).len(), 23);
+        // Sunday's bucket in the week starts at the jump too.
+        let week = bounds(&Havana, PeriodKind::Week, sunday, None, 0);
+        let days = buckets(&Havana, PeriodKind::Week, week);
+        assert_eq!(days.len(), 7);
+        assert_eq!(days[6], jump);
+    }
+
+    /// A zone that jumps from 00:00 to 01:00 on Monday 2027-03-01, the first day of a
+    /// month and of a week.
+    struct GapOnTheFirst;
+
+    impl Zone for GapOnTheFirst {
+        fn offset_secs(&self, utc: i64) -> i32 {
+            if utc >= utc_secs(2027, 3, 1, 5) {
+                -4 * 3600
+            } else {
+                -5 * 3600
+            }
+        }
+    }
+
+    #[test]
+    fn a_skipped_midnight_on_the_first_adds_no_bucket_from_the_month_before() {
+        let jump = utc_secs(2027, 3, 1, 5);
+        let march = bounds(&GapOnTheFirst, PeriodKind::Month, d(2027, 3, 1), None, 0);
+        assert_eq!(march.start, jump);
+        let days = buckets(&GapOnTheFirst, PeriodKind::Month, march);
+        assert_eq!(days.len(), 31);
+        assert_eq!(days[0], jump);
+        let week = bounds(&GapOnTheFirst, PeriodKind::Week, d(2027, 3, 1), None, 0);
+        assert_eq!(buckets(&GapOnTheFirst, PeriodKind::Week, week).len(), 7);
+    }
+
+    /// Asia/Amman, October 2021: at 22:00Z on the 28th, 01:00 on the 29th goes back to 00:00.
+    struct Amman;
+
+    impl Zone for Amman {
+        fn offset_secs(&self, utc: i64) -> i32 {
+            if utc >= utc_secs(2021, 10, 28, 22) {
+                2 * 3600
+            } else {
+                3 * 3600
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeated_midnight_starts_the_day_at_the_first_one() {
+        let first = utc_secs(2021, 10, 28, 21);
+        assert_eq!(local(&Amman, first).date, d(2021, 10, 29));
+        assert_eq!(local(&Amman, first - 1).date, d(2021, 10, 28));
+        assert_eq!(start_of_day(&Amman, d(2021, 10, 29)), first);
+        let day = bounds(&Amman, PeriodKind::Day, d(2021, 10, 29), None, 0);
+        assert_eq!(day.end - day.start, 25 * 3600);
     }
 
     #[test]
