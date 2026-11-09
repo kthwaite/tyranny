@@ -1609,7 +1609,7 @@ impl Fixture {
         .await;
         self.until(|state| state.transport == Transport::Ended)
             .await;
-        ok(&self.control(), Command::Pause).await;
+        ok(&self.control(), Command::Pause {}).await;
         let state = snapshot(&self.control()).await;
         ok(&self.control(), enqueue(&state)).await;
         let state = snapshot(&self.control()).await;
