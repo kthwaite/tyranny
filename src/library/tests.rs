@@ -1905,6 +1905,47 @@ fn malformed_filters_are_typed_located_and_bounded_for_all_projections() {
     assert!(page.entries.is_empty());
 }
 
+/// `InvalidFilter` reports UTF-8 byte positions, and every other position starts a token.
+#[test]
+fn the_byte_limit_error_position_is_on_a_character_boundary() {
+    let mut connection = structured_filter_fixture();
+    // `x` then two-byte characters: byte 1024 is inside a character, byte 1023 starts it.
+    let filter = format!("x{}", "é".repeat(600));
+    assert!(filter.len() > 1024 && !filter.is_char_boundary(1024));
+    let error = classify(
+        query::execute(
+            &mut connection,
+            LibraryCommand::Tracks {
+                album_id: None,
+                page: page_request(None, 0, 10, &filter),
+            },
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(error.kind, LibraryErrorKind::InvalidFilter);
+    assert!(
+        error.message.contains("UTF-8 byte 1023:"),
+        "{}",
+        error.message
+    );
+    // A limit on a boundary stays at the limit.
+    let error = classify(
+        query::execute(
+            &mut connection,
+            LibraryCommand::Tracks {
+                album_id: None,
+                page: page_request(None, 0, 10, &"x".repeat(1025)),
+            },
+        )
+        .unwrap_err(),
+    );
+    assert!(
+        error.message.contains("UTF-8 byte 1024:"),
+        "{}",
+        error.message
+    );
+}
+
 fn database(scratch: &Scratch) -> Connection {
     Connection::open(scratch.path("library.sqlite")).unwrap()
 }
