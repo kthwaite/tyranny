@@ -76,6 +76,8 @@ public enum WindowFetchError: Error {
     /// A refresh pass. Replies are held here until every request of the pass is answered.
     private struct Pass {
         let id: UInt64
+        /// `changes` when the pass started.
+        let change: UInt64
         var pending: Set<Int>
         var replies: [Int: (page: WindowPage<Row>, change: UInt64)] = [:]
         var failures: Set<Int> = []
@@ -90,7 +92,8 @@ public enum WindowFetchError: Error {
     @ObservationIgnored private var windows: [Int: Window] = [:]
     @ObservationIgnored private var inFlight: [Int: Flight] = [:]
     /// Windows whose last request failed. Not retried until they newly become visible, the server
-    /// revision changes, or the cache is discarded or reset.
+    /// revision changes, or the cache is discarded or reset. A request sent before the latest change
+    /// is not counted: its failure says nothing of the list now, and the window still needs its refresh.
     @ObservationIgnored private var failed: Set<Int> = []
     /// Windows covering the last visible range ± 1 window. They are never evicted.
     @ObservationIgnored private var wanted: Set<Int> = []
@@ -281,7 +284,8 @@ public enum WindowFetchError: Error {
         case .failure(WindowFetchError.stale) where flight.pinned:
             restartAfterStale(index)
         case .failure:
-            failed.insert(index)
+            if flight.change == changes { failed.insert(index) }
+            pumpRefresh()
             settleIfReady()
         }
     }
@@ -323,7 +327,7 @@ public enum WindowFetchError: Error {
             if let existing = windows[index], existing.revision > reply.page.revision { continue }
             store(reply.page, index: index, change: reply.change)
         }
-        failed.formUnion(done.failures)
+        if done.change == changes { failed.formUnion(done.failures) }
         generation &+= 1
         if totalChanged { updateWanted() }
         evict(keeping: Set(done.replies.keys))
@@ -408,7 +412,7 @@ public enum WindowFetchError: Error {
         let targets = refreshCandidates
         guard !targets.isEmpty else { return }
         nextPassID &+= 1
-        pass = Pass(id: nextPassID, pending: Set(targets))
+        pass = Pass(id: nextPassID, change: changes, pending: Set(targets))
         for index in targets { request(index, pass: nextPassID) }
         let epoch = cooldownEpoch
         let sleep = self.sleep
