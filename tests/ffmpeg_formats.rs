@@ -151,6 +151,8 @@ fn every_format_fixture_decodes_to_eof() {
     // tone.spx is the exception: the CLI decodes its final Ogg Speex packet
     // whole, while `Decoder` cuts it to the duration the end granule gives, so
     // its reference is the packet durations' sum (the 0.25 s source exactly).
+    // tone-heaac.caf is another: the CLI applies its core-rate priming and
+    // remainder as output samples, so its reference is the CAF packet table.
     // Trackers use a direct libopenmpt reference at 48 kHz stereo, all subsongs.
     let mut failures = Vec::new();
     let mut buffer = vec![Frame::default(); 4096];
@@ -297,9 +299,122 @@ fn decode_to_eof(decoder: &mut Decoder) -> usize {
 }
 
 #[test]
+fn caf_header_durations_count_frames_at_the_packet_table_rate() {
+    // The CAF packet table of HE-AAC counts 6000 frames at the 24 kHz core rate:
+    // 0.25 s, 12000 frames at 48 kHz. FFmpeg times the stream at the output rate.
+    for name in ["tone-heaac.caf", "tone.caf", "tone.m4a"] {
+        let path = fixture_root().join("formats").join(name);
+        let decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        assert_eq!(decoder.duration_frames(), Some(12_000), "{name}");
+    }
+}
+
+/// `seek/heaac-steps.caf` (scripts/make_test_fixtures.py, `seek_fixtures`): ten
+/// segments of 12000 frames; segment k is a 440 Hz sine at amplitude 0.05 * (k + 1).
+const STEP_FRAMES: usize = 12_000;
+const STEP_SEGMENTS: usize = 10;
+
+/// The segment whose amplitude the RMS of `frames` matches.
+fn step_segment(frames: &[Frame]) -> usize {
+    let power = frames
+        .iter()
+        .map(|frame| f64::from(frame[0]).powi(2))
+        .sum::<f64>();
+    let amplitude = (power / frames.len() as f64).sqrt() * std::f64::consts::SQRT_2;
+    ((amplitude / 0.05).round() as usize).saturating_sub(1)
+}
+
+fn read_exact(decoder: &mut Decoder, count: usize) -> Vec<Frame> {
+    let mut frames = vec![Frame::default(); count];
+    let mut filled = 0;
+    while filled < count {
+        let read = decoder.read(&mut frames[filled..]).unwrap();
+        assert_ne!(read, 0, "EOF after {filled} of {count} frames");
+        filled += read;
+    }
+    frames
+}
+
+#[test]
+fn heaac_caf_seeks_land_on_the_requested_segment() {
+    // CAF counts HE-AAC packets at the 24 kHz core rate. Timed at the 48 kHz
+    // output rate, a seek lands at twice its target, and past half the file it
+    // fails as beyond EOF.
+    let path = fixture_root().join("seek/heaac-steps.caf");
+    let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+    for segment in 0..STEP_SEGMENTS {
+        let frames = read_exact(&mut linear, STEP_FRAMES);
+        assert_eq!(
+            step_segment(&frames[3_000..9_000]),
+            segment,
+            "linear segment"
+        );
+    }
+    for segment in [1, 3, 5, 6, 8, 9] {
+        let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        let target = segment * STEP_FRAMES + 3_000;
+        decoder
+            .seek(target as u64)
+            .unwrap_or_else(|error| panic!("seek to {target}: {error:#}"));
+        let frames = read_exact(&mut decoder, 6_000);
+        assert_eq!(step_segment(&frames), segment, "seek to {target}");
+    }
+}
+
+#[test]
+fn heaac_caf_trims_priming_and_remainder_at_the_output_rate() {
+    // The CAF packet table gives priming and remainder frames at the 24 kHz core
+    // rate; each is two output samples. A linear decode and a decode after a seek
+    // both hold the valid frames, plus the part of a remainder longer than one
+    // 1024-frame packet: side data can cut only the final packet. tone-heaac.caf
+    // has a remainder of 1104 (80 kept), heaac-steps.caf 1376 (352 kept).
+    for (name, valid, kept) in [
+        ("formats/tone-heaac.caf", 12_000, 160),
+        ("seek/heaac-steps.caf", STEP_SEGMENTS * STEP_FRAMES, 704),
+    ] {
+        let frames = valid + kept;
+        let path = fixture_root().join(name);
+        let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+        let header = linear.duration_frames();
+        let linear = decode_to_eof(&mut linear);
+        let mut sought = Decoder::open(&path, GainMode::Off).unwrap();
+        sought.seek(0).unwrap();
+        let sought = decode_to_eof(&mut sought);
+        assert_eq!(
+            (header, linear, sought),
+            (Some(valid as u64), frames, frames),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn heaac_caf_seeks_decode_what_a_linear_decode_holds_there() {
+    let path = fixture_root().join("seek/heaac-steps.caf");
+    let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+    let all = read_exact(&mut linear, STEP_SEGMENTS * STEP_FRAMES);
+    for target in [6_000, 30_000, 61_000, 100_000] {
+        let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        decoder.seek(target as u64).unwrap();
+        let frames = read_exact(&mut decoder, 4_800);
+        let worst = frames
+            .iter()
+            .zip(&all[target..])
+            .map(|(a, b)| (a[0] - b[0]).abs().max((a[1] - b[1]).abs()))
+            .fold(0.0f32, f32::max);
+        eprintln!("seek {target}: worst difference {worst}");
+        assert!(
+            worst < 0.01,
+            "seek {target}: worst sample difference {worst}"
+        );
+    }
+}
+
+#[test]
 fn seeking_back_after_eof_decodes_like_a_fresh_seek() {
-    // HE-AAC in CAF only matches a frame duration on its end-trimmed final frame.
-    // That match must not carry over a seek and halve the frames decoded after it.
+    // HE-AAC in CAF, timed at the output rate, matched a frame duration only on its
+    // end-trimmed final frame. That match must not carry over a seek and halve the
+    // frames decoded after it. Timed at the core rate, its durations never cut.
     let path = fixture_root().join("formats/tone-heaac.caf");
     let mut fresh = Decoder::open(&path, GainMode::Off).unwrap();
     fresh.seek(0).unwrap();

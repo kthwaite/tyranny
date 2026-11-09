@@ -217,6 +217,29 @@ def packet_frames(path):
     return total // den
 
 
+def caf_frames(path):
+    """Frames a CAF decodes to at the engine rate: the packet table's valid frames,
+    plus the part of the remainder before the final packet, which side data cannot
+    cut. Its counts are at the desc rate (the core rate for HE-AAC)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    pos, desc, pakt = 8, None, None
+    while pos + 12 <= len(data):
+        kind, size = data[pos:pos + 4], struct.unpack(">q", data[pos + 4:pos + 12])[0]
+        body = data[pos + 12:pos + 12 + size] if size >= 0 else data[pos + 12:]
+        if kind == b"desc":
+            desc = struct.unpack(">d4sIIIII", body[:32])
+        elif kind == b"pakt":
+            pakt = struct.unpack(">qqii", body[:24])
+        if size < 0:
+            break
+        pos += 12 + size
+    rate, frames_per_packet = desc[0], desc[4]
+    _, valid, _, remainder = pakt
+    scale = FORMAT_RATE / rate
+    return int((valid + max(0, remainder - frames_per_packet)) * scale)
+
+
 def probe(path):
     out = run(["ffprobe", "-v", "error", "-select_streams", "a:0",
                "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", path])
@@ -517,6 +540,34 @@ def external_makers(ff, tools, tmp, pcm):
     ]
 
 
+# HE-AAC in CAF, long enough that seek preroll does not reach back to the start.
+# Segment k of SEEK_SEGMENTS is a 440 Hz sine at amplitude SEEK_STEP * (k + 1), the
+# same on both channels, so the RMS of decoded audio names the segment it came from.
+SEEK_RATE = 48000
+SEEK_SEGMENTS = 10
+SEEK_SEGMENT_FRAMES = 12000
+SEEK_STEP = 0.05
+
+
+def seek_fixtures(af, fixtures, manifest):
+    rel = "seek/heaac-steps.caf"
+    dst = os.path.join(fixtures, rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    out = bytearray()
+    for n in range(SEEK_SEGMENTS * SEEK_SEGMENT_FRAMES):
+        x = SEEK_STEP * (n // SEEK_SEGMENT_FRAMES + 1) * math.sin(2 * math.pi * 440 * n / SEEK_RATE)
+        v = struct.pack("<h", max(-32768, min(32767, int(math.floor(x * 32768.0 + 0.5)))))
+        out += v + v
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "steps.wav")
+        write_wav(src, bytes(out), SEEK_RATE)
+        run([af, "-f", "caff", "-d", "aach", "-b", "64000", src, dst])
+    manifest["seek"] = {
+        "file": rel, "encoder": "afconvert -f caff -d aach -b 64000", "rate": SEEK_RATE,
+        "segments": SEEK_SEGMENTS, "segment_frames": SEEK_SEGMENT_FRAMES,
+        "description": "segment k is a 440 Hz sine at amplitude %.2f * (k + 1) on both channels" % SEEK_STEP}
+
+
 def stream_fixtures(ff, fixtures):
     """Four seconds of generated 440 Hz tone; no encoder is needed by tests."""
     directory = os.path.join(fixtures, "streams")
@@ -573,7 +624,7 @@ def main():
         # differs. HE-AAC in CAF reports packet durations at the SBR core rate.
         makers.append(("tone-heaac", "caf", None, FORMAT_SECONDS,
                        lambda dst: run([af, "-f", "caff", "-d", "aach", "-b", "64000", fsrc, dst]),
-                       lambda path: cli_frames(ff, path)))
+                       caf_frames))
         missing = []
         for stem, ext, codec, seconds, make, count_frames in makers:
             rel = "formats/%s.%s" % (stem, ext)
@@ -592,6 +643,8 @@ def main():
                      "seconds": seconds, "frames": frames}
             if count_frames is packet_frames:
                 entry["frames_from"] = "packet durations"
+            elif count_frames is caf_frames:
+                entry["frames_from"] = "CAF packet table: valid frames plus the remainder side data cannot cut"
             manifest["formats"]["files"].append(entry)
         if missing:
             die("cannot produce extensions: " + "; ".join(missing))
@@ -629,6 +682,7 @@ def main():
                 "lengths": LENGTHS[rate], "encoder": label})
 
     stream_fixtures(ff, fixtures)
+    seek_fixtures(af, fixtures, manifest)
     add_tracker_fixtures(fixtures, manifest, tracker_library)
 
     with open(os.path.join(fixtures, "manifest.json"), "w") as f:

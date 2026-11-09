@@ -110,7 +110,7 @@ pub(crate) fn probe_before(
     );
     let mut tags = Tags::default();
     tags.read(&input, &stream)?;
-    let time_base = stream.time_base();
+    let time_base = stream_time_base(&input, &stream, path);
     let duration_ms = duration_ms(stream.duration(), time_base.0, time_base.1)
         .or_else(|| duration_ms(input.duration(), 1, ffmpeg::ffi::AV_TIME_BASE));
     let mut metadata = tags.finish(path)?;
@@ -190,6 +190,43 @@ pub(crate) fn playback_metadata(
         },
         gain,
     )
+}
+
+/// The time base of a stream's timestamps and duration. A CAF packet table
+/// counts frames at the sample rate of the file's `desc` chunk, and FFmpeg's CAF
+/// demuxer stamps packets in those units. But it sets the stream time base to
+/// the codec's output rate, which for AAC with SBR (HE-AAC, HE-AACv2) is twice
+/// the core rate in `desc`. Read in that time base, every timestamp, duration
+/// and seek target is half its real value.
+pub(crate) fn stream_time_base(
+    input: &ffmpeg::format::context::Input,
+    stream: &ffmpeg::format::stream::Stream,
+    path: &Path,
+) -> ffmpeg::Rational {
+    let time_base = stream.time_base();
+    if input.format().name() != "caf" {
+        return time_base;
+    }
+    match caf_desc_rate(path) {
+        Some(rate) => ffmpeg::Rational(1, rate),
+        None => time_base,
+    }
+}
+
+/// The sample rate in a CAF file's `desc` chunk, which the format puts first.
+/// `None` unless it is a whole number of frames per second.
+fn caf_desc_rate(path: &Path) -> Option<i32> {
+    use std::io::Read;
+    let mut header = [0; 28];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    if &header[..4] != b"caff" || &header[8..12] != b"desc" {
+        return None;
+    }
+    let rate = f64::from_be_bytes(header[20..28].try_into().ok()?);
+    (rate.fract() == 0.0 && rate >= 1.0 && rate <= f64::from(i32::MAX)).then_some(rate as i32)
 }
 
 /// A zero duration is unknown, as `Decoder::duration_frames` treats it.
@@ -714,6 +751,22 @@ mod tests {
             assert_eq!(metadata.duration_ms, None, "{name}");
         }
         assert_eq!(duration_ms(0, 1, 48_000), None);
+    }
+
+    #[test]
+    fn caf_durations_count_frames_at_the_packet_table_rate() {
+        let formats = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/formats");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        // The CAF packet table of HE-AAC counts 6000 frames at the 24 kHz core
+        // rate: 0.25 s. FFmpeg times the stream at the 48 kHz output rate.
+        for (name, expected) in [
+            ("tone-heaac.caf", 250),
+            ("tone.caf", 250),
+            ("tone.m4a", 250),
+        ] {
+            let metadata = probe(&formats.join(name), &cancelled).unwrap();
+            assert_eq!(metadata.duration_ms, Some(expected), "{name}");
+        }
     }
 
     #[test]

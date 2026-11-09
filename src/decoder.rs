@@ -2,11 +2,13 @@
 //!
 //! libavcodec applies AV_PKT_DATA_SKIP_SAMPLES itself (SKIP_MANUAL is deliberately
 //! not enabled). Its returned sample count and adjusted timestamps already exclude
-//! that padding. Sample-exact frame durations additionally delimit container edits
-//! when one container tick is no longer than one sample, and only after a packet's
-//! duration has matched its decoded count (CAF gives HE-AAC durations at the SBR
-//! core rate, half of every frame, and so proves them only at its end-trimmed last
-//! frame; the proof resets on seek). This cuts a short final
+//! that padding. HE-AAC in CAF counts that padding in core-rate frames, so the
+//! decoder scales the side data to output samples first (`scale_skip_samples`).
+//! Sample-exact frame durations additionally delimit container edits when one
+//! container tick is no longer than one sample, and only after a packet's
+//! duration has matched its decoded count (the proof resets on seek). HE-AAC in
+//! CAF is timed at its core rate (`metadata::stream_time_base`), so its ticks are
+//! two samples long and never cut. This cuts a short final
 //! packet that has no end-trim side data. FFmpeg 9's mov demuxer sends that trim
 //! only for unfragmented files whose codec has a fixed frame size, so Opus in MP4
 //! and fragmented MP4 rely on the cut, as does Ogg Speex. Neither stream duration
@@ -21,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BLOCK_FRAMES, Frame, SAMPLE_RATE,
-    metadata::{PlaybackMetadata, playback_metadata},
+    metadata::{PlaybackMetadata, playback_metadata, stream_time_base},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +155,11 @@ pub struct Decoder {
     next_output: Option<i64>,
     seek_target: Option<i64>,
     alignment_skip: usize,
+    /// Output samples per stream tick in packet skip side data: 2 for HE-AAC in
+    /// CAF, whose priming and remainder count core-rate frames, otherwise 1.
+    skip_scale: u32,
+    /// The most samples one decoded frame has held: the most an end skip can cut.
+    frame_capacity: usize,
 }
 
 impl Decoder {
@@ -225,12 +232,23 @@ impl Decoder {
             .best(ffmpeg::media::Type::Audio)
             .context("source has no audio stream")?;
         let stream_index = stream.index();
-        let time_base = stream.time_base();
+        // Timestamps, durations, seeks and libavcodec's packet time base all use
+        // this one time base (see `stream_time_base` for CAF).
+        let time_base = stream_time_base(&input, &stream, path);
         ensure!(
             time_base.0 > 0 && time_base.1 > 0,
             "invalid audio time base"
         );
         let origin_ts = (stream.start_time() != ffi::AV_NOPTS_VALUE).then_some(stream.start_time());
+        // libavcodec skips output samples. When the stream time base is coarser
+        // than FFmpeg's, which is the codec output rate, side data counts ticks.
+        let native = stream.time_base();
+        let skip_scale = (time_base.0 == 1
+            && native.0 == 1
+            && native.1 > time_base.1
+            && native.1 % time_base.1 == 0)
+            .then(|| (native.1 / time_base.1) as u32)
+            .unwrap_or(1);
         // A zero container duration is unknown, not an empty source. Musepack SV8
         // counts whole 73728-frame ticks, so a short file reads 0. RealMedia
         // files can carry 0 in their PROP header.
@@ -280,6 +298,8 @@ impl Decoder {
             next_output: Some(0),
             seek_target: None,
             alignment_skip: 0,
+            skip_scale,
+            frame_capacity: 0,
         };
         // Prime one decoded frame, not the whole track. This also surfaces
         // malformed sources during preparation and gets codec/frame gain data
@@ -440,7 +460,7 @@ impl Decoder {
         self.seek_target = Some(target);
         self.alignment_skip = 0;
         // libavcodec rewrites an end-trimmed frame's duration to its kept count, so
-        // a stream can prove its durations only at its last frame (HE-AAC in CAF).
+        // a stream can prove its durations only at its last frame.
         // Prove them again after a seek.
         self.durations_count_samples = false;
         // Actually decode/discard preroll now so seek errors are not deferred
@@ -499,6 +519,13 @@ impl Decoder {
                             !self.packet.is_corrupt(),
                             "demuxer returned a corrupt audio packet"
                         );
+                        if self.skip_scale > 1 {
+                            scale_skip_samples(
+                                &mut self.packet,
+                                self.skip_scale,
+                                self.frame_capacity,
+                            )?;
+                        }
                         self.codec
                             .send_packet(&self.packet)
                             .context("submitting audio packet")?;
@@ -527,6 +554,7 @@ impl Decoder {
     }
 
     fn prepare_frame(&mut self) -> Result<()> {
+        self.frame_capacity = self.frame_capacity.max(self.decoded.samples());
         let rate = self.decoded.rate();
         ensure!(
             rate > 0 && rate <= i32::MAX as u32,
@@ -736,9 +764,9 @@ fn rescale(value: i64, from: Rational, to: Rational) -> i64 {
 
 /// The decoded samples a frame keeps. A sample-exact duration shorter than the
 /// decoded frame cuts it, but only once `proven`: an earlier packet's duration
-/// matched its decoded count, so durations count output samples. CAF reports
-/// HE-AAC durations at the SBR core rate under a full-rate time base, half the
-/// decoded frame on every packet; without the proof each frame would be halved.
+/// matched its decoded count, so durations count output samples. Durations that
+/// count SBR core-rate samples under a full-rate time base are half of every
+/// decoded frame; without the proof each frame would be halved.
 fn valid_samples(
     decoded: usize,
     duration: i64,
@@ -767,6 +795,37 @@ fn valid_samples(
         *proven = true;
     }
     if *proven { decoded.min(exact) } else { decoded }
+}
+
+/// Multiplies the start and end counts of a packet's skip side data by `scale`.
+/// libavcodec ignores an end count longer than the packet's decoded frame. A CAF
+/// remainder can be: it can cover the whole final packet and the end of the one
+/// before. The end count is then cut to `capacity`, a whole frame, so the final
+/// packet is dropped; the rest of the remainder cannot be cut from side data.
+fn scale_skip_samples(packet: &mut ffmpeg::Packet, scale: u32, capacity: usize) -> Result<()> {
+    let mut size = 0;
+    let data = unsafe {
+        ffi::av_packet_get_side_data(
+            packet.as_mut_ptr(),
+            ffi::AVPacketSideDataType::AV_PKT_DATA_SKIP_SAMPLES,
+            &mut size,
+        )
+    };
+    if data.is_null() || size < 8 {
+        return Ok(());
+    }
+    // The packet owns its side data; libavcodec reads it on send_packet.
+    let counts = unsafe { std::slice::from_raw_parts_mut(data, 8) };
+    for (index, count) in counts.chunks_exact_mut(4).enumerate() {
+        let mut value = u32::from_le_bytes(count.try_into().unwrap())
+            .checked_mul(scale)
+            .context("packet skip samples overflow")?;
+        if index == 1 && capacity > 0 {
+            value = value.min(u32::try_from(capacity).unwrap_or(u32::MAX));
+        }
+        count.copy_from_slice(&value.to_le_bytes());
+    }
+    Ok(())
 }
 
 fn grid_skip(position: i64, rate: u32) -> usize {
@@ -917,7 +976,7 @@ mod tests {
 
     #[test]
     fn core_rate_durations_never_halve_he_aac_frames() {
-        // CAF reports HE-AAC packet durations at the SBR core rate (1024 ticks)
+        // Packet durations at the SBR core rate (1024 ticks), as CAF gives them,
         // under a full-rate time base, while each frame decodes to 2048 samples.
         // No ordinary frame proves the durations, so nothing is cut.
         let mut proven = false;
