@@ -855,6 +855,48 @@ async fn compilation_groups_do_not_cross_folders_or_release_ids_but_shared_relea
 }
 
 #[tokio::test]
+async fn an_inferred_compilation_does_not_rename_the_artist_of_its_album_artist_id() {
+    let scratch = Scratch::new();
+    let ann = [
+        ("MUSICBRAINZ_ARTISTID", "ann-id"),
+        ("MUSICBRAINZ_ALBUMARTISTID", "ann-id"),
+    ];
+    flac(
+        &scratch.path("music/collection/one.flac"),
+        &[("artist", "Ann"), ("album", "Collection"), ann[0], ann[1]],
+    );
+    flac(
+        &scratch.path("music/collection/two.flac"),
+        &[("artist", "Bob"), ("album", "Collection")],
+    );
+    flac(
+        &scratch.path("music/solo/one.flac"),
+        &[("artist", "Ann"), ("album", "Solo"), ann[0], ann[1]],
+    );
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let LibraryReply::Artists(artists) = library
+        .handle()
+        .request(LibraryCommand::Artists(page()))
+        .await
+        .unwrap()
+    else {
+        panic!("unexpected artists reply");
+    };
+    let artists: Vec<(String, u64)> = artists
+        .entries
+        .into_iter()
+        .map(|artist| (artist.name, artist.album_count))
+        .collect();
+    assert_eq!(
+        artists,
+        [("Ann".to_owned(), 1), ("Various Artists".to_owned(), 1)]
+    );
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn compilation_inference_waits_for_legacy_metadata_to_be_reprobed() {
     let scratch = Scratch::new();
     let first = scratch.path("music/one.flac");
