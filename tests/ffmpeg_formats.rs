@@ -933,3 +933,14 @@ fn tracker_eof_advances_every_queue_entry_once() {
         "queue capture is silent"
     );
 }
+
+#[test]
+fn matroska_header_durations_come_from_the_segment() {
+    // Matroska and WebM have no per-track duration. The library scan already
+    // reads the segment duration; the decoder reads the same one.
+    for (name, frames) in [("tone.mka", 12_000), ("tone.webm", 12_384)] {
+        let path = fixture_root().join("formats").join(name);
+        let decoder = Decoder::open(&path, GainMode::Off).unwrap();
+        assert_eq!(decoder.duration_frames(), Some(frames), "{name}");
+    }
+}

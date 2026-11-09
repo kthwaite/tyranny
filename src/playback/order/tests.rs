@@ -1456,3 +1456,19 @@ fn an_unstarted_selection_is_not_a_later_pass_over_its_entry() -> anyhow::Result
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+#[test]
+fn a_matroska_pass_counts_at_half_its_segment_duration() -> anyhow::Result<()> {
+    // Matroska gives a duration only for the whole segment, not per track. A pass
+    // over tone.mka (0.25 s) counts at half of it, not only at its natural end.
+    let directory = scratch("matroska-duration")?;
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/formats/tone.mka");
+    let mut player = clocked(&directory, vec![source])?;
+    player.play();
+    player.pump()?;
+    let pass = player.passes.back().expect("playing began a pass");
+    assert_eq!(pass.threshold, Some(6_000));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
