@@ -145,11 +145,16 @@ impl PlayOrder {
     }
 
     /// Records that Previous moved back to `to`. Drops history after its latest
-    /// occurrence, so a second Previous goes further back.
+    /// occurrence, so a second Previous goes further back. When `to` is not in
+    /// history, Previous stepped back past all of it: `to` starts it again.
     pub fn retreated(&mut self, to: u64) {
         self.planned = None;
-        if let Some(p) = self.history.iter().rposition(|&id| id == to) {
-            self.history.truncate(p + 1);
+        match self.history.iter().rposition(|&id| id == to) {
+            Some(p) => self.history.truncate(p + 1),
+            None => {
+                self.history.clear();
+                self.history.push_back(to);
+            }
         }
     }
 
@@ -432,6 +437,23 @@ mod tests {
         assert_eq!(order.previous(&slots, 9), Some(2));
         order.retreated(2);
         assert_eq!(order.previous(&slots, 2), Some(7));
+    }
+
+    #[test]
+    fn previous_walks_on_past_the_start_of_history() {
+        let slots = songs(5);
+        let mut order = PlayOrder::new(RepeatMode::Off, seeded(5));
+        order.advanced(2);
+        // Nothing played before id 2, so Previous steps back in queue order.
+        assert_eq!(order.previous(&slots, 2), Some(1));
+        order.retreated(1);
+        // A second Previous goes further back, not forward to id 2.
+        assert_eq!(order.previous(&slots, 1), Some(0));
+        order.retreated(0);
+        assert_eq!(order.previous(&slots, 0), None);
+        // The entries Previous reached played: they are history now.
+        order.advanced(3);
+        assert_eq!(order.previous(&slots, 3), Some(0));
     }
 
     #[test]

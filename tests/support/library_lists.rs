@@ -1355,6 +1355,62 @@ async fn next_at_the_end_of_a_repeat_all_run_starts_a_fresh_pass() {
     running.stop().await;
 }
 
+/// Waits until output plays the current entry `id`, so the player heard it.
+async fn until_heard(client: &mut PlaybackClient, id: u64) {
+    client
+        .until(|state| state.current_id == Some(id) && state.position_frames > 0)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn previous_under_shuffle_walks_back_past_the_start_of_history() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    append_long(&scratch, &mut client, &["One", "Two", "Three", "Four"]).await;
+    ok(&mut client, json!({"command":"set_shuffle","enabled":true})).await;
+    ok(&mut client, json!({"command":"play","entry_id":3})).await;
+    until_heard(&mut client, 3).await;
+    ok(&mut client, json!({"command":"previous"})).await;
+    assert_eq!(client.state.current_id, Some(2));
+    // A second Previous goes further back, not forward to entry 3.
+    ok(&mut client, json!({"command":"previous"})).await;
+    assert_eq!(client.state.current_id, Some(1));
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn previous_restarting_an_unheard_entry_keeps_the_history() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let names: Vec<String> = (0..9).map(|index| format!("Song {index}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    append_long(&scratch, &mut client, &names).await;
+    ok(&mut client, json!({"command":"set_shuffle","enabled":true})).await;
+    ok(&mut client, json!({"command":"play","entry_id":5})).await;
+    until_heard(&mut client, 5).await;
+    ok(&mut client, json!({"command":"pause"})).await;
+    // Paused, output never hears the selected entry. Entry 6 is skipped: the
+    // step back in queue order from it is entry 5 as well.
+    let mut selected = next(&mut client).await;
+    if selected == 6 {
+        selected = next(&mut client).await;
+    }
+    ok(
+        &mut client,
+        json!({"command":"seek","entry_id":selected,"position_frames":192_000}),
+    )
+    .await;
+    // Past 3 s, Previous restarts the entry, and does not move in history.
+    ok(&mut client, json!({"command":"previous"})).await;
+    assert_eq!(client.state.current_id, Some(selected));
+    assert_eq!(client.state.position_frames, 0);
+    ok(&mut client, json!({"command":"previous"})).await;
+    assert_eq!(client.state.current_id, Some(5));
+    running.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn play_after_the_queue_ended_follows_the_new_repeat_mode() {
     use tyranny_likes_smoke::protocol::Transport;
