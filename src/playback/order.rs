@@ -632,6 +632,8 @@ impl Player {
     /// The current entry's queue index, its pass if prepared, and the
     /// position. A callback already in flight may publish old PCM after a stop
     /// or selection; only a valid pass token makes that publication count.
+    /// After an edit cut the PCM output was playing, the latest valid pass it
+    /// started stays current until output starts what follows.
     pub(super) fn current_pass(
         &self,
         output: &OutputSnapshot,
@@ -639,7 +641,12 @@ impl Player {
         if self.stopped {
             return None;
         }
-        let heard = self.heard_pass(output).and_then(|pass| {
+        let started = || {
+            self.passes.iter().rposition(|pass| {
+                pass.token.is_valid() && pass.token.consumed_by(output.rendered_frames)
+            })
+        };
+        let heard = self.heard_pass(output).or_else(started).and_then(|pass| {
             let index = self.index_of(self.passes[pass].id)?;
             Some((index, Some(pass), output.position_frames))
         });
