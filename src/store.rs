@@ -749,10 +749,11 @@ impl Store {
             Edit::AppendStream { id, stream } => {
                 let validated = StreamSpec::new(stream.url.clone(), stream.title.clone())?;
                 ensure!(&validated == stream, "stream descriptor is not canonical");
+                let ordinal = playlists::insertion_ordinal(&transaction, None, None, 1)?;
                 transaction.execute(
                     "INSERT INTO queue(id,ordinal,path,track_id,source_kind,source_name,run_id,stream_title)
-                     SELECT ?1,COALESCE(MAX(ordinal),-1)+1,?2,NULL,'stream',?3,?1,?3 FROM queue",
-                    params![id, &stream.url, &stream.title],
+                     VALUES(?1,?2,?3,NULL,'stream',?4,?1,?4)",
+                    params![id, ordinal, &stream.url, &stream.title],
                 )?;
             }
             Edit::Append {
@@ -766,11 +767,13 @@ impl Store {
                     let indexed = library::resolve_track(&transaction, track_id, library_revision)?;
                     ensure!(indexed == path, "indexed source changed before enqueue");
                 }
+                let ordinal = playlists::insertion_ordinal(&transaction, None, None, 1)?;
                 transaction.execute(
                     "INSERT INTO queue(id,ordinal,path,track_id,source_kind,source_name,run_id)
-                     SELECT ?1,COALESCE(MAX(ordinal),-1)+1,?2,?3,?4,?5,?6 FROM queue",
+                     VALUES(?1,?2,?3,?4,?5,?6,?7)",
                     params![
                         id,
+                        ordinal,
                         path,
                         track.map(|track| track.0),
                         source.map(|source| source.kind.as_str()),
@@ -1068,6 +1071,47 @@ mod tests {
                 vec![(1, PathBuf::from("/music/a.flac"))]
             );
             assert_eq!((loaded.revision, loaded.next_id), (2, 2));
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        result
+    }
+
+    /// Every other insert refuses to pass the top ordinal. A single append must
+    /// too: SQLite turns the overflowing sum into a REAL, and `load` cannot read it.
+    #[test]
+    fn single_appends_at_the_top_ordinal_are_refused() -> Result<()> {
+        let path = temp_path();
+        let result = (|| -> Result<()> {
+            let mut store = Store::open(&path)?;
+            let file = |id| Edit::Append {
+                id,
+                path: "/music/b.flac",
+                track: None,
+                source: None,
+                run_id: None,
+            };
+            store.edit(file(1), 2, 2)?;
+            // One below the top still fits.
+            store
+                .connection
+                .execute("UPDATE queue SET ordinal=?1 WHERE id=1", [i64::MAX - 1])?;
+            store.edit(file(2), 3, 3)?;
+            assert_eq!(store.load()?.entries.len(), 2);
+            // The top ordinal is taken now.
+            let stream = StreamSpec::new("http://radio.example/".into(), "Radio".into())?;
+            for edit in [
+                file(3),
+                Edit::AppendStream {
+                    id: 3,
+                    stream: &stream,
+                },
+            ] {
+                let error = store.edit(edit, 4, 4).unwrap_err();
+                assert_eq!(error.to_string(), "occurrence order exhausted", "{error:#}");
+            }
+            let loaded = store.load()?;
+            assert_eq!((loaded.entries.len(), loaded.revision), (2, 3));
             Ok(())
         })();
         let _ = fs::remove_file(&path);
