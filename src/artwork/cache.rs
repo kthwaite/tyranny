@@ -36,8 +36,11 @@ impl Cache {
         let application: i64 =
             connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        // Version 0 with our application ID: a first open died between the two pragmas
+        // at the end of this function. It holds no other schema, so it can go on.
         ensure!(
-            (application == 0 && version == 0) || (application == APPLICATION_ID && version == 1),
+            (application == 0 && version == 0)
+                || (application == APPLICATION_ID && matches!(version, 0 | 1)),
             "unsupported private artwork cache"
         );
         // FULL auto-vacuum returns evicted pages to the filesystem. A hard page
@@ -109,5 +112,43 @@ impl Cache {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A death between the two pragmas of the first open leaves this state. It must
+    /// not turn the cache off for good. Other pairs are still refused.
+    #[test]
+    fn an_interrupted_first_open_can_be_opened() {
+        let dir = std::env::temp_dir().join(format!(
+            "tyranny-likes-smoke-artwork-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&dir).unwrap();
+        for (name, application, version, opens) in [
+            ("interrupted", APPLICATION_ID, 0, true),
+            ("no-application", 0, 1, false),
+            ("foreign-no-version", 0x1234_5678, 0, false),
+            ("newer", APPLICATION_ID, 2, false),
+        ] {
+            let path = dir.join(name);
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .pragma_update(None, "application_id", application)
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            drop(connection);
+            assert_eq!(Cache::open(&path).is_ok(), opens, "{name}");
+        }
+        let mut cache = Cache::open(&dir.join("interrupted")).unwrap();
+        cache.put("key", &"art", None);
+        assert_eq!(cache.get::<String>("key").as_deref(), Some("art"));
+        drop(cache);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
