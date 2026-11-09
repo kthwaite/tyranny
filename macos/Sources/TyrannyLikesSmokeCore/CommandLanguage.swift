@@ -246,7 +246,12 @@ public enum CommandLanguage {
         }
         let prefix = tokens.removeLast()
         let stem = colon + tokens.map(quote).joined(separator: " ") + " "
-        return Set(candidates).sorted().filter { $0.hasPrefix(prefix) }.map { value in
+        // Unique by bytes. The server keeps playlist names apart whose lowercase forms
+        // differ in bytes, so canonically equal names can both exist; `String ==` joins them.
+        var seen = Set<[UInt8]>()
+        let unique = candidates.filter { seen.insert(Array($0.utf8)).inserted }
+        let sorted = unique.sorted { $0 < $1 || (!($1 < $0) && $0.utf8.lexicographicallyPrecedes($1.utf8)) }
+        return sorted.filter { $0.hasPrefix(prefix) }.map { value in
             let more = index + 1 < definition.arguments.count && !(definition.id == .sort && index == 0 && value == "none")
             return CommandSuggestion(line: stem + quote(value), value: value, summary: nil, continues: more)
         }

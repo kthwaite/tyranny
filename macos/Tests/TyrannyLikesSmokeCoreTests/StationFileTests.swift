@@ -70,6 +70,12 @@ import Testing
         ])
     }
 
+    /// "Exact URLs": URLs that are only canonically equal are both kept.
+    @Test func duplicateURLsCompareBytes() throws {
+        let stations = try StationFile.parse("http://a.example/caf\u{E9}\nhttp://a.example/cafe\u{301}\nhttp://a.example/caf\u{E9}", fileName: "d.m3u")
+        #expect(stations.map { Array($0.url.utf8) } == [Array("http://a.example/caf\u{E9}".utf8), Array("http://a.example/cafe\u{301}".utf8)])
+    }
+
     @Test func unknownExtensionThrows() {
         #expect(throws: StationFileError.self) { try StationFile.parse("http://a.example/s", fileName: "a.txt") }
         #expect(throws: StationFileError.self) { try StationFile.parse("http://a.example/s", fileName: "noextension") }

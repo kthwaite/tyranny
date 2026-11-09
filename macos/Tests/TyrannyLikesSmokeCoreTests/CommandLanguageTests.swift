@@ -245,4 +245,11 @@ import Testing
         #expect(CommandLanguage.suggestions(" \u{301}:queue-c").isEmpty)
         #expect(CommandLanguage.suggestions(" :queue-c").map(\.line) == [":queue-clear"])
     }
+
+    /// The server keeps playlist names apart by their lowercase bytes, so "\u{C5}" and "A\u{30A}"
+    /// can both exist. Names that are only canonically equal each get a row.
+    @Test func playlistCompletionsKeepNamesThatDifferInBytes() {
+        let rows = CommandLanguage.suggestions("playlist-open ", playlistNames: ["\u{C5}", "A\u{30A}", "A\u{30A}"])
+        #expect(rows.map { $0.value.unicodeScalars.map(\.value) }.sorted { $0.lexicographicallyPrecedes($1) } == [[0x41, 0x30A], [0xC5]])
+    }
 }

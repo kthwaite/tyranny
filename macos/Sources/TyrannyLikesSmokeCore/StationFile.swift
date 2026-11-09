@@ -21,8 +21,9 @@ public enum StationFile {
         case "m3u", "m3u8": candidates = parseM3U(lines)
         default: throw StationFileError("\(fileName) is not a .pls or .m3u station file")
         }
-        var seen = Set<String>()
-        let stations = candidates.filter { seen.insert($0.url).inserted }
+        // Exact URLs: by bytes, as the server's UNIQUE url. `String ==` joins canonically equal URLs.
+        var seen = Set<[UInt8]>()
+        let stations = candidates.filter { seen.insert(Array($0.url.utf8)).inserted }
         if stations.isEmpty {
             throw StationFileError("\(fileName) has no http or https stations")
         }
