@@ -1025,8 +1025,14 @@ impl Actor {
         }
         Ok(self.revision() + 1)
     }
+    /// Replies to a queue edit that is committed and in the player. The edit stands,
+    /// so a failed checkpoint must not reject it. The periodic checkpoint saves again.
     fn applied(&mut self, entry_id: Option<u64>) -> CommandResult<Response> {
-        self.save().map_err(Failure::persistence)?;
+        if let Err(error) = self.save() {
+            eprintln!(
+                "tyranny likes smoke: checkpoint after a queue edit failed; the next one retries: {error:#}"
+            );
+        }
         self.published(entry_id)
     }
 

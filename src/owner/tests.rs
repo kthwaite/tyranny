@@ -577,6 +577,171 @@ fn applied(actor: &mut Actor, command: Command) -> Response {
         Err(failure) => panic!("command failed: {:#}", failure.error),
     }
 }
+/// An actor with `count` queued WAVs. The tests below edit its queue.
+fn actor_with_queue(root: &Path, count: usize) -> Actor {
+    fs::create_dir_all(root).unwrap();
+    let mut actor = Actor::open(OwnerConfig {
+        database_path: root.join("state.sqlite"),
+        output: OutputConfig::Capture {
+            path: root.join("capture.f32"),
+            clocked: true,
+        },
+    })
+    .unwrap();
+    for index in 0..count {
+        let source = root.join(format!("{index}.wav"));
+        wav(&source);
+        let expected_revision = actor.revision();
+        applied(
+            &mut actor,
+            Command::Append {
+                expected_revision,
+                path: source.to_str().unwrap().to_owned(),
+            },
+        );
+    }
+    actor
+}
+/// The queue IDs and revision the store holds.
+fn stored_queue(actor: &Actor) -> (Vec<u64>, u64) {
+    let loaded = actor.store.load().unwrap();
+    (
+        loaded.entries.iter().map(|entry| entry.id).collect(),
+        loaded.revision,
+    )
+}
+
+/// Append, Remove and Clear commit, and the player applies them, before the
+/// checkpoint. A failed checkpoint must not report the edit as rejected: a client
+/// that retries an append it was told failed would add the entry twice.
+#[test]
+fn a_failed_checkpoint_does_not_reject_a_committed_queue_edit() {
+    let root = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-edit-checkpoint-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut actor = actor_with_queue(&root, 3);
+    let (ids, _) = stored_queue(&actor);
+    let database = rusqlite::Connection::open(root.join("state.sqlite")).unwrap();
+    // A queue edit does not write the settings column, and a checkpoint does.
+    database
+        .execute_batch(
+            "CREATE TRIGGER reject_checkpoint BEFORE UPDATE OF settings ON control
+             BEGIN SELECT RAISE(ABORT, 'test checkpoint failure'); END;",
+        )
+        .unwrap();
+
+    let source = root.join("0.wav");
+    let expected_revision = actor.revision();
+    let response = applied(
+        &mut actor,
+        Command::Append {
+            expected_revision,
+            path: source.to_str().unwrap().to_owned(),
+        },
+    );
+    let Response::Applied {
+        snapshot,
+        entry_id: Some(added),
+    } = response
+    else {
+        panic!("expected the new entry");
+    };
+    assert_eq!(snapshot.queue_revision, expected_revision + 1);
+    assert_eq!(snapshot.queue_length, 4);
+    assert_eq!(
+        stored_queue(&actor),
+        (vec![ids[0], ids[1], ids[2], added], expected_revision + 1)
+    );
+
+    let expected_revision = actor.revision();
+    let response = applied(
+        &mut actor,
+        Command::Remove {
+            expected_revision,
+            entry_id: ids[1],
+        },
+    );
+    let Response::Applied { snapshot, .. } = response else {
+        panic!("expected a snapshot");
+    };
+    assert_eq!(snapshot.queue_length, 3);
+    assert_eq!(
+        stored_queue(&actor),
+        (vec![ids[0], ids[2], added], expected_revision + 1)
+    );
+
+    let expected_revision = actor.revision();
+    let response = applied(&mut actor, Command::Clear { expected_revision });
+    let Response::Applied { snapshot, .. } = response else {
+        panic!("expected a snapshot");
+    };
+    assert_eq!(snapshot.queue_length, 0);
+    assert_eq!(stored_queue(&actor), (Vec::new(), expected_revision + 1));
+
+    // The periodic checkpoint saves once the store accepts it again.
+    database
+        .execute_batch("DROP TRIGGER reject_checkpoint")
+        .unwrap();
+    actor.save().unwrap();
+    actor.library.shutdown().unwrap();
+    drop(actor.player);
+    drop(actor.store);
+    drop(database);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The edits still save a checkpoint when the store accepts it.
+#[test]
+fn a_committed_queue_edit_still_saves_a_checkpoint() {
+    let root = std::env::temp_dir().join(format!(
+        "tyranny-likes-smoke-edit-saves-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut actor = actor_with_queue(&root, 2);
+    let (ids, _) = stored_queue(&actor);
+    let database = rusqlite::Connection::open(root.join("state.sqlite")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE saves(id INTEGER PRIMARY KEY);
+             CREATE TRIGGER count_saves AFTER UPDATE OF settings ON control
+             BEGIN INSERT INTO saves VALUES(NULL); END;",
+        )
+        .unwrap();
+    let saves = || -> u64 {
+        database
+            .query_row("SELECT COUNT(*) FROM saves", [], |row| row.get(0))
+            .unwrap()
+    };
+    let source = root.join("0.wav");
+    let expected_revision = actor.revision();
+    applied(
+        &mut actor,
+        Command::Append {
+            expected_revision,
+            path: source.to_str().unwrap().to_owned(),
+        },
+    );
+    assert_eq!(saves(), 1);
+    let expected_revision = actor.revision();
+    applied(
+        &mut actor,
+        Command::Remove {
+            expected_revision,
+            entry_id: ids[0],
+        },
+    );
+    assert_eq!(saves(), 2);
+    let expected_revision = actor.revision();
+    applied(&mut actor, Command::Clear { expected_revision });
+    assert_eq!(saves(), 3);
+    actor.library.shutdown().unwrap();
+    drop(actor.player);
+    drop(actor.store);
+    drop(database);
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// Remove or Clear of the current entry just after output reached its
 /// threshold, before the owner's next pump saw it, still records the play.
 #[test]
