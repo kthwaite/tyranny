@@ -31,6 +31,9 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
+/// How long a library write waits for a writer on another connection. This thread
+/// is not the playback owner, so it can wait. A failed status save ends the worker.
+const WRITER_WAIT: Duration = Duration::from_secs(5);
 /// Bounds the in-memory Reindex queue; it is never persisted.
 pub(crate) const MAX_PENDING_REINDEX: usize = 4096;
 /// Bounds the Reindex work that shutdown finishes.
@@ -250,7 +253,7 @@ impl Coordinator {
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        connection.busy_timeout(Duration::from_millis(100))?;
+        connection.busy_timeout(WRITER_WAIT)?;
         connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
