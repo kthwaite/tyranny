@@ -833,6 +833,27 @@ mod tests {
         Ok(())
     }
 
+    /// What the store writes it reads back, in every EQ float.
+    #[test]
+    fn settings_floats_read_back_exactly() -> Result<()> {
+        let settings = Settings {
+            equalizer: crate::equalizer::EqualizerSettings {
+                enabled: true,
+                preamp_db: 0.0,
+                bands: vec![crate::equalizer::EqualizerBand {
+                    gain_db: 54_053.0 / 48_000.0,
+                    ..Default::default()
+                }],
+            },
+            ..Settings::default()
+        };
+        assert_eq!(
+            decode_settings(&serde_json::to_string(&settings)?)?,
+            settings
+        );
+        Ok(())
+    }
+
     #[test]
     fn invalid_parametric_settings_and_presets_are_not_silently_reset() -> Result<()> {
         let mut settings = Settings {
