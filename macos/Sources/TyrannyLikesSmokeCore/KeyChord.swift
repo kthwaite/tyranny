@@ -33,8 +33,9 @@ public struct KeyChord: Hashable, Sendable {
                 guard rest.hasSuffix("+") else { return nil }
                 rest = rest.dropLast()
             }
-        } else if let split = rest.lastIndex(of: "+") {
-            keyText = String(rest[rest.index(after: split)...])
+        } else if canonical.count > 1, let split = rest.unicodeScalars.lastIndex(of: "+") {
+            // By scalar: a combining mark key joins the `+` before it in one grapheme.
+            keyText = String(rest[rest.unicodeScalars.index(after: split)...])
             rest = rest[..<split]
         } else {
             keyText = String(rest)
