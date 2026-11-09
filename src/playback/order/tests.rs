@@ -1570,3 +1570,144 @@ fn an_output_fault_still_reports_the_passes_output_started() -> anyhow::Result<(
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+/// Shuffle under Repeat All: a fresh pass picks from the context minus the
+/// current entry ("the whole context minus `i`", library-server plan, Task 11).
+/// An entry inserted inside a run splits it, so the current entry is a context
+/// of one and replays. Removing that entry joins the run again: what follows
+/// must be decided in the joined context, not kept from the split one.
+#[test]
+fn a_removal_that_joins_a_run_decides_next_again() -> anyhow::Result<()> {
+    let directory = scratch("joined-run")?;
+    let source = silence(&directory, crate::BLOCK_FRAMES as u32)?;
+    let mut player = Player::new(
+        vec![source.clone()],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    // Entry 1 is loose; 2 and 3 are a run; 4 goes inside the run.
+    let revision = player.snapshot().queue_revision;
+    player.append_run(vec![source.clone(); 2], revision, RepeatScope::Run)?;
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_insert(vec![source].into_iter(), Some(3), revision)?;
+    player.commit_insert(prepared);
+    assert_eq!(player.queue_ids(), [1, 2, 4, 3]);
+    player.set_shuffle(Some(Box::new(Last)));
+    player.set_repeat(RepeatMode::All);
+    player.mark_played(2);
+    let prepared = player.prepare_selection(3, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(3);
+    player.pump()?;
+    // 3 alone is its context: it replays.
+    assert_eq!(player.snapshot().next_id, Some(3));
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_remove_batch(&[4], Some(3), revision)?;
+    player.commit_remove_batch(prepared);
+    player.pump()?;
+    // The run is [2, 3] again, both played: the fresh pass starts with 2.
+    assert_eq!(player.queue_ids(), [1, 2, 3]);
+    assert_eq!(player.snapshot().next_id, Some(2));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// The same join when the anchor is outside the run: passes the decoder
+/// already prepared after the anchor were decided in the split run, where 3
+/// is a context of one and replays. Removing 4 joins 2 and 3 again, so after
+/// 3 comes 2, not 3 again (reviewer's probe).
+#[test]
+fn a_removal_that_joins_a_run_after_the_anchor_decides_again() -> anyhow::Result<()> {
+    let directory = scratch("joined-run-ahead")?;
+    let source = silence(&directory, crate::BLOCK_FRAMES as u32)?;
+    let mut player = Player::new(
+        vec![source.clone()],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    // [1, 2, 4, 3, 5]: 2 and 3 are a run, 4 is inside it, 1 and 5 are loose.
+    let revision = player.snapshot().queue_revision;
+    player.append_run(vec![source.clone(); 2], revision, RepeatScope::Run)?;
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_insert(vec![source.clone()].into_iter(), Some(3), revision)?;
+    player.commit_insert(prepared);
+    let revision = player.snapshot().queue_revision;
+    player.append(source, revision)?;
+    assert_eq!(player.queue_ids(), [1, 2, 4, 3, 5]);
+    player.set_shuffle(Some(Box::new(Last)));
+    player.set_repeat(RepeatMode::All);
+    player.mark_played(1);
+    player.mark_played(2);
+    let prepared = player.prepare_selection(5, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(5);
+    // Paused: the decoder prepares ahead in the split run.
+    for _ in 0..20 {
+        player.pump()?;
+    }
+    let ids = |player: &Player| player.passes.iter().map(|pass| pass.id).collect::<Vec<_>>();
+    assert_eq!(ids(&player)[..3], [5, 3, 3]);
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_remove_batch(&[4], Some(5), revision)?;
+    player.commit_remove_batch(prepared);
+    for _ in 0..20 {
+        player.pump()?;
+    }
+    assert_eq!(player.queue_ids(), [1, 2, 3, 5]);
+    assert_eq!(ids(&player)[..3], [5, 3, 2], "passes {:?}", ids(&player));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// Removing an inner member of an unbroken run joins nothing: the run stays
+/// one context, so the passes prepared after the anchor stand. (The owner's
+/// trim of played entries removes such members on many advances.)
+#[test]
+fn removing_an_inner_run_member_keeps_the_prepared_passes() -> anyhow::Result<()> {
+    let directory = scratch("inner-run-member")?;
+    let source = silence(&directory, crate::BLOCK_FRAMES as u32)?;
+    let mut player = Player::new(
+        vec![source.clone()],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    // Entry 1 is loose; 2..=6 are one run.
+    let revision = player.snapshot().queue_revision;
+    player.append_run(vec![source; 5], revision, RepeatScope::Run)?;
+    assert_eq!(player.queue_ids(), [1, 2, 3, 4, 5, 6]);
+    player.set_shuffle(Some(Box::new(Last)));
+    player.set_repeat(RepeatMode::All);
+    player.mark_played(2);
+    player.mark_played(3);
+    let prepared = player.prepare_selection(5, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(5);
+    // Paused: prepare one pass after 5 (the unplayed pick, 6).
+    while player.passes.len() < 2 {
+        player.pump()?;
+    }
+    let ids = |player: &Player| player.passes.iter().map(|pass| pass.id).collect::<Vec<_>>();
+    assert_eq!(ids(&player), [5, 6]);
+    let token = Arc::clone(&player.passes[1].token);
+    // 3 is played, before the anchor, and not ahead.
+    let revision = player.snapshot().queue_revision;
+    let prepared = player.prepare_remove_batch(&[3], Some(5), revision)?;
+    player.commit_remove_batch(prepared);
+    assert_eq!(player.queue_ids(), [1, 2, 4, 5, 6]);
+    assert_eq!(ids(&player), [5, 6], "the prepared pass was dropped");
+    assert!(Arc::ptr_eq(&token, &player.passes[1].token));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}

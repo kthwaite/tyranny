@@ -9,7 +9,7 @@ use crate::{
     SAMPLE_RATE,
     listing::unix_now,
     output::{OutputSnapshot, TrackToken},
-    play_order::{self, RepeatMode, ShuffleStrategy, Slot},
+    play_order::{self, RepeatMode, RepeatScope, RunInfo, ShuffleStrategy, Slot},
     store::{EndReason, count_threshold_frames, played_overflow},
 };
 use std::{
@@ -311,6 +311,39 @@ impl Player {
 
     pub(super) fn index_of(&self, id: u64) -> Option<usize> {
         self.queue.iter().position(|entry| entry.id == id)
+    }
+
+    /// Whether removing `removed` joins a run: a removed entry from outside a
+    /// `Run` run sits between two kept entries of it, so they become one
+    /// context again. Removing members of the run itself joins nothing.
+    /// What follows an entry of that run was decided while it was split, in
+    /// the anchor's own plan or in passes the decoder prepared after it.
+    pub(super) fn removal_joins_run(&self, removed: &[bool]) -> bool {
+        let run_of = |index: usize| match self.queue[index].run {
+            Some(RunInfo {
+                run_id,
+                scope: RepeatScope::Run,
+            }) => Some(run_id),
+            _ => None,
+        };
+        let mut last_kept: Option<usize> = None;
+        let mut gap = false;
+        for (index, gone) in removed.iter().enumerate() {
+            if *gone {
+                gap |= last_kept.is_none_or(|previous| run_of(index) != run_of(previous));
+                continue;
+            }
+            if gap
+                && let Some(previous) = last_kept
+                && run_of(index).is_some()
+                && run_of(index) == run_of(previous)
+            {
+                return true;
+            }
+            last_kept = Some(index);
+            gap = false;
+        }
+        false
     }
 
     /// The queue as the play order sees it. An entry is played once heard in
