@@ -343,6 +343,23 @@ fn a_track_heard_to_its_end_opens_counts_and_finishes() -> anyhow::Result<()> {
 }
 
 #[test]
+fn a_zero_header_duration_counts_only_at_the_natural_end() -> anyhow::Result<()> {
+    // Musepack SV8 has a 73728-frame time base, so the container duration of
+    // tone.mpc (12000 samples) is 0 ticks. That is unknown, not a 0-frame track
+    // whose pass counts as soon as output starts.
+    let directory = scratch("zero-duration")?;
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/formats/tone.mpc");
+    let mut player = clocked(&directory, vec![source])?;
+    player.play();
+    player.pump()?;
+    let pass = player.passes.back().expect("playing began a pass");
+    assert_eq!(pass.threshold, None);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+#[test]
 fn end_play_skipped_before_the_threshold_closes_uncounted() -> anyhow::Result<()> {
     let directory = scratch("skip")?;
     let mut player = clocked(&directory, vec![silence(&directory, 480_000)?])?;
