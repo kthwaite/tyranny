@@ -42,20 +42,22 @@ pub(crate) struct GainMetadata {
 
 impl GainMetadata {
     pub(crate) fn tag(&mut self, key: &str, value: &str) {
-        let field = if key.eq_ignore_ascii_case("replaygain_track_gain") {
-            &mut self.track_gain
+        let (field, peak) = if key.eq_ignore_ascii_case("replaygain_track_gain") {
+            (&mut self.track_gain, false)
         } else if key.eq_ignore_ascii_case("replaygain_album_gain") {
-            &mut self.album_gain
+            (&mut self.album_gain, false)
         } else if key.eq_ignore_ascii_case("replaygain_track_peak") {
-            &mut self.track_peak
+            (&mut self.track_peak, true)
         } else if key.eq_ignore_ascii_case("replaygain_album_peak") {
-            &mut self.album_peak
+            (&mut self.album_peak, true)
         } else {
             return;
         };
         // Malformed/nonfinite metadata is absent, not a NaN audio multiplier.
         // A malformed stream override must not erase a valid container tag.
-        if let Some(value) = tag_number(value) {
+        // A peak that is not above zero limits nothing: it is absent too, as
+        // FFmpeg's unknown side-data peak is, so it cannot hide another peak.
+        if let Some(value) = tag_number(value).filter(|value| !peak || *value > 0.0) {
             *field = Some(value);
         }
     }
@@ -806,6 +808,62 @@ mod tests {
             ..tags
         };
         assert_eq!(album.selected_db(GainMode::Album), -20.0 * 8.0_f64.log10());
+    }
+
+    /// Side data as FFmpeg attaches it. Peak 0 there means unknown.
+    fn replay_gain_bytes(track_peak: u32, album_peak: u32) -> Vec<u8> {
+        let gain = ffi::AVReplayGain {
+            track_gain: i32::MIN,
+            track_peak,
+            album_gain: i32::MIN,
+            album_peak,
+        };
+        let size = std::mem::size_of::<ffi::AVReplayGain>();
+        // SAFETY: AVReplayGain is plain integers; this reads its own bytes.
+        unsafe { std::slice::from_raw_parts((&raw const gain).cast::<u8>(), size) }.to_vec()
+    }
+
+    #[test]
+    fn unusable_peak_tags_are_absent() {
+        let limited = -20.0 * 0.5_f64.log10();
+        for bad in ["0", "-0.5", "0.0 dB"] {
+            // Album gain with a bad album peak falls back to the track peak.
+            let mut album = GainMetadata::default();
+            album.tag("replaygain_album_gain", "12");
+            album.tag("replaygain_album_peak", bad);
+            album.tag("replaygain_track_peak", "0.5");
+            assert_eq!(
+                album.selected_db(GainMode::Album),
+                limited,
+                "album peak {bad}"
+            );
+            // A bad tag peak does not hide the side-data peak.
+            let mut side = GainMetadata::default();
+            side.tag("replaygain_track_gain", "12");
+            side.tag("replaygain_track_peak", bad);
+            side.side_data(&replay_gain_bytes(50_000, 0)).unwrap();
+            assert_eq!(
+                side.selected_db(GainMode::Track),
+                limited,
+                "track peak {bad}"
+            );
+            // A bad stream tag does not erase the container's peak.
+            let mut stream = GainMetadata::default();
+            stream.tag("replaygain_track_gain", "12");
+            stream.tag("replaygain_track_peak", "0.5");
+            stream.tag("replaygain_track_peak", bad);
+            assert_eq!(
+                stream.selected_db(GainMode::Track),
+                limited,
+                "stream peak {bad}"
+            );
+        }
+        // No usable peak at all still requests the plain gain.
+        let mut none = GainMetadata::default();
+        none.tag("replaygain_album_gain", "12");
+        none.tag("replaygain_album_peak", "0");
+        none.tag("replaygain_track_peak", "0");
+        assert_eq!(none.selected_db(GainMode::Album), 12.0);
     }
 
     #[test]
