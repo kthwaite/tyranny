@@ -263,7 +263,7 @@ fn run(
     mut recycled: Consumer<Box<PcmBlock>>,
 ) -> Result<()> {
     let mut failures = 0;
-    let mut last_metadata: Option<PlaybackMetadata> = None;
+    let mut last_metadata: Option<(PlaybackMetadata, bool)> = None;
     let mut spare = None;
     let mut opened_once = false;
     loop {
@@ -358,14 +358,17 @@ fn copy_metadata(metadata: &PlaybackMetadata) -> PlaybackMetadata {
     }
 }
 
+/// An announcement is a change even when the title is the same: an empty
+/// ICY title announces the station name, which replaces a carried title.
 fn publish_changed(
     shared: &Shared,
-    previous: &mut Option<PlaybackMetadata>,
+    previous: &mut Option<(PlaybackMetadata, bool)>,
     metadata: &PlaybackMetadata,
     announced: bool,
 ) {
-    if previous.as_ref().is_some_and(|old| {
-        old.title == metadata.title
+    if previous.as_ref().is_some_and(|(old, old_announced)| {
+        *old_announced == announced
+            && old.title == metadata.title
             && old.artist == metadata.artist
             && old.album == metadata.album
             && old.metadata_error == metadata.metadata_error
@@ -373,7 +376,7 @@ fn publish_changed(
         return;
     }
     shared.publish(metadata, announced);
-    *previous = Some(copy_metadata(metadata));
+    *previous = Some((copy_metadata(metadata), announced));
 }
 
 /// Applies a new ICY packet's title. Returns whether the station announced
@@ -553,6 +556,57 @@ mod tests {
         publish("Live", true);
         decoder.carry_title("Other");
         assert_eq!(decoder.take_metadata().unwrap().title, "Live");
+    }
+
+    /// An empty ICY title announces the station name (`update_icy`). It must
+    /// replace a carried or earlier title, even though the metadata the
+    /// worker last published already held the station name.
+    #[test]
+    fn an_announced_station_name_replaces_the_shown_title() {
+        let (_writer, ready) = RingBuffer::new(PCM_BLOCKS);
+        let (recycle, _recycled) = RingBuffer::new(PCM_BLOCKS);
+        let shared = Arc::new(Shared {
+            cancelled: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            started: Instant::now(),
+            deadline_ms: AtomicU64::new(0),
+            gain_bits: AtomicU64::new(0.0_f64.to_bits()),
+            updates: Mutex::new(Updates {
+                title: Some("Carried".to_owned()),
+                ..Updates::default()
+            }),
+        });
+        let mut decoder = StreamDecoder {
+            ready,
+            recycle,
+            current: None,
+            offset: 0,
+            shared: Arc::clone(&shared),
+            worker: thread::current(),
+        };
+        let metadata = |title: &str| PlaybackMetadata {
+            title: title.to_owned(),
+            artist: String::new(),
+            album: String::new(),
+            metadata_error: None,
+        };
+        let mut previous = None;
+        let mut publish = |title: &str, announced: bool| {
+            publish_changed(&shared, &mut previous, &metadata(title), announced);
+        };
+        let mut shown = || decoder.take_metadata().map(|metadata| metadata.title);
+        // A carried title shows until the station announces one.
+        publish("Station", false);
+        assert_eq!(shown().as_deref(), Some("Carried"));
+        publish("Station", true);
+        assert_eq!(shown().as_deref(), Some("Station"));
+        // The same on a reconnect after an announced song.
+        publish("Song", true);
+        assert_eq!(shown().as_deref(), Some("Song"));
+        publish("Station", false);
+        assert_eq!(shown().as_deref(), Some("Song"));
+        publish("Station", true);
+        assert_eq!(shown().as_deref(), Some("Station"));
     }
 
     #[test]
