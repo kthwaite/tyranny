@@ -147,9 +147,10 @@ public final class CommandPaletteModel {
         }
     }
 
-    /// The input without its leading `/`, trimmed.
+    /// The input without its leading `/`, trimmed. By scalar: a mark after the slash joins its grapheme.
     private var searchTerm: String {
-        (text.hasPrefix("/") ? String(text.dropFirst()) : text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let scalars = text.unicodeScalars[...]
+        return String(Substring(scalars.first == "/" ? scalars.dropFirst() : scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// True when the text parses to `search` with no term.

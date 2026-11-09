@@ -220,7 +220,7 @@ public enum CommandLanguage {
     /// Returns suggestion rows. `continues` is true when the command takes another argument after the row.
     public static func suggestions(_ text: String, playlistNames: [String] = []) -> [CommandSuggestion] {
         guard let scan = try? tokenize(body(text), incomplete: true) else { return [] }
-        let colon = text.drop(while: { $0.isWhitespace }).hasPrefix(":") ? ":" : ""
+        let colon = leading(text).first == ":" ? ":" : ""
         var tokens = scan.tokens
         if !scan.active { tokens.append("") }
         if tokens.count == 1 {
@@ -258,9 +258,15 @@ public enum CommandLanguage {
         return registry.first { $0.id.rawValue == first }
     }
 
+    /// Drops leading whitespace and one `:`.
     private static func body(_ text: String) -> String {
-        let trimmed = text.drop(while: { $0.isWhitespace })
-        return String(trimmed.hasPrefix(":") ? trimmed.dropFirst() : trimmed)
+        let trimmed = leading(text)
+        return String(Substring(trimmed.first == ":" ? trimmed.dropFirst() : trimmed))
+    }
+
+    /// The text after its leading whitespace. By scalar: a mark after a space or `:` joins its grapheme.
+    private static func leading(_ text: String) -> Substring.UnicodeScalarView {
+        text.unicodeScalars.drop(while: { $0.properties.isWhitespace })
     }
 
     public static func quote(_ token: String) -> String {
