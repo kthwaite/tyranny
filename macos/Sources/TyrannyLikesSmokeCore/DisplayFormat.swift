@@ -92,11 +92,18 @@ public enum DisplayFormat {
     }
 
     /// Replaces the home directory prefix with "~".
+    /// The prefix ends at a `/` scalar, as a file path does: a mark after `/` joins its
+    /// grapheme. The prefix still compares canonically, as `path == home` does, so an NFD
+    /// path under an NFC home is abbreviated too.
     public static func abbreviatedPath(_ path: String, home: String) -> String {
         guard !home.isEmpty else { return path }
         if path == home { return "~" }
-        let prefix = home.hasSuffix("/") ? home : home + "/"
-        return path.hasPrefix(prefix) ? "~/" + path.dropFirst(prefix.count) : path
+        let prefix = home.unicodeScalars.last == "/" ? home : home + "/"
+        let scalars = path.unicodeScalars
+        guard let slash = scalars.indices.first(where: {
+            scalars[$0] == "/" && String(Substring(scalars[...$0])) == prefix
+        }) else { return path }
+        return "~/" + String(Substring(scalars[scalars.index(after: slash)...]))
     }
 
     /// A column browser's first row: "All (12 Genres)".
