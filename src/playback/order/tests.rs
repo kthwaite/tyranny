@@ -1008,3 +1008,45 @@ fn reselecting_a_fresh_pass_does_not_keep_the_planned_wrap() -> anyhow::Result<(
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+#[test]
+fn an_entry_without_pcm_is_not_a_play() -> anyhow::Result<()> {
+    let directory = scratch("empty")?;
+    let empty = silence(&directory, 0)?;
+    let empty_path = directory.join("empty.wav");
+    fs::rename(empty, &empty_path)?;
+    let track = silence(&directory, 30_000)?;
+    let mut player = Player::new(
+        vec![empty_path, track],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    player.play();
+    let mut events = Vec::new();
+    pump_until(&mut player, &mut events, |player, _| player.completed())?;
+    player.pump()?;
+    events.extend(player.take_play_events());
+    assert_eq!(player.started_entries(), [2]);
+    // Output never started entry 1: only entry 2 opens, counts and finishes.
+    let [
+        PlayEvent::Opened {
+            play, entry_id: 2, ..
+        },
+        PlayEvent::Counted { play: counted },
+        PlayEvent::Closed {
+            play: closed,
+            reason: EndReason::Finished,
+            ..
+        },
+    ] = events[..]
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!((counted, closed), (play, play));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
