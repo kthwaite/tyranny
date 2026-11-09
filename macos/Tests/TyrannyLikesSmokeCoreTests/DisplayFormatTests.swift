@@ -16,6 +16,13 @@ private func scan(_ phase: String, discovered: Int = 0, processed: Int = 0, tota
         #expect(DisplayFormat.clock(.nan) == "—")
     }
 
+    /// `%d` reads 32 bits, and an hour count can pass that while `seconds` is still valid.
+    @Test func clockKeepsHoursAbove32Bits() {
+        #expect(DisplayFormat.clock(10_000_000_000_000) == "2777777777:46:40")
+        #expect(DisplayFormat.clock(16_000_000_000_000_000) == "4444444444444:26:40")
+        #expect(DisplayFormat.clock(7_730_941_132_799) == "2147483647:59:59")
+    }
+
     @Test func remainingUsesMinusSignAndClampsAtZero() {
         #expect(DisplayFormat.remaining(elapsed: 30, duration: 184) == "\u{2212}2:34")
         #expect(DisplayFormat.remaining(elapsed: 200, duration: 184) == "\u{2212}0:00")

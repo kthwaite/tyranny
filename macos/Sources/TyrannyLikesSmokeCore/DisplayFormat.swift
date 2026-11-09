@@ -10,9 +10,9 @@ public enum DisplayFormat {
         guard seconds.isFinite, seconds >= 0, seconds < Double(Int.max) else { return "—" }
         let value = Int(seconds)
         if value >= 3600 {
-            return String(format: "%d:%02d:%02d", value / 3600, (value / 60) % 60, value % 60)
+            return String(format: "%ld:%02ld:%02ld", value / 3600, (value / 60) % 60, value % 60)
         }
-        return String(format: "%d:%02d", value / 60, value % 60)
+        return String(format: "%ld:%02ld", value / 60, value % 60)
     }
 
     /// Time left, with a minus sign. Clamped at zero.
