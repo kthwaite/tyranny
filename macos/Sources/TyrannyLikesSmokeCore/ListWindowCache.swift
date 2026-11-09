@@ -32,7 +32,8 @@ public enum WindowFetchError: Error {
 /// without a revision. After `serverRevisionChanged`, a refresh pass refetches the visible windows
 /// unpinned. The visible windows keep their old rows until every reply of the pass is in; then the
 /// pass commits in one step: new rows, the newest page revision, `total` and `anchorPosition`.
-/// Revisions are assumed to grow.
+/// A window that leaves the visible range while outdated is dropped, and requested again when it
+/// comes back. Revisions are assumed to grow.
 ///
 /// Throttle. The first change after a quiet period starts a pass at once. Each pass starts a
 /// cooldown of `refreshInterval`. Changes during the cooldown or during a pass join one trailing
@@ -330,6 +331,7 @@ public enum WindowFetchError: Error {
         if done.change == changes { failed.formUnion(done.failures) }
         generation &+= 1
         if totalChanged { updateWanted() }
+        dropOutdatedOffScreen()
         evict(keeping: Set(done.replies.keys))
         if anchorRequested {
             anchorPosition = pendingAnchor.flatMap { position(of: $0) }
@@ -406,6 +408,13 @@ public enum WindowFetchError: Error {
         window.revision != revision || window.change < changes
     }
 
+    /// An outdated window that left the visible range gets no refresh pass, and its positions are
+    /// stale. Nobody looks at it, so it goes. It is requested again when it comes back into view.
+    private func dropOutdatedOffScreen() {
+        guard !wanted.isEmpty else { return }
+        windows = windows.filter { wanted.contains($0.key) || !isOutdated($0.value) }
+    }
+
     /// Starts a pass when one is needed, no pass is running and the cooldown is over.
     private func pumpRefresh() {
         guard pass == nil, cooldown == nil else { return }
@@ -452,6 +461,9 @@ public enum WindowFetchError: Error {
         for index in next { ticks[index] = tick }
         failed.subtract(next.subtracting(wanted))
         wanted = next
+        let before = windows.count
+        dropOutdatedOffScreen()
+        if windows.count != before { generation &+= 1 }
         let center = range.isEmpty ? 0 : (range.lowerBound + range.upperBound) / 2 / windowSize
         for index in next.sorted(by: { abs($0 - center) < abs($1 - center) })
         where windows[index] == nil && inFlight[index] == nil && !failed.contains(index) {
