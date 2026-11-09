@@ -316,14 +316,18 @@ impl Player {
     /// The queue as the play order sees it. An entry is played once heard in
     /// the current pass over its context, or once a pass of it is prepared.
     fn slots(&self) -> Vec<Slot> {
-        // Passes from an unheard fresh pass on make up the new pass.
+        // Passes before the latest heard one ended: a cut notes passes without
+        // dropping them. From there, passes from an unheard fresh pass on make
+        // up the new pass.
+        let current = self.passes.iter().rposition(|pass| pass.heard).unwrap_or(0);
         let fresh = self
             .passes
-            .iter()
-            .rposition(|pass| pass.fresh.is_some() && !pass.heard);
+            .range(current..)
+            .rposition(|pass| pass.fresh.is_some() && !pass.heard)
+            .map(|index| current + index);
         let prepared: HashSet<u64> = self
             .passes
-            .range(fresh.unwrap_or(0)..)
+            .range(fresh.unwrap_or(current)..)
             .map(|pass| pass.id)
             .collect();
         self.queue
@@ -431,6 +435,14 @@ impl Player {
             self.listen(rendered);
             return;
         };
+        self.note_started(latest, rendered);
+        self.count(&output, latest);
+        self.passes.drain(..latest);
+    }
+
+    /// Notes the passes up to `latest` that output started by `rendered`,
+    /// oldest first, and opens their plays.
+    fn note_started(&mut self, latest: usize, rendered: u64) {
         for index in 0..=latest {
             let pass = &mut self.passes[index];
             if pass.heard || !pass.token.consumed_by(rendered) {
@@ -444,18 +456,16 @@ impl Player {
                 play.heard = true;
             }
             self.start_play(index);
+            self.heard(id, fresh);
             if restored {
                 self.retitle(index);
             }
-            self.heard(id, fresh);
         }
-        self.count(&output, latest);
-        self.passes.drain(..latest);
     }
 
-    /// Counts what output played since the last `hear`. Passes are about to
-    /// be dropped, and a pass that reached its threshold or ended in the
-    /// meantime must not be lost.
+    /// Notes and counts what output played since the last `hear`. Passes are
+    /// about to be dropped, and a pass that output started, reached its
+    /// threshold or ended in the meantime must not be lost.
     pub(crate) fn count_heard(&mut self) {
         let output = self.output.snapshot();
         match self
@@ -463,7 +473,10 @@ impl Player {
             .iter()
             .rposition(|pass| pass.token.consumed_by(output.rendered_frames))
         {
-            Some(latest) => self.count(&output, latest),
+            Some(latest) => {
+                self.note_started(latest, output.rendered_frames);
+                self.count(&output, latest);
+            }
             None => self.listen(output.rendered_frames),
         }
     }

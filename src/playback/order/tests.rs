@@ -1115,3 +1115,158 @@ fn next_onto_a_silent_pass_keeps_its_fresh_pass() -> anyhow::Result<()> {
     fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+/// A seek in the moment after output starts a pass, before a pump, notes
+/// that pass. From `fix/pt-seek-started-pass`, whose fix this one replaces.
+#[test]
+fn a_seek_keeps_a_pass_output_just_started() -> anyhow::Result<()> {
+    let directory = scratch("seek-started")?;
+    let source = silence(&directory, 2_400)?;
+    let mut player = clocked(&directory, vec![source; 2])?;
+    player.set_repeat(RepeatMode::All);
+    player.play();
+    // Pump until both entries were heard, with PCM of the wrap prepared.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut advances = Vec::new();
+    while advances.len() < 2 || player.snapshot().output.buffered_frames < 2_400 {
+        anyhow::ensure!(Instant::now() < deadline, "timed out: {advances:?}");
+        player.pump()?;
+        advances.extend(player.take_advances());
+    }
+    assert_eq!(advances[..2], [(1, Vec::new()), (2, Vec::new())]);
+    // No pump while output starts the wrap's pass over entry 1.
+    while player.snapshot().current_id != Some(1) {
+        anyhow::ensure!(Instant::now() < deadline, "output did not wrap");
+        thread::sleep(Duration::from_millis(1));
+    }
+    player.seek(100)?;
+    while advances.len() < 3 {
+        anyhow::ensure!(Instant::now() < deadline, "timed out: {advances:?}");
+        player.pump()?;
+        advances.extend(player.take_advances());
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Output started the fresh pass: its context clears.
+    assert_eq!(advances[2], (1, vec![1, 2]));
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// A player whose output started entries 1 and 2, with no pump since. All its
+/// PCM is prepared before output starts: the sources are under the prebuffer.
+fn crossed_without_a_pump(directory: &std::path::Path) -> anyhow::Result<Player> {
+    let mut sources = Vec::new();
+    for (index, frames) in [2_400, 9_600, 2_400].into_iter().enumerate() {
+        let source = directory.join(format!("{index}.wav"));
+        fs::rename(silence(directory, frames)?, &source)?;
+        sources.push(source);
+    }
+    let mut player = clocked(directory, sources)?;
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while player.snapshot().output.paused {
+        anyhow::ensure!(Instant::now() < deadline, "output did not start");
+        player.pump()?;
+    }
+    while player.snapshot().current_id != Some(2) {
+        anyhow::ensure!(Instant::now() < deadline, "output did not cross");
+        thread::sleep(Duration::from_millis(1));
+    }
+    Ok(player)
+}
+
+/// Each pass output started is reported and opens a play, oldest first.
+fn assert_reported(player: &mut Player) {
+    let advances = player.take_advances();
+    assert_eq!(advances[..2], [(1, Vec::new()), (2, Vec::new())]);
+    let entries: Vec<u64> = player
+        .take_play_events()
+        .iter()
+        .filter_map(|event| match event {
+            PlayEvent::Opened { entry_id, .. } => Some(*entry_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entries[..2], [1, 2]);
+}
+
+#[test]
+fn a_selection_reports_the_passes_output_started_since_the_last_pump() -> anyhow::Result<()> {
+    let directory = scratch("select-started")?;
+    let mut player = crossed_without_a_pump(&directory)?;
+    let prepared = player.prepare_selection(1, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    assert_reported(&mut player);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+#[test]
+fn a_stop_reports_the_passes_output_started_since_the_last_pump() -> anyhow::Result<()> {
+    let directory = scratch("stop-started")?;
+    let mut player = crossed_without_a_pump(&directory)?;
+    player.stop();
+    assert_reported(&mut player);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+#[test]
+fn removing_an_entry_reports_the_passes_output_started_since_the_last_pump() -> anyhow::Result<()> {
+    let directory = scratch("remove-started")?;
+    let mut player = crossed_without_a_pump(&directory)?;
+    player.remove(1, 1)?;
+    player.pump()?;
+    assert_reported(&mut player);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// An edit notes a wrap's pass that output started since the last pump. The
+/// passes before it ended with the old pass: what follows is decided in the new one.
+#[test]
+fn an_edit_that_notes_a_wrap_decides_in_the_fresh_pass() -> anyhow::Result<()> {
+    let directory = scratch("edit-noted-wrap")?;
+    let mut sources = Vec::new();
+    for index in 0..2 {
+        let source = directory.join(format!("{index}.wav"));
+        fs::rename(silence(&directory, 12_000)?, &source)?;
+        sources.push(source);
+    }
+    let mut player = clocked(&directory, sources)?;
+    player.set_repeat(RepeatMode::All);
+    player.play();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while player.snapshot().output.paused {
+        anyhow::ensure!(Instant::now() < deadline, "output did not start");
+        player.pump()?;
+    }
+    // Prepare the wrap's PCM while output plays entry 1.
+    for _ in 0..40 {
+        player.pump()?;
+    }
+    // No pump while output plays entry 2 and starts the wrap.
+    while player.snapshot().output.rendered_frames <= 24_000 {
+        anyhow::ensure!(Instant::now() < deadline, "output did not wrap");
+        thread::sleep(Duration::from_millis(1));
+    }
+    player.set_shuffle(Some(Box::new(Last)));
+    let mut advances = player.take_advances();
+    while advances.len() < 4 {
+        anyhow::ensure!(Instant::now() < deadline, "timed out: {advances:?}");
+        player.pump()?;
+        advances.extend(player.take_advances());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        advances[..4],
+        [(1, vec![]), (2, vec![]), (1, vec![1, 2]), (2, vec![])]
+    );
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
