@@ -272,6 +272,55 @@ const ALIASES: &[(TagKind, TagField, &str)] = &[
     ),
 ];
 
+/// MP4 freeform names that beat a written value in the library, without case,
+/// spaces, `_` or `-`. FFmpeg passes on a freeform atom by its name alone,
+/// whatever its mean. The library takes an explicit total over `trkn`, and joins
+/// or orders the rest with the field's own atom.
+const FREEFORM_COPIES: &[(&str, TagField)] = &[
+    ("title", TagField::Title),
+    ("artist", TagField::Artist),
+    ("album", TagField::Album),
+    ("albumartist", TagField::AlbumArtist),
+    ("date", TagField::Date),
+    ("tracktotal", TagField::TrackTotal),
+    ("totaltracks", TagField::TrackTotal),
+    ("disctotal", TagField::DiscTotal),
+    ("totaldiscs", TagField::DiscTotal),
+];
+
+/// The field and raw key of a freeform atom that is a copy, with its values the
+/// library would use. An atom with binary data stays whole: FFmpeg reads an atom's
+/// first data, so taking text out or putting it back could change what it reads.
+fn freeform_copy(atom: &Atom<'_>) -> Option<(TagField, String, Vec<String>)> {
+    let AtomIdent::Freeform { mean, name } = atom.ident() else {
+        return None;
+    };
+    let (_, field) = FREEFORM_COPIES
+        .iter()
+        .find(|(key, _)| crate::metadata::key_is(name, key))?;
+    let mut values = Vec::new();
+    for data in atom.data() {
+        let (AtomData::UTF8(text) | AtomData::UTF16(text)) = data else {
+            return None;
+        };
+        if library_uses(*field, text) {
+            values.push(text.clone());
+        }
+    }
+    Some((*field, format!("----:{mean}:{name}"), values))
+}
+
+/// Whether the library takes this value for the field. Otherwise it is not a copy.
+fn library_uses(field: TagField, value: &str) -> bool {
+    match field {
+        TagField::Date => crate::metadata::year_from(value).is_some(),
+        TagField::TrackTotal | TagField::DiscTotal => {
+            crate::metadata::positive_number(value).is_some()
+        }
+        _ => !value.trim().is_empty(),
+    }
+}
+
 /// The primary key is a raw key, not the field's ItemKey; the ItemKey value is
 /// then a copy, unless it is the field's `second_home`.
 const PRIMARY_RAW: &[(TagKind, TagField, &str)] = &[(
@@ -1077,6 +1126,11 @@ impl Body {
                         }
                     }
                 }
+                for (field, key, values) in (&*rest).into_iter().filter_map(freeform_copy) {
+                    for value in values {
+                        add(field, CopyKey::Raw(key.clone()), &value);
+                    }
+                }
             }
             Body::Vorbis(tag) => {
                 for (key, value) in tag.items() {
@@ -1493,6 +1547,24 @@ fn edit_ilst(tag: &mut Ilst, remove: &BTreeSet<TagField>, push: &[Push]) -> Resu
             }
         }
     }
+    let copies: Vec<(TagField, String, Vec<String>)> = (&atoms)
+        .into_iter()
+        .filter_map(freeform_copy)
+        .filter(|(field, _, values)| remove.contains(field) && !values.is_empty())
+        .collect();
+    for (field, key, _) in copies {
+        let ident = freeform(&key);
+        let old: Vec<Atom<'static>> = atoms.remove(&ident).collect();
+        for atom in old {
+            changed = true;
+            let unused = atom.into_data().filter(
+                |data| !matches!(data, AtomData::UTF8(text) | AtomData::UTF16(text) if library_uses(field, text)),
+            );
+            if let Some(atom) = Atom::from_collection(ident.clone(), unused.collect()) {
+                atoms.insert(atom);
+            }
+        }
+    }
     for (field, key, value) in push {
         changed = true;
         match key {
@@ -1717,11 +1789,12 @@ fn txxx(key: &str) -> &str {
     key.strip_prefix("TXXX:").unwrap_or(key)
 }
 
-/// `----:<mean>:<name>` as an MP4 freeform identifier. Every MP4 raw key in the
-/// tables has this form.
+/// `----:<mean>:<name>` as an MP4 freeform identifier. Every MP4 raw key has
+/// this form.
 fn freeform(key: &str) -> AtomIdent<'static> {
     let rest = key.strip_prefix("----:").unwrap_or(key);
-    let (mean, name) = rest.split_once(':').unwrap_or(("", rest));
+    // A mean may hold ':', as in "urn:example:x". The names used here do not.
+    let (mean, name) = rest.rsplit_once(':').unwrap_or(("", rest));
     AtomIdent::Freeform {
         mean: mean.to_owned().into(),
         name: name.to_owned().into(),
@@ -3144,6 +3217,187 @@ mod tests {
         assert_eq!(chunks.name, None);
         assert_eq!(chunks.comments, Some(comments));
         assert_eq!(chunks.annotations, None);
+    }
+
+    fn mp4_with_freeform(path: &Path, atoms: &[(&str, &str, &str)]) {
+        let mut ilst = Ilst::new();
+        for (mean, name, value) in atoms {
+            ilst.insert(Atom::new(
+                AtomIdent::Freeform {
+                    mean: (*mean).to_owned().into(),
+                    name: (*name).to_owned().into(),
+                },
+                AtomData::UTF8((*value).to_owned()),
+            ));
+        }
+        ilst.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// FFmpeg passes a freeform atom on by its name alone. The library ignores
+    /// case, spaces, `_` and `-`, and an explicit total beats the one in `trkn`.
+    #[test]
+    fn mp4_freeform_totals_are_copies_under_any_mean_and_spelling() {
+        let scratch = Scratch::new();
+        for mean in ["com.apple.iTunes", "org.example", "urn:example:x"] {
+            for (track, disc) in [
+                ("TRACKTOTAL", "DISCTOTAL"),
+                ("TOTALTRACKS", "TOTALDISCS"),
+                ("tracktotal", "disctotal"),
+                ("TrackTotal", "DiscTotal"),
+                ("total_tracks", "Total Discs"),
+                ("TRACK-TOTAL", "DISC_TOTAL"),
+            ] {
+                let path = scratch.copy("tone.m4a");
+                mp4_with_freeform(&path, &[(mean, track, "7"), (mean, disc, "8")]);
+                assert_eq!(probe(&path).track_total, Some(7), "{mean} {track}");
+                assert_eq!(probe(&path).disc_total, Some(8), "{mean} {disc}");
+                let before = read_tags(&path).unwrap();
+                assert_eq!(before.current(TagField::TrackTotal), Some("7"), "{track}");
+
+                let edit = setting(&[
+                    (TagField::TrackNumber, "1"),
+                    (TagField::TrackTotal, "3"),
+                    (TagField::DiscNumber, "1"),
+                    (TagField::DiscTotal, "4"),
+                ]);
+                let removed = edit_tags(&path, &edit).unwrap();
+                assert_eq!(probe(&path).track_total, Some(3), "{mean} {track}");
+                assert_eq!(probe(&path).disc_total, Some(4), "{mean} {disc}");
+
+                let revert = TagEdit {
+                    set: edit.set.keys().map(|field| (*field, None)).collect(),
+                    restore: removed,
+                };
+                edit_tags(&path, &revert).unwrap();
+                assert_eq!(read_tags(&path).unwrap().copies, before.copies);
+                assert_eq!(probe(&path).track_total, Some(7), "{mean} {track}");
+            }
+        }
+    }
+
+    #[test]
+    fn mp4_freeform_atoms_the_library_reads_are_copies_of_their_field() {
+        let scratch = Scratch::new();
+        for (name, field, old, new) in [
+            ("TITLE", TagField::Title, "old", "new"),
+            ("artist", TagField::Artist, "old", "new"),
+            ("Album", TagField::Album, "old", "new"),
+            ("album_artist", TagField::AlbumArtist, "old", "new"),
+            ("DATE", TagField::Date, "1999", "2001"),
+        ] {
+            let path = scratch.copy("tone.m4a");
+            mp4_with_freeform(&path, &[("urn:example:x", name, old)]);
+            let copy = TagCopy {
+                tag: TagKind::Mp4Ilst,
+                field,
+                key: CopyKey::Raw(format!("----:urn:example:x:{name}")),
+                value: old.to_owned(),
+                read_only: false,
+            };
+            assert!(read_tags(&path).unwrap().copies.contains(&copy), "{name}");
+            let removed = edit_tags(&path, &setting(&[(field, new)])).unwrap();
+            assert!(removed.contains(&copy), "{name}: {removed:?}");
+            let after = read_tags(&path).unwrap();
+            assert!(after.copies.is_empty(), "{name}: {:?}", after.copies);
+
+            let revert = TagEdit {
+                set: [(field, None)].into(),
+                restore: removed,
+            };
+            edit_tags(&path, &revert).unwrap();
+            assert_eq!(read_tags(&path).unwrap().copies, [copy], "{name}");
+        }
+    }
+
+    fn mp4_atoms(path: &Path) -> Vec<String> {
+        let mut reader = fs::File::open(path).unwrap();
+        let mut atoms: Vec<String> = Mp4File::read_from(&mut reader, ParseOptions::new())
+            .unwrap()
+            .remove_ilst()
+            .map(|ilst| {
+                ilst.into_iter()
+                    .filter(|atom| !matches!(atom.ident(), AtomIdent::Fourcc(_)))
+                    .map(|atom| format!("{:?} {:?}", atom.ident(), atom.data().collect::<Vec<_>>()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        atoms.sort();
+        atoms
+    }
+
+    /// The library ignores these values, or never read a stale one on `dev`, so an
+    /// edit of the field leaves them.
+    #[test]
+    fn mp4_freeform_atoms_the_library_does_not_use_stay() {
+        let scratch = Scratch::new();
+        for (name, value, field, new) in [
+            ("date", "hello", TagField::Date, "2001"),
+            ("tracktotal", "abc", TagField::TrackTotal, "3"),
+            ("TOTALDISCS", "0", TagField::DiscTotal, "3"),
+            ("title", "   ", TagField::Title, "new"),
+            ("track", "xyz", TagField::TrackNumber, "3"),
+            ("track", "5", TagField::TrackNumber, "3"),
+            ("disc", "5", TagField::DiscNumber, "3"),
+            ("year", "1999", TagField::Date, "2001"),
+            ("originaldate", "1999", TagField::OriginalDate, "2001"),
+            (
+                "MUSICBRAINZ_ALBUMID",
+                "old",
+                TagField::MusicbrainzReleaseId,
+                "new",
+            ),
+        ] {
+            let path = scratch.copy("tone.m4a");
+            mp4_with_freeform(&path, &[("org.example", name, value)]);
+            let before = mp4_atoms(&path);
+            let tags = read_tags(&path).unwrap();
+            assert!(tags.copies.is_empty(), "{name}: {:?}", tags.copies);
+            let mut edit = setting(&[(field, new)]);
+            if field == TagField::TrackTotal {
+                edit.set.insert(TagField::TrackNumber, Some("1".to_owned()));
+            }
+            if field == TagField::DiscTotal {
+                edit.set.insert(TagField::DiscNumber, Some("1".to_owned()));
+            }
+            let removed = edit_tags(&path, &edit).unwrap();
+            assert!(removed.is_empty(), "{name}: {removed:?}");
+            // The edit may add a freeform atom of its own.
+            let after = mp4_atoms(&path);
+            assert!(before.iter().all(|atom| after.contains(atom)), "{name}");
+        }
+    }
+
+    /// FFmpeg reads an atom's first data. An atom with binary data stays whole,
+    /// as on `dev`, so a revert can't change which data comes first.
+    #[test]
+    fn an_mp4_freeform_atom_with_binary_data_stays_whole() {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.m4a");
+        let mut ilst = Ilst::new();
+        let ident = AtomIdent::Freeform {
+            mean: "com.apple.iTunes".into(),
+            name: "TRACKTOTAL".into(),
+        };
+        let data = vec![
+            AtomData::UTF8("7".to_owned()),
+            AtomData::Unknown {
+                code: DataType::Reserved,
+                data: vec![1, 2, 3],
+            },
+        ];
+        ilst.insert(Atom::from_collection(ident, data).unwrap());
+        ilst.save_to_path(&path, WriteOptions::default()).unwrap();
+        let before = mp4_atoms(&path);
+        let edit = setting(&[(TagField::TrackNumber, "1"), (TagField::TrackTotal, "3")]);
+        let removed = edit_tags(&path, &edit).unwrap();
+        assert_eq!(mp4_atoms(&path), before);
+        let revert = TagEdit {
+            set: edit.set.keys().map(|field| (*field, None)).collect(),
+            restore: removed,
+        };
+        edit_tags(&path, &revert).unwrap();
+        assert_eq!(mp4_atoms(&path), before);
+        assert_eq!(probe(&path).track_total, Some(7));
     }
 
     #[test]
