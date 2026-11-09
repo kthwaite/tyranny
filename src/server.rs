@@ -186,10 +186,19 @@ impl StateDirectory {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
             .context("open private state directory without following symlinks")?;
-        validate_directory(&directory.metadata()?)?;
+        let opened = directory.metadata()?;
+        validate_directory(&opened)?;
         #[cfg(test)]
         tests::between_open_and_resolve();
         let root = fs::canonicalize(path).context("resolve state directory")?;
+        // Every later child is opened by this path, so it must name the
+        // directory just opened and checked.
+        let resolved = fs::symlink_metadata(&root).context("inspect resolved state directory")?;
+        validate_directory(&resolved)?;
+        ensure!(
+            resolved.dev() == opened.dev() && resolved.ino() == opened.ino(),
+            "state directory changed while it was opened"
+        );
         validate_ancestors(&root)?;
         // All children stay under the private directory. Reject insecure existing
         // files, including SQLite sidecars, rather than silently repairing them.
