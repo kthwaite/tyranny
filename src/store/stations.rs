@@ -63,6 +63,14 @@ fn station_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Station> {
         url: row.get(2)?,
     })
 }
+/// An ID SQLite cannot hold names no station. Without this check, binding it
+/// fails as a storage error.
+fn check_id(id: u64) -> Result<()> {
+    if i64::try_from(id).is_err() {
+        return Err(invalid("station not found"));
+    }
+    Ok(())
+}
 fn insert(connection: &Connection, spec: &StreamSpec) -> Result<Option<Station>> {
     Ok(connection
         .query_row(
@@ -117,6 +125,7 @@ impl Store {
                 added
             }
             StationEdit::Update { id, spec } => {
+                check_id(id)?;
                 let taken: bool = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM stations WHERE url=?1 AND id<>?2)",
                     params![spec.url, id],
@@ -137,6 +146,7 @@ impl Store {
                 vec![station]
             }
             StationEdit::Remove { id } => {
+                check_id(id)?;
                 if transaction.execute("DELETE FROM stations WHERE id=?1", [id])? == 0 {
                     return Err(invalid("station not found"));
                 }

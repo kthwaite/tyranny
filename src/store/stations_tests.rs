@@ -183,6 +183,35 @@ fn unknown_ids_are_invalid() -> Result<()> {
 }
 
 #[test]
+fn ids_sqlite_cannot_hold_are_unknown() -> Result<()> {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.0)?;
+    add(&mut store, 0, &[("http://a/x", "A")])?;
+    let before = store.stations()?;
+    for id in [i64::MAX as u64 + 1, u64::MAX] {
+        for edit in [
+            StationEdit::Remove { id },
+            StationEdit::Update {
+                id,
+                spec: spec("http://b/y", "B"),
+            },
+        ] {
+            let error = store.edit_stations(1, edit).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<PlaylistFailure>()
+                    .map(|failure| failure.code),
+                Some(crate::protocol::ErrorCode::InvalidCommand),
+                "{error:#}"
+            );
+            assert_eq!(error.to_string(), "station not found");
+        }
+    }
+    assert_eq!(store.stations()?, before);
+    Ok(())
+}
+
+#[test]
 fn stale_revision_and_limits_commit_nothing() -> Result<()> {
     let scratch = Scratch::new();
     let mut store = Store::open(&scratch.0)?;
