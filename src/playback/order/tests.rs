@@ -969,3 +969,42 @@ fn a_gain_change_keeps_the_radio_play() -> anyhow::Result<()> {
     drop(player);
     Ok(())
 }
+
+#[test]
+fn reselecting_a_fresh_pass_does_not_keep_the_planned_wrap() -> anyhow::Result<()> {
+    let directory = scratch("reselect-fresh")?;
+    let source = silence(&directory, 480_000)?;
+    let mut player = Player::new(
+        vec![source; 3],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    player.set_repeat(RepeatMode::All);
+    player.set_shuffle(Some(Box::new(Last)));
+    // Paused, as the owner would: each entry is selected and marked played.
+    for id in [1, 2, 3] {
+        let prepared = player.prepare_selection(id, 0, GainMode::Off)?;
+        player.commit_selection(prepared);
+        player.mark_played(id);
+    }
+    // Every entry was heard, so what follows entry 3 wraps.
+    let (_, plan) = player.current_plan().expect("a current entry");
+    assert_eq!(plan.fresh, Some(vec![1, 2, 3]));
+    // Re-selecting entry 3 starts the fresh pass itself, as the owner does.
+    let fresh = player.jump_fresh(3);
+    assert_eq!(fresh, [1, 2, 3]);
+    player.clear_played(&fresh);
+    let prepared = player.prepare_selection(3, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.mark_played(3);
+    // What follows is decided in that pass: no second fresh pass starts.
+    let (_, plan) = player.current_plan().expect("a current entry");
+    assert_eq!(plan.id, Some(2));
+    assert_eq!(plan.fresh, None);
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}

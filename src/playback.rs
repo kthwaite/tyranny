@@ -1668,9 +1668,9 @@ impl Player {
         // continues its pass and play, counted as output last played it.
         // Completed playback has no plan to keep: the selection decides again.
         self.count_heard();
-        let kept = self
-            .current_plan()
-            .filter(|(id, _)| *id == prepared.id && !self.completed());
+        let kept = self.current_plan().filter(|(id, plan)| {
+            *id == prepared.id && !self.completed() && self.plan_holds(*id, plan)
+        });
         let (counted, started_at, play) = self.continued_pass(prepared.id);
         self.output.set_paused(true);
         self.invalidate_buffer();

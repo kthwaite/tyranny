@@ -690,6 +690,19 @@ impl Player {
         Some((self.queue[index].id, plan))
     }
 
+    /// Whether `plan`, what follows current entry `id`, still holds for a
+    /// selection that re-selects `id`. A planned fresh pass wraps a context
+    /// whose entries were heard. When this selection's own fresh pass cleared
+    /// them, what follows is decided in that pass.
+    pub(super) fn plan_holds(&self, id: u64, plan: &Plan) -> bool {
+        plan.fresh.as_ref().is_none_or(|fresh| {
+            self.queue
+                .iter()
+                .filter(|entry| entry.id != id && fresh.contains(&entry.id))
+                .all(|entry| entry.visited)
+        })
+    }
+
     /// The entries a user jump onto `id` starts a fresh Repeat All pass over:
     /// a planned fresh pass that begins with `id`, or `id`'s context when
     /// every entry of it was heard in this pass.
