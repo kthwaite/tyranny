@@ -944,3 +944,37 @@ fn matroska_header_durations_come_from_the_segment() {
         assert_eq!(decoder.duration_frames(), Some(frames), "{name}");
     }
 }
+
+#[test]
+fn a_seek_to_the_decoded_end_of_opus_in_webm_lands_at_eof() {
+    // Matroska and WebM stamp blocks in whole milliseconds, so a decode after a
+    // seek, placed by those stamps, can be up to 1 ms (48 frames) off a linear
+    // decode. Here the 6.5 ms Opus pre-skip leaves every block after the first
+    // 24 frames late, and the decode after a seek ends 24 frames early. FLAC in
+    // Matroska is off the same way. The linear end is where output leaves an
+    // entry, so a restore seeks there.
+    let path = fixture_root().join("formats/tone.webm");
+    let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+    let end = decode_to_eof(&mut linear);
+    assert_eq!(end, 12_000);
+    let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+    decoder
+        .seek(end as u64)
+        .unwrap_or_else(|error| panic!("seek to {end}: {error:#}"));
+    assert_eq!(decode_to_eof(&mut decoder), 0);
+}
+
+#[test]
+fn a_seek_well_past_the_end_of_musepack_still_fails() {
+    // Musepack SV8 ticks are 73728 frames (1.536 s), but its seeks land exactly.
+    // Only ticks of at most 1 ms excuse a target past the decoded end.
+    let path = fixture_root().join("formats/tone.mpc");
+    let mut linear = Decoder::open(&path, GainMode::Off).unwrap();
+    let end = decode_to_eof(&mut linear) as u64;
+    let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+    let error = decoder.seek(end + 1_000).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("beyond decoded EOF"),
+        "{error:#}"
+    );
+}

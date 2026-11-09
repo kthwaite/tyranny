@@ -160,6 +160,12 @@ pub struct Decoder {
     skip_scale: u32,
     /// The most samples one decoded frame has held: the most an end skip can cut.
     frame_capacity: usize,
+    /// Output frames in one container tick when a tick is longer than a codec
+    /// sample but at most 1 ms (Matroska and WebM: 48 frames), else 0. A decode
+    /// after a seek is placed by timestamps, so with millisecond stamps it can
+    /// end up to this far from where a linear decode ends. Coarser ticks
+    /// (Musepack SV8: 1.536 s) place seeks exactly and get no tolerance.
+    tick_frames: i64,
 }
 
 impl Decoder {
@@ -285,6 +291,17 @@ impl Decoder {
                 | ffmpeg::decoder::Check::EXPLODE,
         );
         let codec = codec.audio().context("opening native audio decoder")?;
+        // One tick in output frames, rounded up; both terms are positive.
+        let tick = (i64::from(time_base.0) * i64::from(SAMPLE_RATE) + i64::from(time_base.1) - 1)
+            / i64::from(time_base.1);
+        let tick_exceeds_sample =
+            i64::from(time_base.0) * i64::from(codec.rate()) > i64::from(time_base.1);
+        let millisecond = i64::from(SAMPLE_RATE) / 1_000;
+        let tick_frames = if tick_exceeds_sample && tick <= millisecond {
+            tick
+        } else {
+            0
+        };
         let mut this = Self {
             input,
             codec,
@@ -314,6 +331,7 @@ impl Decoder {
             alignment_skip: 0,
             skip_scale,
             frame_capacity: 0,
+            tick_frames,
         };
         // Prime one decoded frame, not the whole track. This also surfaces
         // malformed sources during preparation and gets codec/frame gain data
@@ -685,7 +703,12 @@ impl Decoder {
                 }
                 let end = self.next_output.unwrap_or(0);
                 if let Some(target) = self.seek_target {
-                    ensure!(target <= end, "seek target is beyond decoded EOF");
+                    // Within one coarse tick of the end, the target is the end
+                    // a linear decode reaches: the seek lands at EOF.
+                    ensure!(
+                        target <= end + self.tick_frames,
+                        "seek target is beyond decoded EOF"
+                    );
                 }
                 self.duration = Some(end.max(0) as u64);
                 self.drained = true;

@@ -1321,6 +1321,61 @@ async fn clearing_the_queue_closes_its_play_as_stopped() {
     assert!(plays[0].listened_ms.unwrap() >= 1_000, "{plays:?}");
 }
 
+/// Restarts with tone.webm current at its end, as output left it. Its decode
+/// after a seek ends 24 frames before its linear decode (see
+/// `a_seek_to_the_decoded_end_of_opus_in_webm_lands_at_eof`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_restores_an_opus_webm_entry_at_its_end() {
+    let mut fixture = Fixture::new();
+    let path = fixture.music("tone.webm");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/formats/tone.webm"),
+        &path,
+    )
+    .unwrap();
+    let state = snapshot(&fixture.control()).await;
+    ok(
+        &fixture.control(),
+        Command::Append {
+            expected_revision: state.queue_revision,
+            path: path.to_str().unwrap().to_owned(),
+        },
+    )
+    .await;
+    ok(&fixture.control(), Command::Play { entry_id: None }).await;
+    let ended = fixture
+        .until(|state| state.transport == Transport::Ended)
+        .await;
+    assert_eq!(ended.position_frames, 12_000);
+    ok(&fixture.control(), Command::Pause {}).await;
+    // Queue another entry: output has not started it, so the ended entry stays
+    // current at its end.
+    let next = fixture.music("next.wav");
+    wav_frames(&next, 4_800);
+    let state = snapshot(&fixture.control()).await;
+    ok(
+        &fixture.control(),
+        Command::Append {
+            expected_revision: state.queue_revision,
+            path: next.to_str().unwrap().to_owned(),
+        },
+    )
+    .await;
+    let state = snapshot(&fixture.control()).await;
+    assert_eq!(
+        (state.current_id, state.position_frames),
+        (ended.current_id, 12_000)
+    );
+    fixture.stop().await;
+    fixture.start();
+    let state = snapshot(&fixture.control()).await;
+    assert_eq!(state.error, None);
+    assert_eq!(
+        (state.current_id, state.position_frames),
+        (ended.current_id, 12_000)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopping_closes_the_play_as_stopped() {
     let fixture = Fixture::new();
