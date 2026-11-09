@@ -155,7 +155,15 @@ fn copy_into(path: &Path, clone: &mut File) -> std::io::Result<()> {
             flags,
         )
     };
-    if status == 0 {
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // `COPYFILE_STAT` also copies the flags. A clone of a file locked in Finder
+    // would be locked too, and could never be removed.
+    use std::os::darwin::fs::MetadataExt;
+    let flags = clone.metadata()?.st_flags() & !(libc::UF_IMMUTABLE | libc::UF_APPEND);
+    // SAFETY: the descriptor is open for the call.
+    if unsafe { libc::fchflags(clone.as_raw_fd(), flags) } == 0 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
@@ -477,6 +485,32 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_file_fails_and_leaves_no_locked_temp() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        fn set_flags(path: &Path, flags: u32) {
+            let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::chflags(path.as_ptr(), flags) }, 0);
+        }
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.flac");
+        let before = fs::read(&path).unwrap();
+        // Finder's "Locked".
+        set_flags(&path, libc::UF_IMMUTABLE);
+        let result = write_safely(&path, stamp(&path).unwrap(), &title("New"));
+        let temp = temp_path(&path);
+        let temp_left = fs::symlink_metadata(&temp).is_ok();
+        if temp_left {
+            set_flags(&temp, 0);
+        }
+        set_flags(&path, 0);
+        assert!(matches!(result, Err(WriteError::Failed(_))), "{result:?}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!temp_left);
     }
 
     #[test]
