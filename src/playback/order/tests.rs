@@ -199,6 +199,43 @@ fn a_selection_never_inherits_a_planned_fresh_pass() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn reselecting_after_completion_decides_again() -> anyhow::Result<()> {
+    let directory = scratch("reselect")?;
+    let source = silence(&directory, 2_000)?;
+    let mut player = Player::new(
+        vec![source],
+        OutputConfig::Capture {
+            path: directory.join("capture.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )?;
+    player.play();
+    let mut events = Vec::new();
+    pump_until(&mut player, &mut events, |player, _| player.completed())?;
+    // Completed playback has no future to rebuild: the selection decides again.
+    player.set_repeat(RepeatMode::All);
+    let prepared = player.prepare_selection(1, 0, GainMode::Off)?;
+    player.commit_selection(prepared);
+    player.play();
+    assert_eq!(player.snapshot().next_id, Some(1));
+    // Each pass over the entry is heard, which the first pass already was.
+    player.take_advances();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut passes = 0;
+    while passes < 2 {
+        anyhow::ensure!(Instant::now() < deadline, "the entry did not repeat");
+        player.pump()?;
+        passes += player.take_advances().len();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!player.completed());
+    drop(player);
+    fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
 /// A clocked capture player over `sources`.
 fn clocked(directory: &std::path::Path, sources: Vec<PathBuf>) -> anyhow::Result<Player> {
     Player::new(

@@ -1666,8 +1666,11 @@ impl Player {
         assert_eq!(self.queue[prepared.index].id, prepared.id);
         // A seek or gain change keeps what was planned after the entry, and
         // continues its pass and play, counted as output last played it.
+        // Completed playback has no plan to keep: the selection decides again.
         self.count_heard();
-        let kept = self.current_plan().filter(|(id, _)| *id == prepared.id);
+        let kept = self
+            .current_plan()
+            .filter(|(id, _)| *id == prepared.id && !self.completed());
         let (counted, started_at, play) = self.continued_pass(prepared.id);
         self.output.set_paused(true);
         self.invalidate_buffer();
