@@ -47,8 +47,9 @@ public struct LyricsTimeline: Sendable, Equatable {
         for raw in lrc.components(separatedBy: .newlines) {
             var remainder = raw.trimmingCharacters(in: .whitespacesAndNewlines)[...]
             var times: [Double] = []
-            while remainder.first == "[", let end = remainder.firstIndex(of: "]") {
-                let tag = remainder[remainder.index(after: remainder.startIndex)..<end]
+            // By scalar, as the server's `has_timestamps`: a mark after a bracket joins its grapheme.
+            while remainder.unicodeScalars.first == "[", let end = remainder.unicodeScalars.firstIndex(of: "]") {
+                let tag = remainder[remainder.unicodeScalars.index(after: remainder.startIndex)..<end]
                 if let time = Self.timestamp(tag) {
                     times.append(time)
                 } else if tag.lowercased().hasPrefix("offset:"),
@@ -56,7 +57,7 @@ public struct LyricsTimeline: Sendable, Equatable {
                           milliseconds.isFinite {
                     offset = milliseconds / 1000
                 }
-                remainder = remainder[remainder.index(after: end)...]
+                remainder = remainder[remainder.unicodeScalars.index(after: end)...]
             }
             let text = remainder.trimmingCharacters(in: .whitespaces)
             for time in times { parsed.append((time, text, parsed.count)) }

@@ -41,6 +41,18 @@ import Testing
         }
     }
 
+    /// `has_timestamps` in `src/lyrics/discovery.rs` scans brackets by Unicode scalar, and sends these
+    /// as synced. A mark that joins a bracket's grapheme must not hide the tag.
+    @Test func marksAfterBracketsDoNotHideTags() {
+        for mark in ["\u{0301}", "\u{200D}", "\u{FE0F}", "\u{093E}"] {
+            let timed = LyricsTimeline("[00:01]\(mark)Words")
+            #expect(timed.lines.map(\.seconds) == [1])
+            #expect(timed.lines.map(\.text) == ["\(mark)Words"])
+            #expect(LyricsTimeline("[\(mark)x][00:01]Words").lines.map(\.text) == ["Words"])
+            #expect(LyricsTimeline("[00:01\(mark)]Words").lines.isEmpty)
+        }
+    }
+
     @Test func pauseAndSeekUseAuthoritativePositionWithoutWallClock() {
         let timeline = LyricsTimeline("[00:00]Opening\n[00:02]Second\n[00:04]Third\n[00:06]")
         #expect(timeline.activeRange(at: 3) == 1..<2)
