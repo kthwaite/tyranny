@@ -145,9 +145,15 @@ impl Tags {
         }
     }
 }
+/// The client's line ends: Foundation's `CharacterSet.newlines`.
+const LINE_ENDS: [char; 7] = [
+    '\n', '\u{b}', '\u{c}', '\r', '\u{85}', '\u{2028}', '\u{2029}',
+];
+/// Scans lines as `LyricsTimeline` does, so a text the client can time is sent as synced.
 pub(super) fn has_timestamps(text: &str) -> bool {
-    text.lines().any(|line| {
-        let mut remainder = line.trim_start();
+    text.split(LINE_ENDS).any(|line| {
+        // Foundation's `.whitespacesAndNewlines` is `White_Space` plus U+200B.
+        let mut remainder = line.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{200b}');
         while let Some((tag, rest)) = remainder.strip_prefix('[').and_then(|s| s.split_once(']')) {
             if timestamp(tag).is_some() {
                 return true;
@@ -270,6 +276,25 @@ mod tests {
             assert_eq!(lyrics.plain_text.as_deref(), Some(text));
             assert!(lyrics.synced_lrc.is_none());
         }
+    }
+    #[test]
+    fn line_scan_matches_client_line_ends_and_padding() {
+        // `LyricsTimeline` breaks lines at Foundation's `CharacterSet.newlines`.
+        for end in [
+            "\n", "\r\n", "\r", "\u{b}", "\u{c}", "\u{85}", "\u{2028}", "\u{2029}",
+        ] {
+            let text = format!("[ar:Artist]{end}[00:01]Words{end}[00:02]More");
+            assert!(has_timestamps(&text), "{end:?}");
+            assert_eq!(
+                embedded(text.clone()).synced_lrc.as_deref(),
+                Some(text.as_str())
+            );
+        }
+        // It trims `.whitespacesAndNewlines`, which also holds U+200B.
+        assert!(has_timestamps("\u{200b}[00:01]Words"));
+        assert!(has_timestamps("\u{a0}[00:01]Words"));
+        assert!(!has_timestamps("Title\u{a0}[00:01]Words"));
+        assert!(!has_timestamps("Title\u{200b}[00:01]Words"));
     }
     #[test]
     fn rejects_oversized_and_invalid_utf8_metadata() {

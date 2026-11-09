@@ -30,6 +30,17 @@ import Testing
         #expect(LyricsTimeline("plain unsynchronized lyrics").lines.isEmpty)
     }
 
+    /// `has_timestamps` in `src/lyrics/discovery.rs` must accept these same line ends and padding.
+    @Test func everyLineEndAndPaddingTheServerAcceptsGivesLines() {
+        for end in ["\n", "\r\n", "\r", "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}"] {
+            #expect(LyricsTimeline("[ar:Artist]\(end)[00:01]Words\(end)[00:02]More").lines.map(\.text) == ["Words", "More"])
+        }
+        for padding in ["\u{200B}", "\u{A0}"] {
+            #expect(LyricsTimeline("\(padding)[00:01]Words").lines.map(\.text) == ["Words"])
+            #expect(LyricsTimeline("Title\(padding)[00:01]Words").lines.isEmpty)
+        }
+    }
+
     @Test func pauseAndSeekUseAuthoritativePositionWithoutWallClock() {
         let timeline = LyricsTimeline("[00:00]Opening\n[00:02]Second\n[00:04]Third\n[00:06]")
         #expect(timeline.activeRange(at: 3) == 1..<2)
