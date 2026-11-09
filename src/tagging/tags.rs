@@ -898,8 +898,12 @@ impl Body {
             Body::Id3v2(tag) => {
                 let mut tag = tag.clone();
                 let unparsed = take_unparsed_pairs(&mut tag);
+                let date_copies = date_copies(&tag);
                 let (rest, items) = tag.split_tag();
                 add_items(&items, &mut add);
+                for (key, value) in date_copies {
+                    add(TagField::Date, CopyKey::Raw(key), &value);
+                }
                 for field in TagField::ALL {
                     for key in raw_keys(TagKind::Id3v2, field) {
                         for value in user_texts(&rest, txxx(key)) {
@@ -1071,12 +1075,20 @@ fn edit_id3v2(
     push: &[Push],
     dropped: &mut Vec<Push>,
 ) -> Result<bool> {
+    let mut dates_first = Vec::new();
+    let before: Vec<Frame<'static>> = (&*tag).into_iter().cloned().collect();
     // A pair frame lofty can't parse ("A1") is the number field's raw copy. Its
     // split would make it an item that merging then drops, so it stays aside.
     let mut unparsed = take_unparsed_pairs(tag);
+    let mut changed = false;
+    if remove.contains(&TagField::Date) {
+        changed |= !date_copies(tag).is_empty();
+        tag.retain(|frame| !DATE_COPIES.contains(&frame.id_str()));
+    }
+    let mut others = take_other_items(tag);
     let (rest, mut items) = std::mem::take(tag).split_tag();
     let mut frames = Id3v2Tag::from(rest);
-    let mut changed = remove_items(&mut items, remove);
+    changed |= remove_items(&mut items, remove);
     for field in remove {
         for key in raw_keys(TagKind::Id3v2, *field) {
             while frames.remove_user_text(txxx(key)).is_some() {
@@ -1106,6 +1118,13 @@ fn edit_id3v2(
         match key {
             CopyKey::Raw(id) if PAIRS.iter().any(|(number, _)| pair_keys(*number).1 == id) => {
                 unparsed.push((*field, value.clone()));
+            }
+            CopyKey::Raw(raw) if date_copy_id(raw).is_some() => {
+                let id = date_copy_id(raw).unwrap_or_default();
+                if raw.ends_with(BEFORE_TDRC) {
+                    dates_first.push(id);
+                }
+                others.push(pair_frame(id, value.clone()));
             }
             CopyKey::Raw(raw) => {
                 let description = txxx(raw);
@@ -1143,7 +1162,108 @@ fn edit_id3v2(
     for (number, value) in unparsed {
         tag.insert(pair_frame(pair_keys(number).1, value));
     }
+    for frame in others {
+        tag.insert(frame);
+    }
+    keep_frame_order(tag, &before, remove, &dates_first);
     Ok(changed)
+}
+
+/// Frames FFmpeg also reads as `date`, which lofty does not map to the field.
+/// Between `TDRC` and `TDRL` the last wins, and `TYER` beats both, so each one
+/// is a copy of `Date`.
+const DATE_COPIES: [&str; 2] = ["TDRL", "TYER"];
+/// The end of a date copy's raw key when it came before `TDRC`, so `TDRC` won.
+/// Revert needs this to give the library the same year.
+const BEFORE_TDRC: &str = " before TDRC";
+
+fn date_copy_id(key: &str) -> Option<&'static str> {
+    let id = key.strip_suffix(BEFORE_TDRC).unwrap_or(key);
+    DATE_COPIES.into_iter().find(|copy| *copy == id)
+}
+
+/// The raw key and value of each date copy.
+fn date_copies(tag: &Id3v2Tag) -> Vec<(String, String)> {
+    let frames: Vec<&Frame<'static>> = tag.into_iter().collect();
+    let tdrc = frames.iter().position(|frame| frame.id_str() == "TDRC");
+    frames
+        .iter()
+        .enumerate()
+        .filter(|(_, frame)| DATE_COPIES.contains(&frame.id_str()))
+        .filter_map(|(position, frame)| {
+            let value = match frame {
+                Frame::Text(text) => text.value.to_string(),
+                Frame::Timestamp(date) => date.timestamp.to_string(),
+                _ => return None,
+            };
+            let before = tdrc.is_some_and(|tdrc| position < tdrc);
+            let end = if before { BEFORE_TDRC } else { "" };
+            Some((format!("{}{end}", frame.id_str()), value))
+        })
+        .collect()
+}
+
+/// lofty's merge gives frames in random order, and FFmpeg takes the last of two
+/// keys it reads alike. So an untouched frame keeps its place, in order, and
+/// the frames of edited fields follow them in a fixed order. New values then win,
+/// and an edit of one field does not change what another field reads as.
+fn keep_frame_order(
+    tag: &mut Id3v2Tag,
+    before: &[Frame<'static>],
+    remove: &BTreeSet<TagField>,
+    dates_first: &[&str],
+) {
+    let edited = |frame: &Frame<'static>| {
+        if let Frame::UserText(text) = frame
+            && remove
+                .iter()
+                .flat_map(|field| raw_keys(TagKind::Id3v2, *field))
+                .any(|key| txxx(key) == text.description)
+        {
+            return true;
+        }
+        let mut one = Id3v2Tag::new();
+        one.insert(frame.clone());
+        let (_, items) = one.split_tag();
+        items
+            .items()
+            .filter_map(|item| field_of(item.key()))
+            .any(|(field, _)| remove.contains(&field))
+    };
+    let mut frames: Vec<Frame<'static>> = (&*tag).into_iter().cloned().collect();
+    frames.sort_by_cached_key(|frame| {
+        let place = before.iter().position(|old| old == frame);
+        match place.filter(|_| !edited(frame)) {
+            Some(place) => (0, place, String::new()),
+            None if dates_first.contains(&frame.id_str()) => (1, 0, String::new()),
+            None if DATE_COPIES.contains(&frame.id_str()) => (1, 2, String::new()),
+            None => (1, 1, format!("{frame:?}")),
+        }
+    });
+    tag.retain(|_| false);
+    for frame in frames {
+        tag.insert(frame);
+    }
+}
+
+/// Takes out the frames lofty's split consumes although they hold none of our
+/// fields. Merging would lose or refuse them: it keeps one value of `TSOP` or
+/// `TSRC`, drops a `TCMP` of "yes" and fails on `TXXX:WORK`.
+fn take_other_items(tag: &mut Id3v2Tag) -> Vec<Frame<'static>> {
+    fn other_item(frame: &Frame<'static>) -> bool {
+        let mut one = Id3v2Tag::new();
+        one.insert(frame.clone());
+        let (rest, items) = one.split_tag();
+        let consumed = !items.is_empty() || (&*rest).into_iter().next().is_none();
+        consumed && !items.items().any(|item| field_of(item.key()).is_some())
+    }
+    let others: Vec<Frame<'static>> = (&*tag)
+        .into_iter()
+        .filter(|frame| other_item(frame))
+        .cloned()
+        .collect();
+    tag.retain(|frame| !other_item(frame));
+    others
 }
 
 fn pair_frame(id: &str, value: String) -> Frame<'static> {
@@ -1917,6 +2037,166 @@ mod tests {
         let mpeg = read_mpeg(&path);
         assert_eq!(mpeg.id3v1().unwrap().title().as_deref(), Some("Old Title"));
         assert_eq!(mpeg.ape().unwrap().album().as_deref(), Some("Old Album"));
+    }
+
+    fn id3_text(tag: &Id3v2Tag, id: &str) -> Option<String> {
+        tag.into_iter().find_map(|frame| match frame {
+            Frame::Text(text) if frame.id_str() == id => Some(text.value.to_string()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn id3_frames_of_other_items_survive_an_edit() {
+        let scratch = Scratch::new();
+        let path = scratch.copy("tone.mp3");
+        let mut tag = Id3v2Tag::new();
+        let texts = [
+            ("TSOP", "Sort A\0Sort B"),
+            ("TSRC", "USX1\0USX2"),
+            ("TENC", "Encoder A\0Encoder B"),
+            ("TMED", "CD\0Vinyl"),
+            ("TCMP", "yes"),
+            ("MVIN", "3/5"),
+        ];
+        for (id, value) in texts {
+            tag.insert(pair_frame(id, value.to_owned()));
+        }
+        tag.insert_user_text("WORK".to_owned(), "A Work".to_owned());
+        tag.insert_user_text("ITUNESADVISORY".to_owned(), "9".to_owned());
+        tag.insert_user_text("replaygain_track_gain".to_owned(), "-3 dB".to_owned());
+        tag.save_to_path(&path, WriteOptions::default()).unwrap();
+        assert_eq!(probe(&path).compilation_tag, Some(true));
+
+        edit_tags(&path, &setting(&[(TagField::Title, "New")])).unwrap();
+
+        let tag = read_mpeg(&path).remove_id3v2().unwrap();
+        assert_eq!(id3_text(&tag, "TIT2").as_deref(), Some("New"));
+        for (id, value) in texts {
+            assert_eq!(id3_text(&tag, id).as_deref(), Some(value), "{id}");
+        }
+        assert_eq!(tag.get_user_text("WORK"), Some("A Work"));
+        assert_eq!(tag.get_user_text("ITUNESADVISORY"), Some("9"));
+        assert_eq!(tag.get_user_text("replaygain_track_gain"), Some("-3 dB"));
+        assert_eq!(probe(&path).compilation_tag, Some(true));
+    }
+
+    /// FFmpeg reads `TDRC`, `TDRL` and `TYER` all as `date`.
+    fn mp3_with_dates(scratch: &Scratch, frames: &[(&str, &str)]) -> PathBuf {
+        let path = scratch.copy("tone.mp3");
+        let mut tag = Id3v2Tag::new();
+        for (id, value) in frames {
+            tag.insert(pair_frame(id, (*value).to_owned()));
+        }
+        tag.save_to_path(&path, WriteOptions::default()).unwrap();
+        // lofty writes frames in the order they went in.
+        let bytes = fs::read(&path).unwrap();
+        let at = |id: &str| bytes.windows(4).position(|w| w == id.as_bytes()).unwrap();
+        assert!(at(frames[0].0) < at(frames[1].0));
+        path
+    }
+
+    #[test]
+    fn a_date_edit_beats_a_release_date_and_revert_puts_it_back() {
+        let scratch = Scratch::new();
+        // Many runs: lofty's merge gives its frames in a random order.
+        for _ in 0..20 {
+            for frames in [
+                [("TDRC", "1990"), ("TDRL", "1970")],
+                [("TDRL", "1970"), ("TDRC", "1990")],
+                [("TDRC", "1990"), ("TYER", "1970")],
+                [("TYER", "1970"), ("TDRC", "1990")],
+            ] {
+                let path = mp3_with_dates(&scratch, &frames);
+                let year = probe(&path).year;
+                let before = read_tags(&path).unwrap();
+                assert_eq!(before.primary[&TagField::Date], "1990");
+                // TDRC and TDRL: the last one wins. FFmpeg's TYER always wins.
+                let tdrc_last = frames[1].0 == "TDRC" && frames[0].0 == "TDRL";
+                assert_eq!(
+                    year,
+                    Some(if tdrc_last { 1990 } else { 1970 }),
+                    "{frames:?}"
+                );
+
+                let edit = setting(&[(TagField::Date, "2001-05-14")]);
+                let removed = edit_tags(&path, &edit).unwrap();
+                assert_eq!(probe(&path).year, Some(2001), "{frames:?}");
+                assert_eq!(removed.len(), 1, "{removed:?}");
+                assert_eq!(removed[0].value, "1970");
+                assert!(read_tags(&path).unwrap().copies.is_empty());
+
+                let revert = TagEdit {
+                    set: [(TagField::Date, Some("1990".to_owned()))].into(),
+                    restore: removed,
+                };
+                edit_tags(&path, &revert).unwrap();
+                assert_eq!(probe(&path).year, year, "revert {frames:?}");
+                assert_eq!(read_tags(&path).unwrap().copies, before.copies);
+            }
+        }
+    }
+
+    #[test]
+    fn an_edit_of_another_field_keeps_the_date_the_library_reads() {
+        let scratch = Scratch::new();
+        for _ in 0..20 {
+            for frames in [
+                [("TDRC", "1990"), ("TDRL", "1970")],
+                [("TDRL", "1970"), ("TDRC", "1990")],
+                [("TDRC", "1990"), ("TYER", "1970")],
+                [("TYER", "1970"), ("TDRC", "1990")],
+            ] {
+                let path = mp3_with_dates(&scratch, &frames);
+                let year = probe(&path).year;
+                edit_tags(&path, &setting(&[(TagField::Title, "New")])).unwrap();
+                assert_eq!(probe(&path).year, year, "{frames:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_edit_of_the_same_file_gives_the_same_bytes() {
+        let scratch = Scratch::new();
+        let frames = [
+            ("TDRC", "1990"),
+            ("TPE1", "Artist"),
+            ("TALB", "Album"),
+            ("TPE2", "Album Artist"),
+            ("TRCK", "1/2"),
+            ("TSOP", "Sort"),
+            ("TSRC", "ISRC"),
+        ];
+        let edit = setting(&[
+            (TagField::Title, "New"),
+            (TagField::MusicbrainzReleaseId, "release"),
+            (TagField::MusicbrainzArtistId, "artist"),
+        ]);
+        let once = || {
+            let path = mp3_with_dates(&scratch, &frames);
+            edit_tags(&path, &edit).unwrap();
+            fs::read(&path).unwrap()
+        };
+        let first = once();
+        for _ in 0..20 {
+            assert!(once() == first);
+        }
+    }
+
+    /// FFmpeg reads `TDRL` as `date` too, and the last frame wins. The date an
+    /// edit writes must win. lofty's merge order varies, so this repeats.
+    #[test]
+    fn a_date_edit_wins_over_a_stale_tdrl() {
+        for _ in 0..20 {
+            let scratch = Scratch::new();
+            let path = scratch.copy("tone.mp3");
+            let mut tag = Id3v2Tag::new();
+            tag.insert(pair_frame("TDRC", "1990-01-01".to_owned()));
+            tag.insert(pair_frame("TDRL", "1970-01-01".to_owned()));
+            tag.save_to_path(&path, WriteOptions::default()).unwrap();
+            edit_tags(&path, &setting(&[(TagField::Date, "2001-05-14")])).unwrap();
+            assert_eq!(probe(&path).year, Some(2001));
+        }
     }
 
     #[test]
