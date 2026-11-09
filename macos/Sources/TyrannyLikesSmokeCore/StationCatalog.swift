@@ -288,8 +288,8 @@ public final class StationCatalog {
         }
         // The server orders by the lower-cased name's UTF-8 bytes, then by ID.
         stations = rows.sorted { left, right in
-            let a = left.name.lowercased(), b = right.name.lowercased()
-            return a == b ? left.id < right.id : a.utf8.lexicographicallyPrecedes(b.utf8)
+            let a = Array(left.name.lowercased().utf8), b = Array(right.name.lowercased().utf8)
+            return a == b ? left.id < right.id : a.lexicographicallyPrecedes(b)
         }
         revision = applied.snapshot.stations_revision
     }
