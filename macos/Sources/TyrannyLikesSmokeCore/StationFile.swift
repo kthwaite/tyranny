@@ -9,6 +9,8 @@ public struct StationFileError: Error, Equatable {
 }
 
 /// Reads `.pls` and `.m3u`/`.m3u8` files into station inputs.
+///
+/// Delimiters are matched by scalar, not by grapheme: a mark after `=`, `,` or `#` joins its grapheme.
 public enum StationFile {
     public static func parse(_ text: String, fileName: String) throws -> [StationInput] {
         let lines = text.replacingOccurrences(of: "\u{FEFF}", with: "")
@@ -28,8 +30,8 @@ public enum StationFile {
     }
 
     private static func isHTTP(_ url: String) -> Bool {
-        let lowered = url.lowercased()
-        return lowered.hasPrefix("http://") || lowered.hasPrefix("https://")
+        let lowered = url.lowercased().unicodeScalars
+        return lowered.starts(with: "http://".unicodeScalars) || lowered.starts(with: "https://".unicodeScalars)
     }
 
     private static func trimmed(_ text: some StringProtocol) -> String {
@@ -40,9 +42,10 @@ public enum StationFile {
         var files: [Int: String] = [:]
         var titles: [Int: String] = [:]
         for line in lines {
-            guard let equals = line.firstIndex(of: "=") else { continue }
-            let key = trimmed(line[..<equals]).lowercased()
-            let value = trimmed(line[line.index(after: equals)...])
+            let scalars = line.unicodeScalars
+            guard let equals = scalars.firstIndex(of: "=") else { continue }
+            let key = trimmed(Substring(scalars[..<equals])).lowercased()
+            let value = trimmed(Substring(scalars[scalars.index(after: equals)...]))
             if key.hasPrefix("file"), let number = Int(key.dropFirst(4)) {
                 files[number] = value
             } else if key.hasPrefix("title"), let number = Int(key.dropFirst(5)) {
@@ -61,9 +64,10 @@ public enum StationFile {
         for raw in lines {
             let line = trimmed(raw)
             if line.isEmpty { continue }
-            if line.hasPrefix("#") {
-                if line.uppercased().hasPrefix("#EXTINF:"), let comma = line.firstIndex(of: ",") {
-                    title = trimmed(line[line.index(after: comma)...])
+            let scalars = line.unicodeScalars
+            if scalars.first == "#" {
+                if line.uppercased().unicodeScalars.starts(with: "#EXTINF:".unicodeScalars), let comma = scalars.firstIndex(of: ",") {
+                    title = trimmed(Substring(scalars[scalars.index(after: comma)...]))
                 }
                 continue
             }
