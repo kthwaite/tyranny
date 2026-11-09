@@ -141,7 +141,7 @@ async fn ok(control: &Controller, command: Command) -> Response {
     }
 }
 async fn snapshot(control: &Controller) -> ControlState {
-    let Response::Snapshot { snapshot } = ok(control, Command::Snapshot).await else {
+    let Response::Snapshot { snapshot } = ok(control, Command::Snapshot {}).await else {
         panic!("expected a snapshot");
     };
     *snapshot
@@ -405,7 +405,7 @@ async fn controls_answer_while_a_selection_resolves() {
     let pending = tokio::spawn(async move { ask(&gated, command).await });
     gate.wait().await;
     // The owner answers while the resolved selection waits.
-    let paused = timeout(Duration::from_millis(500), ask(&control, Command::Pause))
+    let paused = timeout(Duration::from_millis(500), ask(&control, Command::Pause {}))
         .await
         .expect("pause must not wait for selection resolution");
     assert!(matches!(paused, Reply::Ok { .. }), "{paused:?}");
@@ -533,7 +533,7 @@ async fn enqueue_playlist_resolves_off_the_owner_and_rechecks_at_commit() {
     let command = enqueue_playlist(&before);
     let pending = tokio::spawn(async move { ask(&held, command).await });
     gate.wait().await;
-    let paused = timeout(Duration::from_millis(500), ask(&control, Command::Pause))
+    let paused = timeout(Duration::from_millis(500), ask(&control, Command::Pause {}))
         .await
         .expect("pause must not wait for playlist resolution");
     assert!(matches!(paused, Reply::Ok { .. }), "{paused:?}");
@@ -1059,7 +1059,7 @@ async fn skipping_mid_track_records_an_uncounted_skipped_play() {
     let first = fixture.queue_library().await;
     let before = snapshot(&fixture.control()).await;
     fixture.play_to(first, 48_000).await;
-    ok(&fixture.control(), Command::Next).await;
+    ok(&fixture.control(), Command::Next {}).await;
     let plays = fixture
         .until_plays(|plays| closed(plays, first).is_some())
         .await;
@@ -1089,7 +1089,7 @@ async fn reselecting_the_current_entry_continues_its_play() {
     let first = fixture.queue_library().await;
     fixture.play_to(first, 48_000).await;
     fixture.play_to(first, 72_000).await;
-    ok(&fixture.control(), Command::Next).await;
+    ok(&fixture.control(), Command::Next {}).await;
     let plays = fixture
         .until_plays(|plays| closed(plays, first).is_some())
         .await;
@@ -1162,7 +1162,7 @@ async fn stopping_closes_the_play_as_stopped() {
     fixture.index_frames(&["a", "b"], TEN_SECONDS).await;
     let first = fixture.queue_library().await;
     fixture.play_to(first, 48_000).await;
-    ok(&fixture.control(), Command::Stop).await;
+    ok(&fixture.control(), Command::Stop {}).await;
     let plays = fixture
         .until_plays(|plays| closed(plays, first).is_some())
         .await;
@@ -1466,7 +1466,7 @@ async fn history_write_failures_queue_events_without_stalling_playback() {
     fixture.play_to(first, 48_000).await;
     let next = timeout(
         Duration::from_millis(500),
-        ask(&fixture.control(), Command::Next),
+        ask(&fixture.control(), Command::Next {}),
     )
     .await
     .expect("Next must not wait for history writes");
