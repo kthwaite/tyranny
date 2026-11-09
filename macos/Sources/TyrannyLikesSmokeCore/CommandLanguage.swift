@@ -264,32 +264,45 @@ public enum CommandLanguage {
     }
 
     public static func quote(_ token: String) -> String {
-        if !token.isEmpty && !token.contains(where: { $0.isWhitespace || $0 == "\"" || $0 == "'" || $0 == "\\" }) { return token }
-        return "\"" + token.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        if !token.isEmpty && !token.unicodeScalars.contains(where: { $0.properties.isWhitespace || $0 == "\"" || $0 == "'" || $0 == "\\" }) { return token }
+        var quoted = String.UnicodeScalarView()
+        quoted.append("\"")
+        for scalar in token.unicodeScalars {
+            if scalar == "\\" || scalar == "\"" { quoted.append("\\") }
+            quoted.append(scalar)
+        }
+        quoted.append("\"")
+        return String(quoted)
     }
 
+    /// Reads scalars, not graphemes. A mark joins the grapheme before it, and that may be the space or quote in front of a name.
     private static func tokenize(_ text: String, incomplete: Bool) throws -> (tokens: [String], active: Bool) {
         var tokens: [String] = []
-        var token = ""
-        var quote: Character?
+        var token = String.UnicodeScalarView()
+        var quote: Unicode.Scalar?
         var escaped = false
         var active = false
-        for character in text {
+        let scalars = text.unicodeScalars
+        var index = scalars.startIndex
+        while index != scalars.endIndex {
+            let scalar = scalars[index]
+            index = scalars.index(after: index)
             if escaped {
-                token.append(character)
-                escaped = false
-            } else if character == "\\" {
+                token.append(scalar)
+                // CR LF is one character, so one escape covers both.
+                escaped = scalar == "\r" && index != scalars.endIndex && scalars[index] == "\n"
+            } else if scalar == "\\" {
                 escaped = true
                 active = true
             } else if let delimiter = quote {
-                if character == delimiter { quote = nil } else { token.append(character) }
-            } else if character == "\"" || character == "'" {
-                quote = character
+                if scalar == delimiter { quote = nil } else { token.append(scalar) }
+            } else if scalar == "\"" || scalar == "'" {
+                quote = scalar
                 active = true
-            } else if character.isWhitespace {
-                if active { tokens.append(token); token = ""; active = false }
+            } else if scalar.properties.isWhitespace {
+                if active { tokens.append(String(token)); token = String.UnicodeScalarView(); active = false }
             } else {
-                token.append(character)
+                token.append(scalar)
                 active = true
             }
         }
@@ -297,7 +310,7 @@ public enum CommandLanguage {
             if escaped { throw CommandLanguageError("Trailing escape: add the escaped character.") }
             if quote != nil { throw CommandLanguageError("Unterminated quoted argument.") }
         }
-        if active { tokens.append(token) }
+        if active { tokens.append(String(token)) }
         return (tokens, active)
     }
 
