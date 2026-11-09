@@ -928,8 +928,9 @@ impl Player {
             .checked_add(1)
             .context("queue revision exhausted")?;
         let current = self.snapshot().current_id;
-        self.queue[index].token.invalidate();
+        // Count what output heard first: a pass with an invalid token never counts.
         self.forget_passes(&[id]);
+        self.queue[index].token.invalidate();
         self.queue.remove(index);
         self.revision = revision;
         if self.selection.is_some_and(|(selected, _)| selected == id) {
@@ -1263,12 +1264,13 @@ impl Player {
             self.output.set_paused(true);
             self.drop_passes();
         }
+        // Count what output heard first: a pass with an invalid token never counts.
+        self.forget_passes(&removed_ids);
         for (entry, gone) in self.queue.iter().zip(&removed) {
             if *gone {
                 entry.token.invalidate();
             }
         }
-        self.forget_passes(&removed_ids);
         let mut index = 0;
         self.queue.retain(|_| {
             index += 1;
@@ -1404,12 +1406,13 @@ impl Player {
             .take(self.cursor)
             .filter(|gone| **gone)
             .count();
+        // Count what output heard first: a pass with an invalid token never counts.
+        self.forget_passes(&removed_ids);
         for (entry, gone) in self.queue.iter().zip(&removed) {
             if *gone {
                 entry.token.invalidate();
             }
         }
-        self.forget_passes(&removed_ids);
         let mut index = 0;
         self.queue.retain(|_| {
             index += 1;
@@ -1529,15 +1532,18 @@ impl Player {
             .checked_add(1)
             .context("queue revision exhausted")?;
         self.output.set_paused(true);
+        // Count what output heard first: a pass with an invalid token never counts.
+        self.stop();
         for entry in self.queue.drain(..) {
             entry.token.invalidate();
         }
-        self.stop();
         self.revision = revision;
         Ok(())
     }
 
     fn rebuild_future(&mut self, current: Option<u64>) {
+        // Count what output heard first: a pass with an invalid token never counts.
+        self.count_heard();
         for entry in &mut self.queue {
             if Some(entry.id) != current {
                 entry.token.invalidate();
@@ -1549,6 +1555,8 @@ impl Player {
     }
 
     fn replace_future_tokens(&mut self, current: Option<u64>, tokens: Vec<Arc<TrackToken>>) {
+        // Count what output heard first: a pass with an invalid token never counts.
+        self.count_heard();
         for (entry, token) in self.queue.iter_mut().zip(tokens) {
             if Some(entry.id) != current {
                 entry.token.invalidate();
