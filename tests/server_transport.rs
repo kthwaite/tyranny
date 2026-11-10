@@ -610,6 +610,47 @@ async fn writable_ancestors_are_rejected_by_server_and_client() {
     running.stop().await;
 }
 
+/// A symlink inside a directory other users can write can be replaced to
+/// send the path elsewhere, so a path looked up through one is refused even
+/// when its resolved directories are all trusted.
+#[tokio::test]
+async fn paths_through_a_symlink_in_a_writable_directory_are_refused() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let shared = scratch.path("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).unwrap();
+    let link = shared.join("link");
+    symlink(&scratch.0, &link).unwrap();
+    let connection = connect(&link.join("state/control.sock")).await;
+    assert!(
+        connection.is_err(),
+        "client trusted a symlink in a writable directory"
+    );
+    let startup = Server::start(config(link.join("other-state"), scratch.path("other.f32"))).await;
+    let startup_rejected = startup.is_err();
+    if let Ok(server) = startup {
+        server.run(async {}).await.unwrap();
+    }
+    assert!(
+        startup_rejected,
+        "server trusted a symlink in a writable directory"
+    );
+    assert!(!scratch.path("other.f32").exists());
+    // The same symlink in a private directory is still followed.
+    let private = scratch.path("private");
+    private_directory(&private);
+    symlink(&scratch.0, private.join("link")).unwrap();
+    let mut socket = Socket {
+        stream: connect(&private.join("link/state/control.sock"))
+            .await
+            .unwrap(),
+        reader: FrameReader::default(),
+    };
+    hello(&mut socket, &running.instance_id).await;
+    running.stop().await;
+}
+
 #[tokio::test]
 async fn client_resolves_ancestor_aliases_before_applying_the_socket_byte_limit() {
     let scratch = Scratch::new();
