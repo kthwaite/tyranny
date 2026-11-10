@@ -26,6 +26,13 @@ use crate::{
     metadata::{PlaybackMetadata, playback_metadata, stream_time_base},
 };
 
+/// The highest source sample rate a decoder accepts. FFmpeg decodes DSD at an
+/// eighth of its bit rate, so DSD1024 decodes at 5.6448 MHz (44.1 kHz family)
+/// and 6.144 MHz (48 kHz family); PCM goes up to 768 kHz. The resampler's
+/// tables grow with its input rate, so a source above every supported rate is
+/// refused before one is built. The library scan refuses it too.
+pub(crate) const MAX_SOURCE_RATE: u32 = 6_144_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GainMode {
@@ -291,6 +298,11 @@ impl Decoder {
                 | ffmpeg::decoder::Check::EXPLODE,
         );
         let codec = codec.audio().context("opening native audio decoder")?;
+        ensure!(
+            codec.rate() <= MAX_SOURCE_RATE,
+            "unsupported audio sample rate {} Hz",
+            codec.rate()
+        );
         // One tick in output frames, rounded up; both terms are positive.
         let tick = (i64::from(time_base.0) * i64::from(SAMPLE_RATE) + i64::from(time_base.1) - 1)
             / i64::from(time_base.1);
@@ -588,9 +600,10 @@ impl Decoder {
     fn prepare_frame(&mut self) -> Result<()> {
         self.frame_capacity = self.frame_capacity.max(self.decoded.samples());
         let rate = self.decoded.rate();
+        ensure!(rate > 0, "invalid decoded sample rate");
         ensure!(
-            rate > 0 && rate <= i32::MAX as u32,
-            "invalid decoded sample rate"
+            rate <= MAX_SOURCE_RATE,
+            "unsupported decoded sample rate {rate} Hz"
         );
         let mut layout = self.decoded.channel_layout();
         ensure!(

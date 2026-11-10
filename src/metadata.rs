@@ -21,7 +21,7 @@ use anyhow::{Context, Result, ensure};
 use ffmpeg_next as ffmpeg;
 
 use crate::{
-    decoder::{GainMetadata, initialize_ffmpeg},
+    decoder::{GainMetadata, MAX_SOURCE_RATE, initialize_ffmpeg},
     library_types::{TrackMetadata, is_lossless},
 };
 
@@ -100,6 +100,11 @@ pub(crate) fn probe_before(
         .ok()
         .filter(|value| *value != 0)
         .context("invalid audio sample rate")?;
+    // Playback refuses it; indexing it would list a track that cannot play.
+    ensure!(
+        sample_rate <= MAX_SOURCE_RATE,
+        "unsupported audio sample rate {sample_rate} Hz"
+    );
     let channels = u16::try_from(parameters.ch_layout.nb_channels)
         .ok()
         .filter(|value| *value != 0)
