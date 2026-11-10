@@ -410,6 +410,117 @@ fn heaac_caf_seeks_decode_what_a_linear_decode_holds_there() {
     }
 }
 
+/// A stereo s16 WAV whose header gives `rate`, with `frames` silent frames.
+fn wav_at_rate(path: &Path, rate: u32, frames: u32) {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&rate.wrapping_mul(4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(frames * 4).to_le_bytes());
+    bytes.resize(bytes.len() + frames as usize * 4, 0);
+    fs::write(path, bytes).unwrap();
+}
+
+/// Peak resident set size of this process, in bytes (macOS reports bytes).
+fn peak_rss() -> u64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    usage.ru_maxrss as u64
+}
+
+#[test]
+fn sources_above_the_sample_rate_ceiling_are_refused() {
+    // The resampler's tables grow with the input rate. Rates above every
+    // supported format are refused before it is built.
+    let scratch = Scratch::new();
+    for rate in [6_144_001u32, 0x2000_0000] {
+        let path = scratch.0.join(format!("rate-{rate}.wav"));
+        wav_at_rate(&path, rate, 64);
+        let before = peak_rss();
+        let result = Decoder::open(&path, GainMode::Off);
+        let grew = peak_rss().saturating_sub(before) >> 20;
+        let Err(error) = result else {
+            panic!("rate {rate}: the source opened (peak memory grew {grew} MiB)");
+        };
+        assert!(
+            format!("{error:#}").contains("sample rate"),
+            "rate {rate}: {error:#}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_scan_and_the_player_refuse_a_source_above_the_rate_ceiling() {
+    let scratch = Scratch::new();
+    let library_dir = scratch.0.join("library");
+    fs::create_dir(&library_dir).unwrap();
+    let refused = library_dir.join("refused.wav");
+    wav_at_rate(&refused, 0x2000_0000, 64);
+    wav_at_rate(&library_dir.join("kept.wav"), 48_000, 4_800);
+    // The scan counts the refused file as a failure and indexes the other.
+    let (library, state) = scan(&scratch, &library_dir).await;
+    assert_eq!(
+        (state.tracks, state.scan.failures),
+        (1, 1),
+        "{:?}",
+        state.scan
+    );
+    library.shutdown().unwrap();
+    // A queued path is refused when it is selected, with the decoder's error.
+    let player = Player::new(
+        vec![refused],
+        OutputConfig::Capture {
+            path: scratch.0.join("player.f32"),
+            clocked: false,
+        },
+        GainMode::Off,
+    )
+    .unwrap();
+    let entry = player.queue_ids()[0];
+    let Err(error) = player.prepare_selection(entry, 0, GainMode::Off) else {
+        panic!("the refused source was selected");
+    };
+    assert!(format!("{error:#}").contains("sample rate"), "{error:#}");
+}
+
+#[test]
+fn the_highest_supported_sample_rates_still_decode() {
+    let scratch = Scratch::new();
+    // PCM at the ceiling.
+    let path = scratch.0.join("ceiling.wav");
+    wav_at_rate(&path, 6_144_000, 12_288);
+    let before = peak_rss();
+    let mut decoder = Decoder::open(&path, GainMode::Off).unwrap();
+    assert!(decode_to_eof(&mut decoder) > 0);
+    eprintln!(
+        "6.144 MHz: peak memory grew {} MiB",
+        peak_rss().saturating_sub(before) >> 20
+    );
+    // DSD1024 in DSF, in the 44.1 kHz and 48 kHz families: FFmpeg decodes DSD
+    // at an eighth of its bit rate, 5.6448 MHz and 6.144 MHz.
+    let dsf = fs::read(fixture_root().join("formats/tone.dsf")).unwrap();
+    for dsd_rate in [45_158_400u32, 49_152_000] {
+        let mut bytes = dsf.clone();
+        // DSF "fmt " chunk: the sampling frequency follows the 28-byte "DSD "
+        // chunk, the chunk header (12), version, format id, channel type and
+        // channel count (4 each).
+        bytes[56..60].copy_from_slice(&dsd_rate.to_le_bytes());
+        let path = scratch.0.join(format!("dsd-{dsd_rate}.dsf"));
+        fs::write(&path, bytes).unwrap();
+        let mut decoder = Decoder::open(&path, GainMode::Off)
+            .unwrap_or_else(|error| panic!("DSD rate {dsd_rate}: {error:#}"));
+        assert!(decode_to_eof(&mut decoder) > 0, "DSD rate {dsd_rate}");
+    }
+}
+
 #[test]
 fn seeking_back_after_eof_decodes_like_a_fresh_seek() {
     // HE-AAC in CAF, timed at the output rate, matched a frame duration only on its

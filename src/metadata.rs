@@ -741,6 +741,42 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_refuses_sample_rates_the_decoder_refuses() {
+        let dir =
+            std::env::temp_dir().join(format!("tyranny-likes-smoke-rate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for (rate, accepted) in [
+            (6_144_000u32, true),
+            (6_144_001, false),
+            (0x2000_0000, false),
+        ] {
+            let path = dir.join(format!("{rate}.wav"));
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(36u32 + 256).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&rate.to_le_bytes());
+            bytes.extend_from_slice(&rate.wrapping_mul(4).to_le_bytes());
+            bytes.extend_from_slice(&4u16.to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&256u32.to_le_bytes());
+            bytes.resize(bytes.len() + 256, 0);
+            std::fs::write(&path, bytes).unwrap();
+            let result = probe(&path, &cancelled);
+            assert_eq!(result.is_ok(), accepted, "rate {rate}: {:?}", result.err());
+            if let Err(error) = result {
+                assert!(format!("{error:#}").contains("sample rate"), "{error:#}");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_zero_container_duration_is_unknown() {
         // Musepack SV8 counts whole 73728-frame ticks, so tone.mpc reads 0; the
         // RealMedia PROP header of tone.ra says 0. Both decode 0.25 s of audio.
