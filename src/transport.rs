@@ -7,7 +7,7 @@ use std::{
         ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt},
     },
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -115,17 +115,96 @@ pub(crate) fn validate_directory(metadata: &Metadata) -> Result<()> {
 /// temporary roots while rejecting writable or foreign-owned intermediates.
 pub(crate) fn validate_ancestors(directory: &Path) -> Result<()> {
     for ancestor in directory.ancestors().skip(1) {
-        let metadata = fs::symlink_metadata(ancestor)
-            .with_context(|| format!("inspect socket ancestor {}", ancestor.display()))?;
-        let root_sticky = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
-        ensure!(
-            metadata.is_dir()
-                && !metadata.file_type().is_symlink()
-                && (metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() })
-                && (metadata.mode() & 0o022 == 0 || root_sticky),
-            "socket ancestor must be a trusted directory without unsafe write permissions: {}",
-            ancestor.display()
-        );
+        validate_trusted(ancestor)?;
+    }
+    Ok(())
+}
+
+fn validate_trusted(directory: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(directory)
+        .with_context(|| format!("inspect socket ancestor {}", directory.display()))?;
+    let root_sticky = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
+    ensure!(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && (metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() })
+            && (metadata.mode() & 0o022 == 0 || root_sticky),
+        "socket ancestor must be a trusted directory without unsafe write permissions: {}",
+        directory.display()
+    );
+    Ok(())
+}
+
+/// The canonical path is not the only path that matters: a symlink in a
+/// directory another user can write can be replaced to send the path given
+/// elsewhere. Resolve `path` one name at a time, as the kernel does, and
+/// require every directory a name is looked up in to be trusted and every
+/// symlink followed to be owned by root or the current user. The last name is
+/// not followed; callers check it with `validate_directory`.
+pub(crate) fn validate_lookup(path: &Path) -> Result<()> {
+    enum Step {
+        Root,
+        Parent,
+        Name(std::ffi::OsString),
+    }
+    fn push(steps: &mut Vec<Step>, path: &Path) {
+        for component in path.components().rev() {
+            match component {
+                Component::RootDir => steps.push(Step::Root),
+                Component::ParentDir => steps.push(Step::Parent),
+                Component::Normal(name) => steps.push(Step::Name(name.to_owned())),
+                Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolve current directory")?
+            .join(path)
+    };
+    let mut steps = Vec::new();
+    push(&mut steps, &absolute);
+    let mut resolved = PathBuf::from("/");
+    let mut links = 0;
+    while let Some(step) = steps.pop() {
+        let name = match step {
+            Step::Root => {
+                resolved = PathBuf::from("/");
+                continue;
+            }
+            Step::Parent => {
+                resolved.pop();
+                continue;
+            }
+            Step::Name(name) => name,
+        };
+        validate_trusted(&resolved)?;
+        let next = resolved.join(&name);
+        if steps.is_empty() {
+            break;
+        }
+        let metadata = fs::symlink_metadata(&next)
+            .with_context(|| format!("inspect path component {}", next.display()))?;
+        if metadata.file_type().is_symlink() {
+            ensure!(
+                metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() },
+                "symlink on the path must be owned by root or the current user: {}",
+                next.display()
+            );
+            links += 1;
+            ensure!(
+                links <= 40,
+                "too many symlinks on the path: {}",
+                path.display()
+            );
+            let target = fs::read_link(&next)
+                .with_context(|| format!("read path symlink {}", next.display()))?;
+            push(&mut steps, &target);
+        } else {
+            resolved = next;
+        }
     }
     Ok(())
 }
@@ -196,6 +275,7 @@ pub async fn connect(path: &Path) -> Result<UnixStream> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     validate_directory(&fs::symlink_metadata(parent).context("inspect socket directory")?)?;
+    validate_lookup(parent)?;
     let parent = fs::canonicalize(parent).context("resolve socket directory")?;
     validate_directory(&fs::symlink_metadata(&parent)?)?;
     validate_ancestors(&parent)?;

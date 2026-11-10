@@ -5,7 +5,7 @@ use crate::{
     protocol::{Command, Message, Reply, Request, Response, VERSION},
     transport::{
         FrameReader, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, prepare_socket, socket_metadata,
-        validate_ancestors, validate_directory, validate_socket_path, write_frame,
+        validate_ancestors, validate_directory, validate_lookup, validate_socket_path, write_frame,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -200,6 +200,7 @@ impl StateDirectory {
             "state directory changed while it was opened"
         );
         validate_ancestors(&root)?;
+        validate_lookup(path)?;
         // All children stay under the private directory. Reject insecure existing
         // files, including SQLite sidecars, rather than silently repairing them.
         let lock = open_private_file(&root.join("server.lock"), true)?;
