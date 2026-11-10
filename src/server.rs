@@ -5,7 +5,7 @@ use crate::{
     protocol::{Command, Message, Reply, Request, Response, VERSION},
     transport::{
         FrameReader, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, prepare_socket, socket_metadata,
-        validate_ancestors, validate_directory, validate_socket_path, write_frame,
+        validate_ancestors, validate_directory, validate_lookup, validate_socket_path, write_frame,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -186,9 +186,21 @@ impl StateDirectory {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
             .context("open private state directory without following symlinks")?;
-        validate_directory(&directory.metadata()?)?;
+        let opened = directory.metadata()?;
+        validate_directory(&opened)?;
+        #[cfg(test)]
+        tests::between_open_and_resolve();
         let root = fs::canonicalize(path).context("resolve state directory")?;
+        // Every later child is opened by this path, so it must name the
+        // directory just opened and checked.
+        let resolved = fs::symlink_metadata(&root).context("inspect resolved state directory")?;
+        validate_directory(&resolved)?;
+        ensure!(
+            resolved.dev() == opened.dev() && resolved.ino() == opened.ino(),
+            "state directory changed while it was opened"
+        );
         validate_ancestors(&root)?;
+        validate_lookup(path)?;
         // All children stay under the private directory. Reject insecure existing
         // files, including SQLite sidecars, rather than silently repairing them.
         let lock = open_private_file(&root.join("server.lock"), true)?;
@@ -425,6 +437,58 @@ mod tests {
     use super::*;
     use crate::protocol::ControlState;
     use futures_util::FutureExt;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BETWEEN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs in `StateDirectory::open` after the opened directory is checked
+    /// and before the path is resolved.
+    pub(super) fn between_open_and_resolve() {
+        if let Some(hook) = BETWEEN.with(|cell| cell.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// The directory `open` resolves must be the directory it opened and
+    /// checked, even if a path component changes between the two calls.
+    #[test]
+    fn the_resolved_directory_is_the_opened_one() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tyranny-state-identity-{}", Uuid::new_v4()));
+        for name in ["checked", "other"] {
+            fs::create_dir_all(root.join(name).join("state")).unwrap();
+        }
+        fs::set_permissions(
+            root.join("checked/state"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(root.join("other/state"), fs::Permissions::from_mode(0o777)).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(root.join("checked"), &link).unwrap();
+        let opened = fs::metadata(root.join("checked/state")).unwrap().ino();
+        let swap = {
+            let (link, target) = (link.clone(), root.join("other"));
+            move || {
+                fs::remove_file(&link).unwrap();
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+            }
+        };
+        BETWEEN.with(|cell| *cell.borrow_mut() = Some(Box::new(swap)));
+        let result = StateDirectory::open(&link.join("state"));
+        BETWEEN.with(|cell| cell.borrow_mut().take());
+        let resolved = result.map(|state| {
+            let metadata = fs::metadata(&state.root).unwrap();
+            (metadata.ino(), metadata.mode() & 0o7777)
+        });
+        let _ = fs::remove_dir_all(&root);
+        if let Ok(resolved) = resolved {
+            assert_eq!(resolved, (opened, 0o700), "open used another directory");
+        }
+    }
 
     async fn next(reader: &mut FrameReader, socket: &mut UnixStream) -> Option<Message> {
         let frame = timeout(IO_TIMEOUT, reader.read(socket, MAX_RESPONSE_BYTES))
