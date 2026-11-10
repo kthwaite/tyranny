@@ -21,7 +21,7 @@ use anyhow::{Context, Result, ensure};
 use ffmpeg_next as ffmpeg;
 
 use crate::{
-    decoder::{GainMetadata, initialize_ffmpeg},
+    decoder::{GainMetadata, MAX_SOURCE_RATE, initialize_ffmpeg},
     library_types::{TrackMetadata, is_lossless},
 };
 
@@ -100,6 +100,11 @@ pub(crate) fn probe_before(
         .ok()
         .filter(|value| *value != 0)
         .context("invalid audio sample rate")?;
+    // Playback refuses it; indexing it would list a track that cannot play.
+    ensure!(
+        sample_rate <= MAX_SOURCE_RATE,
+        "unsupported audio sample rate {sample_rate} Hz"
+    );
     let channels = u16::try_from(parameters.ch_layout.nb_channels)
         .ok()
         .filter(|value| *value != 0)
@@ -738,6 +743,42 @@ mod tests {
         assert_eq!(duration_ms(ffmpeg::ffi::AV_NOPTS_VALUE, 1, 48_000), None);
         assert_eq!(duration_ms(96_000, 1, 48_000), Some(2_000));
         assert_eq!(duration_ms(i64::MAX, i32::MAX, 1), None);
+    }
+
+    #[test]
+    fn the_scan_refuses_sample_rates_the_decoder_refuses() {
+        let dir =
+            std::env::temp_dir().join(format!("tyranny-likes-smoke-rate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for (rate, accepted) in [
+            (6_144_000u32, true),
+            (6_144_001, false),
+            (0x2000_0000, false),
+        ] {
+            let path = dir.join(format!("{rate}.wav"));
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(36u32 + 256).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&rate.to_le_bytes());
+            bytes.extend_from_slice(&rate.wrapping_mul(4).to_le_bytes());
+            bytes.extend_from_slice(&4u16.to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&256u32.to_le_bytes());
+            bytes.resize(bytes.len() + 256, 0);
+            std::fs::write(&path, bytes).unwrap();
+            let result = probe(&path, &cancelled);
+            assert_eq!(result.is_ok(), accepted, "rate {rate}: {:?}", result.err());
+            if let Err(error) = result {
+                assert!(format!("{error:#}").contains("sample rate"), "{error:#}");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
