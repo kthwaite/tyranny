@@ -253,6 +253,7 @@ impl Coordinator {
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        crate::filter::search::register(&connection)?;
         connection.busy_timeout(WRITER_WAIT)?;
         connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",

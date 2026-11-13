@@ -154,17 +154,36 @@ struct MainWindowView: View {
     }
 
     private var filterField: some View {
-        TextField("Filter", text: $navigation.filter, prompt: Text("Filter"))
-            .textFieldStyle(.roundedBorder)
+        HStack(spacing: 4) {
+            TextField("Filter", text: $navigation.filter, prompt: Text("Filter"))
+                .textFieldStyle(.plain)
+                .focused($filterFocused)
+                .accessibilityIdentifier("library-filter")
+            if !navigation.filter.isEmpty {
+                Button {
+                    navigation.filter = ""
+                    filterFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear filter")
+                .accessibilityLabel("Clear filter")
+                .accessibilityIdentifier("library-filter-clear")
+            }
+        }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
             .frame(width: 190)
-            .focused($filterFocused)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
             .overlay {
                 RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(colours.error, lineWidth: filterError == nil ? 0 : 1.5)
+                    .strokeBorder(filterError == nil ? Color(nsColor: .separatorColor) : colours.error,
+                                  lineWidth: filterError == nil ? 0.5 : 1.5)
                     .allowsHitTesting(false)
             }
             .help(filterError ?? navigation.keymap.help("Filter title, artist, album or liked:true / liked:false with phrases, AND (&), OR (|), NOT (!), parentheses and field lists.", for: "focus-filter"))
-            .accessibilityIdentifier("library-filter")
             .popover(isPresented: Binding(
                 get: { filterError != nil && dismissedFilterError != filterError },
                 set: { if !$0 { dismissedFilterError = filterError } }

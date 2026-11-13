@@ -1,7 +1,10 @@
-//! Track-level literal filtering shared by library projections and saved occurrences.
-//! Bare atoms retain the complete persisted search corpus, including album
-//! artist and path. Multiple bare words now imply AND; quote a phrase to require
-//! contiguous text. Qualified atoms use only their named normalized field.
+//! Track-level filtering shared by library projections and saved occurrences.
+//! Bare atoms retain the complete persisted corpus, including album artist and
+//! path. Unquoted words allow one typo; quoted phrases stay literal substrings.
+//! Qualified atoms use only their named normalized field.
+pub(crate) mod search;
+#[cfg(test)]
+mod tests;
 use rusqlite::types::Value;
 use std::fmt::{self, Write};
 
@@ -41,7 +44,7 @@ enum Field {
     Liked,
 }
 enum Expr {
-    Term(Field, String),
+    Term(Field, String, bool),
     Years(u16, u16),
     Liked(bool),
     Not(Box<Expr>),
@@ -254,6 +257,7 @@ impl Parser {
     }
     fn value(&mut self, field: Field) -> Result<Expr> {
         let position = self.position();
+        let quoted = matches!(self.peek(), Some(Kind::Quoted(_)));
         let value = match self.peek() {
             Some(Kind::Word(value) | Kind::Quoted(value)) if !value.trim().is_empty() => {
                 value.to_lowercase()
@@ -280,7 +284,8 @@ impl Parser {
             return self.node(Expr::Liked(liked));
         }
         self.cursor += 1;
-        self.node(Expr::Term(field, value))
+        let fuzzy = !quoted && search::fuzzy_word(&value);
+        self.node(Expr::Term(field, value, fuzzy))
     }
 }
 
@@ -358,33 +363,11 @@ impl Filter {
                     .unwrap();
                 }
             }
-            Expr::Term(Field::Genre, value) => {
+            Expr::Term(field, value, fuzzy) => {
                 let parameter = first + self.values.len();
+                self.sql
+                    .push_str(&search::predicate(field, &value, fuzzy, parameter));
                 self.values.push(Value::Text(value));
-                write!(
-                    self.sql,
-                    "EXISTS(SELECT 1 FROM library_track_genres tg JOIN library_genres g ON g.id=tg.genre_id \
-                     WHERE tg.track_id=t.id AND instr(g.search,?{parameter})>0)"
-                )
-                .unwrap();
-            }
-            Expr::Term(field, value) => {
-                let parameter = first + self.values.len();
-                self.values.push(Value::Text(value));
-                let title = "t.title_sort";
-                let artist = "(SELECT fa.search FROM library_artists fa WHERE fa.id=t.artist_id)";
-                let album = "(SELECT fl.title_sort FROM library_albums fl WHERE fl.id=t.album_id)";
-                let album_artist = "(SELECT aa.search FROM library_artists aa WHERE aa.id=\
-                     (SELECT fl.artist_id FROM library_albums fl WHERE fl.id=t.album_id))";
-                let column = match field {
-                    Field::Any => "t.search",
-                    Field::Title => title,
-                    Field::Artist => artist,
-                    Field::Album => album,
-                    Field::AlbumArtist => album_artist,
-                    Field::Genre | Field::Year | Field::Liked => unreachable!(),
-                };
-                write!(self.sql, "instr({column},?{parameter})>0").unwrap();
             }
             Expr::Not(term) => {
                 self.sql.push_str("(NOT (");
