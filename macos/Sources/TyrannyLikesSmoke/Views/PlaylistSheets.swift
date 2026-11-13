@@ -20,7 +20,8 @@ struct TrackFilterHelp: View {
             .popover(isPresented: $showing) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Live Track Filters").font(.headline)
-                    Text("Use title:, artist: (track artist), or album:. Text matches literal substrings, ignoring case. Bare words search all three fields; quote a phrase.")
+                    Text("Use title:, artist: (track artist), album:, albumartist:, or genre:. Text ignores case. Unquoted alphabetic words of 4–64 characters also allow one insertion, deletion, substitution, or adjacent transposition. Quote text for literal substring matching.")
+                    Text("Bare terms search titles, artists, albums, genres, and paths. Click the circled × in the toolbar filter to clear it.")
                     Text("Use liked:true for liked songs or liked:false for songs you have not liked. Combine either with any other rule.")
                     Text(#"artist:"Miles Davis" & !album:"Kind of Blue""#).font(.system(.callout, design: .monospaced))
                     Text(#"(artist:"Miles Davis" | artist:"Ornette Coleman") & !album:"Kind of Blue""#)

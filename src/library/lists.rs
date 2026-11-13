@@ -331,8 +331,8 @@ fn list_tracks(
 }
 
 /// The first row in the direction after (or before, when `backward`) the zero-based position
-/// `from`, whose track matches `term`. With no hit and a `from`, searches again from the end the
-/// direction begins at: that hit is `wrapped`.
+/// `from`, whose track matches `term`. With no hit on that side of `from`, returns
+/// the first hit from the direction's beginning and sets `wrapped`.
 fn find_in_list(
     transaction: &Transaction<'_>,
     CompiledList { sql, mut values }: CompiledList,
@@ -352,39 +352,41 @@ fn find_in_list(
     } else {
         (">", "ASC")
     };
-    let search = |bound: Option<usize>| -> rusqlite::Result<Option<ListMatch>> {
-        let mut values = values.clone();
-        let bound_sql = match bound {
-            // `position` is 1-based and `from` zero-based, so the bound is `from + 1`.
-            Some(from) => {
-                values.push(Value::Integer(from as i64 + 1));
-                format!("l.position{operator}?{from_parameter} AND")
-            }
-            None => String::new(),
-        };
-        transaction
-            .query_row(
-                &format!(
-                    "SELECT l.position-1,l.row_id FROM ({sql}) l
-                     CROSS JOIN library_tracks t ON t.id=l.track_id
-                     WHERE {bound_sql} ({filter}) ORDER BY l.position {order} LIMIT 1"
-                ),
-                params_from_iter(values.iter()),
-                |row| {
-                    Ok(ListMatch {
-                        position: row.get(0)?,
-                        row_id: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
+    let preferred = match from {
+        // Prefer the requested side; the same sorted list also supplies a wrap.
+        // Position is 1-based in SQL and 0-based on the wire.
+        Some(from) => {
+            values.push(Value::Integer(from as i64 + 1));
+            format!("(l.position{operator}?{from_parameter}) DESC,")
+        }
+        None => String::new(),
     };
-    let found = search(from)?;
-    if found.is_some() || from.is_none() {
-        return Ok((found, false));
-    }
-    let wrapped = search(None)?;
-    Ok((wrapped, wrapped.is_some()))
+    let found = transaction
+        .query_row(
+            &format!(
+                "SELECT l.position-1,l.row_id
+                 FROM ({sql}) l CROSS JOIN library_tracks t ON t.id=l.track_id
+                 WHERE ({filter}) ORDER BY {preferred} l.position {order} LIMIT 1"
+            ),
+            params_from_iter(values.iter()),
+            |row| {
+                Ok(ListMatch {
+                    position: row.get(0)?,
+                    row_id: row.get(1)?,
+                })
+            },
+        )
+        .optional()?;
+    let wrapped = found.is_some_and(|found| {
+        from.is_some_and(|from| {
+            if backward {
+                found.position >= from
+            } else {
+                found.position <= from
+            }
+        })
+    });
+    Ok((found, wrapped))
 }
 
 /// Reads `TRACK_COLUMNS` starting at column `first`.

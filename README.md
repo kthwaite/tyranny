@@ -29,6 +29,63 @@ music players to form a piece of highly-personalised software that satisfies my 
   duplicates, remove selected device copies, and see storage usage and synced
   status in library columns.
 
+### Search
+
+Library filters, saved-playlist rules, and find-in-list share case-insensitive
+matching. Unquoted alphabetic words of 4–64 Unicode characters allow one insertion,
+deletion, substitution, or adjacent transposition (`radiohaed` finds Radiohead).
+Existing substring matches still count. Quoted text stays literal; short words,
+numbers, and punctuation-containing terms do not expand to typo matches.
+
+Use `title:`, `artist:`, `album:`, `albumartist:`, or `genre:` to restrict a term.
+Boolean operators, `year:` and `liked:` retain their existing meaning. In particular,
+`NOT radiohaed` excludes typo matches too; `NOT "radiohaed"` excludes only the
+literal text. The circled × clears the toolbar filter and keeps keyboard focus.
+
+SQLite schema 10 builds persistent substring/word indexes once on upgrade, without
+rescanning audio. Transactional triggers maintain them through metadata edits and
+deletion. The indexes cost disk space and import work; queries do not cache stale
+library membership. Filtering does not change the selected sort order.
+
+Reproduce end-to-end daemon latency on the declared synthetic 50,000-track fixture:
+
+```sh
+python3 scripts/search_gate.py --server /path/to/baseline-server --protocol-version 25 --output target/search-before.json
+just build-server-release
+python3 scripts/search_gate.py --output target/search-after.json --require-typos
+```
+
+Reports include binary hashes, fixture/schema identity, index-inclusive database
+size and seeding time, process-cold samples, and 30 warm round-trip samples per
+query with median/p95 latency. OS caches are uncontrolled; this is not a benchmark
+of your own collection or native rendering. Search properties compare compiled SQL
+against an independent string/Boolean model, including update/delete/reinsert,
+rollback, populated migration, and reopening.
+
+Measured on Apple Silicon, 2026-11-12, with the fixture above (milliseconds;
+before binary `dad46b214219`, after `fa747dd6e451`):
+
+| Track-page query | Before median | After median | Before p95 | After p95 |
+| --- | ---: | ---: | ---: | ---: |
+| `Radiohead` | 34.27 | 4.90 | 42.49 | 7.10 |
+| `"Paranoid Android"` | 31.04 | 4.39 | 32.14 | 8.12 |
+| No matching term | 26.45 | 0.48 | 34.71 | 0.82 |
+
+`radiohaed` now returns 100 tracks (previously zero), with a 4.76 ms median.
+Broad/short queries and find-in-list still spend most of their time scanning or
+ordering rows; their median latency is largely unchanged. The indexed fixture
+occupies 58.8 MB and takes 4.75 seconds to seed. Raw samples are in
+`target/search-before.json` and `target/search-after.json`.
+
+Run the search properties independently (change `PROPTEST_RNG_SEED` for a fresh
+reproducible run; minimized failures are persisted by proptest):
+
+```sh
+FFMPEG_DIR="$(python3 scripts/build_ffmpeg.py)" MACOSX_DEPLOYMENT_TARGET=14.0 \
+  PROPTEST_RNG_SEED=1222026 cargo test --locked --release \
+  --target-dir target/portable-rust --lib filter::tests
+```
+
 ## Build and run
 
 ### Prerequisites

@@ -25,7 +25,7 @@ fn json<T: serde::de::DeserializeOwned>(
 
 /// Counts, revision checks and page rows share one read transaction. Rust's
 /// Unicode lowercase is persisted separately from untouched display metadata;
-/// instr implements a literal substring, not SQL LIKE wildcard syntax.
+/// shared Filter predicates preserve literal substrings and add bounded word typos.
 pub(super) fn execute(
     connection: &mut Connection,
     command: LibraryCommand,

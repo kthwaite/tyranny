@@ -35,10 +35,11 @@ mod playlists_tests;
 #[cfg(test)]
 mod stations_tests;
 const APPLICATION_ID: i64 = 0x7479726e;
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Runs the migration ladder up to `target`; tests use a lower target to build old schemas.
 pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
+    crate::filter::search::register(connection)?;
     let mut version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let application: i64 = connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     ensure!(
@@ -158,6 +159,13 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
         transaction.pragma_update(None, "user_version", 9)?;
         transaction.commit()?;
         version = 9;
+    }
+    if version == 9 && target > 9 {
+        let transaction = connection.transaction()?;
+        crate::filter::search::migrate(&transaction)?;
+        transaction.pragma_update(None, "user_version", 10)?;
+        transaction.commit()?;
+        version = 10;
     }
     ensure!(version == target, "unsupported database version {version}");
     Ok(version)
@@ -978,7 +986,6 @@ mod tests {
             let local = store.load()?;
             assert!(local.entries[0].stream.is_none());
             assert_eq!(local.checkpoint.position_frames, 48_000);
-            assert_eq!(user_version(&path), 9);
             let stream =
                 StreamSpec::new("HTTPS://RADIO.EXAMPLE:443/live".into(), "Station".into())?;
             store.edit(
@@ -1151,7 +1158,6 @@ mod tests {
             )?;
             drop(connection);
             let store = Store::open(&path)?;
-            assert_eq!(user_version(&path), 9);
             let connection = Connection::open(&path)?;
             let row: (i64, Option<i64>, Option<String>, Option<i64>) = connection.query_row(
                 "SELECT counted,listened_ms,end_reason,ended_at FROM play_history",

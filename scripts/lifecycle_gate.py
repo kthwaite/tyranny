@@ -224,7 +224,7 @@ def main():
         assert state.stat().st_mode & 0o777 == 0o700
         private_socket(socket_path)
         assert (state / "server.log").stat().st_mode & 0o777 == 0o600
-        record("absent-daemon-installed-by-launchservices-app-and-peer-verified-v25", hello=control.hello,
+        record("absent-daemon-installed-by-launchservices-app-and-peer-verified-v26", hello=control.hello,
                launchd=ctl("print", target).stdout, socket_path=socket_path)
 
         if args.legacy_app:

@@ -476,7 +476,7 @@ mod tests {
     /// its asset was last seen before the root's completed scan.
     fn fixture() -> Connection {
         let mut connection = Connection::open_in_memory().unwrap();
-        crate::store::migrate(&mut connection, 5).unwrap();
+        crate::store::migrate(&mut connection, 10).unwrap();
         connection
             .execute_batch(
                 r#"INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/m','/m',2);

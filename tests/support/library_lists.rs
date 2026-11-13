@@ -1,4 +1,4 @@
-//! v25 list queries through a real private Unix client and native indexing.
+//! v26 list queries through a real private Unix client and native indexing.
 use super::{
     saved_playlists::{add, create, index, ok, queue, rescan},
     *,

@@ -29,6 +29,7 @@ impl Scratch {
             migrate(&transaction).unwrap();
             migrate_v5(&transaction).unwrap();
             migrate_v9(&transaction).unwrap();
+            crate::filter::search::migrate(&transaction).unwrap();
             transaction.commit().unwrap();
         }
         Library::start(database).unwrap()
@@ -1189,9 +1190,11 @@ fn ordered_track_pages_keep_path_ties_filters_and_availability() {
     // Explicit metadata-only fixture: query ordering, not native import coverage.
     // IDs deliberately disagree with paths within one indexed ordering prefix.
     let mut connection = Connection::open_in_memory().unwrap();
+    crate::filter::search::register(&connection).unwrap();
     let transaction = connection.transaction().unwrap();
     migrate(&transaction).unwrap();
     migrate_v9(&transaction).unwrap();
+    crate::filter::search::migrate(&transaction).unwrap();
     transaction
         .execute_batch(
             "INSERT INTO library_roots(id,path,search,completed_scan)
@@ -1480,10 +1483,12 @@ async fn interruption_keeps_committed_index_and_queries_remain_responsive_during
 
 fn structured_filter_fixture() -> Connection {
     let mut connection = Connection::open_in_memory().unwrap();
+    crate::filter::search::register(&connection).unwrap();
     let transaction = connection.transaction().unwrap();
     migrate(&transaction).unwrap();
     migrate_v5(&transaction).unwrap();
     migrate_v9(&transaction).unwrap();
+    crate::filter::search::migrate(&transaction).unwrap();
     transaction.execute_batch(
         "INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/music','/music',1);
          INSERT INTO library_genres(id,name,search) VALUES(1,'Jazz','jazz'),(2,'Free Jazz','free jazz'),
@@ -2367,7 +2372,7 @@ mod lists_fixture {
     /// Genres: Orphan (4) has no tracks; Hidden (5) only the unavailable track.
     pub(super) fn connection(tracks: &[Fixture]) -> Connection {
         let mut connection = Connection::open_in_memory().unwrap();
-        crate::store::migrate(&mut connection, 9).unwrap();
+        crate::store::migrate(&mut connection, 10).unwrap();
         connection
             .execute_batch(
                 "INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/m','/m',2);
