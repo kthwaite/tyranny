@@ -637,6 +637,28 @@ impl Output {
     }
 }
 
+impl Output {
+    /// Rebuild only a failed native backend, retaining PCM, counters and volume.
+    /// Pool/callback invariant failures and capture errors are not recoverable.
+    pub(crate) fn recover(&mut self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if self.shared.faults.load(Ordering::Acquire) == BACKEND_FAILURE
+            && let Some(Backend::CoreAudio(stream)) = self.backend.as_mut()
+        {
+            stream.recover()?;
+        }
+        self.check_error()
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn interrupt_for_test(&self) {
+        match self.backend.as_ref() {
+            Some(Backend::CoreAudio(stream)) => stream.interrupt_for_test(),
+            _ => panic!("interrupt requires native output"),
+        }
+    }
+}
+
 impl Drop for Output {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);

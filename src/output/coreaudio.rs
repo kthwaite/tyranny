@@ -28,7 +28,7 @@ use objc2_core_audio_types::{
     AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
     kAudio_ParamError, kAudioFormatFlagsNativeFloatPacked, kAudioFormatLinearPCM,
 };
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{OnceCell, UnsafeCell};
 use std::ffi::c_void;
 use std::mem::{MaybeUninit, align_of, size_of};
 use std::ptr::{self, NonNull};
@@ -38,12 +38,12 @@ use std::time::Duration;
 
 pub(super) struct CoreAudioOutput {
     unit: AudioUnit,
-    callback: Option<Box<CallbackState>>,
+    callback: Box<CallbackState>,
     error_listener: bool,
-    failed: Cell<bool>,
+    failure: OnceCell<String>,
 }
 
-// The owner may move between threads, but cannot be shared (Cell/UnsafeCell).
+// The owner may move between threads, but cannot be shared (OnceCell/UnsafeCell).
 // CoreAudio serializes rendering for this unit; only that callback accesses
 // render. The owner's access to callback-visible state is exclusively atomic.
 unsafe impl Send for CoreAudioOutput {}
@@ -62,6 +62,27 @@ struct RenderState {
 }
 
 pub(super) fn open(consumer: BlockConsumer) -> Result<CoreAudioOutput> {
+    let shared = Arc::clone(&consumer.shared);
+    let mut output = CoreAudioOutput {
+        unit: ptr::null_mut(),
+        callback: Box::new(CallbackState {
+            render: UnsafeCell::new(RenderState {
+                consumer,
+                last_sample_end: None,
+                last_playback_end: 0,
+            }),
+            shared,
+            latency_nanos: AtomicU64::new(0),
+            render_failed: AtomicBool::new(false),
+        }),
+        error_listener: false,
+        failure: OnceCell::new(),
+    };
+    initialize(&mut output)?;
+    Ok(output)
+}
+
+fn initialize(output: &mut CoreAudioOutput) -> Result<()> {
     let description = AudioComponentDescription {
         componentType: kAudioUnitType_Output,
         componentSubType: kAudioUnitSubType_DefaultOutput,
@@ -87,24 +108,9 @@ pub(super) fn open(consumer: BlockConsumer) -> Result<CoreAudioOutput> {
         "CoreAudio created a null DefaultOutput instance"
     );
 
-    // Install the RAII owner before any operation that can register a callback
-    // or fail. The Box's address remains stable even if the owner is moved.
-    let shared = Arc::clone(&consumer.shared);
-    let mut output = CoreAudioOutput {
-        unit,
-        callback: Some(Box::new(CallbackState {
-            render: UnsafeCell::new(RenderState {
-                consumer,
-                last_sample_end: None,
-                last_playback_end: 0,
-            }),
-            shared,
-            latency_nanos: AtomicU64::new(0),
-            render_failed: AtomicBool::new(false),
-        })),
-        error_listener: false,
-        failed: Cell::new(false),
-    };
+    // Retain the unit before any operation that can register a callback or fail.
+    // The callback allocation also survives failed recovery attempts.
+    output.unit = unit;
     let format = AudioStreamBasicDescription {
         mSampleRate: f64::from(SAMPLE_RATE),
         mFormatID: kAudioFormatLinearPCM,
@@ -132,7 +138,7 @@ pub(super) fn open(consumer: BlockConsumer) -> Result<CoreAudioOutput> {
         },
         "setting CoreAudio client stereo f32/48 kHz format",
     )?;
-    let context = ptr::from_ref(output.callback.as_deref().expect("callback is installed"))
+    let context = ptr::from_ref(output.state())
         .cast_mut()
         .cast::<c_void>();
     let callback = AURenderCallbackStruct {
@@ -181,17 +187,20 @@ pub(super) fn open(consumer: BlockConsumer) -> Result<CoreAudioOutput> {
         unsafe { AudioOutputUnitStart(unit) },
         "starting CoreAudio DefaultOutput",
     )?;
-    Ok(output)
+    Ok(())
 }
 
 impl CoreAudioOutput {
     pub(super) fn check_error(&self) -> Result<()> {
-        if self.failed.get() {
-            bail!("CoreAudio output previously failed");
+        if let Some(error) = self.failure.get() {
+            bail!("{error}");
         }
-        let result = self.check_native();
-        if result.is_err() {
-            self.failed.set(true);
+        self.record_failure(self.check_native())
+    }
+
+    fn record_failure(&self, result: Result<()>) -> Result<()> {
+        if let Err(error) = &result {
+            let _ = self.failure.set(format!("{error:#}"));
             self.state()
                 .shared
                 .faults
@@ -200,10 +209,33 @@ impl CoreAudioOutput {
         result
     }
 
+    pub(super) fn recover(&mut self) -> Result<()> {
+        // A new unit must never overlap the old unit's callback: both use the
+        // same single-consumer PCM pool and render state.
+        self.dispose();
+        self.failure.take();
+        self.state().render_failed.store(false, Ordering::Release);
+        self.state()
+            .shared
+            .faults
+            .fetch_and(!BACKEND_FAILURE, Ordering::AcqRel);
+        let result = initialize(self);
+        self.record_failure(result)?;
+        self.check_error()
+    }
+
+    #[cfg(test)]
+    pub(super) fn interrupt_for_test(&self) {
+        // SAFETY: stop this live unit, not the system device or other apps.
+        status(
+            unsafe { AudioOutputUnitStop(self.unit) },
+            "stopping test output",
+        )
+        .unwrap();
+    }
+
     fn state(&self) -> &CallbackState {
-        self.callback
-            .as_deref()
-            .expect("callback is retained until disposal")
+        &self.callback
     }
 
     fn check_native(&self) -> Result<()> {
@@ -279,12 +311,12 @@ impl CoreAudioOutput {
     }
 }
 
-impl Drop for CoreAudioOutput {
-    fn drop(&mut self) {
-        let Some(callback) = self.callback.take() else {
+impl CoreAudioOutput {
+    fn dispose(&mut self) {
+        if self.unit.is_null() {
             return;
-        };
-        let context = ptr::from_ref(callback.as_ref()).cast_mut().cast::<c_void>();
+        }
+        let context = ptr::from_ref(self.state()).cast_mut().cast::<c_void>();
         // SAFETY: all callback storage is still owned here. Dispose is attempted
         // even if stop/uninitialize fail, including partial initialization.
         let disposed = unsafe {
@@ -306,8 +338,16 @@ impl Drop for CoreAudioOutput {
             // storage or leak it indefinitely.
             std::process::abort();
         }
-        // On success, callback (including consumer blocks/Arcs) drops only now,
-        // after native rendering and notifications can no longer reference it.
+        self.unit = ptr::null_mut();
+        self.error_listener = false;
+    }
+}
+
+impl Drop for CoreAudioOutput {
+    fn drop(&mut self) {
+        self.dispose();
+        // Callback storage drops only after native rendering and notifications
+        // can no longer reference it, including partial initialization failures.
     }
 }
 

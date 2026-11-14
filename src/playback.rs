@@ -292,6 +292,7 @@ pub struct Snapshot {
 
 pub struct Player {
     output: Output,
+    retry_output: bool,
     queue: Vec<Entry>,
     revision: u64,
     next_id: u64,
@@ -422,6 +423,7 @@ impl Player {
     ) -> Result<Self> {
         Ok(Self {
             output: Output::open(output)?,
+            retry_output: false,
             queue,
             revision,
             next_id,
@@ -463,6 +465,7 @@ impl Player {
         }
         self.playing = true;
         self.stopped = false;
+        self.retry_output = true;
         self.maybe_start();
     }
 
@@ -515,11 +518,18 @@ impl Player {
     /// serialized between calls even when a paused output has filled its pool.
     pub fn pump(&mut self) -> Result<()> {
         // Passes output started before a fault are still heard and reported.
-        let output = self.output.check_error();
+        let retry_output = std::mem::take(&mut self.retry_output) && self.playing;
+        let mut output = self.output.check_error();
         while let Some(id) = self.output.take_started() {
             self.starts.push(id);
         }
         self.hear();
+        // Retry once per explicit Play request, never from the owner's idle
+        // pump loop. Preserve the consumer so buffered PCM and heard positions
+        // survive replacement of the native audio unit.
+        if output.is_err() && retry_output {
+            output = self.output.recover();
+        }
         output?;
         if self.stopped {
             return Ok(());
@@ -1769,6 +1779,55 @@ mod batch_tests {
         }
         fs::write(&path, bytes).unwrap();
         path
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a macOS audio device; plays only silence"]
+    fn play_recovers_failed_coreaudio_without_losing_buffered_pcm() -> Result<()> {
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "tyranny-coreaudio-recovery-{}",
+            uuid::Uuid::new_v4()
+        )));
+        fs::create_dir(&scratch.0)?;
+        let track = source(&scratch.0, "silence.wav", 96_000, 0);
+        let mut player = Player::new(vec![track], OutputConfig::CoreAudio, GainMode::Off)?;
+        player.set_volume(37);
+        player.play();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while player.snapshot().output.rendered_frames == 0 {
+            assert!(Instant::now() < deadline, "native playback never started");
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        player.output.interrupt_for_test();
+        let before = player.snapshot();
+        assert!(before.output.buffered_frames > 0);
+        let original = player.pump().unwrap_err().to_string();
+        assert!(original.contains("stopped unexpectedly"), "{original}");
+        player.pause(); // The persistent owner's response to a pump failure.
+        for _ in 0..3 {
+            assert_eq!(player.pump().unwrap_err().to_string(), original);
+            let paused = player.snapshot();
+            assert_eq!(paused.position_frames, before.position_frames);
+            assert_eq!(paused.output.buffered_frames, before.output.buffered_frames);
+            assert_eq!(paused.output.rendered_frames, before.output.rendered_frames);
+        }
+        player.play();
+        while !player.completed() {
+            assert!(Instant::now() < deadline, "recovered output did not drain");
+            player.pump()?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        player.pump()?;
+        let after = player.snapshot();
+        assert_eq!(after.current_id, Some(1));
+        assert_eq!(after.position_frames, 96_000);
+        assert_eq!(after.output.rendered_frames, 96_000);
+        assert_eq!(after.queue_revision, before.queue_revision);
+        assert_eq!(player.started_entries(), &[1]);
+        assert!(player.error().is_none());
+        Ok(())
     }
 
     #[test]

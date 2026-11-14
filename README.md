@@ -29,6 +29,14 @@ music players to form a piece of highly-personalised software that satisfies my 
   duplicates, remove selected device copies, and see storage usage and synced
   status in library columns.
 
+### Audio output recovery
+
+If CoreAudio fails, playback pauses and retains the original error. Restore the
+desired macOS output device, then press Play to rebuild the failed audio unit.
+Recovery retains queued PCM, position and volume; it does not retry in the
+background or resume playback by itself. Audio already handed to the old device
+cannot be recalled. If reopening fails, playback stays paused with that error.
+
 ### Search
 
 Library filters, saved-playlist rules, and find-in-list share case-insensitive
