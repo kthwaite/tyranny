@@ -53,6 +53,7 @@ enum NativeLikesSmoke {
         if ColumnPreferences.shared.isHidden("liked") { try await column(kit) }
         try await kit.drive("exists", heart)
         let selection = songs.selectedPositions
+        try await measure(kit, tableID: "track-table-songs", heart: heart, label: "ungrouped")
         try await clickHeart(kit, identifier: heart, tableID: "track-table-songs")
         try await kit.wait("liked Alpha") { !model.busy && songs.cache.loadedRows().contains { $0.row.track.id == alpha.track.id && $0.row.track.liked } }
         try kit.check(songs.selectedPositions == selection && model.snapshot?.queue_length == 0,
@@ -103,6 +104,7 @@ enum NativeLikesSmoke {
         try await kit.wait("grouped songs") {
             songs.cache.total == 3 && songs.description.group == .artistAlbum && songs.layoutIsCurrent
         }
+        try await measure(kit, tableID: "track-table-songs", heart: heart, label: "grouped")
         try await clickHeart(kit, identifier: heart, tableID: "track-table-songs")
         try await kit.wait("grouped heart refresh") { !model.busy && songs.cache.loadedRows().contains { $0.row.track.id == alpha.track.id && $0.row.track.liked } }
         try kit.capture("grouped-hearts")
@@ -118,6 +120,8 @@ enum NativeLikesSmoke {
         }
         try kit.check(row.track.liked, "Album did not inherit liked state")
         let albumSelection = expansion.selectedRowIDs
+        try await measure(kit, tableID: "album-track-table",
+                          heart: "album-track-table-cell-\(row.row_id)-liked", label: "album")
         try await clickHeart(kit, identifier: "album-track-table-cell-\(row.row_id)-liked", tableID: "album-track-table")
         try await kit.wait("album heart refresh") { !model.busy && expansion.tracks.contains { $0.track.id == alpha.track.id && !$0.track.liked } }
         try kit.check(expansion.selectedRowIDs == albumSelection && model.snapshot?.queue_length == 0,
@@ -129,6 +133,66 @@ enum NativeLikesSmoke {
                       "Likes caused a connection reset or protocol error: \(model.message ?? "none")")
         kit.observations["track_id"] = alpha.track.id
         kit.observations["final_liked"] = false
+    }
+
+    /// Timed samples use the displayed button's target/action, excluding external driver startup.
+    /// The surrounding scenario also exercises actual pointer clicks.
+    private static func measure(_ kit: NativePlaylistKit, tableID: String, heart: String, label: String) async throws {
+        guard let table = table(tableID) as? ActivatingTableView else {
+            throw NativePlaylistKit.Failure(message: "Missing measured table")
+        }
+        try await revealLikedColumn(kit, tableID: tableID)
+        func button() -> NSButton? {
+            let column = table.column(withIdentifier: NSUserInterfaceItemIdentifier("liked"))
+            for row in 0..<table.numberOfRows {
+                if let cell = table.view(atColumn: column, row: row, makeIfNecessary: false) as? LikedTrackCell,
+                   cell.button.accessibilityIdentifier() == heart { return cell.button }
+            }
+            return nil
+        }
+        var samples: [[String: Any]] = []
+        for _ in 0..<10 {
+            try await Task.sleep(for: .milliseconds(50))
+            guard let control = button(), control.isEnabled else {
+                throw NativePlaylistKit.Failure(message: "Measured heart unavailable")
+            }
+            let expected = control.accessibilityValue() as? String == "Liked" ? "Not liked" : "Liked"
+            var fullReloads = 0, cellReloads = 0
+            table.reloadObserver = { rows, columns in
+                if let rows, let columns { cellReloads += rows.count * columns.count }
+                else { fullReloads += 1 }
+            }
+            let start = ContinuousClock.now
+            control.performClick(nil)
+            var replyMS: Double?
+            while button()?.accessibilityValue() as? String != expected || kit.model.busy {
+                if !kit.model.busy && replyMS == nil {
+                    replyMS = milliseconds(start.duration(to: .now))
+                }
+                try kit.check(start.duration(to: .now) < .seconds(5), "Heart failed to update")
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            table.displayIfNeeded()
+            let visibleMS = milliseconds(start.duration(to: .now))
+            // Include the grouped-layout reply that follows the row refresh.
+            try await Task.sleep(for: .milliseconds(80))
+            table.reloadObserver = nil
+            samples.append(["visible_ms": visibleMS, "reply_ms": replyMS ?? visibleMS,
+                            "full_reloads": fullReloads, "reloaded_cells": cellReloads])
+            kit.observations["\(label)_timings"] = samples
+            try kit.check(kit.model.message == nil, "Like failed: \(kit.model.message ?? "")")
+        }
+        kit.observations["\(label)_timings"] = samples
+        if CommandLine.arguments.contains("--likes-performance-check") {
+            try kit.check(samples.allSatisfy { ($0["visible_ms"] as? Double ?? .infinity) < 200 },
+                          "\(label) heart exceeded 200ms")
+            try kit.check(samples.allSatisfy { ($0["full_reloads"] as? Int) == 0 },
+                          "\(label) rebuilt the table for a heart toggle")
+        }
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
     }
 
     private static func column(_ kit: NativePlaylistKit) async throws {

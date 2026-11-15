@@ -38,6 +38,7 @@ public enum WindowFetchError: Error {
 /// Throttle. The first change after a quiet period starts a pass at once. Each pass starts a
 /// cooldown of `refreshInterval`. Changes during the cooldown or during a pass join one trailing
 /// pass, which starts when both are over. So passes start at least `refreshInterval` apart.
+/// Interactive edits may bypass the cooldown; an in-flight pass still commits atomically first.
 ///
 /// Sessions. `discard(session:)` drops all rows and every in-flight request. Replies tagged with an
 /// older session are ignored.
@@ -204,7 +205,7 @@ public enum WindowFetchError: Error {
     /// playlist revision. `revision` is that counter's new value. It is informational, because the
     /// counter may differ from the page revision; the refresh pass is unpinned and adopts the page
     /// revision. Visible windows keep their rows until the pass commits. Other windows are dropped.
-    public func serverRevisionChanged(_ revision: UInt64, anchor: Row.ID?) {
+    public func serverRevisionChanged(_ revision: UInt64, anchor: Row.ID?, immediately: Bool = false) {
         changes &+= 1
         unsettled = true
         failed.removeAll()
@@ -214,6 +215,11 @@ public enum WindowFetchError: Error {
         let before = windows.count
         windows = windows.filter { keep.contains($0.key) }
         if windows.count != before { generation &+= 1 }
+        if immediately {
+            cooldownEpoch &+= 1
+            cooldown?.cancel()
+            cooldown = nil
+        }
         pumpRefresh()
     }
 

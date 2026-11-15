@@ -179,7 +179,7 @@ final class ListModel {
             historyRevision = history
             // Play counts change Plays and Last Played without a library revision change.
             recordAnchor()
-            cache.serverRevisionChanged(library, anchor: anchorRowID)
+            cache.serverRevisionChanged(library, anchor: anchorRowID, immediately: !player.scanActive)
         }
         browser.sync(player: player, session: session, revision: library, query: query,
                      narrowing: browserSelection.albumColumnBrowser,

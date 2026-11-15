@@ -481,10 +481,27 @@ impl Coordinator {
                 liked,
                 library_revision,
             } => {
+                // A like changes neither membership nor duration/size. Reuse published
+                // totals only if no scan work is waiting to be published.
+                let previous = (!self.dirty).then(|| {
+                    self.shared
+                        .read()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .clone()
+                });
                 let (library_revision, changed) =
                     db::set_track_liked(&mut self.connection, track_id, liked, library_revision)?;
                 self.dirty |= changed;
-                self.publish(true)?;
+                if let Some(mut state) = previous.filter(|state| {
+                    changed && state.revision == library_revision - 1
+                }) {
+                    state.revision = library_revision;
+                    publish(&self.shared, state);
+                    self.published = Instant::now();
+                    self.dirty = false;
+                } else {
+                    self.publish(true)?;
+                }
                 Ok(LibraryReply::TrackLiked {
                     track_id,
                     liked,

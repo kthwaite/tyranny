@@ -222,6 +222,7 @@ async fn likes_publish_revision_and_validate_stale_unknown_and_noop_writes() {
     let before = tracks(&library).await;
     let track_id = before.entries[0].id;
     assert!(!before.entries[0].liked);
+    let totals_before = library.state();
     let handle = library.handle();
     let revision = before.revision + 1;
     for expected in [before.revision, revision] {
@@ -233,6 +234,11 @@ async fn likes_publish_revision_and_validate_stale_unknown_and_noop_writes() {
                 if id == track_id && library_revision == revision
         ));
         assert_eq!(library.state().revision, revision);
+        let current = library.state();
+        assert_eq!(current.tracks, totals_before.tracks);
+        assert_eq!(current.duration_ms, totals_before.duration_ms);
+        assert_eq!(current.size_bytes, totals_before.size_bytes);
+        assert_eq!(current.scan, totals_before.scan);
         assert!(tracks(&library).await.entries[0].liked);
     }
     for liked in [false, true] {
@@ -280,6 +286,37 @@ async fn likes_publish_revision_and_validate_stale_unknown_and_noop_writes() {
     assert_eq!(failure.kind, LibraryErrorKind::Invalid);
     assert_eq!(library.state().revision, unavailable_revision);
     library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn likes_publish_pending_scan_progress_without_losing_totals() {
+    let scratch = Scratch::new();
+    wav(&scratch.path("music/song.wav"));
+    let library = scratch.library();
+    add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let page = tracks(&library).await;
+    let before = library.state();
+    library.shutdown().unwrap();
+    let shared = Arc::new(RwLock::new(before.clone()));
+    let mut coordinator = Coordinator::open(scratch.path("library.sqlite"), shared.clone()).unwrap();
+    // Scan progress can be unpublished without changing the content revision.
+    let mut progress = before.scan.clone();
+    progress.failures += 1;
+    let transaction = coordinator.connection.transaction().unwrap();
+    db::save_status(&transaction, &progress).unwrap();
+    transaction.commit().unwrap();
+    coordinator.dirty = true;
+    coordinator.command(LibraryCommand::SetTrackLiked {
+        track_id: page.entries[0].id,
+        liked: true,
+        library_revision: before.revision,
+    }).unwrap();
+    let published = shared.read().unwrap();
+    assert_eq!(published.revision, before.revision + 1);
+    assert_eq!(published.scan, progress);
+    assert_eq!(published.duration_ms, before.duration_ms);
+    assert_eq!(published.size_bytes, before.size_bytes);
 }
 
 #[tokio::test]
