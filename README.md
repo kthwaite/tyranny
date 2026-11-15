@@ -30,6 +30,46 @@ music players to form a piece of highly-personalised software that satisfies my 
   duplicates, remove selected device copies, and see storage usage and synced
   status in library columns.
 
+### Likes
+
+Hearts show server-confirmed values, not optimistic toggles. The client fetches the
+new snapshot after the reply instead of waiting for the 250 ms state broadcast.
+Outside a scan, list edits refresh immediately rather than waiting for the scan's
+500 ms batching timer.
+Heart changes preserve native row views and selection; unchanged group layouts no
+longer rebuild the table. Album actions use the revision of their displayed rows.
+The server reuses duration/size totals for a like only when no unpublished library
+work exists.
+
+Reproduce native timing and flicker checks on an isolated three-track fixture
+(requires `ffmpeg`, a debug client, and Accessibility/Screen Recording permission):
+
+```sh
+python3 scripts/likes_gate.py --output target/likes-after --check
+python3 scripts/likes_gate.py --server-only --output target/likes-server-after
+```
+
+The native report measures ten repeated toggles per ungrouped, grouped, and expanded
+album table, including AppKit's `performClick` animation; surrounding checks use
+actual pointer clicks and verify liked-only removal, filtering, selection, and
+column visibility. The server-only report uses 30 writes against the synthetic
+50,000-track search fixture. Neither mode touches the user's library.
+
+Measured on Apple Silicon, 2026-11-14 (median milliseconds):
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Ungrouped heart visible, including click animation | 366.23 | 125.59 |
+| Grouped heart visible, including click animation | 365.92 | 130.52 |
+| Server like write, 50,000 tracks | 37.03 | 0.11 |
+
+Grouped toggles went from one whole-table reload each to zero. Repeated album
+toggles previously failed with a stale revision; all ten now succeed, at a
+132.15 ms median. These are synthetic-fixture measurements, not a benchmark of
+the user's collection. Raw reports are under `target/likes-before`,
+`target/likes-after`, `target/likes-server-after`, and `target/likes-server-scale.json`
+(the pre-optimization server measurement).
+
 ### Audio output recovery
 
 If CoreAudio fails, playback pauses and retains the original error. Restore the

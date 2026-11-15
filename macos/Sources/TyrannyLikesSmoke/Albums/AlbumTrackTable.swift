@@ -110,12 +110,13 @@ struct AlbumTrackTable: NSViewRepresentable {
         var parent: AlbumTrackTable
         weak var table: ActivatingTableView?
         private var updating = false
-        /// The rows the table shows. Replaced only in `update`, with a reload.
+        /// The rows the table shows. Replaced only in `update`.
         private var rows: [ListRow] = []
         private weak var shownExpansion: AlbumExpansion?
         private var shownColours: UInt64?
         private var shownLikedHidden: Bool?
         private var shownCanMutate: Bool?
+        private var shownDiscCount: UInt64?
 
         init(_ parent: AlbumTrackTable) { self.parent = parent }
 
@@ -134,28 +135,43 @@ struct AlbumTrackTable: NSViewRepresentable {
 
         // MARK: Updates
 
-        /// Reloads when the tracks or the album change, then applies the expansion's selection.
+        /// Keeps existing rows for value changes, then applies the expansion's selection.
         func update(_ parent: AlbumTrackTable) {
             self.parent = parent
             guard let table else { return }
             updating = true
             defer { updating = false }
             let albumChanged = parent.expansion !== shownExpansion
-            if albumChanged || parent.tracks != rows {
-                shownExpansion = parent.expansion
-                rows = parent.tracks
-                table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(Self.artist))?.isHidden =
-                    !parent.expansion.album.compilation
-                fitColumns()
-                table.reloadData()
-                if albumChanged { table.scrollRowToVisible(0) }
+            let structureChanged = albumChanged || parent.tracks.count != rows.count
+                || !zip(parent.tracks, rows).allSatisfy { $0.0.row_id == $0.1.row_id }
+            let discCountChanged = parent.expansion.album.disc_count != shownDiscCount
+            var changedRows = IndexSet()
+            if !structureChanged {
+                for index in rows.indices where discCountChanged || rows[index] != parent.tracks[index] {
+                    changedRows.insert(index)
+                }
             }
-            if parent.likedHidden != shownLikedHidden || parent.canMutate != shownCanMutate {
+            shownExpansion = parent.expansion
+            shownDiscCount = parent.expansion.album.disc_count
+            rows = parent.tracks
+            let artistColumn = table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(Self.artist))
+            let artistHidden = !parent.expansion.album.compilation
+            if artistColumn?.isHidden != artistHidden || parent.likedHidden != shownLikedHidden {
+                artistColumn?.isHidden = artistHidden
                 shownLikedHidden = parent.likedHidden
-                shownCanMutate = parent.canMutate
                 table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("liked"))?.isHidden = parent.likedHidden
                 fitColumns()
+            }
+            if structureChanged {
                 table.reloadData()
+                if albumChanged { table.scrollRowToVisible(0) }
+            } else if !changedRows.isEmpty {
+                table.reloadData(forRowIndexes: changedRows,
+                                 columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
+            }
+            if parent.canMutate != shownCanMutate {
+                shownCanMutate = parent.canMutate
+                updateHeartAvailability()
             }
             if parent.colours.revision != shownColours {
                 shownColours = parent.colours.revision
@@ -195,11 +211,10 @@ struct AlbumTrackTable: NSViewRepresentable {
             if column.id == "liked" {
                 let cell = tableView.makeView(withIdentifier: LikedTrackCell.reuse, owner: nil) as? LikedTrackCell
                     ?? LikedTrackCell()
-                let revision = parent.expansion.basis?.revision
-                cell.show(item.track, enabled: parent.canMutate && item.available && revision != nil,
+                cell.show(item.track,
+                          enabled: parent.canMutate && item.available && parent.expansion.basis != nil,
                           identifier: "\(AlbumTrackTable.identifier)-cell-\(item.row_id)-liked") { [weak self] in
-                    guard let revision else { return }
-                    self?.parent.player.setTrackLiked(item.track.id, liked: !item.track.liked, libraryRevision: revision)
+                    self?.toggleLiked(rowID: item.row_id)
                 }
                 return cell
             }
@@ -214,6 +229,30 @@ struct AlbumTrackTable: NSViewRepresentable {
             cell.toolTip = item.available ? (column.fixed || text.isEmpty ? nil : text)
                 : "\(item.track.title)\nUnavailable: \(item.track.path)"
             return cell
+        }
+
+        /// Busy transitions must not recreate the table or replace the button under the pointer.
+        private func updateHeartAvailability() {
+            guard let table else { return }
+            let column = table.column(withIdentifier: NSUserInterfaceItemIdentifier("liked"))
+            guard column >= 0 else { return }
+            table.enumerateAvailableRowViews { _, row in
+                guard self.rows.indices.contains(row),
+                      let cell = table.view(atColumn: column, row: row, makeIfNecessary: false) as? LikedTrackCell else {
+                    return
+                }
+                cell.button.isEnabled = self.parent.canMutate && self.rows[row].available
+                    && self.parent.expansion.basis != nil
+            }
+        }
+
+        private func toggleLiked(rowID: UInt64) {
+            // A revision-only refresh can leave the cell intact. Resolve both the row and
+            // its basis at click time rather than retaining the revision from cell creation.
+            guard parent.canMutate, let revision = parent.expansion.basis?.revision,
+                  let item = parent.expansion.tracks.first(where: { $0.row_id == rowID }),
+                  item.available else { return }
+            parent.player.setTrackLiked(item.track.id, liked: !item.track.liked, libraryRevision: revision)
         }
 
         private func value(_ column: String, _ track: TrackSummary) -> String {

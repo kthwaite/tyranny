@@ -543,6 +543,9 @@ final class PlayerModel {
                 "track_id": .uint(trackID), "liked": .bool(liked),
                 "library_revision": .uint(libraryRevision),
             ])
+            // Like replies carry a revision, not a snapshot. Do not wait for the
+            // periodic state broadcast before refreshing revision-bound list rows.
+            try await refreshSnapshot()
         }
     }
 

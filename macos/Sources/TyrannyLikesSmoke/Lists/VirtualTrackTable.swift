@@ -137,7 +137,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         private weak var scroll: NSScrollView?
         private var updating = false
         private var restoreViewport = true
-        /// The layout the table's rows show. Replaced only in `update`, with a reload.
+        /// The layout the table's rows show; a new token need not change its mapping.
         private(set) var layout = GroupLayout(grouping: .none, total: 0, spans: [])
         private var shownExplicit: Set<String> = []
         private var shownSort: [SortKey] = []
@@ -153,6 +153,11 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var shownCanMutate: Bool?
         private var shownBlocks: Bool?
         private var reported: Range<Int>?
+        /// Only prepared track rows are retained, including unloaded placeholders.
+        private struct PreparedTrack {
+            let item: ListRow?
+        }
+        private var preparedTracks: [Int: PreparedTrack] = [:]
         /// The reveal request last handled. The outer nil: none seen yet.
         var shownReveal: UInt64??
         /// Album covers retained for the albums in view.
@@ -238,34 +243,48 @@ struct VirtualTrackTable: NSViewRepresentable {
                 reported = nil
                 table.scrollRowToVisible(0)
             }
-            let layoutChanged = parent.layoutToken != shownLayout
+            let layoutTokenChanged = parent.layoutToken != shownLayout
             /// A full `reloadData` already refreshed every row view.
             var reloadedAll = false
             var rowsWereCreated = false
-            if layoutChanged {
+            if layoutTokenChanged {
+                let next = parent.list.layout
+                let layoutChanged = layout != next
                 let wasGrouped = layout.grouping != .none
-                layout = parent.list.layout
+                layout = next
                 shownLayout = parent.layoutToken
                 reported = nil
-                if wasGrouped || layout.grouping != .none {
-                    // Row kinds and heights may all have changed.
-                    table.reloadData()
-                    reloadedAll = true
-                } else {
-                    // Ungrouped, a refresh pass changes the total and the rows together.
-                    let rowsBefore = table.numberOfRows
-                    table.noteNumberOfRowsChanged()
-                    // First rows were just created; skipping the reload relies on `viewFor` reading the current cache when row views are made.
-                    rowsWereCreated = rowsBefore == 0 && table.numberOfRows > 0
+                if layoutChanged {
+                    preparedTracks.removeAll(keepingCapacity: true)
+                    if wasGrouped || layout.grouping != .none {
+                        // Row kinds and heights may all have changed.
+                        table.reloadData()
+                        reloadedAll = true
+                    } else {
+                        // Ungrouped, a refresh pass changes the total and the rows together.
+                        let rowsBefore = table.numberOfRows
+                        table.noteNumberOfRowsChanged()
+                        // Newly created views already read the current cache.
+                        rowsWereCreated = rowsBefore == 0 && table.numberOfRows > 0
+                    }
                 }
             }
-            if parent.generation != shownGeneration || epochChanged || layoutChanged {
+            if parent.generation != shownGeneration || epochChanged || layoutTokenChanged {
                 shownGeneration = parent.generation
                 restoreAnchor()
-                if !reloadedAll && !rowsWereCreated { reloadVisible() }
+                if !reloadedAll && !rowsWereCreated {
+                    if epochChanged {
+                        reloadVisible()
+                    } else {
+                        reloadChangedTracks()
+                    }
+                }
+                rememberPreparedTracks(replacing: true)
                 let rows = layout.displayIndexes(ofPositions: parent.list.rowsChanged())
                 if table.selectedRowIndexes != rows { table.selectRowIndexes(rows, byExtendingSelection: false) }
-            } else if parent.playingTrackID != shownPlaying, let status = columnIndex(TrackColumns.status) {
+            }
+            if parent.playingTrackID != shownPlaying, !reloadedAll,
+               let status = columnIndex(TrackColumns.status) {
                 reloadVisible(columns: IndexSet(integer: status))
             }
             if parent.factsGeneration != shownFacts {
@@ -281,7 +300,7 @@ struct VirtualTrackTable: NSViewRepresentable {
             }
             if parent.canMutate != shownCanMutate {
                 shownCanMutate = parent.canMutate
-                if let liked = columnIndex("liked") { reloadVisible(columns: IndexSet(integer: liked)) }
+                updateLikedEnabled()
             }
             if parent.colours.revision != shownColours {
                 shownColours = parent.colours.revision
@@ -311,6 +330,93 @@ struct VirtualTrackTable: NSViewRepresentable {
                 guard case .artistHeader(let key, let span)? = layout.row(at: row),
                       let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ArtistHeaderCell else { continue }
                 configure(cell, artistKey: key, span: span)
+            }
+        }
+
+        /// Cache generations also advance for unchanged rows. Compare only prepared content,
+        /// keeping an authoritative heart update on its existing native button.
+        private func reloadChangedTracks() {
+            guard let table else { return }
+            var changed = IndexSet()
+            let liked = columnIndex("liked")
+            for row in table.preparedRows {
+                switch layout.row(at: row) {
+                case .track(let position, _)?:
+                    let item = cache.loadedRow(at: position)
+                    guard let previous = preparedTracks[row], previous.item == item else {
+                        if let previous = preparedTracks[row]?.item, let item,
+                           sameContentExceptLiked(previous, item) {
+                            if let liked,
+                               let cell = table.view(atColumn: liked, row: row, makeIfNecessary: false) as? LikedTrackCell {
+                                configure(cell, item: item, position: position)
+                            }
+                            // A hidden/unprepared heart has no stale view to refresh.
+                        } else {
+                            changed.insert(row)
+                        }
+                        continue
+                    }
+                case .artistHeader(let key, let span)?:
+                    if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ArtistHeaderCell {
+                        configure(cell, artistKey: key, span: span)
+                    }
+                default:
+                    break
+                }
+            }
+            if !changed.isEmpty {
+                table.reloadData(forRowIndexes: changed,
+                                 columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
+            }
+        }
+
+        private func sameContentExceptLiked(_ lhs: ListRow, _ rhs: ListRow) -> Bool {
+            guard lhs.row_id == rhs.row_id, lhs.artist_key == rhs.artist_key,
+                  lhs.album_key == rhs.album_key, lhs.available == rhs.available else { return false }
+            let a = lhs.track
+            let b = rhs.track
+            return a.id == b.id && a.album_id == b.album_id && a.artist_id == b.artist_id
+                && a.album_artist_id == b.album_artist_id && a.title == b.title
+                && a.artist == b.artist && a.album == b.album && a.album_artist == b.album_artist
+                && a.compilation == b.compilation && a.disc_number == b.disc_number
+                && a.track_number == b.track_number && a.duration_ms == b.duration_ms
+                && a.year == b.year && a.genre == b.genre && a.format == b.format
+                && a.sample_rate == b.sample_rate && a.bitrate_kbps == b.bitrate_kbps
+                && a.play_count == b.play_count && a.last_played == b.last_played
+                && a.date_added == b.date_added && a.path == b.path
+        }
+
+        private func rememberPreparedTracks(replacing: Bool = false) {
+            guard let table else { return }
+            let rows = table.preparedRows
+            if preparedTracks.keys.contains(where: { !rows.contains($0) }) {
+                preparedTracks = preparedTracks.filter { rows.contains($0.key) }
+            }
+            for row in rows where replacing || preparedTracks[row] == nil {
+                guard case .track(let position, _)? = layout.row(at: row) else { continue }
+                preparedTracks[row] = PreparedTrack(item: cache.loadedRow(at: position))
+            }
+        }
+
+        private func updateLikedEnabled() {
+            guard let table, let liked = columnIndex("liked") else { return }
+            for row in table.preparedRows {
+                guard let cell = table.view(atColumn: liked, row: row, makeIfNecessary: false) as? LikedTrackCell,
+                      case .track(let position, _)? = layout.row(at: row) else { continue }
+                cell.button.isEnabled = parent.canMutate && cache.loadedRow(at: position)?.available == true
+            }
+        }
+
+        private func configure(_ cell: LikedTrackCell, item: ListRow, position: Int) {
+            let rowID = item.row_id
+            let trackID = item.track.id
+            cell.show(item.track, enabled: parent.canMutate && item.available,
+                      identifier: "\(parent.identifier)-cell-\(rowID)-liked") { [weak self] in
+                guard let self, self.parent.canMutate,
+                      let current = self.cache.loadedRow(at: position), current.available,
+                      current.row_id == rowID, current.track.id == trackID,
+                      let revision = self.cache.revision else { return }
+                self.parent.player.setTrackLiked(trackID, liked: !current.track.liked, libraryRevision: revision)
             }
         }
 
@@ -346,9 +452,10 @@ struct VirtualTrackTable: NSViewRepresentable {
         @objc func scrolled(_ notification: Notification) { reportVisible() }
 
         fileprivate func reportVisible() {
-            guard !dismantled, !updating, let table, let scroll, table.window != nil,
-                  scroll.contentView.bounds.height > 0, parent.list.layoutIsCurrent,
-                  shownLayout == parent.list.layoutToken else { return }
+            guard !dismantled, !updating, let table, let scroll else { return }
+            rememberPreparedTracks()
+            guard table.window != nil, scroll.contentView.bounds.height > 0,
+                  parent.list.layoutIsCurrent, shownLayout == parent.list.layoutToken else { return }
             if restoreViewport {
                 // Wait for rows and the real viewport before AppKit clamps the saved origin.
                 guard table.numberOfRows > 0 else { return }
@@ -447,13 +554,10 @@ struct VirtualTrackTable: NSViewRepresentable {
             guard let column = TrackColumns.column(id) ?? deviceColumns.first(where: { $0.id == id }) else { return nil }
             if id == "liked" {
                 guard case .track(let position, _)? = display,
-                      let item = cache.row(at: position), let revision = cache.revision else { return nil }
+                      let item = cache.row(at: position), cache.revision != nil else { return nil }
                 let cell = tableView.makeView(withIdentifier: LikedTrackCell.reuse, owner: nil) as? LikedTrackCell
                     ?? LikedTrackCell()
-                cell.show(item.track, enabled: parent.canMutate && item.available,
-                          identifier: "\(parent.identifier)-cell-\(item.row_id)-liked") { [weak self] in
-                    self?.parent.player.setTrackLiked(item.track.id, liked: !item.track.liked, libraryRevision: revision)
-                }
+                configure(cell, item: item, position: position)
                 return cell
             }
             let cell = tableView.makeView(withIdentifier: TrackCellView.reuse, owner: nil) as? TrackCellView

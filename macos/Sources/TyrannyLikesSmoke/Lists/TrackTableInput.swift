@@ -18,6 +18,19 @@ final class ActivatingTableView: NSTableView {
     /// move its selection. Other tables pass them on.
     var ignoresLeftRight = false
 
+    #if DEBUG
+    /// Native smoke probes count redraws without changing AppKit's update behavior.
+    var reloadObserver: ((IndexSet?, IndexSet?) -> Void)?
+    override func reloadData() {
+        reloadObserver?(nil, nil)
+        super.reloadData()
+    }
+    override func reloadData(forRowIndexes rows: IndexSet, columnIndexes columns: IndexSet) {
+        reloadObserver?(rows, columns)
+        super.reloadData(forRowIndexes: rows, columnIndexes: columns)
+    }
+    #endif
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let column = column(at: point)

@@ -45,7 +45,7 @@ def run_directory(work):
 
 
 class UnixSocket:
-    def __init__(self, socket_path, receive_buffer=None, expected_version=28):
+    def __init__(self, socket_path, receive_buffer=None, expected_version=29):
         before = private_socket(socket_path)
         limit = 104 if os.sys.platform == "darwin" else 108
         assert len(os.fsencode(socket_path)) < limit, "Unix socket path too long"

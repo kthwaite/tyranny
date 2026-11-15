@@ -13,12 +13,12 @@ public enum DisplayRow: Equatable, Sendable {
 
 /// Maps list positions to display rows and back, from server group spans.
 /// Memory is O(groups). Lookups are O(log n) binary searches over prefix sums.
-public struct GroupLayout: Sendable {
+public struct GroupLayout: Sendable, Equatable {
     /// The gutter's 104 pt cover and its four facts lines end within eight 20 pt rows, so the
     /// gap row after a block stays clear.
     public static let minimumBlockRows = 8
 
-    private enum Kind: Sendable {
+    private enum Kind: Sendable, Equatable {
         case header(artistKey: UInt64, span: Range<Int>)
         /// Tracks only, no cover (artist grouping).
         case plain(albumKey: UInt64?)
@@ -26,7 +26,7 @@ public struct GroupLayout: Sendable {
         case album(albumKey: UInt64?)
     }
 
-    private struct Block: Sendable {
+    private struct Block: Sendable, Equatable {
         let displayStart: Int
         let positionStart: Int
         let trackCount: Int

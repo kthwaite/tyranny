@@ -81,7 +81,7 @@ final class AlbumGridModel {
         } else if library != libraryRevision {
             libraryRevision = library
             recordAnchor()
-            cache.serverRevisionChanged(library, anchor: anchorID)
+            cache.serverRevisionChanged(library, anchor: anchorID, immediately: !player.scanActive)
         }
     }
 
@@ -178,9 +178,9 @@ final class AlbumGridModel {
             expansion.refetch = true
             return
         }
-        guard let player, let revision = player.snapshot?.library.revision else { return }
+        guard let player, player.snapshot != nil else { return }
         expansion.fetching = true
-        let basis = AlbumPanel.Loaded(album: expansion.album, revision: revision)
+        let album = expansion.album
         let list = AlbumPlayback.list(albumID: expansion.albumID)
         // A cancelled request would close the shared connection: send it unstructured.
         Task { @MainActor [weak self] in
@@ -196,6 +196,9 @@ final class AlbumGridModel {
             guard let self, self.expansion === expansion else { return }
             switch result {
             case .success(let page):
+                // This request is unpinned: its rows belong to the reply's revision, not
+                // the snapshot that happened to be current when the fetch started.
+                let basis = AlbumPanel.Loaded(album: album, revision: page.revision)
                 expansion.loaded(page.entries, total: Int(page.total), basis: basis)
             case .failure(let error):
                 // The next refresh pass, or the end of the scan, fetches again.
@@ -418,13 +421,13 @@ final class AlbumExpansion {
     }
 
     func loaded(_ rows: [ListRow], total: Int, basis: AlbumPanel.Loaded) {
-        tracks = rows
+        if tracks != rows { tracks = rows }
         let shown = Set(rows.map(\.row_id))
         if !selectedRowIDs.isSubset(of: shown) { selectedRowIDs.formIntersection(shown) }
-        self.total = total
+        if self.total != total { self.total = total }
         self.basis = basis
-        isLoaded = true
-        failure = nil
+        if !isLoaded { isLoaded = true }
+        if failure != nil { failure = nil }
     }
 
     func failed(_ message: String) {

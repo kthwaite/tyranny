@@ -377,6 +377,51 @@ struct ListWindowCacheTests {
         #expect(fake.log.dropFirst(initial).allSatisfy { $0.at == .zero })
     }
 
+    @Test func interactiveRefreshBypassesCooldownWithoutBlankingOrOverlappingPasses() async {
+        let clock = ManualClock()
+        let fake = FakeList(count: 1000)
+        let cache = ListWindowCache(sleep: clock.sleep, fetch: fake.fetch)
+        cache.visible(0..<50)
+        await until { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until { cache.loadedRow(at: 0) != nil }
+
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: 1)
+        await until { fake.pendingCount == 2 }
+        fake.complete(offset: 0)
+        await drain()
+        #expect(cache.loadedRow(at: 0)?.label == "1@1")
+
+        // A user edit during an existing pass waits only for that pass, not its timer.
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: 1, immediately: true)
+        await drain()
+        #expect(fake.pendingCount == 1)
+        #expect(cache.loadedRow(at: 0)?.label == "1@1")
+        fake.complete(offset: 200)
+        await until { fake.pendingCount == 2 }
+        fake.completeAll()
+        await until { cache.isSettled }
+        #expect(cache.loadedRow(at: 0)?.label == "1@3")
+        #expect(cache.anchorPosition == 0)
+        #expect(clock.now == .zero)
+
+        // A second edit in the cooldown also becomes visible without advancing time.
+        fake.touch()
+        cache.serverRevisionChanged(fake.revision, anchor: 1, immediately: true)
+        await until { fake.pendingCount == 2 }
+        #expect(cache.loadedRow(at: 0)?.label == "1@3")
+        fake.completeAll()
+        await until { cache.isSettled }
+        #expect(cache.loadedRow(at: 0)?.label == "1@4")
+        #expect(clock.now == .zero)
+        // Resume cancelled manual sleepers; they must not start another pass.
+        clock.advance(to: .seconds(1))
+        await drain()
+        #expect(fake.pendingCount == 0)
+    }
+
     @Test func revision_storm_refetches_visible_window_at_most_twice_per_second() async {
         let clock = ManualClock()
         let fake = FakeList(count: 1000, autoComplete: true)
