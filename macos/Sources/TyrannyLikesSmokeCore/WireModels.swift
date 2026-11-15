@@ -718,6 +718,11 @@ public struct TrackLiked: Decodable, Sendable {
     public let library_revision: UInt64
 }
 
+public struct LibraryTracksRemoved: Decodable, Sendable {
+    public let removed: Int
+    public let library_revision: UInt64
+}
+
 public struct ListRow: Codable, Sendable, Equatable, Identifiable {
     public let row_id: UInt64
     public let artist_key: UInt64

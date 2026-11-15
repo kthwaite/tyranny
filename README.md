@@ -10,7 +10,8 @@ music players to form a piece of highly-personalised software that satisfies my 
 ## Features
 
 - **Local music library** — folder import with scan progress, artist/album/track
-  browsing, live filtering, and compilation-aware album grouping.
+  browsing, live filtering, compilation-aware album grouping, and persistent
+  removal of selected songs without deleting audio files.
 - **Playback** — gapless audio, ReplayGain, seeking, a persistent queue; macOS
   system playback controls.
 - **Playlists** — editable regular playlists and rule-based smart playlists, with
@@ -36,6 +37,18 @@ desired macOS output device, then press Play to rebuild the failed audio unit.
 Recovery retains queued PCM, position and volume; it does not retry in the
 background or resume playback by itself. Audio already handed to the old device
 cannot be recalled. If reopening fails, playback stays paused with that error.
+
+### Removing music
+
+Select songs in a track list or expanded album, right-click, and choose
+**Remove from Library…**. Confirm to remove the selected songs from the library;
+**Cancel** leaves it unchanged. This is separate from **Remove from Playlist**.
+
+Audio files stay on disk. Removed paths remain excluded after rescans and
+restarts. Existing queue entries and listening history are retained; regular
+playlists keep unavailable entries, while smart playlists exclude removed songs.
+Removal is revision-checked: if the library changes while confirmation is open,
+refresh and select again rather than automatically replaying the removal.
 
 ### Search
 

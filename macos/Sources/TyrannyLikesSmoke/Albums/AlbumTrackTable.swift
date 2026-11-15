@@ -297,6 +297,11 @@ struct AlbumTrackTable: NSViewRepresentable {
             parentItem.setAccessibilityIdentifier("album-track-menu-add-to-playlist")
             parentItem.submenu = playlists
             menu.addItem(parentItem)
+            let hasUnavailable = parent.expansion.selectedPositions.contains {
+                parent.expansion.tracks.indices.contains($0) && !parent.expansion.tracks[$0].available
+            }
+            add(to: menu, "Remove from Library…", "album-track-menu-remove-from-library",
+                #selector(menuRemoveFromLibrary), enabled: !busy && !hasUnavailable)
             return menu
         }
 
@@ -316,6 +321,17 @@ struct AlbumTrackTable: NSViewRepresentable {
         }
         @objc private func menuPlayNext() { parent.grid.playNext(parent.expansion) }
         @objc private func menuAddToUpNext() { parent.grid.addToUpNext(parent.expansion) }
+        @objc private func menuRemoveFromLibrary() {
+            let expansion = parent.expansion
+            let positions = expansion.selectedPositions
+            guard !positions.isEmpty else { return }
+            do {
+                let request = try parent.grid.selectionRequest(expansion, positions: positions, asRun: false)
+                parent.player.requestLibraryRemoval(request.selection, count: positions.count, window: table?.window)
+            } catch {
+                parent.player.message = (error as? LocalizedError)?.errorDescription ?? "Wait for the tracks to load, then try again."
+            }
+        }
         @objc private func menuAddToPlaylist(_ item: NSMenuItem) {
             guard let playlist = item.representedObject as? Playlist else { return }
             parent.grid.addToPlaylist(parent.expansion, playlist: playlist)

@@ -78,8 +78,8 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
 }
 
 /// Snapshot old group keys before retags overwrite metadata. This visits only
-/// the scanned root, outside a main-database writer transaction. Tombstoned rows
-/// are included so returning unchanged files also reconcile correctly.
+/// the scanned root, outside a main-database writer transaction. Missing-file
+/// tombstones are included for returning files; user exclusions are not.
 pub(super) fn begin(connection: &Connection, root_id: u64) -> Result<()> {
     connection.execute_batch(
         "DELETE FROM temp.library_album_groups;
@@ -92,7 +92,8 @@ pub(super) fn begin(connection: &Connection, root_id: u64) -> Result<()> {
         "INSERT INTO temp.library_album_seed(asset_id,path,album,release_id)
         SELECT a.id,a.path,json_extract(t.metadata,'$.album'),
             json_extract(t.metadata,'$.musicbrainz_release_id')
-        FROM library_assets a JOIN library_tracks t ON t.asset_id=a.id WHERE a.root_id=?1",
+        FROM library_assets a JOIN library_tracks t ON t.asset_id=a.id
+        WHERE a.root_id=?1 AND a.excluded=0",
         [root_id],
     )?;
     Ok(())
@@ -231,7 +232,10 @@ impl Reconciliation {
                     )?;
                     connection.execute(
                         "INSERT OR IGNORE INTO temp.library_album_members(track_id)
-                        SELECT track_id FROM temp.library_album_companions WHERE release_id=?1",
+                        SELECT c.track_id FROM temp.library_album_companions c
+                        JOIN library_tracks t ON t.id=c.track_id
+                        JOIN library_assets a ON a.id=t.asset_id
+                        WHERE c.release_id=?1 AND a.indexed=1",
                         [&id],
                     )?;
                     current.release_id = Some(id);
@@ -263,7 +267,7 @@ impl Reconciliation {
                 "SELECT t.id,t.metadata,a.metadata_version FROM temp.library_album_members m
                 JOIN library_tracks t ON t.id=m.track_id
                 JOIN library_assets a ON a.id=t.asset_id
-                WHERE m.track_id>?1 ORDER BY m.track_id LIMIT ?2",
+                WHERE m.track_id>?1 AND a.indexed=1 ORDER BY m.track_id LIMIT ?2",
             )?;
             let mut rows = statement.query(params![current.analyzed, db::BATCH as u64])?;
             let mut count = 0;
@@ -341,7 +345,8 @@ impl Reconciliation {
                 "SELECT t.id,a.path,t.metadata,a.metadata_version,al.musicbrainz_release_id
             FROM temp.library_album_members m JOIN library_tracks t ON t.id=m.track_id
             JOIN library_assets a ON a.id=t.asset_id
-            JOIN library_albums al ON al.id=t.album_id ORDER BY m.track_id LIMIT ?1",
+            JOIN library_albums al ON al.id=t.album_id
+            WHERE a.indexed=1 ORDER BY m.track_id LIMIT ?1",
             )?
             .query_map([db::BATCH as u64], |row| {
                 Ok((
@@ -354,6 +359,8 @@ impl Reconciliation {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if rows.is_empty() {
+            // A removal may retire members after this group was prepared.
+            connection.execute("DELETE FROM temp.library_album_members", [])?;
             connection.execute(
                 "DELETE FROM temp.library_album_groups WHERE key=?1",
                 [&current.key],

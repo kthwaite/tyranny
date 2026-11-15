@@ -119,6 +119,9 @@ extension VirtualTrackTable.Coordinator {
         if parent.list.canRemoveEntries {
             add(to: menu, "Remove from Playlist", "track-menu-remove-from-playlist", #selector(menuRemove), enabled: !busy)
         }
+        let hasUnavailable = parent.list.selectedPositions.contains { parent.list.cache.loadedRow(at: $0)?.available == false }
+        add(to: menu, "Remove from Library…", "track-menu-remove-from-library", #selector(menuRemoveFromLibrary),
+            enabled: !busy && !hasUnavailable)
         menu.addItem(.separator())
         add(to: menu, "Show in Album", "track-menu-show-album", #selector(menuShowAlbum), enabled: true)
         add(to: menu, "Show in Artist", "track-menu-show-artist", #selector(menuShowArtist), enabled: true)
@@ -147,6 +150,15 @@ extension VirtualTrackTable.Coordinator {
     @objc private func menuAddToUpNext() { parent.list.activateSelected(.addToUpNext) }
     @objc private func menuAddToPlaylist() { parent.list.requestPlaylistPicker() }
     @objc private func menuRemove() { parent.list.removeSelected() }
+    @objc private func menuRemoveFromLibrary() {
+        let list = parent.list
+        do {
+            let selection = try list.encode(list.selectedPositions)
+            parent.player.requestLibraryRemoval(selection, count: list.selectedPositions.count, window: table?.window)
+        } catch {
+            parent.player.message = (error as? LocalizedError)?.errorDescription ?? "Select tracks in a loaded list before removing them."
+        }
+    }
     @objc private func menuLookUp(_ sender: Any?) {
         guard let target = (sender as? NSMenuItem)?.representedObject as? AlbumLookUp else { return }
         parent.player.tagging.begin(albumID: target.albumID, title: target.title)

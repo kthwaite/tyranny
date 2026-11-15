@@ -322,6 +322,7 @@ impl Controller {
             }
             Command::AddRoot { path } => LibraryCommand::AddRoot { path },
             Command::Rescan { root_id } => LibraryCommand::Rescan { root_id },
+            Command::RemoveLibraryTracks { selection } => LibraryCommand::RemoveTracks { selection },
             Command::SetTrackLiked {
                 track_id,
                 liked,
@@ -1931,6 +1932,7 @@ impl Actor {
             | Command::AddRoot { .. }
             | Command::Rescan { .. }
             | Command::SetTrackLiked { .. }
+            | Command::RemoveLibraryTracks { .. }
             | Command::LibraryRoots { .. }
             | Command::LibraryArtists { .. }
             | Command::LibraryAlbums { .. }

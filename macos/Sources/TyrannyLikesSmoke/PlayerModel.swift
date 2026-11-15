@@ -545,6 +545,36 @@ final class PlayerModel {
             ])
         }
     }
+
+    /// Captures a revision-bound selection before presenting the native confirmation.
+    /// A reconnect or stale revision requires a new user action, never a replay.
+    func requestLibraryRemoval(_ selection: TrackSelection, count: Int, window: NSWindow?) {
+        guard canMutate, count > 0, let window, window.attachedSheet == nil else { return }
+        let generation = playlistConnectionGeneration
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Remove \(count == 1 ? "selected track" : "\(count) selected tracks") from Library?"
+        alert.informativeText = "Files stay on disk; rescans won’t restore them. Saved playlist references become unavailable. Queued playback and listening history stay unchanged."
+        alert.addButton(withTitle: "Remove from Library")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[0].setAccessibilityIdentifier("library-removal-confirm")
+        alert.buttons[1].keyEquivalent = "\u{1b}"
+        alert.buttons[1].setAccessibilityIdentifier("library-removal-cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            guard self.connected, self.playlistConnectionGeneration == generation else {
+                self.message = "The connection changed. Select the tracks again before removing them."
+                return
+            }
+            self.mutate {
+                let _: LibraryTracksRemoved = try await self.send("remove_library_tracks", [
+                    "selection": try .encoding(selection),
+                ])
+                self.refresh()
+            }
+        }
+    }
     /// Runs one user mutation: marks the model busy, reports failure in `message`,
     /// afterwards.
     func mutate(_ action: @escaping @MainActor () async throws -> Void) {

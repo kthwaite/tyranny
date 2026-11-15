@@ -7,6 +7,8 @@ mod lists;
 mod query;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod removal_tests;
 
 use crate::{
     library_types::*,
@@ -15,7 +17,7 @@ use crate::{
     store::PlaylistFailure,
 };
 use anyhow::{Context, Result, anyhow, ensure};
-pub(crate) use db::{migrate, migrate_v5, migrate_v9, resolve_track};
+pub(crate) use db::{migrate, migrate_v5, migrate_v9, migrate_v11, resolve_track};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{
     collections::{HashSet, VecDeque},
@@ -411,7 +413,7 @@ impl Coordinator {
         {
             let mut statement = self
                 .connection
-                .prepare("SELECT root_id FROM library_assets WHERE path=?1")?;
+                .prepare("SELECT root_id FROM library_assets WHERE path=?1 AND excluded=0")?;
             for path in std::mem::take(&mut self.pending_reindex) {
                 let root_id: Option<u64> = statement
                     .query_row([path.to_str().context("invalid reindex path")?], |row| {
@@ -486,6 +488,16 @@ impl Coordinator {
                 Ok(LibraryReply::TrackLiked {
                     track_id,
                     liked,
+                    library_revision,
+                })
+            }
+            LibraryCommand::RemoveTracks { selection } => {
+                let (removed, library_revision) =
+                    db::remove_tracks(&mut self.connection, &selection)?;
+                self.dirty = true;
+                self.publish(true)?;
+                Ok(LibraryReply::TracksRemoved {
+                    removed,
                     library_revision,
                 })
             }
