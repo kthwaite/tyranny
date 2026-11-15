@@ -274,6 +274,9 @@ pub enum LibraryCommand {
         liked: bool,
         library_revision: u64,
     },
+    RemoveTracks {
+        selection: crate::protocol::TrackSelection,
+    },
     Roots(PageRequest),
     Artists(PageRequest),
     Albums {
@@ -344,6 +347,10 @@ pub enum LibraryReply {
     TrackLiked {
         track_id: u64,
         liked: bool,
+        library_revision: u64,
+    },
+    TracksRemoved {
+        removed: usize,
         library_revision: u64,
     },
     Roots(Page<Root>),

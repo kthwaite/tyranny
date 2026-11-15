@@ -28,14 +28,14 @@ pub(crate) use history::{HistoryEvent, PendingHistory, PlayRecord, count_thresho
 pub(crate) use playlists::{
     PlaylistChange, PlaylistEdit, PlaylistFailure, list_source_rule, playlist_sources,
 };
-pub(crate) use selection::resolve_selection;
+pub(crate) use selection::{check_revisions as check_selection_revisions, resolve_selection};
 pub(crate) use stations::{StaleStationsRevision, StationEdit};
 #[cfg(test)]
 mod playlists_tests;
 #[cfg(test)]
 mod stations_tests;
 const APPLICATION_ID: i64 = 0x7479726e;
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Runs the migration ladder up to `target`; tests use a lower target to build old schemas.
 pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
@@ -166,6 +166,13 @@ pub(crate) fn migrate(connection: &mut Connection, target: i64) -> Result<i64> {
         transaction.pragma_update(None, "user_version", 10)?;
         transaction.commit()?;
         version = 10;
+    }
+    if version == 10 && target > 10 {
+        let transaction = connection.transaction()?;
+        library::migrate_v11(&transaction)?;
+        transaction.pragma_update(None, "user_version", 11)?;
+        transaction.commit()?;
+        version = 11;
     }
     ensure!(version == target, "unsupported database version {version}");
     Ok(version)

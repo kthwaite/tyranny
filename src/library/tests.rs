@@ -30,6 +30,7 @@ impl Scratch {
             migrate_v5(&transaction).unwrap();
             migrate_v9(&transaction).unwrap();
             crate::filter::search::migrate(&transaction).unwrap();
+            migrate_v11(&transaction).unwrap();
             transaction.commit().unwrap();
         }
         Library::start(database).unwrap()
@@ -144,6 +145,71 @@ async fn tracks(library: &Library) -> Page<Track> {
         LibraryReply::Tracks(page) => page,
         other => panic!("unexpected tracks reply: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn removal_is_atomic_publishes_totals_and_preserves_files_across_restart() {
+    let scratch = Scratch::new();
+    let removed_path = scratch.path("music/removed.wav");
+    let kept_path = scratch.path("music/kept.wav");
+    wav(&removed_path);
+    wav(&kept_path);
+    let bytes = fs::read(&removed_path).unwrap();
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    let removed_id = track_at(&before, &removed_path).id;
+    let kept_id = track_at(&before, &kept_path).id;
+    let selection = |revision, ids| crate::protocol::TrackSelection::Ids {
+        library_revision: revision,
+        track_ids: ids,
+    };
+    for (revision, ids, kind) in [
+        (before.revision - 1, vec![removed_id], LibraryErrorKind::StaleRevision),
+        (before.revision, vec![removed_id, u64::MAX], LibraryErrorKind::Invalid),
+        (before.revision, Vec::new(), LibraryErrorKind::Invalid),
+    ] {
+        let failure = library
+            .handle()
+            .request(LibraryCommand::RemoveTracks {
+                selection: selection(revision, ids),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, kind);
+        assert_eq!(tracks(&library).await.total, 2);
+        assert_eq!(library.state().revision, before.revision);
+    }
+    assert!(matches!(
+        library.handle().request(LibraryCommand::RemoveTracks {
+            selection: selection(before.revision, vec![removed_id, removed_id]),
+        }).await.unwrap(),
+        LibraryReply::TracksRemoved { removed: 1, library_revision }
+            if library_revision == before.revision + 1
+    ));
+    let state = library.state();
+    assert_eq!(state.revision, before.revision + 1);
+    assert_eq!((state.tracks, state.duration_ms, state.size_bytes), (1, 1, bytes.len() as u64));
+    assert_eq!(tracks(&library).await.entries[0].id, kept_id);
+    assert_eq!(fs::read(&removed_path).unwrap(), bytes);
+    let failure = library.handle().request(LibraryCommand::RemoveTracks {
+        selection: selection(state.revision, vec![kept_id, removed_id]),
+    }).await.unwrap_err();
+    assert_eq!(failure.kind, LibraryErrorKind::Invalid);
+    assert_eq!(library.state(), state);
+    // Both queued path reindexing and later root discovery must respect the exclusion.
+    reindex(&library, vec![removed_path.clone()]).await.unwrap();
+    library.shutdown().unwrap();
+    let library = scratch.library();
+    assert_eq!(tracks(&library).await.total, 1);
+    let scan = rescan(&library, root).await;
+    assert_eq!(scan.phase, ScanPhase::Complete);
+    assert_eq!((scan.discovered, scan.processed, scan.updated), (2, 2, 0));
+    assert_eq!(library.state().revision, state.revision);
+    assert_eq!(tracks(&library).await.entries[0].id, kept_id);
+    assert_eq!(fs::read(&removed_path).unwrap(), bytes);
+    library.shutdown().unwrap();
 }
 
 #[tokio::test]

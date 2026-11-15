@@ -158,6 +158,50 @@ pub(crate) fn migrate_v9(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Removal preserves identities and references; only scanner visibility changes.
+pub(crate) fn migrate_v11(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE library_assets ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0
+         CHECK(excluded IN (0,1) AND (excluded=0 OR indexed=0));",
+    )?;
+    Ok(())
+}
+
+pub(super) fn remove_tracks(
+    connection: &mut Connection,
+    selection: &crate::protocol::TrackSelection,
+) -> Result<(usize, u64)> {
+    // Resolve off the playback owner and before reserving the database writer.
+    // Every revision is rechecked in the write transaction, including playlists.
+    let mut tracks =
+        crate::store::resolve_selection(connection, selection, crate::listing::unix_now())?;
+    tracks.sort_unstable_by_key(|(id, _)| *id);
+    tracks.dedup_by_key(|(id, _)| *id);
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    crate::store::check_selection_revisions(&transaction, selection)?;
+    {
+        let mut remove = transaction.prepare(
+            "UPDATE library_assets SET excluded=1,indexed=0
+             WHERE id=(SELECT asset_id FROM library_tracks WHERE id=?1) AND excluded=0",
+        )?;
+        for (id, _) in &tracks {
+            ensure!(remove.execute([id])? == 1, "resolved library track changed");
+        }
+    }
+    transaction.execute(
+        "UPDATE library_state SET track_count=track_count-?1 WHERE singleton=1",
+        [tracks.len() as u64],
+    )?;
+    bump_revision(&transaction)?;
+    let revision = transaction.query_row(
+        "SELECT revision FROM library_state WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.commit()?;
+    Ok((tracks.len(), revision))
+}
+
 pub(super) fn set_track_liked(
     connection: &mut Connection,
     track_id: u64,
@@ -353,19 +397,24 @@ pub(super) fn discover(
         |row| row.get(0),
     )?;
     let mut restored = 0u64;
+    let mut excluded = 0u64;
     for candidate in candidates {
         let path = candidate
             .path
             .to_str()
             .context("non-UTF-8 candidate path; reconciliation prohibited")?;
-        let old: Option<(bool, u64)> = transaction
+        let old: Option<(bool, u64, bool)> = transaction
             .query_row(
-                "SELECT indexed,last_seen_scan FROM library_assets WHERE path=?1",
+                "SELECT indexed,last_seen_scan,excluded FROM library_assets WHERE path=?1",
                 [path],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        if old.is_some_and(|(indexed, seen)| indexed && seen < watermark) {
+        if old.is_some_and(|(_, _, excluded)| excluded) {
+            excluded += 1;
+            continue;
+        }
+        if old.is_some_and(|(indexed, seen, _)| indexed && seen < watermark) {
             restored += 1;
         }
         transaction.execute(
@@ -379,6 +428,10 @@ pub(super) fn discover(
     }
     let mut next = status.clone();
     next.discovered += candidates.len() as u64;
+    // Enumeration still counts excluded candidates. Retire their work now so
+    // the scanner's total and completion watermark remain balanced.
+    next.processed += excluded;
+    next.unchanged += excluded;
     transaction.execute(
         "UPDATE library_state SET track_count=track_count+?1 WHERE singleton=1",
         [restored],
@@ -406,8 +459,8 @@ pub(super) fn next_batch(
     let entries = {
         let mut statement = transaction.prepare(
             "SELECT w.path,w.size,w.modified_ns,
-            a.indexed=1 AND a.error IS NULL AND a.size=w.size AND a.modified_ns=w.modified_ns
-            AND a.metadata_version=?3
+            a.excluded=1 OR (a.indexed=1 AND a.error IS NULL AND a.size=w.size AND a.modified_ns=w.modified_ns
+            AND a.metadata_version=?3)
             FROM library_worklist w JOIN library_assets a ON a.path=w.path
             WHERE w.scan_id=?1 ORDER BY w.path LIMIT ?2",
         )?;
@@ -650,6 +703,22 @@ pub(super) fn probed(
             |row| row.get(0),
         )?;
         ensure!(pending, "scanner returned an unexpected candidate");
+        let excluded: bool = transaction.query_row(
+            "SELECT excluded FROM library_assets WHERE path=?1",
+            [path],
+            |row| row.get(0),
+        )?;
+        if excluded {
+            // An in-flight probe still owns its worklist entry. Consume it, but
+            // never install metadata or errors after removal.
+            transaction.execute(
+                "DELETE FROM library_worklist WHERE scan_id=?1 AND path=?2",
+                params![serial, path],
+            )?;
+            next.processed += 1;
+            next.unchanged += 1;
+            continue;
+        }
         match probe.result {
             Ok(metadata) => {
                 install(&transaction, &probe.candidate, metadata)?;

@@ -19,6 +19,130 @@ fn list_tracks(list: Value, revision: Option<u64>, offset: usize, limit: usize) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn library_removal_preserves_queue_playlists_history_and_restart() {
+    let scratch = Scratch::new();
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    let (root, tracks) = index(&scratch, &mut client, &["Alpha", "Beta"]).await;
+    let removed = tracks.entries.iter().find(|track| track.metadata.title == "Alpha").unwrap().id;
+    let kept = tracks.entries.iter().find(|track| track.metadata.title == "Beta").unwrap().id;
+    let source_path = scratch.path("music/Alpha.wav");
+    let source_bytes = fs::read(&source_path).unwrap();
+    let playlist = create(&mut client, "Retained references").await;
+    let playlist = add(&mut client, &playlist, tracks.revision, vec![removed, kept, removed]).await;
+    let expected_revision = client.state.playlists_revision;
+    let Response::PlaylistApplied { playlist: Some(smart), .. } = ok(
+        &mut client,
+        json!({"command":"create_smart_playlist","expected_revision":expected_revision,
+            "name":"Both songs","query":"title:Alpha OR title:Beta"}),
+    ).await else {
+        panic!("expected a smart playlist");
+    };
+    let playlist_list = json!({"source":{"kind":"playlist","id":playlist.id,"revision":playlist.revision},
+        "query":"","sort":[],"group":"none"});
+    let Response::ListTracks { page: playlist_before, .. } = ok(
+        &mut client, list_tracks(playlist_list.clone(), None, 0, 10),
+    ).await else {
+        panic!("expected playlist rows");
+    };
+    let excluded = playlist_before.entries.iter().find(|row| row.track.id == kept).unwrap().row_id;
+    let selection = json!({"kind":"list","list":playlist_list,"library_revision":tracks.revision,
+        "ranges":[[0,u64::MAX]],"excluded":[excluded],
+        "first_row_id":playlist_before.entries[0].row_id});
+    let command = play_ids(&client, tracks.revision, &[removed, kept]);
+    let current = applied_entry(ok(&mut client, command).await);
+    client.until(|state| state.history_revision > 0).await;
+    ok(&mut client, json!({"command":"pause"})).await;
+    let before = client.state.clone();
+    let queue_before = queue(&mut client).await;
+    let history_before = history(&mut client).await;
+    assert_eq!(history_before.entries[0].track_id, Some(removed));
+    for (selection, code) in [
+        ({
+            let mut stale = selection.clone();
+            stale["library_revision"] = json!(tracks.revision - 1);
+            stale
+        }, ErrorCode::StaleLibraryRevision),
+        ({
+            let mut stale = selection.clone();
+            stale["list"]["source"]["revision"] = json!(playlist.revision - 1);
+            stale
+        }, ErrorCode::StalePlaylistRevision),
+        (json!({"kind":"ids","library_revision":tracks.revision,"track_ids":[removed,u64::MAX]}),
+            ErrorCode::InvalidCommand),
+    ] {
+        client.reject(json!({"command":"remove_library_tracks","selection":selection}), code).await;
+        assert_eq!(client.state.library.revision, tracks.revision);
+        assert_eq!(client.state.library.tracks, 2);
+        assert_eq!(queue(&mut client).await, queue_before);
+    }
+    assert!(matches!(
+        ok(&mut client, json!({"command":"remove_library_tracks","selection":selection})).await,
+        Response::LibraryTracksRemoved { removed: 1, library_revision }
+            if library_revision == tracks.revision + 1
+    ));
+    client.apply(json!({"command":"snapshot"})).await;
+    assert_eq!(client.state.library.tracks, 1);
+    assert_eq!(client.state.library.duration_ms, 5000);
+    assert_eq!(client.state.queue_revision, before.queue_revision);
+    assert_eq!(client.state.current_id, Some(current));
+    assert_eq!(client.state.position_frames, before.position_frames);
+    assert_eq!(client.state.transport, before.transport);
+    assert_eq!(client.state.now_playing, before.now_playing);
+    assert_eq!(queue(&mut client).await, queue_before);
+    assert_eq!(history(&mut client).await.entries, history_before.entries);
+    assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+    assert_eq!(list_track_ids(&mut client, songs()).await.1, vec![kept]);
+    let smart_list = list(json!({"kind":"smart","id":smart.id,"revision":smart.revision}));
+    assert_eq!(list_track_ids(&mut client, smart_list.clone()).await.1, vec![kept]);
+    let Response::ListTracks { page: playlist_after, .. } = ok(
+        &mut client, list_tracks(playlist_list.clone(), None, 0, 10),
+    ).await else {
+        panic!("expected retained playlist rows");
+    };
+    assert_eq!(playlist_after.entries.iter().map(|row| (row.row_id, row.track.id, row.available)).collect::<Vec<_>>(),
+        vec![(playlist_before.entries[0].row_id, removed, false),
+            (excluded, kept, true),
+            (playlist_before.entries[2].row_id, removed, false)]);
+    let Response::PlaylistEntries { page, .. } = ok(&mut client, json!({
+        "command":"playlist_entries","playlist_id":playlist.id,"revision":playlist.revision,
+        "library_revision":null,"offset":0,"limit":10,"query":""
+    })).await else {
+        panic!("expected saved entries");
+    };
+    assert_eq!(page.total, 3);
+    assert_eq!(page.entries.iter().map(|entry| entry.available).collect::<Vec<_>>(), vec![false, true, false]);
+
+    // The currently loaded file remains playable after its library exclusion.
+    let position = client.state.position_frames;
+    ok(&mut client, json!({"command":"play","entry_id":null})).await;
+    client.until(|state| state.position_frames > position).await;
+    assert_eq!(client.state.current_id, Some(current));
+    assert_eq!(client.state.transport, Transport::Playing);
+    ok(&mut client, json!({"command":"pause"})).await;
+    ok(&mut client, json!({"command":"rescan","root_id":root})).await;
+    client.apply(json!({"command":"snapshot"})).await;
+    client.until(|state| state.library.scan.phase == tyranny_likes_smoke::library_types::ScanPhase::Complete).await;
+    assert_eq!(list_track_ids(&mut client, songs()).await.1, vec![kept]);
+    assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+    running.stop().await;
+
+    let running = Running::start(&scratch).await;
+    let mut client = PlaybackClient::connect(&running).await;
+    assert_eq!(client.state.current_id, Some(current));
+    assert_eq!(queue(&mut client).await, queue_before);
+    assert_eq!(list_track_ids(&mut client, songs()).await.1, vec![kept]);
+    assert_eq!(list_track_ids(&mut client, smart_list).await.1, vec![kept]);
+    let history = history(&mut client).await;
+    assert_eq!(history.total, 1);
+    assert_eq!(history.entries[0].id, history_before.entries[0].id);
+    assert_eq!(history.entries[0].track_id, Some(removed));
+    assert_eq!(history.entries[0].title, "Alpha");
+    assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_tracks_round_trips_over_the_socket_and_rejects_stale_revision() {
     let scratch = Scratch::new();
     let running = Running::start(&scratch).await;

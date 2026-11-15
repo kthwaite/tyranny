@@ -379,6 +379,7 @@ final class WireClient {
         case "add_root": return "root_added"
         case "rescan": return "scan_accepted"
         case "set_track_liked": return "track_liked"
+        case "remove_library_tracks": return "library_tracks_removed"
         case "append", "append_stream", "append_track", "remove", "move", "clear", "play", "pause", "toggle_play_pause", "next", "previous", "stop", "seek", "set_gain", "set_resume": return "applied"
         default: return nil
         }
@@ -457,7 +458,7 @@ struct ResultHeader: Decodable {
         case "snapshot", "applied", "playlist_applied", "stations_applied":
             snapshot = try container.decode(ControlState.self, forKey: .snapshot)
         case "queue_page", "root_added", "scan_accepted", "library_roots", "saved_playlists", "playlist_entries", "artwork", "lyrics",
-             "directory_results", "directory_click_counted", "track_liked",
+             "directory_results", "directory_click_counted", "track_liked", "library_tracks_removed",
              "list_tracks", "list_albums", "list_artists", "list_genres", "album_summaries", "list_groups", "list_match", "history",
              "stations", "stats", "wrapped", "stats_years", "tag_proposal", "tag_apply", "tag_edits":
             snapshot = nil

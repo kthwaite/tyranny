@@ -39,7 +39,7 @@ fn selection_revision(selection: &TrackSelection) -> u64 {
 /// Rechecks every revision `selection` was made under: the library's, and a
 /// playlist source's. A write that must match the resolved rows runs this in
 /// its own transaction.
-pub(super) fn check_revisions(connection: &Connection, selection: &TrackSelection) -> Result<()> {
+pub(crate) fn check_revisions(connection: &Connection, selection: &TrackSelection) -> Result<()> {
     library_revision(connection, Some(selection_revision(selection)))?;
     if let TrackSelection::List { list, .. } = selection {
         match list.source {

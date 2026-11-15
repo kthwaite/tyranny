@@ -1,4 +1,4 @@
-//! Version 27 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
+//! Version 28 local control protocol. Queue/library/playlist pages are revision-bound; reconnect
 //! replaces cached control state. A missing reply never authorizes command replay.
 use crate::library_types::{
     Album, AlbumArtist, AlbumSort, AlbumSummary, GroupSpan, LibraryReply, LibraryState, ListMatch,
@@ -14,7 +14,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
-pub const VERSION: u32 = 27;
+pub const VERSION: u32 = 28;
 pub const MAX_PAGE_SIZE: usize = 500;
 /// The most tracks one enqueue or playlist add may resolve to.
 pub const MAX_RUN_ENTRIES: usize = 100_000;
@@ -279,6 +279,10 @@ pub enum Command {
         revision: Option<u64>,
         offset: usize,
         limit: usize,
+    },
+    /// Excludes library tracks permanently without deleting files or references.
+    RemoveLibraryTracks {
+        selection: TrackSelection,
     },
     AppendTrack {
         expected_revision: u64,
@@ -1048,6 +1052,10 @@ pub enum Response {
         liked: bool,
         library_revision: u64,
     },
+    LibraryTracksRemoved {
+        removed: usize,
+        library_revision: u64,
+    },
     LibraryRoots {
         #[serde(flatten)]
         page: Page<Root>,
@@ -1137,6 +1145,13 @@ impl From<LibraryReply> for Response {
             } => Self::TrackLiked {
                 track_id,
                 liked,
+                library_revision,
+            },
+            LibraryReply::TracksRemoved {
+                removed,
+                library_revision,
+            } => Self::LibraryTracksRemoved {
+                removed,
                 library_revision,
             },
             LibraryReply::Roots(page) => Self::LibraryRoots { page },
@@ -1363,6 +1378,38 @@ mod tests {
             serde_json::to_value(response).unwrap(),
             serde_json::json!({
                 "kind": "track_liked", "track_id": 7, "liked": true, "library_revision": 3
+            })
+        );
+    }
+
+    #[test]
+    fn library_removal_uses_track_selection_and_returns_count_and_revision() {
+        let command = serde_json::json!({
+            "id": 1, "command": "remove_library_tracks",
+            "selection": {"kind":"ids","library_revision":2,"track_ids":[7,8]}
+        });
+        assert!(matches!(
+            serde_json::from_value::<Request>(command.clone()).unwrap().command,
+            Command::RemoveLibraryTracks {
+                selection: TrackSelection::Ids { library_revision: 2, track_ids }
+            } if track_ids == vec![7, 8]
+        ));
+        for field in ["kind", "library_revision", "track_ids"] {
+            let mut missing = command.clone();
+            missing["selection"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(missing).is_err());
+        }
+        assert!(serde_json::from_value::<Request>(serde_json::json!({
+            "id":1,"command":"remove_library_tracks"
+        })).is_err());
+        let response = Response::from(LibraryReply::TracksRemoved {
+            removed: 2,
+            library_revision: 3,
+        });
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "kind":"library_tracks_removed","removed":2,"library_revision":3
             })
         );
     }
@@ -1690,7 +1737,7 @@ mod tests {
 
     #[test]
     fn v9_list_commands_require_every_field() {
-        assert_eq!(VERSION, 27);
+        assert_eq!(VERSION, 28);
         let list = serde_json::json!({
             "source": {"kind": "playlist", "id": 4, "revision": 9},
             "query": "genre:Jazz",
