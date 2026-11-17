@@ -161,6 +161,9 @@ impl<K: std::hash::Hash + Eq> Unique<K> {
 }
 
 #[cfg(test)]
+mod membership_properties;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::stats::period::FixedZone;
