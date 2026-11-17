@@ -86,13 +86,14 @@ impl Resolver {
         Ok(sources)
     }
 
-    /// Opened like the artwork workers' library connections.
+    /// Read-only selection queries use the same search functions as browsing.
     fn connection(&self) -> Result<Connection> {
         let connection = Connection::open_with_flags(
             &self.database,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .context("opening the library for selection resolution")?;
+        crate::filter::search::register(&connection)?;
         connection.busy_timeout(Duration::from_millis(100))?;
         Ok(connection)
     }

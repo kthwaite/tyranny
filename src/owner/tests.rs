@@ -209,6 +209,74 @@ impl Gate {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn filtered_song_activation_resolves_and_plays_the_clicked_row() {
+    for query in ["radiohead", "radiohaed"] {
+        let fixture = Fixture::new();
+        fixture
+            .index_frames(&["Radiohead Alpha", "Radiohead Beta", "Unrelated"], 96_000)
+            .await;
+        let control = fixture.control();
+        let before = snapshot(&control).await;
+        let list = ListDescription {
+            source: ListSource::Library,
+            browser: Browser::default(),
+            query: query.into(),
+            sort: Vec::new(),
+            group: Grouping::None,
+        };
+        let Response::ListTracks { page, .. } = ok(
+            &control,
+            Command::ListTracks {
+                list: list.clone(),
+                revision: Some(before.library.revision),
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await
+        else {
+            panic!("expected the filtered Songs view");
+        };
+        assert_eq!(page.total, 2, "query {query}");
+        let clicked = &page.entries[1];
+        assert_eq!(clicked.track.title, "Radiohead Beta");
+        let Response::Applied {
+            snapshot: applied,
+            entry_id: Some(entry_id),
+        } = ok(
+            &control,
+            Command::EnqueueTracks {
+                selection: TrackSelection::List {
+                    list,
+                    library_revision: page.revision,
+                    ranges: vec![[1, u64::MAX]],
+                    excluded: Vec::new(),
+                    first_row_id: Some(clicked.row_id),
+                },
+                expected_revision: before.queue_revision,
+                placement: Placement::ReplaceUpcoming,
+                play: true,
+                source: QueueSource::stamped(SourceKind::Songs, "Songs"),
+            },
+        )
+        .await
+        else {
+            panic!("expected filtered activation to enqueue and play");
+        };
+        assert_eq!(applied.queue_length, 1);
+        assert_eq!(applied.current_id, Some(entry_id));
+        let playing = fixture
+            .until(|state| state.current_id == Some(entry_id) && state.position_frames > 0)
+            .await;
+        assert_eq!(
+            playing.now_playing.as_ref().and_then(|track| track.track_id),
+            Some(clicked.track.id)
+        );
+        assert!(playing.error.is_none(), "{:?}", playing.error);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn liked_commands_route_to_library_and_smart_membership_updates_live() {
     let fixture = Fixture::new();
     fixture.index(&["a", "b"]).await;
