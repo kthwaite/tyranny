@@ -210,3 +210,148 @@ async fn wrapped_years_outside_the_calendar_are_rejected_before_any_work() {
     ));
     workers.shutdown();
 }
+
+mod snapshot_search {
+    use super::*;
+    use crate::store::{EndReason, PlayRecord};
+    use proptest::prelude::*;
+    use rusqlite::functions::FunctionFlags;
+    use std::cell::RefCell;
+
+    // Year offset from 2020, whether it counted, milliseconds listened.
+    type Play = (u8, bool, u16);
+
+    fn plays() -> impl Strategy<Value = Vec<Play>> {
+        prop::collection::vec((0..5u8, any::<bool>(), 0..3001u16), 0..7)
+    }
+
+    fn write_plays(store: &mut Store, plays: &[Play]) {
+        for &(year, counted, ms) in plays {
+            // Mid-year, far from any leap day, calendar boundary or current time.
+            let played_at = 1_593_604_800 + i64::from(year) * 365 * 86_400;
+            let row = store
+                .open_play(&PlayRecord {
+                    entry_id: 1,
+                    track_id: None,
+                    path: "/m/song".into(),
+                    title: "Song".into(),
+                    artist: "Band".into(),
+                    album: "A".into(),
+                    duration_ms: None,
+                    source: None,
+                    played_at,
+                    raw_title: None,
+                })
+                .unwrap();
+            if counted {
+                store.count_play(row).unwrap();
+            }
+            store
+                .close_play(row, u64::from(ms), EndReason::Finished, played_at + 3)
+                .unwrap();
+        }
+    }
+
+    fn commit_during_read(reader: &Connection, writer: Store, batch: Vec<Play>, view: &str) {
+        let pending = RefCell::new(Some((writer, batch)));
+        reader
+            .create_scalar_function("step_writer", 1, FunctionFlags::SQLITE_UTF8, move |ctx| {
+                if let Some((mut writer, batch)) = pending.take() {
+                    write_plays(&mut writer, &batch);
+                }
+                ctx.get::<i64>(0)
+            })
+            .unwrap();
+        reader.execute_batch(view).unwrap();
+    }
+
+    fn expected_report(plays: &[Play], wrapped: Option<u8>) -> (u64, u64, u64) {
+        let mut revision = 0;
+        let mut count = 0;
+        let mut time = 0;
+        for &(year, counted, ms) in plays {
+            revision += 2 + u64::from(counted); // open, optional count, close
+            if wrapped.is_none_or(|selected| year == selected) {
+                count += u64::from(counted);
+                time += u64::from(ms);
+            }
+        }
+        (revision, count, time)
+    }
+
+    fn observed_report(reader: &mut Connection, wrapped: Option<u8>) -> (u64, u64, u64) {
+        let request = wrapped.map_or_else(all, |y| Request::Wrapped(2020 + i32::from(y)));
+        match answer(reader, request).unwrap_or_else(failure) {
+            Reply::Ok {
+                result:
+                    Response::Stats {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays, report.listened_ms),
+            Reply::Ok {
+                result:
+                    Response::Wrapped {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays, report.listened_ms),
+            reply => panic!("unexpected reply: {reply:?}"),
+        }
+    }
+
+    fn year_list(plays: &[Play]) -> Vec<i32> {
+        (0..5)
+            .rev()
+            .filter(|&y| plays.iter().any(|&(year, counted, _)| year == y && counted))
+            .map(|y| 2020 + i32::from(y))
+            .collect()
+    }
+
+    fn observed_years(reader: &mut Connection) -> Vec<i32> {
+        match answer(reader, Request::Years).unwrap_or_else(failure) {
+            Reply::Ok {
+                result: Response::StatsYears { years },
+            } => years,
+            reply => panic!("unexpected reply: {reply:?}"),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn report_uses_one_snapshot(
+            before in plays(), during in plays(), wrapped in prop::option::of(0..5u8),
+        ) {
+            let database = Database::new();
+            let mut writer = Store::open(&database.0).unwrap();
+            write_plays(&mut writer, &before);
+            let mut reader = Connection::open_with_flags(&database.0, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let after = [before.as_slice(), &during].concat();
+            commit_during_read(&reader, writer, during,
+                "CREATE TEMP VIEW history_control AS SELECT step_writer(writes) AS writes FROM main.history_control");
+            // The first SELECT has read its input from the before snapshot when the writer runs.
+            prop_assert_eq!(observed_report(&mut reader, wrapped), expected_report(&before, wrapped));
+            prop_assert_eq!(observed_report(&mut reader, wrapped), expected_report(&after, wrapped));
+        }
+
+        #[test]
+        fn years_use_one_snapshot(
+            mut before in plays(), mut during in plays(), gap in 2..4u8,
+        ) {
+            // Prime the endpoints but leave a gap. Inserting the outside year *first*
+            // makes observing the gap without that outside year an impossible snapshot.
+            before.retain(|&(y, _, _)| y > 0 && y != gap);
+            before.extend([(1, true, 1), (4, true, 1)]);
+            during.splice(0..0, [(0, true, 1), (gap, true, 1)]);
+            let database = Database::new();
+            let mut writer = Store::open(&database.0).unwrap();
+            write_plays(&mut writer, &before);
+            let mut reader = Connection::open_with_flags(&database.0, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let after = [before.as_slice(), &during].concat();
+            commit_during_read(&reader, writer, during,
+                "CREATE TEMP VIEW play_history AS SELECT step_writer(played_at) AS played_at,counted FROM main.play_history");
+            prop_assert_eq!(observed_years(&mut reader), year_list(&before));
+            prop_assert_eq!(observed_years(&mut reader), year_list(&after));
+        }
+    }
+}
