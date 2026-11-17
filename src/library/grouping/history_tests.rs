@@ -10,10 +10,10 @@ use crate::{
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-const SLOTS: usize = 6;
-fn root(slot: usize) -> usize { slot / 3 + 1 }
+const SLOTS: usize = 8;
+fn root(slot: usize) -> usize { slot / 4 + 1 }
 fn path(slot: usize) -> String {
-    format!("/root{}/{}/{}.flac", root(slot), if slot % 3 == 2 { "disc2" } else { "disc1" }, slot)
+    format!("/root{}/{}/{}.flac", root(slot), if slot % 4 == 3 { "disc2" } else { "disc1" }, slot)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -239,7 +239,7 @@ proptest! {
 #[test]
 fn departing_shared_release_member_matrix() {
     use Edit::*;
-    for other in [1, 2, 3] { // same folder, same root/different disc, other root
+    for other in [1, 3, 4] { // same folder, same root/different disc, other root
         for exclusion in [false, true] {
             for single in [false, true] {
                 for replaced in [false, true] {
@@ -258,13 +258,32 @@ fn departing_shared_release_member_matrix() {
 #[test]
 fn visible_title_after_departure_matrix() {
     use Edit::*;
-    for other in [1, 2, 3] {
+    for other in [1, 3, 4] {
         for single in [false, true] {
             for via_retag in [false, true] {
                 let a = plain("Ann", Some("release-a"));
                 let b = Tags { album: "Deluxe", ..a };
                 let departure = if via_retag { Put(other, Tags { release: Some("release-z"), ..b }, single) } else { Unlink(other) };
                 check(&[Put(0, a, single), Put(other, b, single), departure], true);
+            }
+        }
+    }
+}
+
+#[test]
+fn untagged_companion_changes_release_as_folder_evidence_changes() {
+    use Edit::*;
+    for (old, new) in [("release-a", "release-z"), ("release-z", "release-a")] {
+        for single in [false, true] {
+            let a = plain("Ann", Some(old));
+            let b = plain("Bob", None);
+            let c = plain("Cat", Some(new));
+            // Three tracks in one folder. The fourth shares the first one's
+            // release, across roots, but has no knowledge of this folder.
+            for departure in [Unlink(2), Exclude(2), Put(2, plain("Cat", Some(old)), single)] {
+                check(&[Put(4,a,single), Put(0,a,!single), Put(1,b,single),
+                    Put(2,c,single), departure, Put(0, plain("Ann", Some(new)), !single),
+                    Exclude(1), Rescan(4)], !single);
             }
         }
     }
