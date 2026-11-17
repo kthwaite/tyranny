@@ -107,6 +107,9 @@ Boolean operators, `year:` and `liked:` retain their existing meaning. In partic
 `NOT radiohaed` excludes typo matches too; `NOT "radiohaed"` excludes only the
 literal text. The circled × clears the toolbar filter and keeps keyboard focus.
 
+Playing or adding tracks from a filtered list uses the same matching rules as
+browsing, including typo-tolerant matches; double-clicking starts at that result.
+
 SQLite schema 10 builds persistent substring/word indexes once on upgrade, without
 rescanning audio. Transactional triggers maintain them through metadata edits and
 deletion. The indexes cost disk space and import work; queries do not cache stale
@@ -149,6 +152,45 @@ reproducible run; minimized failures are persisted by proptest):
 FFMPEG_DIR="$(python3 scripts/build_ffmpeg.py)" MACOSX_DEPLOYMENT_TARGET=14.0 \
   PROPTEST_RNG_SEED=1222026 cargo test --locked --release \
   --target-dir target/portable-rust --lib filter::tests
+```
+
+### Diagnostics
+
+Open **Window → Diagnostics…** for timestamped client events and the managed
+server's log. Select the text of a failure, or use **Copy Diagnostics** to copy
+the displayed logs and connection context. Even after the status bar changes,
+the session log keeps the command name, request ID, error code and full
+multiline server message.
+
+The session log holds up to 500 events, normally within 1 MiB. The newest
+error is kept whole even if it alone exceeds that budget. Informational
+events are capped at 64 KiB. The server panel separately reads the latest
+256 KiB of `server.log` while visible and labels omitted or unavailable text.
+**Clear Session Events** does not delete the server log. Common credentials
+are redacted, but reports can include track names, SQL and local paths;
+review them before sharing.
+
+To check the native window from a macOS GUI login, enable Accessibility for
+the UI driver and Screen Recording for screenshot capture. From the repository
+root, run the following in `sh`. It uses an empty temporary library, a private
+launchd label, and file capture instead of audio output:
+
+```sh
+(
+  set -eu
+  scripts/build_macos.sh debug
+  swiftc scripts/native_ui_driver.swift -o target/native-ui-driver
+  fixture=$(mktemp -d /private/tmp/tyr-diag.XXXXXXXX)
+  label="dev.tyranny-likes-smoke.spike.$(uuidgen)"
+  trap 'launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || :' EXIT
+  "target/tyranny likes smoke.app/Contents/MacOS/tyranny likes smoke" \
+    --managed-state-dir "$fixture/state" --managed-agent-dir "$fixture/agents" \
+    --managed-label "$label" --managed-capture "$fixture/state/audio.f32" \
+    --ui-driver "$PWD/target/native-ui-driver" --native-diagnostics-smoke "$fixture/report"
+  printf 'Diagnostics artifacts: %s/report\n' "$fixture"
+  jq -e '.passed and (.cases | index("filtered-playback-failure-outlives-status") != null)' \
+    "$fixture/report/report.json"
+)
 ```
 
 ## Build and run

@@ -43,7 +43,10 @@ final class StationsModel {
         }
     }
 
-    func attach(_ player: PlayerModel) { self.player = player }
+    func attach(_ player: PlayerModel) {
+        self.player = player
+        lane.attachDiagnostics(player.diagnostics)
+    }
 
     var stations: [Station] { catalog.stations }
     /// The revision `stations` was read at; 0 until the first fetch.

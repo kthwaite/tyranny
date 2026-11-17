@@ -56,6 +56,8 @@ final class TaggingModel {
 
     func attach(_ player: PlayerModel) {
         self.player = player
+        lookupWire.diagnostics = player.diagnostics
+        editWire.diagnostics = player.diagnostics
     }
 
     func begin(albumID: UInt64, title: String) {

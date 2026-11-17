@@ -26,6 +26,10 @@ final class LyricsStore {
     @ObservationIgnored private var ticket = UUID()
     @ObservationIgnored private let wire = WireClient(requestDeadlineSeconds: 30)
 
+    init(diagnostics: DiagnosticsLog? = nil) {
+        wire.diagnostics = diagnostics
+    }
+
     func setVisible(_ visible: Bool) {
         guard visible != isVisible else { return }
         isVisible = visible
