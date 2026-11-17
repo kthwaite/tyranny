@@ -46,3 +46,56 @@ proptest! {
         prop_assert_eq!(actual, expected);
     }
 }
+
+// Metamorphic cross-check: each kind of list exposes the same range/occurrence
+// contract to destructive edits. Tombstones in regular playlists are selectable
+// but must either be excluded or reject the entire edit.
+#[test]
+fn sqlite_removal_matches_display_for_every_source() {
+    use std::collections::BTreeSet;
+    for source in [
+        ListSource::Library, ListSource::Album {id:1}, ListSource::Artist {id:1},
+        ListSource::AppearsOn {artist_id:4}, ListSource::Compilations,
+        ListSource::Genre {id:2}, ListSource::Recent,
+        ListSource::Playlist {id:1,revision:1}, ListSource::Smart {id:2,revision:1},
+    ] {
+        for fragmented in [false,true] {
+            for skip_missing in [false,true] {
+                let mut db = lists_fixture::library();
+                crate::store::migrate(&mut db,11).unwrap();
+                db.execute_batch("UPDATE library_state SET track_count=8;
+                    INSERT INTO playlists(id,name,search,revision,query) VALUES
+                    (1,'Manual','manual',1,NULL),(2,'Rule','rule',1,'year:1970');
+                    INSERT INTO playlist_entries(id,playlist_id,track_id,ordinal) VALUES
+                    (101,1,2,1),(102,1,1,2),(103,1,9,3),(104,1,2,4)").unwrap();
+                let now = crate::listing::unix_now();
+                db.execute("UPDATE library_tracks SET date_added=?1 WHERE id IN (1,2)", [now-86_400]).unwrap();
+                let list = list(source.clone());
+                let LibraryReply::ListTracks {page,..} = lists::execute(&mut db,
+                    LibraryCommand::ListTracks {list:list.clone(),revision:Some(11),offset:0,limit:32},now
+                ).unwrap() else { unreachable!() };
+                assert!(!page.entries.is_empty(), "{source:?}");
+                let ranges = if fragmented {
+                    (0..page.entries.len() as u64).step_by(2).map(|i|[i,i+1]).collect()
+                } else { vec![[0,u64::MAX]] };
+                let excluded: Vec<_> = page.entries.iter().filter(|r|skip_missing && !r.available)
+                    .map(|r|r.row_id).collect();
+                let selected: Vec<_> = page.entries.iter().enumerate().filter(|(i,r)|
+                    (!fragmented || i%2==0) && !excluded.contains(&r.row_id)).map(|(_,r)|r).collect();
+                let valid = selected.iter().all(|r| r.available);
+                let ids: BTreeSet<_> = selected.iter().filter(|_|valid).map(|r|r.track.id).collect();
+                let result = db::remove_tracks(&mut db,&TrackSelection::List {
+                    list, library_revision:11,ranges,excluded,first_row_id:Some(page.entries[0].row_id)
+                });
+                if valid { assert_eq!(result.unwrap(),(ids.len(),12)); }
+                else { assert_eq!(classify(result.unwrap_err()).kind,LibraryErrorKind::Invalid); }
+                let actual = db.prepare("SELECT id FROM library_assets WHERE excluded").unwrap()
+                    .query_map([], |row|row.get::<_,u64>(0)).unwrap().collect::<rusqlite::Result<BTreeSet<_>>>().unwrap();
+                assert_eq!(actual,ids,"{source:?}");
+                let counters: (usize,u64) = db.query_row("SELECT track_count,revision FROM library_state",[],
+                    |r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+                assert_eq!(counters,(8-ids.len(),11+u64::from(valid)));
+            }
+        }
+    }
+}
