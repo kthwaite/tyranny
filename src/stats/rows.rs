@@ -3,7 +3,7 @@ use super::period::{Date, Zone, local, start_of_day};
 use crate::store::EndReason;
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One `play_history` row, reduced to what statistics read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,19 +97,14 @@ fn plays(connection: &Connection) -> Result<Vec<PlayRow>> {
 }
 
 fn library(connection: &Connection) -> Result<LibraryIndex> {
-    let mut artists = Unique::default();
-    let mut query = connection.prepare("SELECT id,name FROM library_artists")?;
-    for row in query.query_map([], |row| {
-        Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (id, name) = row?;
-        artists.add(artist_key(&name), id);
-    }
+    let mut album_artists = HashSet::new();
     let mut tracks = Unique::default();
     let mut artist_tracks = HashMap::new();
     let mut query = connection.prepare(
-        "SELECT id,artist_id,json_extract(metadata,'$.artist'),json_extract(metadata,'$.title')
-         FROM library_tracks",
+        "SELECT t.id,t.artist_id,json_extract(t.metadata,'$.artist'),json_extract(t.metadata,'$.title'),al.artist_id
+         FROM library_tracks t JOIN library_assets a ON a.id=t.asset_id
+         JOIN library_roots r ON r.id=a.root_id JOIN library_albums al ON al.id=t.album_id
+         WHERE a.indexed=1 AND a.last_seen_scan>=r.completed_scan",
     )?;
     let rows = query.query_map([], |row| {
         Ok((
@@ -117,14 +112,29 @@ fn library(connection: &Connection) -> Result<LibraryIndex> {
             row.get::<_, u64>(1)?,
             row.get::<_, Option<String>>(2)?.unwrap_or_default(),
             row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            row.get::<_, u64>(4)?,
         ))
     })?;
     for row in rows {
-        let (id, artist_id, artist, title) = row?;
+        let (id, artist_id, artist, title, album_artist_id) = row?;
+        if album_artist_id != artist_id {
+            album_artists.insert(album_artist_id);
+        }
         *artist_tracks.entry(artist_id).or_insert(0) += 1;
         let title = artist_key(&title);
         if !title.is_empty() {
             tracks.add((artist_key(&artist), title), id);
+        }
+    }
+    // An artist can be credited on the album, the track, or both. Count tracks by
+    // performer as before, but don't let obsolete credits make a live name ambiguous.
+    let mut artists = Unique::default();
+    let mut query = connection.prepare("SELECT id,name FROM library_artists")?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: u64 = row.get(0)?;
+        if artist_tracks.contains_key(&id) || album_artists.contains(&id) {
+            artists.add(artist_key(row.get_ref(1)?.as_str()?), id);
         }
     }
     Ok(LibraryIndex {
@@ -218,6 +228,52 @@ mod tests {
     }
 
     #[test]
+    fn retained_tracks_only_supply_stats_links_while_visible() {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::store::migrate(&mut db, 11).unwrap();
+        db.execute_batch(
+            "INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/m','/m',1);
+             INSERT INTO library_assets(id,root_id,path,indexed,last_seen_scan)
+                 VALUES(1,1,'/m/1',1,1),(2,1,'/m/2',1,2);
+             INSERT INTO library_artists(id,identity,name,search)
+                 VALUES(1,'one','Band','band'),(2,'two','BAND','band'),(3,'album','Label','label');
+             INSERT INTO library_albums(id,identity,artist_id,title,album_artist,search,title_sort,compilation)
+                 VALUES(1,'album',3,'Release','Label','release','release',0);
+             INSERT INTO library_tracks(id,asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number)
+                 VALUES(1,1,1,1,'{\"artist\":\"Band\",\"title\":\"Song\"}','song','song',1,1,1),
+                       (2,2,2,1,'{\"artist\":\"BAND\",\"title\":\"Song\"}','song','song',1,1,2);
+             INSERT INTO play_history(played_at,entry_id,track_id,path,title,artist,album,counted)
+                 VALUES(100,1,1,'/m/1','Song','Band','Release',1);",
+        ).unwrap();
+        let key = ("band".into(), "song".into());
+        let (history, index) = load(&db).unwrap();
+        assert_eq!(index.tracks.get(&key), None);
+        assert_eq!(index.artists.get("band"), None);
+
+        // The second copy survives the completed scan. The first copy and its play remain stored.
+        db.execute("UPDATE library_roots SET completed_scan=2", [])
+            .unwrap();
+        let (after_scan, index) = load(&db).unwrap();
+        assert_eq!(after_scan, history);
+        assert_eq!(index.tracks.get(&key), Some(&2));
+        assert_eq!(index.artists.get("band"), Some(&2));
+        assert_eq!(index.artists.get("label"), Some(&3));
+        assert_eq!(index.artist_tracks, HashMap::from([(2, 1)]));
+
+        // Removing the surviving copy leaves no library link, including the album-only credit.
+        db.execute(
+            "UPDATE library_assets SET indexed=0,excluded=1 WHERE id=2",
+            [],
+        )
+        .unwrap();
+        let (after_removal, index) = load(&db).unwrap();
+        assert_eq!(after_removal, history);
+        assert!(index.tracks.is_empty());
+        assert!(index.artists.is_empty());
+        assert!(index.artist_tracks.is_empty());
+    }
+
+    #[test]
     fn load_reads_plays_in_order_and_indexes_unique_library_keys() {
         let path = std::env::temp_dir().join(format!(
             "tyranny-likes-smoke-stats-{}.sqlite",
@@ -273,7 +329,7 @@ mod tests {
             (rows[3].listened_ms, rows[3].end_reason, rows[3].counted),
             (Some(5_000), None, false)
         );
-        // "Solo" and "SOLO" share a key, so neither is indexed. The two "untrue" tracks clash too.
+        // Neither "Solo" artist has visible credits. The two visible "untrue" tracks clash.
         assert_eq!(library.artists.get("burial"), Some(&1));
         assert_eq!(library.artists.get("solo"), None);
         assert_eq!(

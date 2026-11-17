@@ -19,7 +19,8 @@ pub struct PeriodRequest {
     pub anchor: String,
 }
 
-/// An artist in a ranking. `artist_id` is set when the name matches exactly one library artist.
+/// `artist_id` is set when exactly one artist credited on a visible library track or
+/// its album matches the ranked name.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct RankedArtist {
     pub name: String,
@@ -28,7 +29,7 @@ pub struct RankedArtist {
     pub artist_id: Option<u64>,
 }
 
-/// A track in a ranking. `track_id` is set when the title and artist match exactly one library track.
+/// `track_id` is set when exactly one visible library track matches the ranked title and artist.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct RankedTrack {
     pub title: String,
@@ -69,7 +70,8 @@ pub struct LapsedLove {
     pub artist_id: Option<u64>,
 }
 
-/// An artist whose plays sit in a few tracks. `library_tracks` is the artist's library track count.
+/// An artist whose plays sit in a few tracks. `library_tracks` counts visible tracks
+/// credited to this performer, not tracks credited only through their album.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ShallowDive {
     pub name: String,
