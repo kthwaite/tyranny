@@ -457,7 +457,7 @@ impl Reconciliation {
             transaction.execute(
                 "INSERT OR IGNORE INTO temp.library_album_titles(album_id)
                  SELECT t.album_id FROM temp.library_album_members m
-                 JOIN library_tracks t ON t.id=m.track_id JOIN library_albums al ON al.id=t.album_id
+                 CROSS JOIN library_tracks t ON t.id=m.track_id JOIN library_albums al ON al.id=t.album_id
                  WHERE m.track_id<=?1 AND al.title!=json_extract(t.metadata,'$.album')",
                 [rows.last().expect("nonempty batch").0],
             )?;
