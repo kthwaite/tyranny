@@ -31,6 +31,8 @@ def main():
         music = run / 'music'
         music.mkdir()
         if not args.server_only:
+            subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=teal:s=96x96',
+                            '-frames:v', '1', str(music / 'cover.png')], check=True)
             for index, title in enumerate(['Alpha', 'Beta', 'Gamma']):
                 subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
                     'anullsrc=r=44100:cl=stereo', '-t', '1', '-metadata', f'title={title}',

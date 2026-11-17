@@ -120,14 +120,21 @@ enum NativeLikesSmoke {
         }
         try kit.check(row.track.liked, "Album did not inherit liked state")
         let albumSelection = expansion.selectedRowIDs
+        // Give the transport an enabled Play button without starting playback.
+        try await kit.press("album-add-up-next")
+        try await kit.wait("queued album and displayed cover") {
+            model.snapshot?.queue_length == 3 && model.transport.canPlayPause
+                && model.artwork.value(for: model.artwork.albumRequest(expansion.albumID)).image != nil
+        }
         try await measure(kit, tableID: "album-track-table",
-                          heart: "album-track-table-cell-\(row.row_id)-liked", label: "album")
+                          heart: "album-track-table-cell-\(row.row_id)-liked", label: "album", albumID: expansion.albumID)
         try await clickHeart(kit, identifier: "album-track-table-cell-\(row.row_id)-liked", tableID: "album-track-table")
         try await kit.wait("album heart refresh") { !model.busy && expansion.tracks.contains { $0.track.id == alpha.track.id && !$0.track.liked } }
-        try kit.check(expansion.selectedRowIDs == albumSelection && model.snapshot?.queue_length == 0,
+        try kit.check(expansion.selectedRowIDs == albumSelection && model.snapshot?.queue_length == 3,
                       "Album heart changed selection or playback")
         try kit.capture("album-hearts")
         kit.passed("album-expansion-heart-refreshes-without-selection-or-playback")
+        kit.passed("heart-keeps-album-art-playlist-and-playback-actions-available")
         try kit.check(model.connected && model.message == nil
                         && model.playlistConnectionGeneration == connectionGeneration,
                       "Likes caused a connection reset or protocol error: \(model.message ?? "none")")
@@ -137,7 +144,8 @@ enum NativeLikesSmoke {
 
     /// Timed samples use the displayed button's target/action, excluding external driver startup.
     /// The surrounding scenario also exercises actual pointer clicks.
-    private static func measure(_ kit: NativePlaylistKit, tableID: String, heart: String, label: String) async throws {
+    private static func measure(_ kit: NativePlaylistKit, tableID: String, heart: String, label: String,
+                                albumID: UInt64? = nil) async throws {
         guard let table = table(tableID) as? ActivatingTableView else {
             throw NativePlaylistKit.Failure(message: "Missing measured table")
         }
@@ -149,6 +157,16 @@ enum NativeLikesSmoke {
                    cell.button.accessibilityIdentifier() == heart { return cell.button }
             }
             return nil
+        }
+        func checkSurroundings() throws {
+            let model = kit.model
+            try kit.check(model.canMutate && model.transport.canChangeModes,
+                          "Heart disabled unrelated playlist or transport actions")
+            if let albumID {
+                try kit.check(model.transport.canPlayPause, "Heart disabled Play")
+                try kit.check(model.artwork.value(for: model.artwork.albumRequest(albumID)).image != nil,
+                              "Displayed album cover became a placeholder")
+            }
         }
         var samples: [[String: Any]] = []
         for _ in 0..<10 {
@@ -164,6 +182,7 @@ enum NativeLikesSmoke {
             }
             let start = ContinuousClock.now
             control.performClick(nil)
+            try checkSurroundings()
             var replyMS: Double?
             while button()?.accessibilityValue() as? String != expected || kit.model.busy {
                 if !kit.model.busy && replyMS == nil {
@@ -171,11 +190,16 @@ enum NativeLikesSmoke {
                 }
                 try kit.check(start.duration(to: .now) < .seconds(5), "Heart failed to update")
                 try await Task.sleep(for: .milliseconds(1))
+                try checkSurroundings()
             }
             table.displayIfNeeded()
             let visibleMS = milliseconds(start.duration(to: .now))
             // Include the grouped-layout reply that follows the row refresh.
-            try await Task.sleep(for: .milliseconds(80))
+            let settleUntil = ContinuousClock.now.advanced(by: .milliseconds(80))
+            repeat {
+                try checkSurroundings()
+                try await Task.sleep(for: .milliseconds(4))
+            } while ContinuousClock.now < settleUntil
             table.reloadObserver = nil
             samples.append(["visible_ms": visibleMS, "reply_ms": replyMS ?? visibleMS,
                             "full_reloads": fullReloads, "reloaded_cells": cellReloads])
