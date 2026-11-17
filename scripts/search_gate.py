@@ -96,7 +96,7 @@ def main():
     parser.add_argument("--server", default="target/portable-rust/release/tyranny-likes-smoke-server")
     parser.add_argument("--output", required=True, help="JSON report, including raw samples")
     parser.add_argument("--samples", type=int, default=30, help="Warm round-robin samples per case (minimum 30)")
-    parser.add_argument("--protocol-version", type=int, default=29)
+    parser.add_argument("--protocol-version", type=int, default=30)
     parser.add_argument("--require-typos", action="store_true")
     args = parser.parse_args()
     if args.samples < 30:

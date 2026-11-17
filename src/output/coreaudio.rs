@@ -257,39 +257,27 @@ impl CoreAudioOutput {
         // reroute or change native rates without changing our 48 kHz client
         // format; refreshing here avoids a stale startup-only drain estimate.
         // SAFETY: each property is requested with its documented scalar type.
-        let (buffer, safety, device_latency, native_rate, unit_latency) = unsafe {
-            let device: u32 = unit_property(self.unit, kAudioOutputUnitProperty_CurrentDevice)?;
-            ensure!(device != 0, "CoreAudio has no default output device");
-            let alive: u32 = device_property(
+        let device: u32 =
+            unsafe { unit_property(self.unit, kAudioOutputUnitProperty_CurrentDevice) }?;
+        ensure!(device != 0, "CoreAudio has no default output device");
+        let alive: u32 = unsafe {
+            device_property(
                 device,
                 kAudioDevicePropertyDeviceIsAlive,
                 kAudioObjectPropertyScopeGlobal,
-            )?;
-            ensure!(alive != 0, "CoreAudio default output device is unavailable");
-            (
-                device_property::<u32>(
-                    device,
-                    kAudioDevicePropertyBufferFrameSize,
-                    kAudioObjectPropertyScopeGlobal,
-                )?,
-                device_property::<u32>(
-                    device,
-                    kAudioDevicePropertySafetyOffset,
-                    kAudioObjectPropertyScopeOutput,
-                )?,
-                device_property::<u32>(
-                    device,
-                    kAudioDevicePropertyLatency,
-                    kAudioObjectPropertyScopeOutput,
-                )?,
-                device_property::<f64>(
-                    device,
-                    kAudioDevicePropertyNominalSampleRate,
-                    kAudioObjectPropertyScopeGlobal,
-                )?,
-                unit_property::<f64>(self.unit, kAudioUnitProperty_Latency)?,
             )
+        }?;
+        ensure!(alive != 0, "CoreAudio default output device is unavailable");
+        // The HAL can destroy the device between two of these reads, while
+        // DefaultOutput reroutes. That is not an output failure: keep the
+        // previous estimate, and the next refresh reads the new device.
+        let timing = keep_estimate_if_gone(unsafe { device_timing(device) }, || {
+            self.device_gone(device)
+        })?;
+        let Some((buffer, safety, device_latency, native_rate)) = timing else {
+            return Ok(());
         };
+        let unit_latency: f64 = unsafe { unit_property(self.unit, kAudioUnitProperty_Latency) }?;
         ensure!(
             native_rate.is_finite() && native_rate > 0.0,
             "CoreAudio returned an invalid native sample rate"
@@ -308,6 +296,62 @@ impl CoreAudioOutput {
             .context("CoreAudio predicted output latency overflows its host clock")?;
         self.state().latency_nanos.store(nanos, Ordering::Release);
         Ok(())
+    }
+}
+
+impl CoreAudioOutput {
+    /// True when the unit left `device`, or the HAL no longer has it.
+    fn device_gone(&self, device: u32) -> bool {
+        // SAFETY: each property is requested with its documented scalar type.
+        let current: Result<u32> =
+            unsafe { unit_property(self.unit, kAudioOutputUnitProperty_CurrentDevice) };
+        let alive: Result<u32> = unsafe {
+            device_property(
+                device,
+                kAudioDevicePropertyDeviceIsAlive,
+                kAudioObjectPropertyScopeGlobal,
+            )
+        };
+        !matches!((current, alive), (Ok(current), Ok(alive)) if current == device && alive != 0)
+    }
+}
+
+/// Buffer frames, safety offset, latency frames and native sample rate.
+// SAFETY: callers must pass a CoreAudio device object ID.
+unsafe fn device_timing(device: u32) -> Result<(u32, u32, u32, f64)> {
+    // SAFETY: each property is requested with its documented scalar type.
+    unsafe {
+        Ok((
+            device_property(
+                device,
+                kAudioDevicePropertyBufferFrameSize,
+                kAudioObjectPropertyScopeGlobal,
+            )?,
+            device_property(
+                device,
+                kAudioDevicePropertySafetyOffset,
+                kAudioObjectPropertyScopeOutput,
+            )?,
+            device_property(
+                device,
+                kAudioDevicePropertyLatency,
+                kAudioObjectPropertyScopeOutput,
+            )?,
+            device_property(
+                device,
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            )?,
+        ))
+    }
+}
+
+/// A failed device read is an error only while the device is still there.
+fn keep_estimate_if_gone<T>(read: Result<T>, gone: impl FnOnce() -> bool) -> Result<Option<T>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(_) if gone() => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -536,4 +580,34 @@ unsafe fn device_property<T: Copy>(device: u32, property: u32, scope: u32) -> Re
     );
     // SAFETY: successful scalar query initialized exactly the expected type.
     Ok(unsafe { value.assume_init() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn failed_read_of_a_gone_device_keeps_the_estimate() {
+        let read: Result<u32> = Err(anyhow!("OSStatus 560947818"));
+        assert_eq!(keep_estimate_if_gone(read, || true).unwrap(), None);
+    }
+
+    #[test]
+    fn failed_read_of_a_present_device_is_an_error() {
+        let read: Result<u32> = Err(anyhow!("OSStatus 560947818"));
+        assert!(keep_estimate_if_gone(read, || false).is_err());
+    }
+
+    #[test]
+    fn successful_read_never_asks_whether_the_device_is_gone() {
+        let value = keep_estimate_if_gone(Ok(7), || panic!("asked")).unwrap();
+        assert_eq!(value, Some(7));
+    }
+
+    #[test]
+    fn unknown_device_has_no_timing() {
+        // SAFETY: an unknown object ID only makes the HAL return an error.
+        assert!(unsafe { device_timing(u32::MAX - 1) }.is_err());
+    }
 }
