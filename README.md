@@ -78,6 +78,10 @@ Recovery retains queued PCM, position and volume; it does not retry in the
 background or resume playback by itself. Audio already handed to the old device
 cannot be recalled. If reopening fails, playback stays paused with that error.
 
+If macOS switches devices while the server is reading output timing, the server
+keeps its last latency estimate until the next refresh. A failed timing read
+from a device that is still active remains an error.
+
 ### Removing music
 
 Select songs in a track list or expanded album, right-click, and choose
