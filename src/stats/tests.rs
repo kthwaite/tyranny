@@ -42,6 +42,121 @@ fn all() -> Request {
     })
 }
 
+fn open_at(writer: &mut Store, played_at: i64) -> i64 {
+    writer
+        .open_play(&crate::store::PlayRecord {
+            entry_id: 1,
+            track_id: None,
+            path: "/m/song".into(),
+            title: "Song".into(),
+            artist: "Band".into(),
+            album: "A".into(),
+            duration_ms: None,
+            source: None,
+            played_at,
+            raw_title: None,
+        })
+        .unwrap()
+}
+
+// The scalar function receives a value already read from the report's WAL snapshot.
+// Count the supplied rows on the writer connection before returning that unchanged value.
+fn count_during_read(database: &Database, writer: Store, rows: Vec<i64>, view: &str) -> Connection {
+    let reader =
+        Connection::open_with_flags(&database.0, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let pending = std::cell::RefCell::new(Some((writer, rows)));
+    reader
+        .create_scalar_function(
+            "count_pending",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |ctx| {
+                if let Some((mut writer, rows)) = pending.take() {
+                    for row in rows {
+                        writer.count_play(row).unwrap();
+                    }
+                }
+                ctx.get::<i64>(0)
+            },
+        )
+        .unwrap();
+    reader.execute_batch(view).unwrap();
+    reader
+}
+
+fn assert_report_snapshot(request: impl Fn() -> Request) {
+    let database = Database::new();
+    let mut writer = Store::open(&database.0).unwrap();
+    let row = open_at(&mut writer, 1_720_000_000); // 2024
+    let mut reader = count_during_read(
+        &database,
+        writer,
+        vec![row],
+        "CREATE TEMP VIEW history_control AS
+         SELECT count_pending(writes) AS writes FROM main.history_control",
+    );
+    for expected in [(1, 0), (2, 1)] {
+        let reply = answer(&mut reader, request()).unwrap_or_else(failure);
+        let pair = match reply {
+            Reply::Ok {
+                result:
+                    Response::Stats {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays),
+            Reply::Ok {
+                result:
+                    Response::Wrapped {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays),
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert_eq!(pair, expected);
+    }
+}
+
+#[test]
+fn stats_returns_the_revision_of_the_reported_plays() {
+    assert_report_snapshot(all);
+}
+
+#[test]
+fn wrapped_returns_the_revision_of_the_reported_plays() {
+    assert_report_snapshot(|| Request::Wrapped(2024));
+}
+
+#[test]
+fn years_never_mix_old_bounds_with_new_counted_plays() {
+    let database = Database::new();
+    let mut writer = Store::open(&database.0).unwrap();
+    for time in [1_625_000_000, 1_720_000_000] {
+        // 2021, 2024
+        let row = open_at(&mut writer, time);
+        writer.count_play(row).unwrap();
+    }
+    let outside = open_at(&mut writer, 1_593_000_000); // 2020
+    let inside = open_at(&mut writer, 1_656_000_000); // 2022
+    let mut reader = count_during_read(
+        &database,
+        writer,
+        vec![outside, inside],
+        "CREATE TEMP VIEW play_history AS
+         SELECT count_pending(played_at) AS played_at, counted FROM main.play_history",
+    );
+    // 2022 without 2020 never existed: the outside year counted first.
+    for expected in [vec![2024, 2021], vec![2024, 2022, 2021, 2020]] {
+        match answer(&mut reader, Request::Years).unwrap_or_else(failure) {
+            Reply::Ok {
+                result: Response::StatsYears { years },
+            } => assert_eq!(years, expected),
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn stats_are_served_by_the_worker_without_an_owner() {
     let database = Database::new();
@@ -209,4 +324,198 @@ async fn wrapped_years_outside_the_calendar_are_rejected_before_any_work() {
         Reply::Ok { .. }
     ));
     workers.shutdown();
+}
+
+// Cross the two report repairs: even when a history commit is immediately
+// followed by a library commit, an old play count cannot have the new link.
+#[test]
+fn sqlite_report_links_and_listening_history_share_a_snapshot() {
+    for wrapped in [false, true] {
+        for excluded in [false, true] {
+            let db = Database::new();
+            db.execute("INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/m','/m',1);
+                INSERT INTO library_assets(id,root_id,path,indexed,last_seen_scan) VALUES(1,1,'/m/song',1,1);
+                INSERT INTO library_artists(id,identity,name,search) VALUES(1,'band','Band','band');
+                INSERT INTO library_albums(id,identity,artist_id,title,album_artist,search,title_sort,compilation)
+                  VALUES(1,'a',1,'A','Band','a','a',0);
+                INSERT INTO library_tracks(id,asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number)
+                  VALUES(1,1,1,1,'{\"title\":\"Song\",\"artist\":\"Band\"}','song','song',1,1,1);
+                UPDATE library_state SET root_count=1,track_count=1;");
+            let mut writer = Store::open(&db.0).unwrap();
+            let first = open_at(&mut writer,1_720_000_000);
+            writer.count_play(first).unwrap();
+            let second = open_at(&mut writer,1_720_000_100);
+            let catalog = Connection::open(&db.0).unwrap();
+            let pending = std::cell::RefCell::new(Some((writer,catalog)));
+            let mut reader = Connection::open_with_flags(&db.0,OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            reader.create_scalar_function("advance",1,rusqlite::functions::FunctionFlags::SQLITE_UTF8,move |ctx| {
+                if let Some((mut writer, mut catalog)) = pending.take() {
+                    writer.count_play(second).unwrap();
+                    let tx = catalog.transaction()?;
+                    tx.execute_batch(if excluded { "UPDATE library_assets SET indexed=0,excluded=1" }
+                        else { "UPDATE library_roots SET completed_scan=2" })?;
+                    tx.execute("UPDATE library_state SET revision=revision+1,track_count=0",[])?;
+                    tx.commit()?;
+                }
+                ctx.get::<i64>(0)
+            }).unwrap();
+            reader.execute_batch("CREATE TEMP VIEW history_control AS SELECT advance(writes) AS writes FROM main.history_control").unwrap();
+            for expected in [(3,1,Some(1)),(4,2,None)] {
+                let request = if wrapped { Request::Wrapped(2024) } else { all() };
+                let tuple = match answer(&mut reader,request).unwrap_or_else(failure) {
+                    Reply::Ok { result: Response::Stats {stats_revision,report} } =>
+                        (stats_revision, report.plays, report.top_tracks_by_plays[0].track_id),
+                    Reply::Ok { result: Response::Wrapped {stats_revision,report} } =>
+                        (stats_revision, report.plays, report.top_tracks[0].track_id),
+                    other => panic!("unexpected reply: {other:?}"),
+                };
+                assert_eq!(tuple,expected);
+            }
+        }
+    }
+}
+
+mod snapshot_search {
+    use super::*;
+    use crate::store::{EndReason, PlayRecord};
+    use proptest::prelude::*;
+    use rusqlite::functions::FunctionFlags;
+    use std::cell::RefCell;
+
+    // Year offset from 2020, whether it counted, milliseconds listened.
+    type Play = (u8, bool, u16);
+
+    fn plays() -> impl Strategy<Value = Vec<Play>> {
+        prop::collection::vec((0..5u8, any::<bool>(), 0..3001u16), 0..7)
+    }
+
+    fn write_plays(store: &mut Store, plays: &[Play]) {
+        for &(year, counted, ms) in plays {
+            // Mid-year, far from any leap day, calendar boundary or current time.
+            let played_at = 1_593_604_800 + i64::from(year) * 365 * 86_400;
+            let row = store
+                .open_play(&PlayRecord {
+                    entry_id: 1,
+                    track_id: None,
+                    path: "/m/song".into(),
+                    title: "Song".into(),
+                    artist: "Band".into(),
+                    album: "A".into(),
+                    duration_ms: None,
+                    source: None,
+                    played_at,
+                    raw_title: None,
+                })
+                .unwrap();
+            if counted {
+                store.count_play(row).unwrap();
+            }
+            store
+                .close_play(row, u64::from(ms), EndReason::Finished, played_at + 3)
+                .unwrap();
+        }
+    }
+
+    fn commit_during_read(reader: &Connection, writer: Store, batch: Vec<Play>, view: &str) {
+        let pending = RefCell::new(Some((writer, batch)));
+        reader
+            .create_scalar_function("step_writer", 1, FunctionFlags::SQLITE_UTF8, move |ctx| {
+                if let Some((mut writer, batch)) = pending.take() {
+                    write_plays(&mut writer, &batch);
+                }
+                ctx.get::<i64>(0)
+            })
+            .unwrap();
+        reader.execute_batch(view).unwrap();
+    }
+
+    fn expected_report(plays: &[Play], wrapped: Option<u8>) -> (u64, u64, u64) {
+        let mut revision = 0;
+        let mut count = 0;
+        let mut time = 0;
+        for &(year, counted, ms) in plays {
+            revision += 2 + u64::from(counted); // open, optional count, close
+            if wrapped.is_none_or(|selected| year == selected) {
+                count += u64::from(counted);
+                time += u64::from(ms);
+            }
+        }
+        (revision, count, time)
+    }
+
+    fn observed_report(reader: &mut Connection, wrapped: Option<u8>) -> (u64, u64, u64) {
+        let request = wrapped.map_or_else(all, |y| Request::Wrapped(2020 + i32::from(y)));
+        match answer(reader, request).unwrap_or_else(failure) {
+            Reply::Ok {
+                result:
+                    Response::Stats {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays, report.listened_ms),
+            Reply::Ok {
+                result:
+                    Response::Wrapped {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays, report.listened_ms),
+            reply => panic!("unexpected reply: {reply:?}"),
+        }
+    }
+
+    fn year_list(plays: &[Play]) -> Vec<i32> {
+        (0..5)
+            .rev()
+            .filter(|&y| plays.iter().any(|&(year, counted, _)| year == y && counted))
+            .map(|y| 2020 + i32::from(y))
+            .collect()
+    }
+
+    fn observed_years(reader: &mut Connection) -> Vec<i32> {
+        match answer(reader, Request::Years).unwrap_or_else(failure) {
+            Reply::Ok {
+                result: Response::StatsYears { years },
+            } => years,
+            reply => panic!("unexpected reply: {reply:?}"),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn report_uses_one_snapshot(
+            before in plays(), during in plays(), wrapped in prop::option::of(0..5u8),
+        ) {
+            let database = Database::new();
+            let mut writer = Store::open(&database.0).unwrap();
+            write_plays(&mut writer, &before);
+            let mut reader = Connection::open_with_flags(&database.0, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let after = [before.as_slice(), &during].concat();
+            commit_during_read(&reader, writer, during,
+                "CREATE TEMP VIEW history_control AS SELECT step_writer(writes) AS writes FROM main.history_control");
+            // The first SELECT has read its input from the before snapshot when the writer runs.
+            prop_assert_eq!(observed_report(&mut reader, wrapped), expected_report(&before, wrapped));
+            prop_assert_eq!(observed_report(&mut reader, wrapped), expected_report(&after, wrapped));
+        }
+
+        #[test]
+        fn years_use_one_snapshot(
+            mut before in plays(), mut during in plays(), gap in 2..4u8,
+        ) {
+            // Prime the endpoints but leave a gap. Inserting the outside year *first*
+            // makes observing the gap without that outside year an impossible snapshot.
+            before.retain(|&(y, _, _)| y > 0 && y != gap);
+            before.extend([(1, true, 1), (4, true, 1)]);
+            during.splice(0..0, [(0, true, 1), (gap, true, 1)]);
+            let database = Database::new();
+            let mut writer = Store::open(&database.0).unwrap();
+            write_plays(&mut writer, &before);
+            let mut reader = Connection::open_with_flags(&database.0, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let after = [before.as_slice(), &during].concat();
+            commit_during_read(&reader, writer, during,
+                "CREATE TEMP VIEW play_history AS SELECT step_writer(played_at) AS played_at,counted FROM main.play_history");
+            prop_assert_eq!(observed_years(&mut reader), year_list(&before));
+            prop_assert_eq!(observed_years(&mut reader), year_list(&after));
+        }
+    }
 }

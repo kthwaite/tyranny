@@ -6,6 +6,9 @@ use crate::{
     protocol::ErrorCode,
 };
 
+#[path = "playlists_order_props.rs"]
+mod occurrence_model;
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {

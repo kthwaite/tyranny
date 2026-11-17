@@ -422,6 +422,10 @@ fn bump_writes(connection: &rusqlite::Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod sqlite_history_properties {
+        include!("sqlite_history_properties.rs");
+    }
     use crate::{
         SAMPLE_RATE,
         protocol::{QueueSource, SourceKind},
