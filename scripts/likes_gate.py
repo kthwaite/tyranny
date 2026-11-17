@@ -19,6 +19,8 @@ def main():
     parser.add_argument('--server', default='target/portable-rust/release/tyranny-likes-smoke-server')
     parser.add_argument('--output', required=True)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--album-surface', action='store_true',
+                        help='Click displayed AppKit hearts in-process; no Accessibility permission required')
     parser.add_argument('--server-only', action='store_true',
                         help='Measure writes on 50,000 synthetic tracks without launching the UI')
     args = parser.parse_args()
@@ -31,6 +33,8 @@ def main():
         music = run / 'music'
         music.mkdir()
         if not args.server_only:
+            subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=teal:s=96x96',
+                            '-frames:v', '1', str(music / 'cover.png')], check=True)
             for index, title in enumerate(['Alpha', 'Beta', 'Gamma']):
                 subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
                     'anullsrc=r=44100:cl=stereo', '-t', '1', '-metadata', f'title={title}',
@@ -82,6 +86,8 @@ def main():
                 else:
                     command = [str(app), '--socket', ready['socket_path'], '--likes-smoke-output',
                                str(output), '--ui-driver', str(Path('target/native-ui-driver').resolve())]
+                    if args.album_surface:
+                        command.append('--likes-album-surface')
                     if args.check:
                         command.append('--likes-performance-check')
                     with (output / 'client.log').open('w') as client_log:

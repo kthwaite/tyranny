@@ -277,7 +277,7 @@ enum NativeRenderViews {
         return "\(name): ok \(Int(view.bounds.width))x\(Int(view.bounds.height)) \(data.count) bytes"
     }
 
-    private static func render(_ name: String, into output: URL) -> String {
+    static func render(_ name: String, into output: URL) -> String {
         guard let window = NSApp.windows.first(where: { $0.title == "tyranny likes smoke" }),
               let frame = window.contentView?.superview else { return "\(name): no window" }
         return write(frame, name, into: output)

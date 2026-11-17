@@ -14,6 +14,7 @@ enum NativeLikesSmoke {
         started = true
         let kit = NativePlaylistKit(model: model, navigation: navigation,
                                     output: URL(fileURLWithPath: args[index + 1], isDirectory: true), tag: "LIKES_SMOKE")
+        let surfaceOnly = args.contains("--likes-album-surface")
         Task {
             var failure: String?
             do {
@@ -23,16 +24,51 @@ enum NativeLikesSmoke {
                     model.connected && model.snapshot?.library.tracks == 3
                         && model.snapshot?.library.scan.phase == "complete"
                 }
-                try await kit.drive("activate")
-                try await exercise(kit)
+                if surfaceOnly {
+                    try await albumSurface(kit)
+                } else {
+                    try await kit.drive("activate")
+                    try await exercise(kit)
+                }
             } catch {
                 failure = error.localizedDescription
-                try? kit.capture("likes-failure")
+                if surfaceOnly {
+                    kit.observations["render"] = NativeRenderViews.render("likes-failure", into: kit.output)
+                } else {
+                    try? kit.capture("likes-failure")
+                }
             }
-            try? kit.finish(automation: "Actual AX/CGEvent heart clicks, toolbar toggle, typed filter and column menu; observation of authoritative reloaded rows; isolated Alpha/Beta/Gamma FLAC fixture.", error: failure)
+            try? kit.finish(automation: surfaceOnly
+                ? "AppKit performClick on displayed album hearts with a queued album and local cover."
+                : "Actual AX/CGEvent heart clicks, toolbar toggle, typed filter and column menu; observation of authoritative reloaded rows; isolated Alpha/Beta/Gamma FLAC fixture.", error: failure)
             NativePlaylistKit.endSheets()
             NSApp.terminate(nil)
         }
+    }
+
+    /// Focused in-process gate when the terminal cannot drive other processes through AX.
+    private static func albumSurface(_ kit: NativePlaylistKit) async throws {
+        let hidden = ColumnPreferences.shared.isHidden("liked")
+        if hidden { ColumnPreferences.shared.setHidden("liked", false) }
+        defer { if hidden { ColumnPreferences.shared.setHidden("liked", true) } }
+        kit.navigation.destination = .albums
+        try await kit.wait("album grid") { NativeAlbumsSmoke.grid?.album(at: 0) != nil }
+        guard let grid = NativeAlbumsSmoke.grid, let album = grid.album(at: 0) else {
+            throw NativePlaylistKit.Failure(message: "Missing fixture album")
+        }
+        grid.toggleExpansion(album)
+        try await kit.wait("expanded album") { grid.expansion?.tracks.count == 3 && table("album-track-table") != nil }
+        guard let expansion = grid.expansion, let row = expansion.tracks.first else {
+            throw NativePlaylistKit.Failure(message: "Missing fixture tracks")
+        }
+        grid.addToUpNext(expansion)
+        try await kit.wait("play enabled and cover displayed") {
+            kit.model.transport.canPlayPause && kit.model.artwork.value(for: kit.model.artwork.albumRequest(album.id)).image != nil
+        }
+        try await measure(kit, tableID: "album-track-table", heart: "album-track-table-cell-\(row.row_id)-liked",
+                          label: "album", albumID: album.id)
+        kit.observations["render"] = NativeRenderViews.render("album-hearts", into: kit.output)
+        kit.passed("heart-keeps-album-art-playlist-and-playback-actions-available")
     }
 
     private static func exercise(_ kit: NativePlaylistKit) async throws {
@@ -120,14 +156,21 @@ enum NativeLikesSmoke {
         }
         try kit.check(row.track.liked, "Album did not inherit liked state")
         let albumSelection = expansion.selectedRowIDs
+        // Give the transport an enabled Play button without starting playback.
+        try await kit.press("album-add-up-next")
+        try await kit.wait("queued album and displayed cover") {
+            model.snapshot?.queue_length == 3 && model.transport.canPlayPause
+                && model.artwork.value(for: model.artwork.albumRequest(expansion.albumID)).image != nil
+        }
         try await measure(kit, tableID: "album-track-table",
-                          heart: "album-track-table-cell-\(row.row_id)-liked", label: "album")
+                          heart: "album-track-table-cell-\(row.row_id)-liked", label: "album", albumID: expansion.albumID)
         try await clickHeart(kit, identifier: "album-track-table-cell-\(row.row_id)-liked", tableID: "album-track-table")
         try await kit.wait("album heart refresh") { !model.busy && expansion.tracks.contains { $0.track.id == alpha.track.id && !$0.track.liked } }
-        try kit.check(expansion.selectedRowIDs == albumSelection && model.snapshot?.queue_length == 0,
+        try kit.check(expansion.selectedRowIDs == albumSelection && model.snapshot?.queue_length == 3,
                       "Album heart changed selection or playback")
         try kit.capture("album-hearts")
         kit.passed("album-expansion-heart-refreshes-without-selection-or-playback")
+        kit.passed("heart-keeps-album-art-playlist-and-playback-actions-available")
         try kit.check(model.connected && model.message == nil
                         && model.playlistConnectionGeneration == connectionGeneration,
                       "Likes caused a connection reset or protocol error: \(model.message ?? "none")")
@@ -137,7 +180,8 @@ enum NativeLikesSmoke {
 
     /// Timed samples use the displayed button's target/action, excluding external driver startup.
     /// The surrounding scenario also exercises actual pointer clicks.
-    private static func measure(_ kit: NativePlaylistKit, tableID: String, heart: String, label: String) async throws {
+    private static func measure(_ kit: NativePlaylistKit, tableID: String, heart: String, label: String,
+                                albumID: UInt64? = nil) async throws {
         guard let table = table(tableID) as? ActivatingTableView else {
             throw NativePlaylistKit.Failure(message: "Missing measured table")
         }
@@ -149,6 +193,16 @@ enum NativeLikesSmoke {
                    cell.button.accessibilityIdentifier() == heart { return cell.button }
             }
             return nil
+        }
+        func checkSurroundings() throws {
+            let model = kit.model
+            try kit.check(model.canMutate && model.transport.canChangeModes,
+                          "Heart disabled unrelated playlist or transport actions")
+            if let albumID {
+                try kit.check(model.transport.canPlayPause, "Heart disabled Play")
+                try kit.check(model.artwork.value(for: model.artwork.albumRequest(albumID)).image != nil,
+                              "Displayed album cover became a placeholder")
+            }
         }
         var samples: [[String: Any]] = []
         for _ in 0..<10 {
@@ -164,18 +218,24 @@ enum NativeLikesSmoke {
             }
             let start = ContinuousClock.now
             control.performClick(nil)
+            try checkSurroundings()
             var replyMS: Double?
-            while button()?.accessibilityValue() as? String != expected || kit.model.busy {
-                if !kit.model.busy && replyMS == nil {
+            while button()?.accessibilityValue() as? String != expected || kit.model.likePending {
+                if !kit.model.likePending && replyMS == nil {
                     replyMS = milliseconds(start.duration(to: .now))
                 }
                 try kit.check(start.duration(to: .now) < .seconds(5), "Heart failed to update")
                 try await Task.sleep(for: .milliseconds(1))
+                try checkSurroundings()
             }
             table.displayIfNeeded()
             let visibleMS = milliseconds(start.duration(to: .now))
             // Include the grouped-layout reply that follows the row refresh.
-            try await Task.sleep(for: .milliseconds(80))
+            let settleUntil = ContinuousClock.now.advanced(by: .milliseconds(80))
+            repeat {
+                try checkSurroundings()
+                try await Task.sleep(for: .milliseconds(4))
+            } while ContinuousClock.now < settleUntil
             table.reloadObserver = nil
             samples.append(["visible_ms": visibleMS, "reply_ms": replyMS ?? visibleMS,
                             "full_reloads": fullReloads, "reloaded_cells": cellReloads])
@@ -216,7 +276,11 @@ enum NativeLikesSmoke {
         let maximum = table.bounds.width - visible.width
         try kit.check(maximum > 0, "Liked column cannot be scrolled into view")
         let fraction = min(1, max(0, (column.midX - visible.width / 2) / maximum))
-        try await kit.drive("scroll-horizontal-fraction", tableID, String(Double(fraction)))
+        if CommandLine.arguments.contains("--likes-album-surface") {
+            table.scrollColumnToVisible(index)
+        } else {
+            try await kit.drive("scroll-horizontal-fraction", tableID, String(Double(fraction)))
+        }
         try await kit.wait("visible liked column") {
             column.minX >= table.visibleRect.minX && column.maxX <= table.visibleRect.maxX
         }

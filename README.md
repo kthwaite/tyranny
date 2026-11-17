@@ -32,12 +32,15 @@ music players to form a piece of highly-personalised software that satisfies my 
 
 ### Likes
 
-Hearts show server-confirmed values, not optimistic toggles. The client fetches the
-new snapshot after the reply instead of waiting for the 250 ms state broadcast.
+Hearts show server-confirmed values, not optimistic toggles. A pending like gates
+other heart writes, not playback or playlist actions. If the state broadcast has
+not arrived by the time the write returns, the client fetches the new snapshot.
 Outside a scan, list edits refresh immediately rather than waiting for the scan's
 500 ms batching timer.
 Heart changes preserve native row views and selection; unchanged group layouts no
 longer rebuild the table. Album actions use the revision of their displayed rows.
+Visible covers stay on screen while the client checks them against the new library
+revision; changing servers or artwork provider settings still clears the old images.
 The server reuses duration/size totals for a like only when no unpublished library
 work exists.
 
@@ -47,13 +50,17 @@ Reproduce native timing and flicker checks on an isolated three-track fixture
 ```sh
 python3 scripts/likes_gate.py --output target/likes-after --check
 python3 scripts/likes_gate.py --server-only --output target/likes-server-after
+python3 scripts/likes_gate.py --album-surface --output target/likes-album --check
 ```
 
 The native report measures ten repeated toggles per ungrouped, grouped, and expanded
 album table, including AppKit's `performClick` animation; surrounding checks use
 actual pointer clicks and verify liked-only removal, filtering, selection, and
-column visibility. The server-only report uses 30 writes against the synthetic
-50,000-track search fixture. Neither mode touches the user's library.
+column visibility. `--album-surface` uses the displayed AppKit heart without
+Accessibility or Screen Recording permission. It checks that a loaded cover stays
+visible and playback and playlist actions stay available throughout ten toggles.
+The server-only report uses 30 writes against the synthetic 50,000-track search
+fixture. None of these checks touches the user's library.
 
 Measured on Apple Silicon, 2026-11-14 (median milliseconds):
 
