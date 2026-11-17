@@ -146,7 +146,7 @@ fn unavailable(message: &str) -> Reply {
 fn open<'a>(
     slot: &'a mut Option<Connection>,
     database: &PathBuf,
-) -> Result<&'a Connection, Failure> {
+) -> Result<&'a mut Connection, Failure> {
     if slot.is_none() {
         let connection = Connection::open_with_flags(
             database,
@@ -159,22 +159,25 @@ fn open<'a>(
         .map_err(|error| Failure::Unavailable(format!("opening stats database: {error}")))?;
         *slot = Some(connection);
     }
-    Ok(slot.as_ref().expect("opened above"))
+    Ok(slot.as_mut().expect("opened above"))
 }
 
-fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
+fn answer(connection: &mut Connection, request: Request) -> Result<Reply, Failure> {
     let unavailable = |error: anyhow::Error| Failure::Unavailable(format!("{error:#}"));
     let anchor = match &request {
         Request::Stats(period) => Some(Date::parse(&period.anchor).ok_or(Failure::BadAnchor)?),
         Request::Wrapped(year) if !(1970..=9999).contains(year) => return Err(Failure::BadYear),
         _ => None,
     };
-    // Reports read every row and the library index. Years read neither.
-    let load = || {
-        let stats_revision: u64 = connection
+    let snapshot = connection
+        .transaction()
+        .map_err(|error| unavailable(error.into()))?;
+    // Consume the read transaction here so aggregation doesn't pin the WAL snapshot.
+    let load = |snapshot: rusqlite::Transaction<'_>| {
+        let stats_revision: u64 = snapshot
             .query_row("SELECT writes FROM history_control", [], |row| row.get(0))
             .map_err(|error| unavailable(error.into()))?;
-        let (rows, library) = rows::load(connection).map_err(unavailable)?;
+        let (rows, library) = rows::load(&snapshot).map_err(unavailable)?;
         Ok::<_, Failure>((stats_revision, rows, library))
     };
     let now = SystemTime::now()
@@ -184,7 +187,7 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
     let thresholds = Thresholds::default();
     let result = match request {
         Request::Stats(period) => {
-            let (stats_revision, rows, library) = load()?;
+            let (stats_revision, rows, library) = load(snapshot)?;
             // All starts at the earliest row of any kind, so skips, radio and open rows
             // before the first counted play still count towards its listened time.
             let earliest = rows.first().map(|row| row.played_at);
@@ -209,7 +212,7 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
             }
         }
         Request::Wrapped(year) => {
-            let (stats_revision, rows, library) = load()?;
+            let (stats_revision, rows, library) = load(snapshot)?;
             Response::Wrapped {
                 stats_revision,
                 report: Box::new(wrapped::wrapped(
@@ -223,7 +226,7 @@ fn answer(connection: &Connection, request: Request) -> Result<Reply, Failure> {
             }
         }
         Request::Years => Response::StatsYears {
-            years: rows::years(connection, &zone).map_err(unavailable)?,
+            years: rows::years(&snapshot, &zone).map_err(unavailable)?,
         },
     };
     Ok(Reply::Ok { result })

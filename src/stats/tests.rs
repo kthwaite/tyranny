@@ -42,6 +42,121 @@ fn all() -> Request {
     })
 }
 
+fn open_at(writer: &mut Store, played_at: i64) -> i64 {
+    writer
+        .open_play(&crate::store::PlayRecord {
+            entry_id: 1,
+            track_id: None,
+            path: "/m/song".into(),
+            title: "Song".into(),
+            artist: "Band".into(),
+            album: "A".into(),
+            duration_ms: None,
+            source: None,
+            played_at,
+            raw_title: None,
+        })
+        .unwrap()
+}
+
+// The scalar function receives a value already read from the report's WAL snapshot.
+// Count the supplied rows on the writer connection before returning that unchanged value.
+fn count_during_read(database: &Database, writer: Store, rows: Vec<i64>, view: &str) -> Connection {
+    let reader =
+        Connection::open_with_flags(&database.0, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let pending = std::cell::RefCell::new(Some((writer, rows)));
+    reader
+        .create_scalar_function(
+            "count_pending",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |ctx| {
+                if let Some((mut writer, rows)) = pending.take() {
+                    for row in rows {
+                        writer.count_play(row).unwrap();
+                    }
+                }
+                ctx.get::<i64>(0)
+            },
+        )
+        .unwrap();
+    reader.execute_batch(view).unwrap();
+    reader
+}
+
+fn assert_report_snapshot(request: impl Fn() -> Request) {
+    let database = Database::new();
+    let mut writer = Store::open(&database.0).unwrap();
+    let row = open_at(&mut writer, 1_720_000_000); // 2024
+    let mut reader = count_during_read(
+        &database,
+        writer,
+        vec![row],
+        "CREATE TEMP VIEW history_control AS
+         SELECT count_pending(writes) AS writes FROM main.history_control",
+    );
+    for expected in [(1, 0), (2, 1)] {
+        let reply = answer(&mut reader, request()).unwrap_or_else(failure);
+        let pair = match reply {
+            Reply::Ok {
+                result:
+                    Response::Stats {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays),
+            Reply::Ok {
+                result:
+                    Response::Wrapped {
+                        stats_revision,
+                        report,
+                    },
+            } => (stats_revision, report.plays),
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert_eq!(pair, expected);
+    }
+}
+
+#[test]
+fn stats_returns_the_revision_of_the_reported_plays() {
+    assert_report_snapshot(all);
+}
+
+#[test]
+fn wrapped_returns_the_revision_of_the_reported_plays() {
+    assert_report_snapshot(|| Request::Wrapped(2024));
+}
+
+#[test]
+fn years_never_mix_old_bounds_with_new_counted_plays() {
+    let database = Database::new();
+    let mut writer = Store::open(&database.0).unwrap();
+    for time in [1_625_000_000, 1_720_000_000] {
+        // 2021, 2024
+        let row = open_at(&mut writer, time);
+        writer.count_play(row).unwrap();
+    }
+    let outside = open_at(&mut writer, 1_593_000_000); // 2020
+    let inside = open_at(&mut writer, 1_656_000_000); // 2022
+    let mut reader = count_during_read(
+        &database,
+        writer,
+        vec![outside, inside],
+        "CREATE TEMP VIEW play_history AS
+         SELECT count_pending(played_at) AS played_at, counted FROM main.play_history",
+    );
+    // 2022 without 2020 never existed: the outside year counted first.
+    for expected in [vec![2024, 2021], vec![2024, 2022, 2021, 2020]] {
+        match answer(&mut reader, Request::Years).unwrap_or_else(failure) {
+            Reply::Ok {
+                result: Response::StatsYears { years },
+            } => assert_eq!(years, expected),
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn stats_are_served_by_the_worker_without_an_owner() {
     let database = Database::new();
