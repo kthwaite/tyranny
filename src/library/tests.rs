@@ -2665,6 +2665,9 @@ mod lists_fixture {
 }
 use lists_fixture::*;
 
+#[path = "sqlite_removal_properties.rs"]
+mod sqlite_removal_properties;
+
 fn tracks_page(
     connection: &mut Connection,
     list: &ListDescription,
