@@ -220,8 +220,8 @@ enum NativeLikesSmoke {
             control.performClick(nil)
             try checkSurroundings()
             var replyMS: Double?
-            while button()?.accessibilityValue() as? String != expected || kit.model.busy {
-                if !kit.model.busy && replyMS == nil {
+            while button()?.accessibilityValue() as? String != expected || kit.model.likePending {
+                if !kit.model.likePending && replyMS == nil {
                     replyMS = milliseconds(start.duration(to: .now))
                 }
                 try kit.check(start.duration(to: .now) < .seconds(5), "Heart failed to update")

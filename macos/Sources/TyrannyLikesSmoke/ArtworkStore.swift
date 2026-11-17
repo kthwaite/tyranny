@@ -10,14 +10,14 @@ enum ArtworkSize: String, Hashable, Sendable {
     var maximumDimension: Int { self == .thumbnail ? 128 : 512 }
 }
 
+/// A display's identity survives catalog edits; each fetch is pinned to the current revision.
 struct ArtworkRequest: Hashable, Sendable {
     enum Target: Hashable, Sendable { case album(UInt64), entry(UInt64) }
     let target: Target
-    let revision: UInt64
     let generation: UInt64
     let size: ArtworkSize
 
-    var fields: [String: JSONValue] {
+    func fields(revision: UInt64) -> [String: JSONValue] {
         var fields: [String: JSONValue] = [
             "album_id": .null, "entry_id": .null,
             "library_revision": .uint(revision), "size": .string(size.rawValue),
@@ -80,6 +80,7 @@ final class ArtworkStore {
     }
     private struct Cached {
         let value: ArtworkImage
+        let revision: UInt64
         let expires: Date
     }
     @MainActor private final class Lane {
@@ -128,7 +129,8 @@ final class ArtworkStore {
         } else {
             next = nil
         }
-        if next != context || invalidate {
+        let revisionChanged = next?.revision != context?.revision
+        if invalidate || next?.socketPath != context?.socketPath || next?.instance != context?.instance {
             cancel(thumbnails)
             expiryTimer?.invalidate()
             expiryTimer = nil
@@ -142,14 +144,25 @@ final class ArtworkStore {
             cache.removeAll()
             recency.removeAll()
             cacheBytes = 0
+        } else if revisionChanged {
+            // The same cells and occurrence still own their requests. Refresh them in place,
+            // without giving up their pixels, attribution, or original provider expiry.
+            context = next
+            if thumbnails.task != nil { cancel(thumbnails) }
+            if display.task != nil { cancel(display) }
+            pending = Array(demand.keys)
         }
-        let request = next.flatMap { context in
-            entryID.map { ArtworkRequest(target: .entry($0), revision: context.revision, generation: generation, size: .display) }
+        let request = next == nil ? nil : entryID.map {
+            ArtworkRequest(target: .entry($0), generation: generation, size: .display)
         }
         if request != nowPlayingRequest {
             if let previous = nowPlayingRequest { release(previous) }
             nowPlayingRequest = request
             if let request { retain(request) }
+        }
+        if revisionChanged {
+            pump(thumbnails)
+            pump(display)
         }
         onNowPlayingChange?()
     }
@@ -163,14 +176,15 @@ final class ArtworkStore {
     func albumRequest(_ albumID: UInt64) -> ArtworkRequest? {
         // Reading generation makes context changes observable without exposing credentials.
         let generation = generation
-        guard let context else { return nil }
-        return ArtworkRequest(target: .album(albumID), revision: context.revision, generation: generation, size: .thumbnail)
+        guard context != nil else { return nil }
+        return ArtworkRequest(target: .album(albumID), generation: generation, size: .thumbnail)
     }
 
     func value(for request: ArtworkRequest?) -> ArtworkImage {
         guard let request, request.generation == generation else { return .missing }
-        guard let cached = cache[request] else { return .loading }
-        guard cached.value.expiresAt.map({ $0 > Date() }) ?? true else { return .loading }
+        guard let cached = cache[request],
+              cached.revision == context?.revision || demand[request] != nil,
+              cached.value.expiresAt.map({ $0 > Date() }) ?? true else { return .loading }
         return cached.value
     }
 
@@ -184,7 +198,7 @@ final class ArtworkStore {
         }
         guard demand.count < Self.maximumEntries else { return }
         demand[request] = 1
-        if let cached = cache[request], cached.expires > Date() {
+        if let cached = cache[request], cached.revision == context?.revision, cached.expires > Date() {
             touch(request)
             return
         }
@@ -198,8 +212,8 @@ final class ArtworkStore {
         if count > 1 { demand[request] = count - 1; return }
         demand.removeValue(forKey: request)
         pending.removeAll { $0 == request }
-        if let value = cache[request]?.value,
-           !ArtworkRetention.mayRedisplay(policy: value.cachePolicy, consumers: 0) {
+        if let cached = cache[request], cached.revision != context?.revision
+            || !ArtworkRetention.mayRedisplay(policy: cached.value.cachePolicy, consumers: 0) {
             removeCached(request)
         }
         let lane = request.size == .thumbnail ? thumbnails : display
@@ -226,7 +240,7 @@ final class ArtworkStore {
         lane.request = request
         let providerFields = settings.requestFields
         lane.task = Task { [weak self] in
-            let value: ArtworkImage
+            let value: ArtworkImage?
             do {
                 if lane.wire.instanceID == nil {
                     try await lane.wire.connect(socketPath: context.socketPath)
@@ -234,7 +248,7 @@ final class ArtworkStore {
                 guard lane.wire.instanceID == context.instance else {
                     throw ServerFailure(code: "artwork_session_changed", message: "Artwork belongs to a different server session.")
                 }
-                let fields = request.fields.merging(providerFields) { _, provider in provider }
+                let fields = request.fields(revision: context.revision).merging(providerFields) { _, provider in provider }
                 let data = try await lane.wire.request("artwork", fields: fields)
                 try Task.checkCancellation()
                 let decoding = Task.detached(priority: .utility) { ArtworkDecoder.decode(data, size: request.size) }
@@ -243,28 +257,41 @@ final class ArtworkStore {
                 } onCancel: {
                     decoding.cancel()
                 }
+            } catch let failure as ServerFailure where failure.code == "stale_library_revision" {
+                // The next control snapshot schedules a fetch for the new revision.
+                value = nil
             } catch {
                 value = .unavailable
             }
             guard let self, !Task.isCancelled, lane.ticket == ticket,
-                  request.generation == generation, demand[request] != nil else { return }
-            insert(value, for: request)
+                  self.context == context, request.generation == generation, demand[request] != nil else { return }
+            if let value { insert(value, for: request, revision: context.revision) }
             lane.request = nil
             lane.task = nil
             pump(lane)
         }
     }
 
-    private func insert(_ value: ArtworkImage, for request: ArtworkRequest) {
+    private func insert(_ value: ArtworkImage, for request: ArtworkRequest, revision: UInt64) {
         let value = value.state == "deezer" && ArtworkBrand.deezerLogo == nil ? ArtworkImage.unavailable : value
-        removeCached(request)
         if value.credentialFailure { settings.reportCredentialFailure() }
+        let lifetime: TimeInterval = value.state == "unavailable" ? 60 : 24 * 60 * 60
+        let expires = value.expiresAt ?? Date().addingTimeInterval(lifetime)
+        // Native cells may still hold the previous handle. Don't revoke identical pixels
+        // between their redraws, or transfer them to different attribution or expiry terms.
+        if let old = cache[request]?.value, let key = value.cacheKey, old.cacheKey == key,
+           old.state == value.state, old.sourceURL == value.sourceURL, old.cachePolicy == value.cachePolicy,
+           old.expiresAt == value.expiresAt, old.credentialFailure == value.credentialFailure {
+            cache[request] = Cached(value: old, revision: revision, expires: expires)
+            touch(request)
+            return
+        }
+        removeCached(request)
         while cache.count >= Self.maximumEntries || cacheBytes + value.byteCost > Self.maximumBytes {
             guard let oldest = recency.first(where: { demand[$0] == nil }) ?? recency.first else { break }
             removeCached(oldest)
         }
-        let lifetime: TimeInterval = value.state == "unavailable" ? 60 : 24 * 60 * 60
-        cache[request] = Cached(value: value, expires: value.expiresAt ?? Date().addingTimeInterval(lifetime))
+        cache[request] = Cached(value: value, revision: revision, expires: expires)
         cacheBytes += value.byteCost
         touch(request)
         if request == nowPlayingRequest { onNowPlayingChange?() }
@@ -303,7 +330,8 @@ final class ArtworkStore {
         for request in expired {
             // Remove first, including active displays: a failed refresh must never reveal stale art.
             removeCached(request)
-            if demand[request] != nil { pending.append(request) }
+            let lane = request.size == .thumbnail ? thumbnails : display
+            if demand[request] != nil, lane.request != request, !pending.contains(request) { pending.append(request) }
         }
         if let request = nowPlayingRequest, expired.contains(request) {
             onNowPlayingChange?()
