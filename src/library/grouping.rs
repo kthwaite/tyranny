@@ -8,6 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[cfg(test)]
+mod history_tests;
+
 #[derive(Serialize, Deserialize)]
 enum Group {
     Release(String),
