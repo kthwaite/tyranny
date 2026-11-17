@@ -326,6 +326,55 @@ async fn wrapped_years_outside_the_calendar_are_rejected_before_any_work() {
     workers.shutdown();
 }
 
+// Cross the two report repairs: even when a history commit is immediately
+// followed by a library commit, an old play count cannot have the new link.
+#[test]
+fn sqlite_report_links_and_listening_history_share_a_snapshot() {
+    for wrapped in [false, true] {
+        for excluded in [false, true] {
+            let db = Database::new();
+            db.execute("INSERT INTO library_roots(id,path,search,completed_scan) VALUES(1,'/m','/m',1);
+                INSERT INTO library_assets(id,root_id,path,indexed,last_seen_scan) VALUES(1,1,'/m/song',1,1);
+                INSERT INTO library_artists(id,identity,name,search) VALUES(1,'band','Band','band');
+                INSERT INTO library_albums(id,identity,artist_id,title,album_artist,search,title_sort,compilation)
+                  VALUES(1,'a',1,'A','Band','a','a',0);
+                INSERT INTO library_tracks(id,asset_id,artist_id,album_id,metadata,search,title_sort,disc_number,disc_total,track_number)
+                  VALUES(1,1,1,1,'{\"title\":\"Song\",\"artist\":\"Band\"}','song','song',1,1,1);
+                UPDATE library_state SET root_count=1,track_count=1;");
+            let mut writer = Store::open(&db.0).unwrap();
+            let first = open_at(&mut writer,1_720_000_000);
+            writer.count_play(first).unwrap();
+            let second = open_at(&mut writer,1_720_000_100);
+            let catalog = Connection::open(&db.0).unwrap();
+            let pending = std::cell::RefCell::new(Some((writer,catalog)));
+            let mut reader = Connection::open_with_flags(&db.0,OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            reader.create_scalar_function("advance",1,rusqlite::functions::FunctionFlags::SQLITE_UTF8,move |ctx| {
+                if let Some((mut writer, mut catalog)) = pending.take() {
+                    writer.count_play(second).unwrap();
+                    let tx = catalog.transaction()?;
+                    tx.execute_batch(if excluded { "UPDATE library_assets SET indexed=0,excluded=1" }
+                        else { "UPDATE library_roots SET completed_scan=2" })?;
+                    tx.execute("UPDATE library_state SET revision=revision+1,track_count=0",[])?;
+                    tx.commit()?;
+                }
+                ctx.get::<i64>(0)
+            }).unwrap();
+            reader.execute_batch("CREATE TEMP VIEW history_control AS SELECT advance(writes) AS writes FROM main.history_control").unwrap();
+            for expected in [(3,1,Some(1)),(4,2,None)] {
+                let request = if wrapped { Request::Wrapped(2024) } else { all() };
+                let tuple = match answer(&mut reader,request).unwrap_or_else(failure) {
+                    Reply::Ok { result: Response::Stats {stats_revision,report} } =>
+                        (stats_revision, report.plays, report.top_tracks_by_plays[0].track_id),
+                    Reply::Ok { result: Response::Wrapped {stats_revision,report} } =>
+                        (stats_revision, report.plays, report.top_tracks[0].track_id),
+                    other => panic!("unexpected reply: {other:?}"),
+                };
+                assert_eq!(tuple,expected);
+            }
+        }
+    }
+}
+
 mod snapshot_search {
     use super::*;
     use crate::store::{EndReason, PlayRecord};
