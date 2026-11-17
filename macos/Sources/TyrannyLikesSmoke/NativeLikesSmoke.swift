@@ -14,6 +14,7 @@ enum NativeLikesSmoke {
         started = true
         let kit = NativePlaylistKit(model: model, navigation: navigation,
                                     output: URL(fileURLWithPath: args[index + 1], isDirectory: true), tag: "LIKES_SMOKE")
+        let surfaceOnly = args.contains("--likes-album-surface")
         Task {
             var failure: String?
             do {
@@ -23,16 +24,51 @@ enum NativeLikesSmoke {
                     model.connected && model.snapshot?.library.tracks == 3
                         && model.snapshot?.library.scan.phase == "complete"
                 }
-                try await kit.drive("activate")
-                try await exercise(kit)
+                if surfaceOnly {
+                    try await albumSurface(kit)
+                } else {
+                    try await kit.drive("activate")
+                    try await exercise(kit)
+                }
             } catch {
                 failure = error.localizedDescription
-                try? kit.capture("likes-failure")
+                if surfaceOnly {
+                    kit.observations["render"] = NativeRenderViews.render("likes-failure", into: kit.output)
+                } else {
+                    try? kit.capture("likes-failure")
+                }
             }
-            try? kit.finish(automation: "Actual AX/CGEvent heart clicks, toolbar toggle, typed filter and column menu; observation of authoritative reloaded rows; isolated Alpha/Beta/Gamma FLAC fixture.", error: failure)
+            try? kit.finish(automation: surfaceOnly
+                ? "AppKit performClick on displayed album hearts with a queued album and local cover."
+                : "Actual AX/CGEvent heart clicks, toolbar toggle, typed filter and column menu; observation of authoritative reloaded rows; isolated Alpha/Beta/Gamma FLAC fixture.", error: failure)
             NativePlaylistKit.endSheets()
             NSApp.terminate(nil)
         }
+    }
+
+    /// Focused in-process gate when the terminal cannot drive other processes through AX.
+    private static func albumSurface(_ kit: NativePlaylistKit) async throws {
+        let hidden = ColumnPreferences.shared.isHidden("liked")
+        if hidden { ColumnPreferences.shared.setHidden("liked", false) }
+        defer { if hidden { ColumnPreferences.shared.setHidden("liked", true) } }
+        kit.navigation.destination = .albums
+        try await kit.wait("album grid") { NativeAlbumsSmoke.grid?.album(at: 0) != nil }
+        guard let grid = NativeAlbumsSmoke.grid, let album = grid.album(at: 0) else {
+            throw NativePlaylistKit.Failure(message: "Missing fixture album")
+        }
+        grid.toggleExpansion(album)
+        try await kit.wait("expanded album") { grid.expansion?.tracks.count == 3 && table("album-track-table") != nil }
+        guard let expansion = grid.expansion, let row = expansion.tracks.first else {
+            throw NativePlaylistKit.Failure(message: "Missing fixture tracks")
+        }
+        grid.addToUpNext(expansion)
+        try await kit.wait("play enabled and cover displayed") {
+            kit.model.transport.canPlayPause && kit.model.artwork.value(for: kit.model.artwork.albumRequest(album.id)).image != nil
+        }
+        try await measure(kit, tableID: "album-track-table", heart: "album-track-table-cell-\(row.row_id)-liked",
+                          label: "album", albumID: album.id)
+        kit.observations["render"] = NativeRenderViews.render("album-hearts", into: kit.output)
+        kit.passed("heart-keeps-album-art-playlist-and-playback-actions-available")
     }
 
     private static func exercise(_ kit: NativePlaylistKit) async throws {
@@ -240,7 +276,11 @@ enum NativeLikesSmoke {
         let maximum = table.bounds.width - visible.width
         try kit.check(maximum > 0, "Liked column cannot be scrolled into view")
         let fraction = min(1, max(0, (column.midX - visible.width / 2) / maximum))
-        try await kit.drive("scroll-horizontal-fraction", tableID, String(Double(fraction)))
+        if CommandLine.arguments.contains("--likes-album-surface") {
+            table.scrollColumnToVisible(index)
+        } else {
+            try await kit.drive("scroll-horizontal-fraction", tableID, String(Double(fraction)))
+        }
         try await kit.wait("visible liked column") {
             column.minX >= table.visibleRect.minX && column.maxX <= table.visibleRect.maxX
         }
