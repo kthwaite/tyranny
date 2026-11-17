@@ -24,7 +24,7 @@ struct AlbumTrackTable: NSViewRepresentable {
     /// The album's track count, which can exceed the rows shown.
     let total: Int
     let likedHidden: Bool
-    let canMutate: Bool
+    let canSetLiked: Bool
 
     static let identifier = "album-track-table"
     /// The panel's tracks area. While the tracks load or fail, the panel's placeholder carries it.
@@ -115,7 +115,7 @@ struct AlbumTrackTable: NSViewRepresentable {
         private weak var shownExpansion: AlbumExpansion?
         private var shownColours: UInt64?
         private var shownLikedHidden: Bool?
-        private var shownCanMutate: Bool?
+        private var shownCanSetLiked: Bool?
         private var shownDiscCount: UInt64?
 
         init(_ parent: AlbumTrackTable) { self.parent = parent }
@@ -169,8 +169,8 @@ struct AlbumTrackTable: NSViewRepresentable {
                 table.reloadData(forRowIndexes: changedRows,
                                  columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
             }
-            if parent.canMutate != shownCanMutate {
-                shownCanMutate = parent.canMutate
+            if parent.canSetLiked != shownCanSetLiked {
+                shownCanSetLiked = parent.canSetLiked
                 updateHeartAvailability()
             }
             if parent.colours.revision != shownColours {
@@ -212,7 +212,7 @@ struct AlbumTrackTable: NSViewRepresentable {
                 let cell = tableView.makeView(withIdentifier: LikedTrackCell.reuse, owner: nil) as? LikedTrackCell
                     ?? LikedTrackCell()
                 cell.show(item.track,
-                          enabled: parent.canMutate && item.available && parent.expansion.basis != nil,
+                          enabled: parent.canSetLiked && item.available,
                           identifier: "\(AlbumTrackTable.identifier)-cell-\(item.row_id)-liked") { [weak self] in
                     self?.toggleLiked(rowID: item.row_id)
                 }
@@ -241,15 +241,14 @@ struct AlbumTrackTable: NSViewRepresentable {
                       let cell = table.view(atColumn: column, row: row, makeIfNecessary: false) as? LikedTrackCell else {
                     return
                 }
-                cell.button.isEnabled = self.parent.canMutate && self.rows[row].available
-                    && self.parent.expansion.basis != nil
+                cell.button.isEnabled = self.parent.canSetLiked && self.rows[row].available
             }
         }
 
         private func toggleLiked(rowID: UInt64) {
             // A revision-only refresh can leave the cell intact. Resolve both the row and
             // its basis at click time rather than retaining the revision from cell creation.
-            guard parent.canMutate, let revision = parent.expansion.basis?.revision,
+            guard parent.canSetLiked, let revision = parent.expansion.basis?.revision,
                   let item = parent.expansion.tracks.first(where: { $0.row_id == rowID }),
                   item.available else { return }
             parent.player.setTrackLiked(item.track.id, liked: !item.track.liked, libraryRevision: revision)

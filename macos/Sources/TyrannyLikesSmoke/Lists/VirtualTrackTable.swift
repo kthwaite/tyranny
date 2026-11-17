@@ -39,7 +39,7 @@ struct VirtualTrackTable: NSViewRepresentable {
     let revealToken: UInt64?
     let selectionToken: UInt64
     var deviceGeneration: UInt64 = 0
-    let canMutate: Bool
+    let canSetLiked: Bool
 
     var columns: [TrackColumn] { TrackColumns.all + TrackColumns.devices(player.devices) }
 
@@ -150,7 +150,7 @@ struct VirtualTrackTable: NSViewRepresentable {
         private var shownHidden: Set<String>?
         private var shownDevices: UInt64?
         private var deviceColumns: [TrackColumn] = []
-        private var shownCanMutate: Bool?
+        private var shownCanSetLiked: Bool?
         private var shownBlocks: Bool?
         private var reported: Range<Int>?
         /// Only prepared track rows are retained, including unloaded placeholders.
@@ -298,8 +298,8 @@ struct VirtualTrackTable: NSViewRepresentable {
                 })
                 if !indexes.isEmpty { reloadVisible(columns: indexes) }
             }
-            if parent.canMutate != shownCanMutate {
-                shownCanMutate = parent.canMutate
+            if parent.canSetLiked != shownCanSetLiked {
+                shownCanSetLiked = parent.canSetLiked
                 updateLikedEnabled()
             }
             if parent.colours.revision != shownColours {
@@ -403,16 +403,16 @@ struct VirtualTrackTable: NSViewRepresentable {
             for row in table.preparedRows {
                 guard let cell = table.view(atColumn: liked, row: row, makeIfNecessary: false) as? LikedTrackCell,
                       case .track(let position, _)? = layout.row(at: row) else { continue }
-                cell.button.isEnabled = parent.canMutate && cache.loadedRow(at: position)?.available == true
+                cell.button.isEnabled = parent.canSetLiked && cache.loadedRow(at: position)?.available == true
             }
         }
 
         private func configure(_ cell: LikedTrackCell, item: ListRow, position: Int) {
             let rowID = item.row_id
             let trackID = item.track.id
-            cell.show(item.track, enabled: parent.canMutate && item.available,
+            cell.show(item.track, enabled: parent.canSetLiked && item.available,
                       identifier: "\(parent.identifier)-cell-\(rowID)-liked") { [weak self] in
-                guard let self, self.parent.canMutate,
+                guard let self, self.parent.canSetLiked,
                       let current = self.cache.loadedRow(at: position), current.available,
                       current.row_id == rowID, current.track.id == trackID,
                       let revision = self.cache.revision else { return }

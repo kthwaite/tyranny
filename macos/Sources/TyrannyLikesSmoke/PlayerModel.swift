@@ -47,6 +47,8 @@ final class PlayerModel {
     private(set) var busy = false {
         didSet { updateMediaControls() }
     }
+    /// Heart writes share one library revision, but do not gate playback or playlist commands.
+    private(set) var likePending = false
     private(set) var startupFailed = false
     private(set) var serverManagementBusy = false {
         didSet { updateMediaControls() }
@@ -452,8 +454,9 @@ final class PlayerModel {
     }
     /// Refetches the snapshot after a `stale_revision` reply, so a retry uses the current revisions.
     func refreshSnapshot() async throws {
-        let fresh: SnapshotReply = try await request("snapshot")
-        accept(fresh.snapshot, newInstance: false)
+        // WireClient validates the snapshot and delivers it on this connection before
+        // resuming the request. Don't reapply the same state after that suspension.
+        _ = try await wire.request("snapshot")
     }
     /// Reloads what the model itself keeps (the music folders); the snapshot arrives by event.
     private func refresh() {
@@ -563,16 +566,37 @@ final class PlayerModel {
         }
     }
 
+    func canSetTrackLiked(at libraryRevision: UInt64?) -> Bool {
+        guard canMutate, !likePending, let libraryRevision, let snapshot else { return false }
+        // A visible row can still be awaiting its reload after a confirmed write.
+        return libraryRevision >= snapshot.library.revision
+    }
+
     /// Hearts reflect authoritative list rows, never an optimistic local toggle.
     func setTrackLiked(_ trackID: UInt64, liked: Bool, libraryRevision: UInt64) {
-        mutate { [self] in
-            let _: TrackLiked = try await send("set_track_liked", [
-                "track_id": .uint(trackID), "liked": .bool(liked),
-                "library_revision": .uint(libraryRevision),
-            ])
-            // Like replies carry a revision, not a snapshot. Do not wait for the
-            // periodic state broadcast before refreshing revision-bound list rows.
-            try await refreshSnapshot()
+        guard canSetTrackLiked(at: libraryRevision) else { return }
+        let generation = playlistConnectionGeneration
+        likePending = true
+        message = nil
+        Task {
+            defer { likePending = false }
+            guard connected, generation == playlistConnectionGeneration else {
+                message = "The connection changed before the like was sent."
+                return
+            }
+            do {
+                let reply: TrackLiked = try await send("set_track_liked", [
+                    "track_id": .uint(trackID), "liked": .bool(liked),
+                    "library_revision": .uint(libraryRevision),
+                ])
+                // A state event may already have started the revision-bound list refresh.
+                if generation == playlistConnectionGeneration, connected,
+                   let snapshot, snapshot.library.revision < reply.library_revision {
+                    try await refreshSnapshot()
+                }
+            } catch {
+                message = error.localizedDescription
+            }
         }
     }
 

@@ -218,7 +218,8 @@ struct AlbumExpansionContent: View {
             } else {
                 AlbumTrackTable(expansion: expansion, grid: grid, player: player, colours: player.theme.tableColours,
                                 tracks: expansion.tracks, selected: expansion.selectedRowIDs, total: expansion.total,
-                                likedHidden: ColumnPreferences.shared.isHidden("liked"), canMutate: player.canMutate)
+                                likedHidden: ColumnPreferences.shared.isHidden("liked"),
+                                canSetLiked: player.canSetTrackLiked(at: expansion.basis?.revision))
             }
         }
         .frame(height: AlbumExpansionMetrics.tableHeight(trackCount: album.track_count))
