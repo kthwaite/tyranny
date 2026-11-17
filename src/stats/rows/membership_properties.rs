@@ -140,3 +140,27 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn report_membership_exhausts_four_track_visibility_states() {
+    // Three distinct persisted states per asset: visible, missing but indexed, excluded.
+    for mut configuration in 0..3usize.pow(4) {
+        let mut world = World::new();
+        let mut seen = 0;
+        for i in 0..TRACKS.len() {
+            match configuration % 3 {
+                0 => seen |= 1 << i,
+                1 => {}
+                _ => {
+                    world.apply(Op::Remove(i));
+                    seen |= 1 << i; // A scan still sees the file but must not resurrect it.
+                }
+            }
+            configuration /= 3;
+        }
+        for root in 0..2 {
+            world.apply(Op::Scan { root, seen });
+        }
+        world.check();
+    }
+}
