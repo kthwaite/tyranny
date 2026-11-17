@@ -81,8 +81,9 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
 }
 
 /// Snapshot old group keys before retags overwrite metadata. This visits only
-/// the scanned root, outside a main-database writer transaction. Missing-file
-/// tombstones are included for returning files; user exclusions are not.
+/// the scanned root, outside a main-database writer transaction. Tombstones
+/// still identify old release keys: even an explicitly excluded track can
+/// leave a visible peer in another root. Membership itself requires indexed=1.
 pub(super) fn begin(connection: &Connection, root_id: u64) -> Result<()> {
     connection.execute_batch(
         "DELETE FROM temp.library_album_groups;
@@ -96,7 +97,7 @@ pub(super) fn begin(connection: &Connection, root_id: u64) -> Result<()> {
         SELECT a.id,a.path,json_extract(t.metadata,'$.album'),
             json_extract(t.metadata,'$.musicbrainz_release_id')
         FROM library_assets a JOIN library_tracks t ON t.asset_id=a.id
-        WHERE a.root_id=?1 AND a.excluded=0",
+        WHERE a.root_id=?1",
         [root_id],
     )?;
     Ok(())

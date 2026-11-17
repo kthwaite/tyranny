@@ -148,6 +148,35 @@ async fn tracks(library: &Library) -> Page<Track> {
 }
 
 #[tokio::test]
+async fn rescanning_an_excluded_release_member_regroups_visible_tracks_in_other_roots() {
+    let scratch = Scratch::new();
+    let departed = scratch.path("disc2/two.flac");
+    for (path, artist) in [(scratch.path("disc1/one.flac"), "Ann"), (departed.clone(), "Bob")] {
+        flac(&path, &[("artist", artist), ("album", "Box"), ("MUSICBRAINZ_ALBUMID", "box-id")]);
+    }
+    let library = scratch.library();
+    add(&library, &scratch.path("disc1")).await;
+    finished(&library).await;
+    let disc2 = add(&library, &scratch.path("disc2")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    assert_eq!(before.total, 2);
+    assert!(before.entries.iter().all(|t| t.metadata.compilation));
+    library.handle().request(LibraryCommand::RemoveTracks {
+        selection: crate::protocol::TrackSelection::Ids {
+            library_revision: before.revision,
+            track_ids: vec![track_at(&before, &departed).id],
+        },
+    }).await.unwrap();
+    assert_eq!(rescan(&library, disc2).await.phase, ScanPhase::Complete);
+    let after = tracks(&library).await;
+    assert_eq!(after.total, 1);
+    assert_eq!(after.entries[0].metadata.album_artist, "Ann");
+    assert!(!after.entries[0].metadata.compilation);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn removal_is_atomic_publishes_totals_and_preserves_files_across_restart() {
     let scratch = Scratch::new();
     let removed_path = scratch.path("music/removed.wav");
