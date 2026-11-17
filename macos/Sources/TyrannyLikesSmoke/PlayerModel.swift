@@ -5,6 +5,7 @@ import TyrannyLikesSmokeCore
 
 @MainActor @Observable
 final class PlayerModel {
+    let diagnostics: DiagnosticsLog
     var socketPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/tyranny/control.sock").path
     private(set) var connection = "disconnected" {
@@ -15,8 +16,8 @@ final class PlayerModel {
         didSet { updateMediaControls(); updateArtwork(); updateLyrics() }
     }
     private(set) var playbackSession: UInt64 = 0
-    let artwork = ArtworkStore()
-    let lyrics = LyricsStore()
+    let artwork: ArtworkStore
+    let lyrics: LyricsStore
     let devices = DeviceSyncModel()
     let notifications = TrackNotifications()
     /// Transport commands and the player bar display. Owns the system media controls.
@@ -36,7 +37,12 @@ final class PlayerModel {
     let tagging = TaggingModel()
     /// The music folders for Settings. One bounded page; the server limits a page to 500.
     private(set) var roots: Page<Root>?
-    var message: String?
+    var message: String? {
+        didSet {
+            guard let message, message != oldValue, !message.isEmpty else { return }
+            diagnostics.record(level: .info, source: "App message", message: message)
+        }
+    }
     @ObservationIgnored private var playlistSession: UInt64 = 0
     private(set) var busy = false {
         didSet { updateMediaControls() }
@@ -49,7 +55,7 @@ final class PlayerModel {
     private var managedServer: ManagedServer?
     @ObservationIgnored private var configurationError: String?
 
-    @ObservationIgnored private let wire = WireClient()
+    @ObservationIgnored private let wire: WireClient
     @ObservationIgnored private let decoder = JSONDecoder()
     @ObservationIgnored private var wantsConnection = false
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
@@ -96,6 +102,12 @@ final class PlayerModel {
         self.theme = theme
         self.quitSuspensions = quitSuspensions
         self.importNotes = importNotes
+        let diagnostics = DiagnosticsLog()
+        self.diagnostics = diagnostics
+        self.wire = WireClient(diagnostics: diagnostics)
+        self.artwork = ArtworkStore(diagnostics: diagnostics)
+        self.lyrics = LyricsStore(diagnostics: diagnostics)
+        diagnostics.record(level: .info, source: "App", message: "Session started; protocol=\(WireProtocol.version)")
         let arguments = CommandLine.arguments
         do {
             managedServer = try ManagedServer.make(arguments: arguments)
@@ -109,6 +121,7 @@ final class PlayerModel {
             startupFailed = true
             message = error.localizedDescription
             configurationError = error.localizedDescription
+            diagnostics.record(level: .error, source: "Configuration", message: error.localizedDescription)
         }
         artwork.onNowPlayingChange = { [weak self] in
             guard let self else { return }
@@ -348,6 +361,7 @@ final class PlayerModel {
                        let managedServer {
                         attemptedBootstrap = true
                         connectionDetail = "Starting the local background server…"
+                        diagnostics.record(level: .info, source: "Server", message: connectionDetail)
                         do {
                             try await managedServer.ensureRunning(replacingIncompatibleServer: failure.code == "protocol_error")
                             guard generation == session, wantsConnection, !Task.isCancelled else { return }
@@ -376,6 +390,12 @@ final class PlayerModel {
     private func accept(_ state: ControlState, newInstance: Bool) {
         if !newInstance, let previous = snapshot, state.sequence < previous.sequence { return }
         let previous = snapshot
+        if let error = state.error, error != previous?.error {
+            diagnostics.record(level: .error, source: "Playback", message: error)
+        }
+        if let error = state.library.scan.last_error, error != previous?.library.scan.last_error {
+            diagnostics.record(level: .error, source: "Library scan", message: error)
+        }
         if newInstance || previous?.library.revision != state.library.revision { devices.libraryChanged() }
         snapshot = state
         notifications.receive(state, newSession: newInstance, artwork: artwork)
@@ -413,7 +433,14 @@ final class PlayerModel {
     }
 
     private func request<T: Decodable>(_ command: String, _ fields: [String: JSONValue] = [:], as type: T.Type = T.self) async throws -> T {
-        try decoder.decode(type, from: await wire.request(command, fields: fields))
+        let data = try await wire.request(command, fields: fields)
+        do {
+            return try decoder.decode(type, from: data)
+        } catch {
+            diagnostics.record(level: .error, source: "Reply decoding",
+                message: "command=\(command)\n\(WireClient.decodingDetail(error))")
+            throw error
+        }
     }
     /// Sends one command on the shared connection and decodes its reply.
     func send<T: Decodable>(_ command: String, _ fields: [String: JSONValue] = [:]) async throws -> T {

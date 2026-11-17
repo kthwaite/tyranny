@@ -37,8 +37,10 @@ final class WireClient {
     private var ready = false
     private let decoder = JSONDecoder()
     private let requestDeadlineSeconds: UInt64
+    weak var diagnostics: DiagnosticsLog?
 
-    init(requestDeadlineSeconds: UInt64 = 10) {
+    init(requestDeadlineSeconds: UInt64 = 10, diagnostics: DiagnosticsLog? = nil) {
+        self.diagnostics = diagnostics
         self.requestDeadlineSeconds = requestDeadlineSeconds
     }
 
@@ -62,7 +64,14 @@ final class WireClient {
             notify: false
         )
 
-        let path = try Self.validateSocketPath(socketPath)
+        diagnostics?.record(level: .info, source: "Connection", message: "Connecting to \(socketPath)")
+        let path: String
+        do {
+            path = try Self.validateSocketPath(socketPath)
+        } catch {
+            diagnostics?.record(level: .error, source: "Connection", message: error.localizedDescription)
+            throw error
+        }
         let connectionID = generation
         let newSocket = NWConnection(to: .unix(path: path), using: .tcp)
         socket = newSocket
@@ -115,6 +124,20 @@ final class WireClient {
     }
 
     func request(_ command: String, fields: [String: JSONValue] = [:]) async throws -> Data {
+        var requestID: UInt64?
+        do {
+            return try await performRequest(command, fields: fields, requestID: &requestID)
+        } catch {
+            let failure = error as? ServerFailure
+            let code = failure?.code ?? (error is CancellationError ? "cancelled" : "client_error")
+            let id = requestID.map { String($0) } ?? "not_sent"
+            diagnostics?.record(level: .error, source: "Command",
+                message: "request_id=\(id) command=\(command) code=\(code)\n\(failure?.message ?? error.localizedDescription)")
+            throw error
+        }
+    }
+
+    private func performRequest(_ command: String, fields: [String: JSONValue], requestID: inout UInt64?) async throws -> Data {
         try Task.checkCancellation()
         guard ready, let socket else {
             throw ServerFailure(code: "not_connected", message: "Connect to the server before sending a command.")
@@ -139,6 +162,7 @@ final class WireClient {
             throw ServerFailure(code: "request_too_large", message: "The command exceeds the 16 KiB request limit and was not sent.")
         }
         let frame = try JSONFrame.encode(bytes, limit: Self.requestLimit)
+        requestID = id
         nextRequestID += 1
         let connectionID = generation
         let deadlineSeconds = requestDeadlineSeconds
@@ -252,7 +276,7 @@ final class WireClient {
         do {
             incoming = try decoder.decode(IncomingMessage.self, from: data)
         } catch {
-            throw protocolFailure("The server sent malformed or incompatible protocol v\(WireProtocol.version) JSON. Upgrade the client and server together.")
+            throw protocolFailure("The server sent malformed or incompatible protocol v\(WireProtocol.version) JSON. Upgrade the client and server together.\n\(Self.decodingDetail(error))")
         }
 
         if case .hello(let version, let instance, let snapshot) = incoming {
@@ -270,6 +294,8 @@ final class WireClient {
             helloDeadline = nil
             ready = true
             instanceID = instance
+            diagnostics?.record(level: .info, source: "Connection",
+                message: "Connected; protocol=\(version), server_instance=\(instance)")
             sequence = snapshot.sequence
             onSnapshot?(snapshot, instance)
             if generation == connectionID {
@@ -328,6 +354,11 @@ final class WireClient {
         if let expected, expected != generation { return }
         instanceID = nil
         let wasActive = socket != nil || helloWaiter != nil
+        if wasActive {
+            let expectedClosure = ["disconnected", "connection_replaced", "cancelled"].contains(failure.code)
+            diagnostics?.record(level: expectedClosure ? .info : .error, source: "Connection",
+                message: "code=\(failure.code)\n\(failure.message)")
+        }
         generation = UUID()
         ready = false
         sequence = nil
@@ -356,6 +387,26 @@ final class WireClient {
 
     private func protocolFailure(_ message: String) -> ServerFailure {
         ServerFailure(code: "protocol_error", message: message)
+    }
+
+    /// Describe decoding failures without retaining the reply body or decoded values.
+    static func decodingDetail(_ error: Error) -> String {
+        let context: DecodingError.Context
+        let reason: String
+        switch error {
+        case DecodingError.keyNotFound(let key, let detail):
+            context = detail; reason = "Missing key \(key.stringValue)"
+        case DecodingError.typeMismatch(let type, let detail):
+            context = detail; reason = "Expected \(type)"
+        case DecodingError.valueNotFound(let type, let detail):
+            context = detail; reason = "Missing \(type)"
+        case DecodingError.dataCorrupted(let detail):
+            context = detail; reason = "Invalid encoded value"
+        default:
+            return error.localizedDescription
+        }
+        let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+        return "\(reason) at \(path.isEmpty ? "<root>" : path)."
     }
 
     private static func resultKind(for command: String) -> String? {

@@ -140,6 +140,9 @@ struct TyrannyLikesSmokeApp: App {
         .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
+            CommandGroup(after: .windowArrangement) {
+                Button("Diagnostics…") { openWindow(id: "diagnostics") }
+            }
             // ⌘F focuses the toolbar filter; the window has no text find.
             CommandGroup(replacing: .textEditing) {
                 Button("Filter") { navigation.focusFilter() }
@@ -197,6 +200,12 @@ struct TyrannyLikesSmokeApp: App {
                 .colourTheme(model.theme)
         }
         .windowResizability(.contentSize)
+        Window("Diagnostics", id: "diagnostics") {
+            DiagnosticsView(model: model)
+                .colourTheme(model.theme)
+        }
+        .defaultSize(width: 920, height: 700)
+        .windowResizability(.contentMinSize)
         Settings {
             SettingsView(model: model, navigation: navigation)
                 .colourTheme(model.theme)
@@ -244,6 +253,7 @@ private struct MainWindow: View {
                 NativeEqualizerSmoke.startIfRequested(model, navigation: navigation, openWindow: { openWindow(id: "equalizer") })
                 NativeRenderViews.startIfRequested(model, navigation: navigation)
                 NativeDeviceSmoke.startIfRequested(model, navigation: navigation)
+                NativeDiagnosticsSmoke.startIfRequested(model, navigation: navigation)
                 #endif
             }
     }

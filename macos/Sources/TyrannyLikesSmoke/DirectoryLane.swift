@@ -16,6 +16,10 @@ final class DirectoryLane {
     /// Bumps when the context changes and when a newer request replaces an older one.
     private var ticket = UUID()
 
+    func attachDiagnostics(_ diagnostics: DiagnosticsLog) {
+        wire.diagnostics = diagnostics
+    }
+
     /// `instance` is nil while disconnected. A change drops the connection and any request on it.
     func synchronize(socketPath: String, instance: String?) {
         let next = instance.map { Context(socketPath: socketPath, instance: $0) }

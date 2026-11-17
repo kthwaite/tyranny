@@ -93,7 +93,9 @@ final class ArtworkStore {
     let settings = ArtworkSettings()
     @ObservationIgnored private var expiryTimer: Timer?
 
-    init() {
+    init(diagnostics: DiagnosticsLog? = nil) {
+        thumbnails.wire.diagnostics = diagnostics
+        display.wire.diagnostics = diagnostics
         settings.onChange = { [weak self] in
             guard let self else { return }
             let entryID: UInt64?
