@@ -173,8 +173,8 @@ pub(super) fn remove_tracks(
 ) -> Result<(usize, u64)> {
     // Resolve off the playback owner and before reserving the database writer.
     // Every revision is rechecked in the write transaction, including playlists.
-    let mut tracks =
-        crate::store::resolve_selection(connection, selection, crate::listing::unix_now())?;
+    let cutoff = crate::listing::recent_cutoff(crate::listing::unix_now());
+    let mut tracks = crate::store::resolve_selection(connection, selection, cutoff)?;
     tracks.sort_unstable_by_key(|(id, _)| *id);
     tracks.dedup_by_key(|(id, _)| *id);
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;

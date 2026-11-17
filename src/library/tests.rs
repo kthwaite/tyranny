@@ -2689,6 +2689,30 @@ fn tracks_page(
 }
 
 #[test]
+fn removing_a_recent_range_includes_tracks_added_yesterday() {
+    let mut db = lists_fixture::library();
+    crate::store::migrate(&mut db, 11).unwrap();
+    db.execute("UPDATE library_state SET track_count=8", []).unwrap();
+    db.execute(
+        "UPDATE library_tracks SET date_added=?1 WHERE id=2",
+        [crate::listing::unix_now() - 86_400],
+    )
+    .unwrap();
+    let selection = crate::protocol::TrackSelection::List {
+        list: list(ListSource::Recent),
+        library_revision: 11,
+        ranges: vec![[0, 1]],
+        excluded: vec![],
+        first_row_id: Some(2),
+    };
+    assert_eq!(db::remove_tracks(&mut db, &selection).unwrap(), (1, 12));
+    let removed: u64 = db
+        .query_row("SELECT id FROM library_assets WHERE excluded", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(removed, 2);
+}
+
+#[test]
 fn list_tracks_pages_are_contiguous_and_totals_only_on_first_page() {
     let rows: Vec<Fixture> = (1..=600)
         .map(|id| Fixture {
