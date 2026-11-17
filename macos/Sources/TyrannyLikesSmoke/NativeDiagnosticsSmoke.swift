@@ -44,25 +44,54 @@ enum NativeDiagnosticsSmoke {
                         && $0.message.contains("code=\(expected.code)") && $0.message.contains(safeMessage)
                 }, "Rejected command was not retained with request ID, command, code and complete server message")
                 kit.passed("filtered-playback-failure-outlives-status")
-                try await kit.drive("menu", "Window›Diagnostics…")
+                guard let menu = NSApp.windowsMenu else { throw NativePlaylistKit.Failure(message: "No Window menu") }
+                menu.update()
+                let index = menu.indexOfItem(withTitle: "Diagnostics…")
+                try kit.check(index >= 0, "Diagnostics missing from the Window menu")
+                menu.performActionForItem(at: index)
                 try await kit.wait("diagnostics window") {
                     NSApp.windows.contains { $0.title == "Diagnostics" && $0.isVisible }
                 }
                 NSApp.windows.first { $0.title == "Diagnostics" }?.makeKeyAndOrderFront(nil)
-                try await kit.drive("expect-text", "diagnostics-session-log", model.diagnostics.text)
-                try await kit.drive("exists", "diagnostics-daemon-log")
+                try capture(kit)
+                let fields: [NSTextField] = controls()
+                try kit.check(fields.contains { $0.isSelectable && $0.stringValue == model.diagnostics.text },
+                              "The window does not display the complete selectable session log")
                 kit.passed("window-menu-opens-selectable-log-view")
                 try await copyAndCheck(kit, expected: expected)
-                try capture(kit)
-                try await kit.press("diagnostics-clear-session")
+                try footerButton(copy: false).performClick(nil)
                 try await kit.wait("session clear") { model.diagnostics.entries.isEmpty }
                 kit.passed("clear-session-events")
             } catch {
                 failure = error.localizedDescription
             }
-            try? kit.finish(automation: "Rejected filtered playback followed by a successful command; Window > Diagnostics… and Copy/Clear via Accessibility. Native diagnostics screenshot.", error: failure)
+            try? kit.finish(automation: "Rejected filtered playback followed by a successful command; AppKit Window menu, selectable text fields and native Copy/Clear buttons.", error: failure)
             NSApp.terminate(nil)
         }
+    }
+
+    private static func controls<T: NSView>() -> [T] {
+        var matches: [T] = []
+        func visit(_ view: NSView) {
+            guard !view.isHidden else { return }
+            if let control = view as? T { matches.append(control) }
+            view.subviews.forEach(visit)
+        }
+        if let view = NSApp.windows.first(where: { $0.title == "Diagnostics" && $0.isVisible })?.contentView {
+            visit(view)
+        }
+        return matches
+    }
+
+    /// SwiftUI draws the labels separately from its AppKit buttons. Copy is the
+    /// leading footer button; Clear is trailing. Check the effect of each click.
+    private static func footerButton(copy: Bool) throws -> NSButton {
+        let buttons: [NSButton] = controls()
+        let sorted = buttons.sorted { $0.convert($0.bounds, to: nil).midX < $1.convert($1.bounds, to: nil).midX }
+        guard let button = copy ? sorted.first : sorted.last, button.isEnabled else {
+            throw NativePlaylistKit.Failure(message: "Missing enabled diagnostics button")
+        }
+        return button
     }
 
     private static func requireIsolation(_ kit: NativePlaylistKit) throws {
@@ -103,7 +132,7 @@ enum NativeDiagnosticsSmoke {
             }
         }
         let changeCount = pasteboard.changeCount
-        try await kit.press("diagnostics-copy")
+        try footerButton(copy: true).performClick(nil)
         try await kit.wait("copied diagnostics") { pasteboard.changeCount != changeCount }
         let text = pasteboard.string(forType: .string) ?? ""
         try kit.check(text.hasPrefix("tyranny likes smoke — Diagnostics"), "Copy did not produce diagnostics")
@@ -130,12 +159,14 @@ enum NativeDiagnosticsSmoke {
         guard let window = NSApp.windows.first(where: { $0.title == "Diagnostics" && $0.isVisible }) else {
             throw NativePlaylistKit.Failure(message: "Diagnostics window unavailable")
         }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-x", "-o", "-l", String(window.windowNumber), kit.output.appendingPathComponent("diagnostics.png").path]
-        try process.run()
-        process.waitUntilExit()
-        try kit.check(process.terminationStatus == 0, "Diagnostics screenshot failed")
+        guard let view = window.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            throw NativePlaylistKit.Failure(message: "Could not capture the diagnostics content view")
+        }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw NativePlaylistKit.Failure(message: "Could not encode the diagnostics capture")
+        }
+        try png.write(to: kit.output.appendingPathComponent("diagnostics.png"))
     }
 }
 #endif

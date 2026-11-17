@@ -170,23 +170,22 @@ events are capped at 64 KiB. The server panel separately reads the latest
 are redacted, but reports can include track names, SQL and local paths;
 review them before sharing.
 
-To check the native window from a macOS GUI login, enable Accessibility for
-the UI driver and Screen Recording for screenshot capture. From the repository
-root, run the following in `sh`. It uses an empty temporary library, a private
-launchd label, and file capture instead of audio output:
+To check the native window from a macOS GUI login, run the following in `sh`
+from the repository root. It exercises the app's own Window menu and controls
+with an empty temporary library, a private launchd label, and file capture
+instead of audio output:
 
 ```sh
 (
   set -eu
   scripts/build_macos.sh debug
-  swiftc scripts/native_ui_driver.swift -o target/native-ui-driver
   fixture=$(mktemp -d /private/tmp/tyr-diag.XXXXXXXX)
   label="dev.tyranny-likes-smoke.spike.$(uuidgen)"
   trap 'launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || :' EXIT
   "target/tyranny likes smoke.app/Contents/MacOS/tyranny likes smoke" \
     --managed-state-dir "$fixture/state" --managed-agent-dir "$fixture/agents" \
     --managed-label "$label" --managed-capture "$fixture/state/audio.f32" \
-    --ui-driver "$PWD/target/native-ui-driver" --native-diagnostics-smoke "$fixture/report"
+    --native-diagnostics-smoke "$fixture/report"
   printf 'Diagnostics artifacts: %s/report\n' "$fixture"
   jq -e '.passed and (.cases | index("filtered-playback-failure-outlives-status") != null)' \
     "$fixture/report/report.json"

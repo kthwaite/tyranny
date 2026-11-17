@@ -104,6 +104,7 @@ struct DiagnosticsView: View {
                 .padding(8)
                 .accessibilityIdentifier(identifier)
         }
+        .defaultScrollAnchor(.bottomLeading)
         .background(.background)
         .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(nsColor: .separatorColor)))
     }
