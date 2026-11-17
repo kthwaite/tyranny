@@ -68,6 +68,7 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
         CREATE TEMP TABLE library_album_sources(path TEXT PRIMARY KEY,key TEXT NOT NULL);
         CREATE INDEX temp.library_album_sources_group ON library_album_sources(key,path);
         CREATE TEMP TABLE library_album_members(track_id INTEGER PRIMARY KEY);
+        CREATE TEMP TABLE library_album_titles(album_id INTEGER PRIMARY KEY);
         CREATE TEMP TABLE library_album_companions(
             track_id INTEGER PRIMARY KEY, release_id TEXT NOT NULL
         );
@@ -86,6 +87,7 @@ pub(super) fn begin(connection: &Connection, root_id: u64) -> Result<()> {
         DELETE FROM temp.library_album_seed;
         DELETE FROM temp.library_album_sources;
         DELETE FROM temp.library_album_members;
+        DELETE FROM temp.library_album_titles;
         DELETE FROM temp.library_album_companions;",
     )?;
     connection.execute(
@@ -173,6 +175,47 @@ struct GroupState {
     ready: bool,
 }
 
+/// Conflicting live title tags have no preferred spelling. Keep the displayed
+/// title if any visible member still supplies it; otherwise replace it from
+/// the remaining tracks, after all moves between album IDs have settled.
+fn refresh_titles(
+    connection: &mut Connection, root: u64, serial: u64, complete: bool,
+) -> Result<bool> {
+    let rows = connection.prepare(
+        "SELECT w.album_id,al.album_artist,(
+            SELECT MIN(json_extract(t.metadata,'$.album')) FROM library_tracks t
+            JOIN library_assets a ON a.id=t.asset_id JOIN library_roots r ON r.id=a.root_id
+            WHERE t.album_id=w.album_id AND a.indexed=1 AND a.last_seen_scan>=
+                CASE WHEN a.root_id=?1 AND ?3 THEN ?2 ELSE r.completed_scan END
+            HAVING MAX(json_extract(t.metadata,'$.album')=al.title)=0
+        )
+        FROM temp.library_album_titles w CROSS JOIN library_albums al ON al.id=w.album_id
+        ORDER BY w.album_id LIMIT ?4",
+    )?.query_map(params![root, serial, complete, db::BATCH as u64], |row| {
+        let title: Option<String> = row.get(2)?;
+        let update = title.map(|title| -> rusqlite::Result<_> {
+            Ok((title, row.get::<_, String>(1)?))
+        }).transpose()?;
+        Ok((row.get::<_, u64>(0)?, update))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some((last, _)) = rows.last() else { return Ok(true) };
+    let tx = connection.transaction()?;
+    let mut changed = false;
+    for (id, update) in &rows {
+        if let Some((title, artist)) = update {
+            tx.execute(
+                "UPDATE library_albums SET title=?2,title_sort=?3,search=?4 WHERE id=?1",
+                params![id, title, title.to_lowercase(), format!("{title}\n{artist}").to_lowercase()],
+            )?;
+            changed = true;
+        }
+    }
+    if changed { db::bump_revision(&tx)?; }
+    tx.execute("DELETE FROM temp.library_album_titles WHERE album_id<=?1", [last])?;
+    tx.commit()?;
+    Ok(false)
+}
+
 #[derive(Default)]
 pub(super) struct Reconciliation {
     seeded: bool,
@@ -205,7 +248,7 @@ impl Reconciliation {
                 )
                 .optional()?;
             let Some(key) = key else {
-                return Ok(true);
+                return refresh_titles(connection, root_id, serial, complete);
             };
             let group: Group = serde_json::from_str(&key)?;
             let mut current = GroupState {
@@ -406,6 +449,17 @@ impl Reconciliation {
                     db::track_search(path, metadata),
                     id
                 ],
+            )?;
+        }
+        if release_id.is_some() {
+            // Check only variants with a mismatch. Folder identity already
+            // includes the title, and every release lookup stays album-local.
+            transaction.execute(
+                "INSERT OR IGNORE INTO temp.library_album_titles(album_id)
+                 SELECT t.album_id FROM temp.library_album_members m
+                 JOIN library_tracks t ON t.id=m.track_id JOIN library_albums al ON al.id=t.album_id
+                 WHERE m.track_id<=?1 AND al.title!=json_extract(t.metadata,'$.album')",
+                [rows.last().expect("nonempty batch").0],
             )?;
         }
         for (id, _, _, _, _) in &rows {
