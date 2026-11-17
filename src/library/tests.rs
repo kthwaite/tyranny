@@ -148,6 +148,35 @@ async fn tracks(library: &Library) -> Page<Track> {
 }
 
 #[tokio::test]
+async fn rescanning_an_excluded_release_member_regroups_visible_tracks_in_other_roots() {
+    let scratch = Scratch::new();
+    let departed = scratch.path("disc2/two.flac");
+    for (path, artist) in [(scratch.path("disc1/one.flac"), "Ann"), (departed.clone(), "Bob")] {
+        flac(&path, &[("artist", artist), ("album", "Box"), ("MUSICBRAINZ_ALBUMID", "box-id")]);
+    }
+    let library = scratch.library();
+    add(&library, &scratch.path("disc1")).await;
+    finished(&library).await;
+    let disc2 = add(&library, &scratch.path("disc2")).await;
+    finished(&library).await;
+    let before = tracks(&library).await;
+    assert_eq!(before.total, 2);
+    assert!(before.entries.iter().all(|t| t.metadata.compilation));
+    library.handle().request(LibraryCommand::RemoveTracks {
+        selection: crate::protocol::TrackSelection::Ids {
+            library_revision: before.revision,
+            track_ids: vec![track_at(&before, &departed).id],
+        },
+    }).await.unwrap();
+    assert_eq!(rescan(&library, disc2).await.phase, ScanPhase::Complete);
+    let after = tracks(&library).await;
+    assert_eq!(after.total, 1);
+    assert_eq!(after.entries[0].metadata.album_artist, "Ann");
+    assert!(!after.entries[0].metadata.compilation);
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn removal_is_atomic_publishes_totals_and_preserves_files_across_restart() {
     let scratch = Scratch::new();
     let removed_path = scratch.path("music/removed.wav");
@@ -955,6 +984,35 @@ async fn compilation_groups_do_not_cross_folders_or_release_ids_but_shared_relea
             .album_artist,
         "Singer One"
     );
+    library.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn shared_release_title_comes_from_a_visible_member_after_removal() {
+    let scratch = Scratch::new();
+    for (file, title) in [("one.flac", "First title"), ("two.flac", "Second title")] {
+        flac(&scratch.path(&format!("music/{file}")), &[
+            ("artist", "Ann"), ("album", title), ("MUSICBRAINZ_ALBUMID", "box-id"),
+        ]);
+    }
+    let library = scratch.library();
+    let root = add(&library, &scratch.path("music")).await;
+    finished(&library).await;
+    let grouped = albums(&library).await;
+    assert_eq!(grouped.total, 1);
+    assert_eq!(grouped.entries[0].track_count, 2);
+    // Neither spelling is preferred while the two member tags disagree.
+    let (gone, remaining) = match grouped.entries[0].title.as_str() {
+        "First title" => ("one.flac", "Second title"),
+        "Second title" => ("two.flac", "First title"),
+        title => panic!("unexpected shared title {title}"),
+    };
+    fs::remove_file(scratch.path(&format!("music/{gone}"))).unwrap();
+    assert_eq!(rescan(&library, root).await.phase, ScanPhase::Complete);
+    let after = albums(&library).await;
+    assert_eq!(after.total, 1);
+    assert_eq!(after.entries[0].track_count, 1);
+    assert_eq!(after.entries[0].title, remaining);
     library.shutdown().unwrap();
 }
 
